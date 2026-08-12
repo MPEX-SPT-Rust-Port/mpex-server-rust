@@ -33,10 +33,7 @@ public class LootIdNormalizerTests
 
         var normalized = LootIdNormalizer.Normalize(json);
 
-        Assert.That(
-            normalized,
-            Is.EqualTo("""[{"_id":"id-0"},{"_id":"id-1","parentId":"id-0"}]""")
-        );
+        Assert.That(normalized, Is.EqualTo("""[{"_id":"id-0"},{"_id":"id-1","parentId":"id-0"}]"""));
     }
 
     [Test]
@@ -59,10 +56,7 @@ public class LootIdNormalizerTests
 
         var normalized = LootIdNormalizer.Normalize(json);
 
-        Assert.That(
-            normalized,
-            Is.EqualTo("""[{"_id":"id-0","_tpl":"5449016a4bdc2d6f028b456f","parentId":"hideout"}]""")
-        );
+        Assert.That(normalized, Is.EqualTo("""[{"_id":"id-0","_tpl":"5449016a4bdc2d6f028b456f","parentId":"hideout"}]"""));
     }
 
     [Test]
@@ -72,9 +66,6 @@ public class LootIdNormalizerTests
 
         var normalized = LootIdNormalizer.Normalize(json);
 
-        Assert.That(
-            JsonNode.Parse(normalized)!.ToJsonString(),
-            Is.EqualTo(JsonNode.Parse(json)!.ToJsonString())
-        );
+        Assert.That(JsonNode.Parse(normalized)!.ToJsonString(), Is.EqualTo(JsonNode.Parse(json)!.ToJsonString()));
     }
 }
