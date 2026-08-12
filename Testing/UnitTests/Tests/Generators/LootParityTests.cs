@@ -2,6 +2,7 @@ using System.Text.Json.Nodes;
 using NUnit.Framework;
 using SPTarkov.Server.Core.Generators.Loot;
 using SPTarkov.Server.Core.Models.Spt.Config;
+using SPTarkov.Server.Core.Models.Spt.Tables;
 using SPTarkov.Server.Core.Utils;
 
 namespace UnitTests.Tests.Generators;
@@ -16,14 +17,32 @@ namespace UnitTests.Tests.Generators;
 [NonParallelizable]
 public class LootParityTests
 {
-    // Task 4 expands this to every loot-bearing map in the database.
-    private static readonly string[] _locationIds = ["factory4_day"];
+    // Every loot-bearing map in the database - pinned by EveryLootBearingLocationIsCovered.
+    // Snake_case ids: GenerateLocationLoot lowercases the id for config lookups keyed like
+    // "factory4_day", so PascalCase property names would break those lookups.
+    private static readonly string[] _locationIds =
+    [
+        "bigmap",
+        "factory4_day",
+        "factory4_night",
+        "interchange",
+        "laboratory",
+        "labyrinth",
+        "lighthouse",
+        "rezervbase",
+        "sandbox",
+        "sandbox_high",
+        "shoreline",
+        "tarkovstreets",
+        "woods",
+    ];
     private static readonly ulong[] _seeds = [42, 1337];
 
     private LocationLootGenerator _locationLootGenerator = default!;
     private LocationConfig _locationConfig = default!;
     private RandomUtil _randomUtil = default!;
     private JsonUtil _jsonUtil = default!;
+    private LocationTable _locationTable = default!;
 
     [OneTimeSetUp]
     public void OneTimeSetUp()
@@ -34,6 +53,24 @@ public class LootParityTests
         _locationConfig = di.GetService<LocationConfig>();
         _randomUtil = di.GetService<RandomUtil>();
         _jsonUtil = di.GetService<JsonUtil>();
+        _locationTable = di.GetService<LocationTable>();
+    }
+
+    /// <summary>
+    /// Pins _locationIds to the database so a new loot-bearing map cannot silently skip the gate.
+    /// Compares by object identity - GetLocation and GetDictionary hand out the same instances - so
+    /// id-spelling problems surface as a set mismatch too.
+    /// </summary>
+    [Test]
+    public void EveryLootBearingLocationIsCovered()
+    {
+        var covered = _locationIds.Select(id => _locationTable.GetLocation(id)).ToHashSet();
+        var lootBearing = _locationTable
+            .GetDictionary()
+            .Values.Where(location => location?.LooseLoot is not null && location.StaticContainers is not null)
+            .ToHashSet();
+
+        Assert.That(covered, Is.EquivalentTo(lootBearing));
     }
 
     [Test]
@@ -73,11 +110,7 @@ public class LootParityTests
             var spawnpoints = _locationLootGenerator.GenerateLocationLoot(locationId);
 
             // Fail fast on silent fallback before comparing anything.
-            Assert.That(
-                _locationLootGenerator.LastPathTaken,
-                Is.EqualTo(expected),
-                $"generation did not take the {expected} path"
-            );
+            Assert.That(_locationLootGenerator.LastPathTaken, Is.EqualTo(expected), $"generation did not take the {expected} path");
 
             return LootIdNormalizer.Normalize(_jsonUtil.Serialize(spawnpoints)!);
         }
@@ -97,26 +130,30 @@ public class LootParityTests
             return;
         }
 
-        var (path, legacyValue, nativeValue) = FirstDifference(
-            JsonNode.Parse(legacy),
-            JsonNode.Parse(native),
-            "$"
-        );
-        Assert.Fail(
-            $"loot parity failure map={locationId} seed={seed} at {path}\n  legacy: {legacyValue}\n  native: {nativeValue}"
-        );
+        var (path, legacyValue, nativeValue) = FirstDifference(JsonNode.Parse(legacy), JsonNode.Parse(native), "$");
+        if (path.Length == 0)
+        {
+            Assert.Fail(
+                $"loot parity failure map={locationId} seed={seed}: normalized strings differ "
+                    + $"(legacy {legacy.Length} chars, native {native.Length} chars) but the walker "
+                    + "found no structural difference - suspect duplicate or reordered keys"
+            );
+        }
+
+        Assert.Fail($"loot parity failure map={locationId} seed={seed} at {path}\n  legacy: {legacyValue}\n  native: {nativeValue}");
     }
 
     /// <summary>
     /// Walks both documents to the first structural or value difference. Returns the JSON path
     /// and short renderings of both sides - a readable report instead of a two-megabyte diff.
     /// </summary>
-    private static (string Path, string Legacy, string Native) FirstDifference(
-        JsonNode? legacy,
-        JsonNode? native,
-        string path
-    )
+    private static (string Path, string Legacy, string Native) FirstDifference(JsonNode? legacy, JsonNode? native, string path)
     {
+        if (legacy is null && native is null)
+        {
+            return ("", "", "");
+        }
+
         if (legacy is null || native is null)
         {
             return (path, Render(legacy), Render(native));
