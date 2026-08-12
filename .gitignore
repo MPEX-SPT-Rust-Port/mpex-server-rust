@@ -465,3 +465,20 @@ Libraries/SPTarkov.Server.Core/Utils/ProgramStatics.Generated.cs
 
 # Not necessary to be included in the repo
 Testing/**/Properties/launchSettings.json
+
+/Tools/**/bin/
+/Tools/**/obj/
+
+/Testing/**/bin/
+/Testing/**/obj/
+
+/SPTarkov.Server/bin/
+/SPTarkov.Server/obj/
+
+/rust/spt-native/target/
+
+Patches/**/bin/
+Patches/**/obj/
+
+/Libraries/**/bin/
+/Libraries/**/obj/
