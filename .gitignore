@@ -452,6 +452,8 @@ graphify-out/
 rust/target/
 todo/
 
+Ceciler/
+
 Libraries/SPTarkov.Server.Assets/SPT_Data/checks.dat
 
 # Extracted from looseLoot.7z by scripts/decompress-assets.sh (or .ps1)
