@@ -110,13 +110,24 @@ pub struct Upd {
 /// so that converter never runs on the native path and a stringly-typed count in the database
 /// (lighthouse ships two, `"20"`) would fail the whole request deserialize. Blank,
 /// `__REPLACEME__` and otherwise unparseable strings fall to `None`, as the converter does.
+///
+/// `double.Parse(value, InvariantCulture)` runs with `NumberStyles.Float | AllowThousands`, so
+/// `"1,000"` is 1000; stripping the invariant group separator mirrors that for every real payload.
+/// It is looser only on inputs C# rejects outright (`",5"` throws and yields `None` there, 5 here),
+/// none of which appear in the database.
+///
+/// Not mirrored: C#'s `Upd.StackObjectsCount` setter rounds with
+/// `Math.Round(value, 0, MidpointRounding.AwayFromZero)`. Unobservable — no production Rust code
+/// reads this value, and every value re-enters C# through that same setter.
 fn deserialize_string_or_number<'de, D>(deserializer: D) -> Result<Option<f64>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
     match Option::<serde_json::Value>::deserialize(deserializer)? {
         None | Some(serde_json::Value::Null) => Ok(None),
-        Some(serde_json::Value::String(text)) => Ok(text.trim().parse::<f64>().ok()),
+        Some(serde_json::Value::String(text)) => {
+            Ok(text.trim().replace(',', "").parse::<f64>().ok())
+        }
         Some(other) => other.as_f64().map(Some).ok_or_else(|| {
             serde::de::Error::custom(format!(
                 "expected a number or numeric string, found {other}"
@@ -597,6 +608,7 @@ mod tests {
         let cases = [
             (r#"{"StackObjectsCount":"20"}"#, Some(20.0)),
             (r#"{"StackObjectsCount":20}"#, Some(20.0)),
+            (r#"{"StackObjectsCount":"1,000"}"#, Some(1000.0)),
             (r#"{"StackObjectsCount":""}"#, None),
             (r#"{"StackObjectsCount":"__REPLACEME__"}"#, None),
             (r#"{"StackObjectsCount":null}"#, None),

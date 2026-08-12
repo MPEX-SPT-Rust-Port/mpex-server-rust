@@ -112,6 +112,9 @@ public class LootParityTests
             // Fail fast on silent fallback before comparing anything.
             Assert.That(_locationLootGenerator.LastPathTaken, Is.EqualTo(expected), $"generation did not take the {expected} path");
 
+            // Two empty lists compare equal, which would make every parity case pass vacuously.
+            Assert.That(spawnpoints, Is.Not.Empty, $"{expected} path generated no loot for {locationId}");
+
             return LootIdNormalizer.Normalize(_jsonUtil.Serialize(spawnpoints)!);
         }
         finally
