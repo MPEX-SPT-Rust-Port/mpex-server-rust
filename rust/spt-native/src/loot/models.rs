@@ -13,6 +13,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
 /// Mod-added fields captured on the way in and replayed on the way out.
@@ -288,11 +289,12 @@ pub struct StaticAmmoDetails {
 /// `Models/Eft/Common/Location.cs`
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct StaticContainer {
-    /// `BTreeMap`, not `HashMap`: `get_group_id_to_container_mappings` draws a `get_int` per group
-    /// as it walks this map, so a randomised iteration order hands different groups different draws
-    /// and leaves generation non-reproducible even under a fixed `test_seed`.
+    /// `IndexMap`, not `HashMap` or `BTreeMap`: `get_group_id_to_container_mappings` draws a
+    /// `get_int` per group as it walks this map, and the C# `Dictionary` it stands in for walks in
+    /// JSON order. A hashed order leaves generation non-reproducible; a sorted one is reproducible
+    /// but hands different groups different draws than the C#.
     #[serde(rename = "containersGroups", skip_serializing_if = "Option::is_none")]
-    pub containers_groups: Option<BTreeMap<String, ContainerMinMax>>,
+    pub containers_groups: Option<IndexMap<String, ContainerMinMax>>,
     /// Keyed lookups only, so iteration order never reaches the RNG.
     #[serde(rename = "containers", skip_serializing_if = "Option::is_none")]
     pub containers: Option<HashMap<String, ContainerData>>,

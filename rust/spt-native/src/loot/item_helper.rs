@@ -374,6 +374,9 @@ pub fn create_cartridges(parent_id: &str, ammo_tpl: &str, stack_count: i32, loca
 /// and an empty box list (`ItemHelper.cs:1266` indexes `ammoBox[0]`). A cartridge with no
 /// `StackMaxSize` joins them as a **deviation** — C# spins forever adding empty stacks, which is not
 /// something to reproduce behind an FFI boundary.
+// A `Diagnostic` carries a `serde_json::Value` of arguments, which `preserve_order` makes wide
+// enough to trip the lint. It is a log line on a skip path, not something worth boxing.
+#[allow(clippy::result_large_err)]
 pub fn add_cartridges_to_ammo_box(
     ctx: &LootContext,
     ammo_box: &mut Vec<Item>,

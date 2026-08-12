@@ -14,6 +14,11 @@ use rand_xoshiro::Xoshiro256StarStar;
 thread_local! {
     /// The test-only seeded generator; `None` means production entropy.
     static TEST_RNG: RefCell<Option<Xoshiro256StarStar>> = const { RefCell::new(None) };
+
+    /// Where the stream of the last seeded [`TestSeedGuard::install`] on this thread ended, kept for
+    /// a following [`TestSeedGuard::resume`] with the same seed to carry on from. Never drawn from
+    /// while parked, so an unseeded run cannot reach it.
+    static PARKED_RNG: RefCell<Option<(u64, Xoshiro256StarStar)>> = const { RefCell::new(None) };
 }
 
 /// Routes every draw on this thread through a seeded xoshiro256** until dropped. Installed by the
@@ -24,20 +29,55 @@ pub struct TestSeedGuard {
     /// Whatever occupied the slot before this guard, restored on drop rather than cleared, so a
     /// nested install cannot silently drop its caller back to entropy.
     previous: Option<Xoshiro256StarStar>,
+    /// The seed to park this guard's stream under on drop; `None` parks nothing.
+    park_under: Option<u64>,
 }
 
 impl TestSeedGuard {
+    /// A fresh stream from `seed`, parked on drop for a [`resume`](Self::resume) to carry on from.
     pub fn install(seed: u64) -> Self {
-        let previous = TEST_RNG.with(|slot| slot.borrow_mut().replace(xoshiro_from_u64(seed)));
+        Self::replace(xoshiro_from_u64(seed), Some(seed))
+    }
 
-        Self { previous }
+    /// Carries on from the stream a preceding [`install`](Self::install) with the same seed parked,
+    /// or starts fresh from `seed` when there is none.
+    ///
+    /// This is what keeps one location's generation on one stream. C# installs a single
+    /// `SeededRandomSource` for the whole of `GenerateLocationLoot` and draws from it in the static
+    /// phase before the dynamic one, where the native side is entered once per phase — so the
+    /// dynamic entry point has to pick the stream up where the static entry point left it rather
+    /// than restart it, or the two phases replay the same draw values.
+    ///
+    /// The park is consumed, so a second resume with no static run in between starts fresh again.
+    pub fn resume(seed: u64) -> Self {
+        let parked = PARKED_RNG.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            match slot.as_ref() {
+                Some((parked_seed, _)) if *parked_seed == seed => slot.take().map(|(_, rng)| rng),
+                _ => None,
+            }
+        });
+
+        Self::replace(parked.unwrap_or_else(|| xoshiro_from_u64(seed)), None)
+    }
+
+    fn replace(rng: Xoshiro256StarStar, park_under: Option<u64>) -> Self {
+        let previous = TEST_RNG.with(|slot| slot.borrow_mut().replace(rng));
+
+        Self {
+            previous,
+            park_under,
+        }
     }
 }
 
 impl Drop for TestSeedGuard {
     fn drop(&mut self) {
-        TEST_RNG.with(|slot| {
-            *slot.borrow_mut() = self.previous.take();
+        let ended =
+            TEST_RNG.with(|slot| std::mem::replace(&mut *slot.borrow_mut(), self.previous.take()));
+
+        PARKED_RNG.with(|slot| {
+            *slot.borrow_mut() = self.park_under.zip(ended);
         });
     }
 }
@@ -334,6 +374,65 @@ mod tests {
         };
 
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn a_resumed_guard_carries_on_where_the_installed_one_stopped() {
+        // The whole point of `resume`: two calls, one stream. C# hands both loot phases the same
+        // `SeededRandomSource`, so the dynamic phase must see the draws that follow the static
+        // phase's, not the same ones over again.
+        let continuous: Vec<u64> = {
+            let _guard = TestSeedGuard::install(9);
+            (0..6).map(|_| next_u64()).collect()
+        };
+
+        let mut split: Vec<u64> = Vec::new();
+        {
+            let _guard = TestSeedGuard::install(9);
+            split.extend((0..3).map(|_| next_u64()));
+        }
+        {
+            let _guard = TestSeedGuard::resume(9);
+            split.extend((0..3).map(|_| next_u64()));
+        }
+
+        assert_eq!(continuous, split);
+    }
+
+    #[test]
+    fn a_resume_starts_fresh_without_a_parked_stream_of_its_own_seed() {
+        let fresh: Vec<u64> = {
+            let _guard = TestSeedGuard::install(9);
+            (0..3).map(|_| next_u64()).collect()
+        };
+
+        // Parked under 8, so the resume of 9 cannot take it.
+        {
+            let _guard = TestSeedGuard::install(8);
+            next_u64();
+        }
+        let after_other_seed: Vec<u64> = {
+            let _guard = TestSeedGuard::resume(9);
+            (0..3).map(|_| next_u64()).collect()
+        };
+
+        // Nothing parked at all, and the park is single-use: a second resume starts over.
+        {
+            let _guard = TestSeedGuard::install(9);
+            next_u64();
+        }
+        let first_resume: Vec<u64> = {
+            let _guard = TestSeedGuard::resume(9);
+            (0..3).map(|_| next_u64()).collect()
+        };
+        let second_resume: Vec<u64> = {
+            let _guard = TestSeedGuard::resume(9);
+            (0..3).map(|_| next_u64()).collect()
+        };
+
+        assert_eq!(after_other_seed, fresh);
+        assert_ne!(first_resume, fresh, "the parked stream was not picked up");
+        assert_eq!(second_resume, fresh);
     }
 
     #[test]

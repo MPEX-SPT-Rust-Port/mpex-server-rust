@@ -6,8 +6,9 @@
 //! and crashes), the port returns a [`LootError`] rather than panicking behind the FFI boundary —
 //! each such site names the C# line it stands in for.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 
+use indexmap::IndexMap;
 use serde_json::json;
 
 use super::container_extensions::{
@@ -27,10 +28,11 @@ use super::{mongo_id, random_util};
 /// seeded with -1 and every other value comes out of `GetInt`.
 #[derive(Debug, Clone, Default)]
 struct ContainerGroupCount {
-    /// `BTreeMap`, not `HashMap`: the iteration order decides both the order containers are rolled
-    /// in and the order they enter the probability array, so a randomised order would leave the
-    /// draw non-reproducible even under a fixed `test_seed`.
-    container_ids_with_probability: BTreeMap<String, f64>,
+    /// `IndexMap`, not `HashMap` or `BTreeMap`: the iteration order decides both the order
+    /// containers are rolled in and the order they enter the probability array, and the C#
+    /// `Dictionary` it stands in for walks in insertion order — so the containers must be kept in
+    /// the order the map was filled in, not sorted by id.
+    container_ids_with_probability: IndexMap<String, f64>,
     chosen_count: f64,
 }
 
@@ -472,12 +474,14 @@ fn get_group_id_to_container_mappings(
     ctx: &mut LootContext,
     static_container_group_data: &StaticContainer,
     static_containers_on_map: &[&StaticContainerData],
-) -> BTreeMap<String, ContainerGroupCount> {
+) -> IndexMap<String, ContainerGroupCount> {
     let config = ctx.config;
 
     // Create dictionary of all group ids and choose a count of containers the map will spawn of
-    // that group
-    let mut mapping: BTreeMap<String, ContainerGroupCount> = BTreeMap::new();
+    // that group. Insertion-ordered, as the C# `Dictionary` is: the groups are walked again below
+    // in this order, so the empty group must stay where it was added - after every group from
+    // `containersGroups` and before any group only the containers mention.
+    let mut mapping: IndexMap<String, ContainerGroupCount> = IndexMap::new();
     for (container_group_id, container_min_max) in static_container_group_data
         .containers_groups
         .iter()
@@ -490,7 +494,7 @@ fn get_group_id_to_container_mappings(
         mapping.insert(
             container_group_id.clone(),
             ContainerGroupCount {
-                container_ids_with_probability: BTreeMap::new(),
+                container_ids_with_probability: IndexMap::new(),
                 chosen_count: f64::from(random_util::get_int(
                     random_util::round_half_even(min * config.container_group_min_size_multiplier)
                         as i32,
@@ -506,7 +510,7 @@ fn get_group_id_to_container_mappings(
     mapping.insert(
         String::new(),
         ContainerGroupCount {
-            container_ids_with_probability: BTreeMap::new(),
+            container_ids_with_probability: IndexMap::new(),
             chosen_count: -1.0,
         },
     );
@@ -885,10 +889,13 @@ fn is_always_spawn(spawn_point: &Spawnpoint) -> bool {
 pub fn generate_dynamic_loot(
     mut request: DynamicLootRequest,
 ) -> Result<DynamicLootResult, LootError> {
+    // `resume`, not `install`: this is the second half of one `GenerateLocationLoot`, and the C#
+    // draws both halves from the single `SeededRandomSource` the caller installed, so the stream
+    // carries on from where the static-container run ended.
     let _seed_guard = request
         .common
         .test_seed
-        .map(random_util::TestSeedGuard::install);
+        .map(random_util::TestSeedGuard::resume);
 
     // Everything the run mutates is moved out before the rest of the request is lent to the context.
     let counter = std::mem::take(&mut request.common.counter);
@@ -1960,6 +1967,22 @@ mod tests {
     }
 
     #[test]
+    fn an_item_location_keeps_the_field_order_the_c_sharp_writes() {
+        // `Item::location` is an untyped `Value`, so the object lands in a `serde_json::Map`. Without
+        // `preserve_order` that map sorts, and every location comes out `{"r","x","y"}` where the C#
+        // `ItemLocation` writes `{"x","y","r"}` - a byte difference in output that is otherwise
+        // invisible to a structural comparison.
+        let json = serde_json::to_string(&generate_static_containers(fixture_request()).unwrap())
+            .expect("result serializes");
+
+        assert!(
+            json.contains(r#""location":{"x":"#),
+            "no x-first location in {json}"
+        );
+        assert!(!json.contains(r#""location":{"r":"#));
+    }
+
+    #[test]
     fn adding_loot_leaves_the_request_container_untouched() {
         let request = fixture_request();
         let mut ctx = loot_context(&request.common, CounterState::default());
@@ -2013,7 +2036,7 @@ mod tests {
         let request = fixture_request();
         let mut ctx = loot_context(&request.common, CounterState::default());
         let container_data = ContainerGroupCount {
-            container_ids_with_probability: BTreeMap::from([("r1".to_owned(), 0.5)]),
+            container_ids_with_probability: IndexMap::from([("r1".to_owned(), 0.5)]),
             chosen_count: 3.0,
         };
 
@@ -2021,6 +2044,64 @@ mod tests {
         chosen.sort();
 
         assert_eq!(chosen, vec!["r1"]);
+    }
+
+    #[test]
+    fn containers_by_probability_hands_back_the_pool_in_insertion_order() {
+        // The whole-pool fallback returns `ContainerIdsWithProbability.Keys`, and the C#
+        // `Dictionary` enumerates those in insertion order. Ids deliberately in reverse-alphabetical
+        // order, so a sorted map would answer `[r1, r2, r3]` instead. The same ordering decides
+        // which container each `get_chance_100` roll belongs to in the ungrouped edge case, and the
+        // index each one takes in the probability array on the drawing path.
+        let request = fixture_request();
+        let mut ctx = loot_context(&request.common, CounterState::default());
+        let container_data = ContainerGroupCount {
+            container_ids_with_probability: IndexMap::from([
+                ("r3".to_owned(), 0.5),
+                ("r2".to_owned(), 0.5),
+                ("r1".to_owned(), 0.5),
+            ]),
+            chosen_count: 99.0,
+        };
+
+        let chosen = get_containers_by_probability(&mut ctx, "g1", &container_data);
+
+        assert_eq!(chosen, vec!["r3", "r2", "r1"]);
+    }
+
+    #[test]
+    fn container_groups_are_walked_in_json_order() {
+        // `containersGroups` is a C# `Dictionary` deserialized from JSON, so it is walked in file
+        // order - both for the `get_int` that sizes each group and for the draws that fill them.
+        // The group names are reverse-alphabetical and the empty group sorts before all of them, so
+        // a sorted map emits `z_group`'s container after `a_group`'s, and rolls the ungrouped
+        // containers before either.
+        let mut request = fixture_request();
+        request.common.test_seed = Some(42);
+        let statics = request.statics.as_mut().expect("fixture has statics");
+        // Rides on serde_json's `preserve_order`, as the FFI entry points do: without it the `json!`
+        // below - and the request the C# caller sends - would arrive alphabetised.
+        statics.containers_groups = Some(
+            serde_json::from_value(json!({
+                "z_group": { "minContainers": 1, "maxContainers": 1 },
+                "a_group": { "minContainers": 1, "maxContainers": 1 },
+                "m_group": { "minContainers": 0, "maxContainers": 0 },
+            }))
+            .unwrap(),
+        );
+        statics.containers = Some(
+            serde_json::from_value(json!({
+                "r1": { "groupId": "z_group" },
+                "r2": { "groupId": "a_group" },
+                // Sized 0, so it is skipped without drawing and cannot mask the order above.
+                "r3": { "groupId": "m_group" },
+            }))
+            .unwrap(),
+        );
+
+        let result = generate_static_containers(request).unwrap();
+
+        assert_eq!(spawnpoint_ids(&result), vec!["w1", "c1", "c2", "r1", "r2"]);
     }
 
     #[test]
