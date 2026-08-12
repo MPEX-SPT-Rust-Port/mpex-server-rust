@@ -1,5 +1,5 @@
 # Containerfile.dev — toolchain image for running this repo's tests and benchmarks.
-# No source is baked in (.dockerignore excludes Testing/), so bind-mount the repo:
+# No source is baked into the image; bind-mount the repo at run time:
 #
 #   podman build -f Containerfile.dev -t mpex-server-dev .
 #   podman run --rm -it -v .:/src:Z mpex-server-dev

@@ -8,6 +8,14 @@
 # RELEASE builds hash-verify SPT_Data against checks.dat at startup and refuse
 # to run if configs were edited afterwards, so it cannot be changed at run time.
 # Profiles and runtime state live in /app/user — keep it on a volume.
+#
+# The server is HTTPS-only on 6969, with a self-signed certificate generated into
+# /app/user/certs on first start. Health check: curl -k https://<host>:6969/health
+#
+# The admin panel requires a login even from localhost. The seeded administrator
+# credentials are spt/spt — change them on first use. Credentials live in
+# /app/user/credentials/, i.e. on the volume and changeable at run time, unlike
+# http.json.
 FROM quay.io/fedora/fedora-minimal:44-x86_64 AS build
 
 RUN dnf5 -y install dotnet-sdk-10.0 gcc git 7zip \
@@ -31,8 +39,11 @@ ARG BACKEND_IP=127.0.0.1
 RUN sed -i \
       -e 's/"ip": "127.0.0.1"/"ip": "0.0.0.0"/' \
       -e "s/\"backendIp\": \"127.0.0.1\"/\"backendIp\": \"${BACKEND_IP}\"/" \
+      -e 's/"requireCredentialsOnLocalhost": false/"requireCredentialsOnLocalhost": true/' \
       Libraries/SPTarkov.Server.Assets/SPT_Data/configs/http.json \
-    && grep -q '"ip": "0.0.0.0"' Libraries/SPTarkov.Server.Assets/SPT_Data/configs/http.json
+    && grep -q '"ip": "0.0.0.0"' Libraries/SPTarkov.Server.Assets/SPT_Data/configs/http.json \
+    && grep -q '"requireCredentialsOnLocalhost": true' Libraries/SPTarkov.Server.Assets/SPT_Data/configs/http.json \
+    && grep -q "\"backendIp\": \"${BACKEND_IP}\"" Libraries/SPTarkov.Server.Assets/SPT_Data/configs/http.json
 
 # Publish the project, not the solution (.dockerignore excludes Testing/).
 # -p:SptNativeRid is required for any RID-qualified publish (see Build.props).
