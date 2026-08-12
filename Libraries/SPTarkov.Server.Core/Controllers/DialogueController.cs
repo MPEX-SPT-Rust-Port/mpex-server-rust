@@ -1,0 +1,797 @@
+using Microsoft.Extensions.Logging;
+using SPTarkov.Common.Models.Logging;
+using SPTarkov.DI.Annotations;
+using SPTarkov.Server.Core.Helpers;
+using SPTarkov.Server.Core.Helpers.Dialogue;
+using SPTarkov.Server.Core.Helpers.Profile;
+using SPTarkov.Server.Core.Helpers.Server;
+using SPTarkov.Server.Core.Models.Common;
+using SPTarkov.Server.Core.Models.Eft.Dialog;
+using SPTarkov.Server.Core.Models.Eft.Profile;
+using SPTarkov.Server.Core.Models.Eft.Ws;
+using SPTarkov.Server.Core.Models.Enums;
+using SPTarkov.Server.Core.Models.Spt.Config;
+using SPTarkov.Server.Core.Models.Spt.Dialog;
+using SPTarkov.Server.Core.Models.Spt.Tables;
+using SPTarkov.Server.Core.Servers;
+using SPTarkov.Server.Core.Services;
+using SPTarkov.Server.Core.Services.Commerce;
+using SPTarkov.Server.Core.Services.Locales;
+using SPTarkov.Server.Core.Utils;
+
+namespace SPTarkov.Server.Core.Controllers;
+
+[Injectable]
+public class DialogueController(
+    ISptLogger<DialogueController> logger,
+    TradersTable traderTable,
+    TimeUtil timeUtil,
+    DialogueHelper dialogueHelper,
+    NotificationSendHelper notificationSendHelper,
+    ProfileHelper profileHelper,
+    SaveServer saveServer,
+    ServerLocalisationService serverLocalisationService,
+    MailSendService mailSendService,
+    CoreConfig coreConfig,
+    RandomUtil randomUtil,
+    IEnumerable<IDialogueChatBot> dialogueChatBots
+)
+{
+    protected readonly List<IDialogueChatBot> DialogueChatBots = dialogueChatBots.ToList();
+
+    /// <summary>
+    /// </summary>
+    /// <param name="chatBot"></param>
+    public void RegisterChatBot(IDialogueChatBot chatBot) // TODO: this is in with the helper types
+    {
+        if (DialogueChatBots.Any(cb => cb.GetChatBot().Id == chatBot.GetChatBot().Id))
+        {
+            logger.Error(serverLocalisationService.GetText("dialog-chatbot_id_already_exists", chatBot.GetChatBot().Id));
+        }
+
+        DialogueChatBots.Add(chatBot);
+    }
+
+    /// <summary>
+    ///     Handle onUpdate spt event
+    /// </summary>
+    public void Update()
+    {
+        var profiles = saveServer.GetProfiles();
+        foreach (var (sessionId, _) in profiles)
+        {
+            if (saveServer.IsProfileInvalidOrUnloadable(sessionId))
+            {
+                continue;
+            }
+
+            ProcessExpiredInsurance(sessionId);
+        }
+    }
+
+    /// <summary>
+    ///     Handle client/friend/list
+    /// </summary>
+    /// <param name="sessionId">session id</param>
+    /// <returns>GetFriendListDataResponse</returns>
+    public GetFriendListDataResponse GetFriendList(MongoId sessionId)
+    {
+        // Add all chatbots to the friends list
+        var friends = GetActiveChatBots();
+
+        // Add any friends the user has after the chatbots
+        var profile = profileHelper.GetFullProfile(sessionId);
+
+        if (profile.FriendProfileIds is null)
+        {
+            return new GetFriendListDataResponse
+            {
+                Friends = friends,
+                Ignore = [],
+                InIgnoreList = [],
+            };
+        }
+
+        foreach (var friendId in profile.FriendProfileIds)
+        {
+            var friendProfile = profileHelper.GetChatRoomMemberFromSessionId(friendId);
+            if (friendProfile is not null)
+            {
+                friends.Add(
+                    new UserDialogInfo
+                    {
+                        Id = friendProfile.Id,
+                        Aid = friendProfile.Aid,
+                        Info = friendProfile.Info,
+                    }
+                );
+            }
+        }
+
+        return new GetFriendListDataResponse
+        {
+            Friends = friends,
+            Ignore = [],
+            InIgnoreList = [],
+        };
+    }
+
+    /// <summary>
+    ///     Get all active chatbots
+    /// </summary>
+    /// <returns>Active chatbots</returns>
+    public List<UserDialogInfo> GetActiveChatBots()
+    {
+        var activeBots = new List<UserDialogInfo>();
+
+        var chatBotConfig = coreConfig.Features.ChatbotFeatures;
+
+        foreach (var bot in DialogueChatBots)
+        {
+            var botData = bot.GetChatBot();
+            if (chatBotConfig.EnabledBots.GetValueOrDefault(botData.Id, false))
+            {
+                activeBots.Add(botData);
+            }
+        }
+
+        return activeBots;
+    }
+
+    /// <summary>
+    ///     Handle client/mail/dialog/list
+    ///     Create array holding trader dialogs and mail interactions with player
+    ///     Set the content of the dialogue on the list tab.
+    /// </summary>
+    /// <param name="sessionId">Session Id</param>
+    /// <returns>list of dialogs</returns>
+    public List<DialogueInfo> GenerateDialogueList(MongoId sessionId)
+    {
+        var data = new List<DialogueInfo>();
+        foreach (var (_, dialog) in dialogueHelper.GetDialogsForProfile(sessionId))
+        {
+            var dialogueInfo = GetDialogueInfo(dialog, sessionId);
+            if (dialogueInfo is null)
+            {
+                continue;
+            }
+
+            data.Add(dialogueInfo);
+        }
+
+        return data;
+    }
+
+    /// <summary>
+    ///     Get the content of a dialogue
+    /// </summary>
+    /// <param name="dialogueId">Dialog id</param>
+    /// <param name="sessionId">Session Id</param>
+    /// <returns>DialogueInfo</returns>
+    public DialogueInfo? GetDialogueInfo(MongoId dialogueId, MongoId sessionId)
+    {
+        var dialogs = dialogueHelper.GetDialogsForProfile(sessionId);
+        var dialogue = dialogs.GetValueOrDefault(dialogueId);
+
+        return GetDialogueInfo(dialogue, sessionId);
+    }
+
+    /// <summary>
+    ///     Get the content of a dialogue
+    /// </summary>
+    /// <param name="dialogue">Dialog</param>
+    /// <param name="sessionId">Session Id</param>
+    /// <returns>DialogueInfo</returns>
+    public DialogueInfo? GetDialogueInfo(Dialogue? dialogue, MongoId sessionId)
+    {
+        if (dialogue is null || dialogue.Messages?.Count == 0)
+        {
+            return null;
+        }
+
+        var result = new DialogueInfo
+        {
+            Id = dialogue.Id,
+            Type = dialogue.Type ?? MessageType.NpcTraderMessage,
+            Message = dialogueHelper.GetMessagePreview(dialogue),
+            New = dialogue?.New,
+            AttachmentsNew = dialogue?.AttachmentsNew,
+            Pinned = dialogue?.Pinned,
+            Users = GetDialogueUsers(dialogue, dialogue?.Type, sessionId),
+        };
+
+        return result;
+    }
+
+    /// <summary>
+    ///     Get the users involved in a dialog (player + other party)
+    /// </summary>
+    /// <param name="dialog">The dialog to check for users</param>
+    /// <param name="messageType">What type of message is being sent</param>
+    /// <param name="sessionId">Player id</param>
+    /// <returns>UserDialogInfo list</returns>
+    public List<UserDialogInfo> GetDialogueUsers(Dialogue? dialog, MessageType? messageType, MongoId sessionId)
+    {
+        var profile = saveServer.GetProfile(sessionId);
+
+        // User to user messages are special in that they need the player to exist in them, add if they don't
+        if (
+            messageType == MessageType.UserMessage
+            && dialog?.Users is not null
+            && dialog.Users.All(userDialog => userDialog.Id != profile.CharacterData?.PmcData?.SessionId)
+        )
+        {
+            dialog.Users.Add(
+                new UserDialogInfo
+                {
+                    Id = profile.CharacterData.PmcData.SessionId.Value,
+                    Aid = profile.CharacterData?.PmcData?.Aid,
+                    Info = new UserDialogDetails
+                    {
+                        Level = profile.CharacterData?.PmcData?.Info?.Level,
+                        Nickname = profile.CharacterData?.PmcData?.Info?.Nickname,
+                        Side = profile.CharacterData?.PmcData?.Info?.Side,
+                        MemberCategory = profile.CharacterData?.PmcData?.Info?.MemberCategory,
+                        SelectedMemberCategory = profile.CharacterData?.PmcData?.Info?.SelectedMemberCategory,
+                    },
+                }
+            );
+        }
+
+        return dialog?.Users!;
+    }
+
+    /// <summary>
+    ///     Handle client/mail/dialog/view
+    ///     Handle player clicking 'messenger' and seeing all the messages they've received
+    ///     Set the content of the dialogue on the details panel, showing all the messages
+    ///     for the specified dialogue.
+    /// </summary>
+    /// <param name="request">Get dialog request</param>
+    /// <param name="sessionId">Session id</param>
+    /// <returns>GetMailDialogViewResponseData object</returns>
+    public GetMailDialogViewResponseData GenerateDialogueView(GetMailDialogViewRequestData request, MongoId sessionId)
+    {
+        var dialogueId = request.DialogId;
+        var fullProfile = saveServer.GetProfile(sessionId);
+        var dialogue = GetDialogByIdFromProfile(fullProfile, request);
+
+        if (dialogue.Messages == null || dialogue.Messages.Count == 0)
+        {
+            return new GetMailDialogViewResponseData
+            {
+                Messages = [],
+                Profiles = [],
+                HasMessagesWithRewards = false,
+            };
+        }
+
+        // Dialog was opened, remove the little [1] on screen
+        dialogue.New = 0;
+
+        // Set number of new attachments, but ignore those that have expired.
+        dialogue.AttachmentsNew = GetUnreadMessagesWithAttachmentsCount(sessionId, dialogueId);
+
+        return new GetMailDialogViewResponseData
+        {
+            Messages = GetLimitedMessages(dialogue.Messages, request.Limit, request.Time),
+            Profiles = GetProfilesForMail(fullProfile, dialogue.Users),
+            HasMessagesWithRewards = MessagesHaveUncollectedRewards(dialogue.Messages),
+        };
+    }
+
+    /// <summary>
+    ///     Get dialog from player profile, create if doesn't exist
+    /// </summary>
+    /// <param name="profile">Player profile</param>
+    /// <param name="request">get dialog request</param>
+    /// <returns>Dialogue</returns>
+    protected Dialogue GetDialogByIdFromProfile(SptProfile profile, GetMailDialogViewRequestData request)
+    {
+        if (profile.DialogueRecords is null || profile.DialogueRecords.ContainsKey(request.DialogId))
+        {
+            return profile.DialogueRecords?[request.DialogId] ?? throw new NullReferenceException();
+        }
+
+        profile.DialogueRecords[request.DialogId] = new Dialogue
+        {
+            Id = request.DialogId,
+            AttachmentsNew = 0,
+            Pinned = false,
+            Messages = [],
+            New = 0,
+            Type = request.Type,
+        };
+
+        if (request.Type != MessageType.UserMessage)
+        {
+            return profile.DialogueRecords[request.DialogId];
+        }
+
+        var dialogue = profile.DialogueRecords[request.DialogId];
+        dialogue.Users = [];
+        var chatBot = DialogueChatBots.FirstOrDefault(cb => cb.GetChatBot().Id == request.DialogId);
+
+        if (chatBot is null)
+        {
+            return profile.DialogueRecords[request.DialogId];
+        }
+
+        dialogue.Users ??= [];
+        dialogue.Users.Add(chatBot.GetChatBot());
+
+        return profile.DialogueRecords[request.DialogId];
+    }
+
+    /// <summary>
+    ///     Get the users involved in a mail between two entities
+    /// </summary>
+    /// <param name="fullProfile">Player profile</param>
+    /// <param name="userDialogs">The participants of the mail</param>
+    /// <returns>UserDialogInfo list</returns>
+    protected List<UserDialogInfo> GetProfilesForMail(SptProfile fullProfile, List<UserDialogInfo>? userDialogs)
+    {
+        List<UserDialogInfo> result = [];
+        if (userDialogs is null)
+        // Nothing to add
+        {
+            return result;
+        }
+
+        result.AddRange(userDialogs);
+
+        if (result.Any(userDialog => userDialog.Id == fullProfile.ProfileInfo?.ProfileId))
+        {
+            return result;
+        }
+
+        // Player doesn't exist, add them in before returning
+        var pmcProfile = fullProfile.CharacterData?.PmcData;
+        result.Add(
+            new UserDialogInfo
+            {
+                Id = fullProfile.ProfileInfo.ProfileId.Value,
+                Aid = fullProfile.ProfileInfo?.Aid,
+                Info = new UserDialogDetails
+                {
+                    Nickname = pmcProfile?.Info?.Nickname,
+                    Side = pmcProfile?.Info?.Side,
+                    Level = pmcProfile?.Info?.Level,
+                    MemberCategory = pmcProfile?.Info?.MemberCategory,
+                    SelectedMemberCategory = pmcProfile?.Info?.SelectedMemberCategory,
+                },
+            }
+        );
+
+        return result;
+    }
+
+    /// <summary>
+    ///     Get a count of messages with attachments from a particular dialog
+    /// </summary>
+    /// <param name="sessionId">Session id</param>
+    /// <param name="dialogueId">Dialog id</param>
+    /// <returns>Count of messages with attachments</returns>
+    protected int GetUnreadMessagesWithAttachmentsCount(MongoId sessionId, MongoId dialogueId)
+    {
+        var newAttachmentCount = 0;
+        var activeMessages = GetActiveMessagesFromDialog(sessionId, dialogueId);
+        foreach (var message in activeMessages)
+        {
+            if (message.HasRewards.GetValueOrDefault(false) && !message.RewardCollected.GetValueOrDefault(false))
+            {
+                newAttachmentCount++;
+            }
+        }
+
+        return newAttachmentCount;
+    }
+
+    /// <summary>
+    ///     Get messages from a specific dialog that have items not expired
+    /// </summary>
+    /// <param name="sessionId">Session/Player id</param>
+    /// <param name="dialogueId">Dialog to get mail attachments from</param>
+    /// <returns>Message array</returns>
+    protected List<Message> GetActiveMessagesFromDialog(MongoId sessionId, MongoId dialogueId)
+    {
+        var timeNow = timeUtil.GetTimeStamp();
+        var dialogs = dialogueHelper.GetDialogsForProfile(sessionId);
+
+        return dialogs[dialogueId]
+                .Messages?.Where(message =>
+                {
+                    var checkTime = message.DateTime + (message.MaxStorageTime ?? 0);
+                    return timeNow < checkTime;
+                })
+                .ToList()
+            ?? [];
+    }
+
+    /// <summary>
+    ///     Does list have messages with uncollected rewards (includes expired rewards)
+    /// </summary>
+    /// <param name="messages">Messages to check</param>
+    /// <returns>true if uncollected rewards found</returns>
+    protected bool MessagesHaveUncollectedRewards(List<Message> messages)
+    {
+        return messages.Any(message => (message.Items?.Data?.Count ?? 0) > 0);
+    }
+
+    /// <summary>
+    /// Gets a subset of messages from before a certain time
+    /// </summary>
+    /// <param name="allMessages">The superset of messages</param>
+    /// <param name="limit">The maximum number of messages to return, null/0 means all</param>
+    /// <param name="time">Limit to messages before this Unix time (seconds since epoch), null/0 means all</param>
+    /// <returns>List of matching messages</returns>
+    protected List<Message> GetLimitedMessages(List<Message> allMessages, int? limit, decimal? time)
+    {
+        if ((time == null || time == 0) && (limit == null || limit == 0 || limit >= allMessages.Count))
+        {
+            return allMessages;
+        }
+
+        if (time == null || time == 0)
+        {
+            time = timeUtil.GetTimeStamp();
+        }
+
+        if (limit == null || limit == 0)
+        {
+            limit = int.MaxValue;
+        }
+
+        List<Message> results = [];
+        for (var i = allMessages.Count - 1; i >= 0; i--)
+        {
+            var message = allMessages[i];
+            if (message.DateTime <= time)
+            {
+                results.Add(message);
+
+                if (results.Count >= limit)
+                {
+                    break;
+                }
+            }
+        }
+
+        results.Reverse(); // Since we iterated from newest to oldest, reverse so the result is in order
+        return results;
+    }
+
+    /// <summary>
+    ///     Handle client/mail/dialog/remove
+    ///     Remove an entire dialog with an entity (trader/user)
+    /// </summary>
+    /// <param name="dialogueId">id of the dialog to remove</param>
+    /// <param name="sessionId">Player id</param>
+    public void RemoveDialogue(MongoId dialogueId, MongoId sessionId)
+    {
+        var profile = saveServer.GetProfile(sessionId);
+        if (!profile.DialogueRecords?.Remove(dialogueId) ?? false)
+        {
+            logger.Error(serverLocalisationService.GetText("dialogue-unable_to_find_in_profile", new { sessionId, dialogueId }));
+        }
+    }
+
+    /// <summary>
+    ///     Handle client/mail/dialog/pin and handle client/mail/dialog/unpin
+    /// </summary>
+    /// <param name="dialogueId"></param>
+    /// <param name="shouldPin"></param>
+    /// <param name="sessionId">Session/Player id</param>
+    public void SetDialoguePin(MongoId dialogueId, bool shouldPin, MongoId sessionId)
+    {
+        var dialog = dialogueHelper.GetDialogsForProfile(sessionId).GetValueOrDefault(dialogueId);
+        if (dialog is null)
+        {
+            logger.Error(serverLocalisationService.GetText("dialogue-unable_to_find_in_profile", new { sessionId, dialogueId }));
+
+            return;
+        }
+
+        dialog.Pinned = shouldPin;
+    }
+
+    /// <summary>
+    ///     Handle client/mail/dialog/read
+    ///     Set a dialog to be read (no number alert/attachment alert)
+    /// </summary>
+    /// <param name="dialogueIds">Dialog ids to set as read</param>
+    /// <param name="sessionId">Player profile id</param>
+    public void SetRead(List<MongoId>? dialogueIds, MongoId sessionId)
+    {
+        if (dialogueIds is null)
+        {
+            logger.Error(serverLocalisationService.GetText("dialogue-list_from_client_empty", new { sessionId }));
+
+            return;
+        }
+
+        var dialogs = dialogueHelper.GetDialogsForProfile(sessionId);
+        if (dialogs.Count == 0)
+        {
+            logger.Error(serverLocalisationService.GetText("dialogue-unable_to_find_dialogs_in_profile", new { sessionId }));
+
+            return;
+        }
+
+        foreach (var dialogId in dialogueIds)
+        {
+            dialogs[dialogId].New = 0;
+        }
+    }
+
+    /// <summary>
+    ///     Handle client/mail/dialog/getAllAttachments
+    ///     Get all uncollected items attached to mail in a particular dialog
+    /// </summary>
+    /// <param name="dialogueId">Dialog to get mail attachments from</param>
+    /// <param name="sessionId">Session id</param>
+    /// <returns>GetAllAttachmentsResponse or null if dialogue doesn't exist</returns>
+    public GetAllAttachmentsResponse? GetAllAttachments(string dialogueId, MongoId sessionId)
+    {
+        var dialogs = dialogueHelper.GetDialogsForProfile(sessionId);
+        var dialog = dialogs.TryGetValue(dialogueId, out var dialogInfo);
+        if (!dialog)
+        {
+            logger.Error(serverLocalisationService.GetText("dialogue-unable_to_find_in_profile"));
+
+            return null;
+        }
+
+        var activeMessages = GetActiveMessagesFromDialog(sessionId, dialogueId);
+        var messagesWithAttachments = GetMessageWithAttachments(activeMessages);
+
+        return new GetAllAttachmentsResponse
+        {
+            Messages = messagesWithAttachments,
+            Profiles = [],
+            HasMessagesWithRewards = MessagesHaveUncollectedRewards(messagesWithAttachments),
+        };
+    }
+
+    /// <summary>
+    ///     handle client/mail/msg/send
+    /// </summary>
+    /// <param name="sessionId">Session/Player id</param>
+    /// <param name="request"></param>
+    /// <returns></returns>
+    public async ValueTask<string> SendMessage(MongoId sessionId, SendMessageRequest request)
+    {
+        mailSendService.SendPlayerMessageToNpc(sessionId, request.DialogId, request.Text);
+
+        var chatBot = DialogueChatBots.FirstOrDefault(cb => cb.GetChatBot().Id == request.DialogId);
+
+        if (chatBot is not null)
+        {
+            return await chatBot.HandleMessage(sessionId, request);
+        }
+        else
+        {
+            return string.Empty;
+        }
+    }
+
+    /// <summary>
+    ///     Return list of messages with uncollected items (includes expired)
+    /// </summary>
+    /// <param name="messages">Messages to parse</param>
+    /// <returns>messages with items to collect</returns>
+    protected List<Message> GetMessageWithAttachments(List<Message> messages)
+    {
+        return messages.Where(message => (message.Items?.Data?.Count ?? 0) > 0).ToList();
+    }
+
+    /// <summary>
+    ///     Delete expired items from all messages in player profile + send expired messages. triggers when updating traders.
+    /// </summary>
+    /// <param name="sessionId">Session id</param>
+    protected void ProcessExpiredInsurance(MongoId sessionId)
+    {
+        foreach (var (dialogId, _) in dialogueHelper.GetDialogsForProfile(sessionId))
+        {
+            SendExpiredInsuranceMessages(sessionId, dialogId);
+        }
+    }
+
+    /// <summary>
+    ///     Send expired insurance messages and remove expired items from messages
+    /// </summary>
+    /// <param name="sessionId">Session id</param>
+    /// <param name="dialogueId">Trader dialog id</param>
+    protected void SendExpiredInsuranceMessages(MongoId sessionId, MongoId dialogueId)
+    {
+        var dialogs = dialogueHelper.GetDialogsForProfile(sessionId);
+        if (!dialogs.TryGetValue(dialogueId, out var dialog))
+        {
+            return;
+        }
+
+        if (dialog.Messages is null)
+        {
+            return;
+        }
+
+        var traderDialogMessages = traderTable.GetTrader(dialogueId)?.Dialogue;
+        List<string>? insuranceFoundMessageIds = null;
+        List<string>? insuranceExpiredMessageIds = null;
+        traderDialogMessages?.TryGetValue("insuranceFound", out insuranceFoundMessageIds);
+        traderDialogMessages?.TryGetValue("insuranceExpired", out insuranceExpiredMessageIds);
+
+        HashSet<SendMessageDetails> expiredInsuranceMessagesToSend = [];
+        foreach (var message in dialog.Messages.Where(MessageHasExpired))
+        {
+            // Check before reset, only messages that still had items get an expiry notification
+            var hadItems = (message.Items?.Data?.Count ?? 0) > 0;
+
+            // Reset expired message items data
+            message.Items = new();
+
+            if (message.TemplateId == null || !hadItems)
+            {
+                continue;
+            }
+
+            if (insuranceFoundMessageIds == null || !insuranceFoundMessageIds.Contains(message.TemplateId))
+            {
+                continue;
+            }
+
+            if (insuranceExpiredMessageIds == null)
+            {
+                continue;
+            }
+
+            // Choose random expired insurance message to send to player
+            var expiredInsuranceMessageId = randomUtil.GetArrayValue(insuranceExpiredMessageIds);
+            expiredInsuranceMessagesToSend.Add(
+                new SendMessageDetails
+                {
+                    RecipientId = sessionId,
+                    Sender = MessageType.NpcTraderMessage,
+                    DialogType = MessageType.NpcTraderMessage,
+                    Trader = dialogueId,
+                    TemplateId = expiredInsuranceMessageId,
+                    Items = [],
+                }
+            );
+        }
+
+        RemoveStaleExpiredInsuranceNotifications(sessionId, dialog, insuranceExpiredMessageIds);
+
+        if (expiredInsuranceMessagesToSend.Count > 0)
+        {
+            // We have expired insurance messages to send to player
+            foreach (var insuranceExpiredDialog in expiredInsuranceMessagesToSend)
+            {
+                mailSendService.SendMessageToPlayer(insuranceExpiredDialog);
+            }
+        }
+    }
+
+    /// <summary>
+    ///     Remove empty expired insurance notifications from a dialog, keeping only the newest.
+    /// </summary>
+    /// <param name="sessionId">Session id</param>
+    /// <param name="dialog">Trader dialog to clean up</param>
+    /// <param name="insuranceExpiredMessageIds">Trader expired insurance message template ids</param>
+    protected void RemoveStaleExpiredInsuranceNotifications(MongoId sessionId, Dialogue dialog, List<string>? insuranceExpiredMessageIds)
+    {
+        if (insuranceExpiredMessageIds == null || dialog.Messages == null)
+        {
+            return;
+        }
+
+        var staleNotifications = dialog
+            .Messages.Where(message =>
+                message.TemplateId != null
+                && insuranceExpiredMessageIds.Contains(message.TemplateId)
+                && (message.Items?.Data?.Count ?? 0) == 0
+            )
+            .ToHashSet();
+
+        if (staleNotifications.Count == 0)
+        {
+            return;
+        }
+
+        dialog.Messages.RemoveAll(staleNotifications.Contains);
+
+        if (logger.IsLogEnabled(LogLevel.Debug))
+        {
+            logger.Debug(
+                $"Removed {staleNotifications.Count} stale expired insurance notifications from dialog {dialog.Id} for profile {sessionId}"
+            );
+        }
+    }
+
+    /// <summary>
+    ///     Has a dialog message expired
+    /// </summary>
+    /// <param name="message">Message to check expiry of</param>
+    /// <returns>True = expired</returns>
+    protected bool MessageHasExpired(Message message)
+    {
+        return timeUtil.GetTimeStamp() > message.DateTime + (message.MaxStorageTime ?? 0);
+    }
+
+    /// <summary>
+    ///     Handle client/friend/request/send
+    /// </summary>
+    /// <param name="sessionID">Session/player id</param>
+    /// <param name="request">Sent friend request</param>
+    /// <returns></returns>
+    public FriendRequestSendResponse SendFriendRequest(MongoId sessionID, FriendRequestData request)
+    {
+        // To avoid needing to jump between profiles, auto-accept all friend requests
+        var friendProfile = profileHelper.GetFullProfile(request.To.Value);
+        if (friendProfile?.CharacterData?.PmcData is null)
+        {
+            return new FriendRequestSendResponse
+            {
+                Status = BackendErrorCodes.PlayerProfileNotFound,
+                RequestId = string.Empty, // Unused in an error state
+                RetryAfter = 600,
+            };
+        }
+
+        // Only add the profile to the friends list if it doesn't already exist
+        var profile = saveServer.GetProfile(sessionID);
+        profile.FriendProfileIds.Add(request.To.Value);
+
+        // We need to delay this so that the friend request gets properly added to the clientside list before we accept it
+        _ = new Timer(
+            _ =>
+            {
+                var notification = new WsFriendsListAccept
+                {
+                    EventType = NotificationEventType.friendListRequestAccept,
+                    Profile = profileHelper.GetChatRoomMemberFromPmcProfile(friendProfile.CharacterData.PmcData),
+                };
+                _ = notificationSendHelper.SendMessageAsync(sessionID, notification);
+            },
+            null,
+            TimeSpan.FromMicroseconds(1000),
+            Timeout.InfiniteTimeSpan // This should mean it does this callback once after 1 second and then stops
+        );
+
+        return new FriendRequestSendResponse
+        {
+            Status = BackendErrorCodes.None,
+            RequestId = friendProfile.ProfileInfo.Aid.ToString(),
+            RetryAfter = 600,
+        };
+    }
+
+    /// <summary>
+    ///     Handle client/friend/delete
+    /// </summary>
+    /// <param name="sessionID">Session/player id</param>
+    /// <param name="request">Sent delete friend request</param>
+    public void DeleteFriend(MongoId sessionID, DeleteFriendRequest request)
+    {
+        var profile = saveServer.GetProfile(sessionID);
+        profile?.FriendProfileIds?.Remove(request.FriendId);
+    }
+
+    /// <summary>
+    /// Clear messages from a specified dialogue
+    /// </summary>
+    /// <param name="sessionId">Session/Player id</param>
+    /// <param name="request">Client request to clear messages</param>
+    public void ClearMessages(MongoId sessionId, ClearMailMessageRequest request)
+    {
+        var profile = saveServer.GetProfile(sessionId);
+        if (profile.DialogueRecords is null || !profile.DialogueRecords.TryGetValue(request.DialogId, out var dialogToClear))
+        {
+            logger.Warning($"unable to clear messages from dialog: {request.DialogId} as it cannot be found in profile: {sessionId}");
+
+            return;
+        }
+
+        dialogToClear.Messages?.Clear();
+    }
+}

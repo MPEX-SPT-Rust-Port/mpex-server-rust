@@ -1,0 +1,48 @@
+using SPTarkov.DI.Annotations;
+using SPTarkov.Server.Core.Models.Common;
+using SPTarkov.Server.Core.Models.Eft.Common;
+using SPTarkov.Server.Core.Models.Eft.Profile;
+using SPTarkov.Server.Core.Models.Enums;
+using SPTarkov.Server.Core.Services;
+using SPTarkov.Server.Core.Services.Commerce;
+using SPTarkov.Server.Core.Services.Locales;
+using SPTarkov.Server.Core.Services.Server;
+using SPTarkov.Server.Core.Utils;
+
+namespace SPTarkov.Server.Core.Helpers.Dialogue.SPTFriend.Commands;
+
+[Injectable]
+public class ForceChristmasMessageHandler(
+    ServerLocalisationService _serverLocalisationService,
+    MailSendService _mailSendService,
+    RandomUtil _randomUtil,
+    SeasonalEventService _seasonalEventService
+) : IChatMessageHandler
+{
+    public int GetPriority()
+    {
+        return 99;
+    }
+
+    public bool CanHandle(string message)
+    {
+        return string.Equals(message, "hohoho", StringComparison.OrdinalIgnoreCase);
+    }
+
+    public void Process(MongoId sessionId, UserDialogInfo sptFriendUser, PmcData? sender, object? extraInfo = null)
+    {
+        var enableEventResult = _seasonalEventService.ForceSeasonalEvent(SeasonalEventType.Christmas);
+        if (enableEventResult)
+        {
+            _mailSendService.SendUserMessageToPlayer(
+                sessionId,
+                sptFriendUser,
+                _randomUtil.GetArrayValue([
+                    _serverLocalisationService.GetText("chatbot-forced_event_enabled", SeasonalEventType.Christmas),
+                ]),
+                [],
+                null
+            );
+        }
+    }
+}

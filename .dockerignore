@@ -1,0 +1,25 @@
+# Build Outputs
+**/bin/
+**/obj/
+rust/target/
+
+# VCS/IDE/CI metadata
+.git/
+.github/
+.idea/
+.vs/
+.vscode/
+
+# Do it live!
+Testing/
+
+# Runtime state
+**/user/
+**/logs/
+
+# Docker & Docs
+Dockerfile
+.dockerignore
+compose.yaml
+docker-compose.yml
+**/*.md

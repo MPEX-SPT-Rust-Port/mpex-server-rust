@@ -1,0 +1,73 @@
+{
+  "loggers": [
+    {
+      "type": "File",
+      "logLevel": "Information",
+      "format": "[%date% %time%][%level%][%logger%] %message%",
+      "filePath": "./user/logs/spt/",
+      "filePattern": "spt%DATE%.log",
+      "maxFileSizeMB": 10,
+      "maxRollingFiles": 10,
+      "filters": [
+        {
+          "type": "Exclude",
+          "name": ".*RequestLogger",
+          "matchingType": "Regex"
+        },
+        {
+          "type": "Exclude",
+          "name": "Microsoft.*",
+          "matchingType": "Regex"
+        }
+      ]
+    },
+    {
+      "type": "File",
+      "logLevel": "Information",
+      "format": "[%date% %time%][%level%][%logger%] %message%",
+      "filePath": "./user/logs/requests/",
+      "filePattern": "requests%DATE%.log",
+      "maxFileSizeMB": 25,
+      "maxRollingFiles": 10,
+      "filters": [
+        {
+          "type": "Include",
+          "name": ".*RequestLogger",
+          "matchingType": "Regex"
+        }
+      ]
+    },
+    {
+      "type": "Console",
+      "logLevel": "Information",
+      "format": "%message%",
+      "filters": [
+        {
+          "type": "Exclude",
+          "name": "Microsoft.*",
+          "matchingType": "Regex"
+        },
+        {
+          "type": "Exclude",
+          "name": "System.Net.Http.HttpClient.*",
+          "matchingType": "Regex"
+        },
+        {
+          "type": "Exclude",
+          "name": ".*FileLogger",
+          "matchingType": "Regex"
+        },
+        {
+          "type": "Exclude",
+          "name": ".*RequestLogger",
+          "matchingType": "Regex"
+        },
+        {
+          "type": "Exclude",
+          "name": ".*SystemInformationLogger",
+          "matchingType": "Regex"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,204 @@
+using System.Text.Encodings.Web;
+using System.Text.Json;
+using System.Text.Json.Serialization;
+using SPTarkov.DI.Annotations;
+using SPTarkov.Server.Core.Utils.Json;
+
+namespace SPTarkov.Server.Core.Utils;
+
+[Injectable(InjectionType.Singleton)]
+public class JsonUtil
+{
+    public static JsonSerializerOptions? JsonSerializerOptionsIndented { get; private set; }
+    public static JsonSerializerOptions? JsonSerializerOptionsNoIndent { get; private set; }
+
+    public JsonUtil(IEnumerable<IJsonConverterRegistrator> registrators)
+    {
+        JsonSerializerOptionsNoIndent = new JsonSerializerOptions()
+        {
+            // This is required for JSONC support
+            ReadCommentHandling = JsonCommentHandling.Skip,
+            WriteIndented = false,
+            DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+#if DEBUG
+            UnmappedMemberHandling = JsonUnmappedMemberHandling.Skip,
+#endif
+            Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+            NewLine = "\n",
+        };
+
+        foreach (var registrator in registrators)
+        {
+            foreach (var converter in registrator.GetJsonConverters())
+            {
+                JsonSerializerOptionsNoIndent.Converters.Add(converter);
+            }
+        }
+
+        JsonSerializerOptionsIndented = new JsonSerializerOptions(JsonSerializerOptionsNoIndent) { WriteIndented = true };
+    }
+
+    /// <summary>
+    ///     Convert JSON into an object
+    /// </summary>
+    /// <typeparam name="T">The type of the object to deserialize to</typeparam>
+    /// <param name="json">The JSON string to deserialize</param>
+    /// <returns>Deserialized object or null</returns>
+    public T? Deserialize<T>(string? json)
+    {
+        return string.IsNullOrEmpty(json) ? default : JsonSerializer.Deserialize<T>(json, JsonSerializerOptionsNoIndent);
+    }
+
+    /// <summary>
+    ///     Convert JSON into an object
+    /// </summary>
+    /// <param name="json">The JSON string to deserialize</param>
+    /// <param name="type">The type of the object to deserialize to</param>
+    /// <returns></returns>
+    public object? Deserialize(string? json, Type type)
+    {
+        return string.IsNullOrEmpty(json) ? null : JsonSerializer.Deserialize(json, type, JsonSerializerOptionsNoIndent);
+    }
+
+    /// <summary>
+    ///     Convert JSON into an object from a file
+    /// </summary>
+    /// <param name="file">The JSON File to read</param>
+    /// <returns>T</returns>
+    public T? DeserializeFromFile<T>(string file)
+    {
+        if (!File.Exists(file))
+        {
+            return default;
+        }
+
+        using (FileStream fs = new(file, FileMode.Open, FileAccess.Read))
+        {
+            return JsonSerializer.Deserialize<T>(fs, JsonSerializerOptionsNoIndent);
+        }
+    }
+
+    /// <summary>
+    ///     Convert JSON into an object from a file asynchronously
+    /// </summary>
+    /// <param name="file">The JSON File to read</param>
+    /// <param name="cancellationToken">
+    /// The <see cref="CancellationToken"/> that can be used to cancel the deserialization operation.
+    /// </param>
+    /// <returns>T</returns>
+    public async Task<T?> DeserializeFromFileAsync<T>(string file, CancellationToken cancellationToken = default)
+    {
+        if (!File.Exists(file))
+        {
+            return default;
+        }
+
+        await using FileStream fs = new(file, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: 4096, useAsync: true);
+
+        return await JsonSerializer.DeserializeAsync<T>(fs, JsonSerializerOptionsNoIndent, cancellationToken);
+    }
+
+    /// <summary>
+    ///     Convert JSON into an object from a file
+    /// </summary>
+    /// <param name="file">The JSON File to read</param>
+    /// <param name="type">The type of the object to deserialize to</param>
+    /// <returns>object</returns>
+    public object? DeserializeFromFile(string file, Type type)
+    {
+        if (!File.Exists(file))
+        {
+            return default;
+        }
+
+        using (FileStream fs = new(file, FileMode.Open, FileAccess.Read))
+        {
+            return JsonSerializer.Deserialize(fs, type, JsonSerializerOptionsNoIndent);
+        }
+    }
+
+    /// <summary>
+    ///     Convert JSON into an object from a file asynchronously
+    /// </summary>
+    /// <param name="file">The JSON File to read</param>
+    /// <param name="type">The type of the object to deserialize to</param>
+    /// <param name="cancellationToken">
+    /// The <see cref="CancellationToken"/> that can be used to cancel the deserialization operation.
+    /// </param>
+    /// <returns>object</returns>
+    public async Task<object?> DeserializeFromFileAsync(string file, Type type, CancellationToken cancellationToken = default)
+    {
+        if (!File.Exists(file))
+        {
+            return default;
+        }
+
+        await using FileStream fs = new(file, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: 4096, useAsync: true);
+
+        return await JsonSerializer.DeserializeAsync(fs, type, JsonSerializerOptionsNoIndent, cancellationToken);
+    }
+
+    /// <summary>
+    ///     Convert JSON into an object from a FileStream
+    /// </summary>
+    /// <param name="fs">The file stream to deserialize</param>
+    /// <param name="type">The type of the object to deserialize to</param>
+    /// <returns></returns>
+    public object? DeserializeFromFileStream(FileStream fs, Type type)
+    {
+        return JsonSerializer.Deserialize(fs, type, JsonSerializerOptionsNoIndent);
+    }
+
+    /// <summary>
+    ///     Convert JSON into an object from a FileStream asynchronously
+    /// </summary>
+    /// <param name="fs">The file stream to deserialize</param>
+    /// <param name="type">The type of the object to deserialize to</param>
+    /// <param name="cancellationToken">
+    /// The <see cref="CancellationToken"/> that can be used to cancel the deserialization operation.
+    /// </param>
+    /// <returns></returns>
+    public async Task<object?> DeserializeFromFileStreamAsync(FileStream fs, Type type, CancellationToken cancellationToken = default)
+    {
+        return await JsonSerializer.DeserializeAsync(fs, type, JsonSerializerOptionsNoIndent, cancellationToken);
+    }
+
+    /// <summary>
+    ///     Convert JSON into an object from a MemoryStream asynchronously
+    /// </summary>
+    /// <param name="ms">The memory stream to deserialize</param>
+    /// <param name="cancellationToken">
+    /// The <see cref="CancellationToken"/> that can be used to cancel the deserialization operation.
+    /// </param>
+    /// <returns>T</returns>
+    public async Task<T?> DeserializeFromMemoryStreamAsync<T>(MemoryStream ms, CancellationToken cancellationToken = default)
+    {
+        return await JsonSerializer.DeserializeAsync<T>(ms, JsonSerializerOptionsNoIndent, cancellationToken);
+    }
+
+    /// <summary>
+    ///     Convert an object into JSON
+    /// </summary>
+    /// <typeparam name="T">Type of the object being serialised</typeparam>
+    /// <param name="obj">Object to serialise</param>
+    /// <param name="indented">Should JSON be indented</param>
+    /// <returns>Serialised object as JSON, or null</returns>
+    public string? Serialize<T>(T? obj, bool indented = false)
+    {
+        return obj == null ? null : JsonSerializer.Serialize(obj, indented ? JsonSerializerOptionsIndented : JsonSerializerOptionsNoIndent);
+    }
+
+    /// <summary>
+    ///     Convert an object into JSON
+    /// </summary>
+    /// <param name="obj">Object to serialise</param>
+    /// <param name="type">Type of object being serialized</param>
+    /// <param name="indented">Should JSON be indented</param>
+    /// <returns>Serialized text</returns>
+    public string? Serialize(object? obj, Type type, bool indented = false)
+    {
+        return obj == null
+            ? null
+            : JsonSerializer.Serialize(obj, type, indented ? JsonSerializerOptionsIndented : JsonSerializerOptionsNoIndent);
+    }
+}

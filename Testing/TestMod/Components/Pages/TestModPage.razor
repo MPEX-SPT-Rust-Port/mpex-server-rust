@@ -1,0 +1,23 @@
+﻿@using Microsoft.AspNetCore.Components.Web
+@using static Microsoft.AspNetCore.Components.Web.RenderMode
+@rendermode InteractiveServer
+@page "/test/page"
+
+<h3>TestModPage</h3>
+
+<img src="/TestMod/chomp.jpg" alt="Chomp!" />
+
+<h3>Counter Test</h3>
+
+<p>Current count: @count</p>
+
+<button class="btn btn-primary" @onclick="IncrementCount">Click me</button>
+
+@code {
+	private int count = 0;
+
+	private void IncrementCount()
+	{
+		count++;
+	}
+}

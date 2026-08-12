@@ -1,0 +1,33 @@
+using SPTarkov.DI.Annotations;
+using SPTarkov.Server.Core.Models.Common;
+using SPTarkov.Server.Core.Models.Eft.Common;
+using SPTarkov.Server.Core.Models.Eft.Profile;
+using SPTarkov.Server.Core.Services;
+using SPTarkov.Server.Core.Services.Commerce;
+
+namespace SPTarkov.Server.Core.Helpers.Dialogue.SPTFriend.Commands;
+
+[Injectable]
+public class GarbageMessageHandler(MailSendService _mailSendService) : IChatMessageHandler
+{
+    public int GetPriority()
+    {
+        return 100;
+    }
+
+    public bool CanHandle(string message)
+    {
+        return string.Equals(message, "garbage", StringComparison.OrdinalIgnoreCase);
+    }
+
+    public void Process(MongoId sessionId, UserDialogInfo sptFriendUser, PmcData? sender, object? extraInfo = null)
+    {
+        var beforeCollect = GC.GetTotalMemory(false) / 1024 / 1024;
+
+        GC.Collect(GC.MaxGeneration, GCCollectionMode.Aggressive, true, true);
+
+        var afterCollect = GC.GetTotalMemory(false) / 1024 / 1024;
+
+        _mailSendService.SendUserMessageToPlayer(sessionId, sptFriendUser, $"Before: {beforeCollect}MB, After: {afterCollect}MB", [], null);
+    }
+}

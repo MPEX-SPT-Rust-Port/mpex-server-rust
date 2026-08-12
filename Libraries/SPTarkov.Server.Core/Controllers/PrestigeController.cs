@@ -1,0 +1,101 @@
+using SPTarkov.DI.Annotations;
+using SPTarkov.Server.Core.Helpers;
+using SPTarkov.Server.Core.Helpers.Profile;
+using SPTarkov.Server.Core.Models.Common;
+using SPTarkov.Server.Core.Models.Eft.Common.Tables;
+using SPTarkov.Server.Core.Models.Eft.Prestige;
+using SPTarkov.Server.Core.Models.Eft.Profile;
+using SPTarkov.Server.Core.Models.Spt.Tables;
+using SPTarkov.Server.Core.Servers;
+
+namespace SPTarkov.Server.Core.Controllers;
+
+[Injectable]
+public class PrestigeController(TemplateTable templateTable, ProfileHelper profileHelper, SaveServer saveServer)
+{
+    /// <summary>
+    ///     Handle /client/prestige/list
+    ///     Get a collection of all possible prestiges
+    /// </summary>
+    /// <param name="sessionId">Session/Player id</param>
+    /// <returns>Prestige</returns>
+    public Prestige GetPrestige(MongoId sessionId)
+    {
+        return templateTable.Prestige;
+    }
+
+    /// <summary>
+    ///     <para>Handle /client/prestige/obtain</para>
+    ///     Going to Prestige 1 grants the below
+    ///     <list type="bullet">
+    ///         <item>5% of skills should be transferred over</item>
+    ///         <item>5% of mastering should be transferred over</item>
+    ///         <item>Earned achievements should be transferred over</item>
+    ///         <item>Profile stats should be transferred over</item>
+    ///         <item>Prestige progress should be transferred over</item>
+    ///         <item>Items and rewards for Prestige 1</item>
+    ///     </list>
+    ///     Going to Prestige 2 grants the below
+    ///     <list type="bullet">
+    ///         <item>10% of skills should be transfered over</item>
+    ///         <item>10% of mastering should be transfered over</item>
+    ///         <item>Earned achievements should be transfered over</item>
+    ///         <item>Profile stats should be transfered over</item>
+    ///         <item>Prestige progress should be transfered over</item>
+    ///         <item>Items and rewards for Prestige 2</item>
+    ///     </list>
+    ///     Each time resetting the below
+    ///     <list type="bullet">
+    ///         <item>Trader standing</item>
+    ///         <item>Task progress</item>
+    ///         <item>Character level</item>
+    ///         <item>Stash</item>
+    ///         <item>Hideout progress</item>
+    ///     </list>
+    /// </summary>
+    /// <returns></returns>
+    public async Task ObtainPrestige(MongoId sessionId, ObtainPrestigeRequestList request)
+    {
+        var profile = profileHelper.GetFullProfile(sessionId);
+        if (profile is not null)
+        {
+            var pendingPrestige = new PendingPrestige
+            {
+                PrestigeLevel = (profile.CharacterData?.PmcData?.Info?.PrestigeLevel ?? 0) + 1,
+                Items = request,
+            };
+
+            profile.SptData.PendingPrestige = pendingPrestige;
+            profile.ProfileInfo.IsWiped = true;
+
+            var prestigeLevels = templateTable.Prestige.Elements ?? [];
+
+            var prestigeRewards = prestigeLevels
+                .Slice(0, pendingPrestige.PrestigeLevel.Value)
+                .SelectMany(prestigeInner => prestigeInner.Rewards);
+
+            var customisationTemplateDb = templateTable.Customization;
+
+            foreach (var reward in prestigeRewards)
+            {
+                if (!MongoId.IsValidMongoId(reward.Target))
+                {
+                    continue;
+                }
+
+                if (!customisationTemplateDb.TryGetValue(reward.Target, out var template))
+                {
+                    continue;
+                }
+
+                // This has to be done before the profile is wiped, as the user can only select a new head during the wipe
+                if (template.Parent == CustomisationTypeId.HEAD)
+                {
+                    profileHelper.AddHideoutCustomisationUnlock(profile, reward, CustomisationSource.PRESTIGE);
+                }
+            }
+
+            await saveServer.SaveProfileAsync(sessionId);
+        }
+    }
+}

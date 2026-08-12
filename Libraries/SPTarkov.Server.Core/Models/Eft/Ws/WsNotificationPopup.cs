@@ -1,0 +1,13 @@
+using System.Text.Json.Serialization;
+using SPTarkov.Server.Core.Models.Common;
+
+namespace SPTarkov.Server.Core.Models.Eft.Ws;
+
+public record WsNotificationPopup : WsNotificationEvent
+{
+    [JsonPropertyName("image")]
+    public string Image { get; set; }
+
+    [JsonPropertyName("message")]
+    public MongoId Message { get; set; }
+}

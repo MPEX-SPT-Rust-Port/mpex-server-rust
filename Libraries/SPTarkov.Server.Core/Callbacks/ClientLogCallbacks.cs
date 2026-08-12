@@ -1,0 +1,73 @@
+﻿using SPTarkov.Common.Models.Logging;
+using SPTarkov.DI.Annotations;
+using SPTarkov.Server.Core.Controllers;
+using SPTarkov.Server.Core.Models.Common;
+using SPTarkov.Server.Core.Models.Enums;
+using SPTarkov.Server.Core.Models.Spt.Config;
+using SPTarkov.Server.Core.Models.Spt.Logging;
+using SPTarkov.Server.Core.Models.Spt.Mod;
+using SPTarkov.Server.Core.Services;
+using SPTarkov.Server.Core.Services.Locales;
+using SPTarkov.Server.Core.Utils;
+
+namespace SPTarkov.Server.Core.Callbacks;
+
+[Injectable]
+public class ClientLogCallbacks(
+    HttpResponseUtil httpResponseUtil,
+    ClientLogController clientLogController,
+    ServerLocalisationService serverLocalisationService,
+    IReadOnlyList<SptMod> loadedMods,
+    CoreConfig coreConfig,
+    BotConfig botConfig,
+    InsuranceConfig insuranceConfig,
+    PmcConfig pmcConfig
+)
+{
+    /// <summary>
+    ///     Handle /singleplayer/log
+    /// </summary>
+    /// <returns></returns>
+    public ValueTask<string> ClientLog(string url, ClientLogRequest request, MongoId sessionId)
+    {
+        clientLogController.ClientLog(request);
+        return new ValueTask<string>(httpResponseUtil.NullResponse());
+    }
+
+    /// <summary>
+    ///     Handle /singleplayer/release
+    /// </summary>
+    /// <returns></returns>
+    public ValueTask<string> ReleaseNotes()
+    {
+        var data = coreConfig.Release;
+
+        data.BetaDisclaimerText = ProgramStatics.MODS()
+            ? serverLocalisationService.GetText("release-beta-disclaimer-mods-enabled")
+            : serverLocalisationService.GetText("release-beta-disclaimer");
+
+        data.BetaDisclaimerAcceptText = serverLocalisationService.GetText("release-beta-disclaimer-accept");
+        data.ServerModsLoadedText = serverLocalisationService.GetText("release-server-mods-loaded");
+        data.ServerModsLoadedDebugText = serverLocalisationService.GetText("release-server-mods-debug-message");
+        data.ClientModsLoadedText = serverLocalisationService.GetText("release-plugins-loaded");
+        data.ClientModsLoadedDebugText = serverLocalisationService.GetText("release-plugins-loaded-debug-message");
+        data.IllegalPluginsLoadedText = serverLocalisationService.GetText("release-illegal-plugins-loaded");
+        data.IllegalPluginsExceptionText = serverLocalisationService.GetText("release-illegal-plugins-exception");
+        data.ReleaseSummaryText = serverLocalisationService.GetText("release-summary");
+        data.IsBeta = ProgramStatics.ENTRY_TYPE() is EntryType.BLEEDINGEDGE or EntryType.BLEEDINGEDGEMODS;
+        data.IsModdable = ProgramStatics.MODS();
+        data.IsModded = loadedMods.Count > 0;
+
+        return new ValueTask<string>(httpResponseUtil.NoBody(data));
+    }
+
+    /// <summary>
+    ///     Handle /singleplayer/enableBSGlogging
+    /// </summary>
+    /// <returns></returns>
+    public ValueTask<string> BsgLogging()
+    {
+        var data = coreConfig.BsgLogging;
+        return new ValueTask<string>(httpResponseUtil.NoBody(data));
+    }
+}

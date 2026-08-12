@@ -1,0 +1,25 @@
+# .graphifyignore
+
+graphify-out/
+.claude/
+.git/
+.superpowers/
+.idea/
+.vs/
+CONTRIBUTING.md
+LICENSE
+*.7zip
+*.7z
+
+# scoped out for the initial graph build - too large / not code
+/Tools/
+/Testing/
+/Libraries/SPTarkov.Server.Assets/
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+*.ico
+*.webp
+*.svg

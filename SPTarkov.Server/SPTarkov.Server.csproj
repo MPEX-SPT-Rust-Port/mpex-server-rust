@@ -1,0 +1,89 @@
+﻿<Project Sdk="Microsoft.NET.Sdk.Web">
+  <Import Project="..\Build.props" />
+  <PropertyGroup>
+    <PackageId>SPTarkov.Server</PackageId>
+    <Authors>Single Player Tarkov</Authors>
+    <Description>Single Player Tarkov server launcher.</Description>
+    <Copyright>Copyright (c) Single Player Tarkov 2026</Copyright>
+    <PackageLicenseFile>LICENSE</PackageLicenseFile>
+    <PackageProjectUrl>https://sp-tarkov.com</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/sp-tarkov/server-csharp</RepositoryUrl>
+    <ServerGarbageCollection>true</ServerGarbageCollection>
+    <EnableDefaultContentItems>false</EnableDefaultContentItems>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <OutputType>Exe</OutputType>
+    <IsPackable>true</IsPackable>
+    <AssemblyName>SPT.Server</AssemblyName>
+    <NoDefaultLaunchSettingsFile>true</NoDefaultLaunchSettingsFile>
+    <!-- Has to be enabled for SPTarkov.Server.Web to function properly-->
+    <StaticWebAssetsEnabled>true</StaticWebAssetsEnabled>
+    <StaticWebAssetBasePath>..\SPT_Data\wwwroot\</StaticWebAssetBasePath>
+    <!-- Required for .Net 10 to provide the web assets for Blazor-->
+    <RequiresAspNetWebAssets>true</RequiresAspNetWebAssets>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(RuntimeIdentifier)' == 'win-x64'">
+    <ApplicationIcon>..\Libraries\SPTarkov.Server.Assets\SPT_Data\images\icon.ico</ApplicationIcon>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(RuntimeIdentifier)' == 'linux-x64'">
+    <AssemblyName>SPT.Server.Linux</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Libraries\SPTarkov.Reflection\SPTarkov.Reflection.csproj" />
+    <ProjectReference Include="..\Libraries\SPTarkov.Server.Core\SPTarkov.Server.Core.csproj" />
+    <ProjectReference Include="..\Libraries\SPTarkov.Server.Assets\SPTarkov.Server.Assets.csproj" />
+    <ProjectReference Include="..\Libraries\SPTarkov.Server.Web\SPTarkov.Server.Web.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="AsmResolver.DotNet" Version="6.0.0" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="UnitTests" />
+  </ItemGroup>
+  <ItemGroup>
+    <Content Include="Assets\**">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+      <ExcludeFromSingleFile>True</ExcludeFromSingleFile>
+    </Content>
+    <None Update="sptLogger.json" Condition="'$(Configuration)' == 'RELEASE'">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </None>
+    <None Update="sptLogger.Development.json" Condition="'$(Configuration)' == 'DEBUG'">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="..\LICENSE" Pack="true" Visible="false" PackagePath="" />
+  </ItemGroup>
+  <!-- Without a Rust target for the RID, cargo emits a host-triple artifact and the publish would package the wrong spt_native. -->
+  <Target Name="CheckSptNativeRuntimeIdentifier" BeforeTargets="Build;Publish">
+    <Error
+      Condition="'$(RuntimeIdentifier)' != '' And '$(RuntimeIdentifier)' != '$(NETCoreSdkPortableRuntimeIdentifier)' And '$(SptNativeTargetTriple)' == ''"
+      Text="Cross-RID publish to $(RuntimeIdentifier) is not supported from a $(NETCoreSdkPortableRuntimeIdentifier) host: no Rust target is mapped for it, so spt_native would be built for the host's triple. Pass -p:SptNativeRid=$(RuntimeIdentifier) if Build.props maps that RID, otherwise publish on a matching host."
+    />
+    <Error
+      Condition="'$(SptNativeRid)' != '' And '$(SptNativeRid)' != '$(RuntimeIdentifier)'"
+      Text="SptNativeRid ($(SptNativeRid)) does not match RuntimeIdentifier ($(RuntimeIdentifier)): spt_native would be cross-compiled for a different platform than the publish output."
+    />
+  </Target>
+  <Target Name="RelocateSatelliteAssemblies" AfterTargets="ResolveAssemblyReferences">
+    <ItemGroup>
+      <_RelocatedSatelliteCulture
+        Include="@(ReferenceCopyLocalPaths->'%(DestinationSubDirectory)')"
+        Condition="$([System.String]::Copy('%(ReferenceCopyLocalPaths.Filename)').EndsWith('.resources'))"
+      />
+      <ReferenceCopyLocalPaths Condition="$([System.String]::Copy('%(ReferenceCopyLocalPaths.Filename)').EndsWith('.resources'))">
+        <DestinationSubDirectory>SPT_Data\dotnet\%(ReferenceCopyLocalPaths.DestinationSubDirectory)</DestinationSubDirectory>
+      </ReferenceCopyLocalPaths>
+    </ItemGroup>
+  </Target>
+  <Target Name="RelocatePublishedSatelliteAssemblies" AfterTargets="ComputeFilesToPublish">
+    <ItemGroup>
+      <ResolvedFileToPublish Condition="$([System.String]::Copy('%(ResolvedFileToPublish.Filename)').EndsWith('.resources'))">
+        <RelativePath>SPT_Data\dotnet\%(ResolvedFileToPublish.RelativePath)</RelativePath>
+      </ResolvedFileToPublish>
+    </ItemGroup>
+  </Target>
+  <Target Name="CleanStaleSatelliteFolders" AfterTargets="Build" Condition="'@(_RelocatedSatelliteCulture)' != ''">
+    <RemoveDir Directories="@(_RelocatedSatelliteCulture->'$(OutDir)%(Identity)')" />
+  </Target>
+</Project>

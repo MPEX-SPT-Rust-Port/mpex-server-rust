@@ -1,0 +1,14 @@
+{
+  "profiles": {
+    "Spt Server": {
+      "commandName": "Project",
+      "hotReloadEnabled": false,
+      "workingDirectory": "$(OutDir)"
+    },
+    "Spt Server (Linux)": {
+      "commandName": "Project",
+      "hotReloadEnabled": false,
+      "workingDirectory": "bin/$(Configuration)/$(TargetFramework)"
+    }
+  }
+}

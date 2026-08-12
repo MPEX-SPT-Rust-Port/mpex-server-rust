@@ -1,0 +1,25 @@
+﻿using System.Text.Json.Serialization;
+using SPTarkov.DI.Annotations;
+using SPTarkov.Server.Core.Utils.Json.Converters;
+
+namespace SPTarkov.Server.Core.Utils.Json;
+
+[Injectable]
+public class SptJsonConverterRegistrator : IJsonConverterRegistrator
+{
+    public IEnumerable<JsonConverter> GetJsonConverters()
+    {
+        return
+        [
+            new ListOrTConverterFactory(),
+            new DictionaryOrListConverter(),
+            new ProcessBaseTradeRequestDataConverter(),
+            new StringToMongoIdConverter(),
+            new EftEnumConverterFactory(),
+            new EftListEnumConverterFactory(),
+            new EnumerableConverterFactory(),
+            new StringOrIntConverterFactory(),
+            new FloatOrIrregularFloatArrayFactory(),
+        ];
+    }
+}

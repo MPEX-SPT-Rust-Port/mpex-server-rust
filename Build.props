@@ -1,0 +1,33 @@
+<Project>
+  <PropertyGroup>
+    <!--  SPT specific  -->
+    <SptVersion Condition="'$(SptVersion)' == ''">4.1.0</SptVersion>
+    <SptCommit Condition="'$(SptCommit)' == ''">T10NVR</SptCommit>
+    <SptBuildTime Condition="'$(SptBuildTime)' == ''">0000000000</SptBuildTime>
+    <SptBuildType Condition="'$(SptBuildType)' == ''">LOCAL</SptBuildType>
+    <!--  BuildType options - LOCAL, DEBUG, RELEASE, BLEEDINGEDGE, BLEEDINGEDGEMODS - *must be all caps*-->
+    <!-- SemVer-compliant version -->
+    <!-- Format: 4.0.1-LOCAL+a12b34.0000000000 -->
+    <Version>$(SptVersion)-$(SptBuildType)+$(SptCommit).$(SptBuildTime)</Version>
+    <AssemblyVersion>$(SptVersion)</AssemblyVersion>
+    <FileVersion>$(SptVersion)</FileVersion>
+    <InformationalVersion>$(Version)</InformationalVersion>
+    <!-- Project settings -->
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <RepositoryType>Git</RepositoryType>
+    <CETCompat>false</CETCompat>
+  </PropertyGroup>
+  <!--
+      rust/spt-native cross-compilation. `dotnet publish -r <rid>` does not flow RuntimeIdentifier to
+      RID-agnostic project references, so a cross-RID build must name the target RID explicitly with
+      -p:SptNativeRid=<rid>. Unset means "build for the build host's triple" - the normal path.
+      Only same-OS targets are mapped; a foreign-OS triple needs that OS's linker/SDK. Building one
+      also needs `rustup target add <triple>` and a matching cross linker on PATH (see Dockerfile).
+      Consumed by BuildSptNative in SPTarkov.Server.Core.csproj and the guard in SPTarkov.Server.csproj.
+    -->
+  <PropertyGroup Condition="$([MSBuild]::IsOSPlatform('Linux'))">
+    <SptNativeTargetTriple Condition="'$(SptNativeRid)' == 'linux-x64'">x86_64-unknown-linux-gnu</SptNativeTargetTriple>
+  </PropertyGroup>
+</Project>

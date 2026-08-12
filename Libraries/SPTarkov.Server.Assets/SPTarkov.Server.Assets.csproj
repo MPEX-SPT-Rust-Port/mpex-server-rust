@@ -1,0 +1,49 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <Import Project="..\..\Build.props" />
+  <PropertyGroup>
+    <PackageId>SPTarkov.Server.Assets</PackageId>
+    <Authors>Single Player Tarkov</Authors>
+    <Description>Asset library for the Single Player Tarkov server.</Description>
+    <Copyright>Copyright (c) Single Player Tarkov 2026</Copyright>
+    <PackageLicenseFile>LICENSE</PackageLicenseFile>
+    <PackageProjectUrl>https://sp-tarkov.com</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/sp-tarkov/server-csharp</RepositoryUrl>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <OutputType>Library</OutputType>
+    <ContentTargetFolders>content</ContentTargetFolders>
+    <RootNamespace>SptAssets</RootNamespace>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+  </PropertyGroup>
+  <ItemGroup>
+    <None Include="build\PostBuild.cs" />
+    <None Include="SPT_Data\**" Exclude="SPT_Data\checks.dat">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+      <PackageCopyToOutput>True</PackageCopyToOutput>
+      <ExcludeFromSingleFile>True</ExcludeFromSingleFile>
+      <buildAction>None</buildAction>
+      <Pack>true</Pack>
+      <PackagePath>contentFiles\any\any\SPT_Data\</PackagePath>
+    </None>
+    <None Include="SPT_Data\checks.dat" Condition="'$(Configuration)' == 'Release'">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+      <PackageCopyToOutput>True</PackageCopyToOutput>
+      <ExcludeFromSingleFile>True</ExcludeFromSingleFile>
+      <buildAction>None</buildAction>
+      <Pack>true</Pack>
+      <PackagePath>contentFiles\any\any\SPT_Data\</PackagePath>
+    </None>
+  </ItemGroup>
+  <Target Name="PreBuildHashFile" BeforeTargets="BeforeBuild" Condition="'$(Configuration)' == 'Release'">
+    <Exec Command="dotnet run PostBuild.cs" WorkingDirectory="$(ProjectDir)\build">
+      <Output TaskParameter="ExitCode" PropertyName="HashFileExitCode" />
+    </Exec>
+    <Error Message="Failed to hash files" Condition=" '$(HashFileExitCode)' != '0'" />
+  </Target>
+  <ItemGroup>
+    <Compile Remove="build\PostBuild.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="..\..\LICENSE" Pack="true" Visible="false" PackagePath="" />
+  </ItemGroup>
+</Project>

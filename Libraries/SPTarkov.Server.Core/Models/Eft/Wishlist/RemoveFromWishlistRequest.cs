@@ -1,0 +1,11 @@
+using System.Text.Json.Serialization;
+using SPTarkov.Server.Core.Models.Common;
+using SPTarkov.Server.Core.Models.Eft.Inventory;
+
+namespace SPTarkov.Server.Core.Models.Eft.Wishlist;
+
+public record RemoveFromWishlistRequest : InventoryBaseActionRequestData
+{
+    [JsonPropertyName("items")]
+    public List<MongoId>? Items { get; set; }
+}
