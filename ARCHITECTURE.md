@@ -1,7 +1,6 @@
 # Architecture
 
-How the SPT server is put together. For build/run commands and contribution rules, see
-[CLAUDE.md](CLAUDE.md) and [CONTRIBUTING.md](CONTRIBUTING.md).
+How the SPT server is put together. For build/run commands see [CLAUDE.md](CLAUDE.md).
 
 ## Solution layout
 
