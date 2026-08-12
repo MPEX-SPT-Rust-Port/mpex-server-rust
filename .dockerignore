@@ -19,7 +19,9 @@ Testing/
 
 # Docker & Docs
 Dockerfile
+Containerfile.*
 .dockerignore
 compose.yaml
 docker-compose.yml
 **/*.md
+graphify-out/

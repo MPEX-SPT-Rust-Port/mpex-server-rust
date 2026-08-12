@@ -1,0 +1,28 @@
+# Containerfile.dev — toolchain image for running this repo's tests and benchmarks.
+# No source is baked in (.dockerignore excludes Testing/), so bind-mount the repo:
+#
+#   podman build -f Containerfile.dev -t mpex-server-dev .
+#   podman run --rm -it -v .:/src:Z mpex-server-dev
+#
+# Inside the container (first run only): scripts/decompress-assets.sh
+#   C# tests:    dotnet test
+#   Rust checks: cd rust && cargo test && cargo fmt --check && cargo clippy --all-targets -- -D warnings
+#   Benchmarks:  cd rust && cargo bench   (no bench targets exist yet; toolchain supports them)
+FROM quay.io/fedora/fedora-minimal:44-x86_64
+
+RUN dnf5 -y install dotnet-sdk-10.0 gcc git 7zip shadow-utils \
+    && dnf5 clean all \
+    && { command -v 7z >/dev/null 2>&1 || ln -s "$(command -v 7zz)" /usr/local/bin/7z; }
+
+# rust/rust-toolchain.toml pins 1.97.1; preinstall it so cargo needs no network at run time.
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+    | sh -s -- -y --profile minimal --default-toolchain 1.97.1 \
+      --component rustfmt --component clippy
+ENV PATH="/root/.cargo/bin:/root/.dotnet/tools:${PATH}"
+ENV DOTNET_CLI_TELEMETRY_OPTOUT=1
+
+# CLAUDE.md: run csharpier before opening a PR.
+RUN dotnet tool install -g csharpier
+
+WORKDIR /src
+CMD ["/bin/bash"]
