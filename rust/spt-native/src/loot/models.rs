@@ -93,10 +93,36 @@ pub enum ItemRotation {
 /// typed; the rest ride along in `extra`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Upd {
-    #[serde(rename = "StackObjectsCount", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "StackObjectsCount",
+        default,
+        deserialize_with = "deserialize_string_or_number",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub stack_objects_count: Option<f64>,
     #[serde(flatten)]
     pub extra: Extra,
+}
+
+/// Mirrors the `[JsonConverter(typeof(StringToNumberFactoryConverter))]` on C#'s
+/// `Upd.StackObjectsCount`. The loose-loot payload reaches this crate as the raw bytes of a
+/// location's `looseLoot.json` (`LooseLootPayload.RawJson`, to skip a 42 MB parse-and-re-encode),
+/// so that converter never runs on the native path and a stringly-typed count in the database
+/// (lighthouse ships two, `"20"`) would fail the whole request deserialize. Blank,
+/// `__REPLACEME__` and otherwise unparseable strings fall to `None`, as the converter does.
+fn deserialize_string_or_number<'de, D>(deserializer: D) -> Result<Option<f64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match Option::<serde_json::Value>::deserialize(deserializer)? {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(text)) => Ok(text.trim().parse::<f64>().ok()),
+        Some(other) => other.as_f64().map(Some).ok_or_else(|| {
+            serde::de::Error::custom(format!(
+                "expected a number or numeric string, found {other}"
+            ))
+        }),
+    }
 }
 
 /// `Models/Eft/Common/LooseLoot.cs`
@@ -562,6 +588,31 @@ mod tests {
         let upd = parsed.item.upd.as_ref().unwrap();
         assert_eq!(upd.stack_objects_count, Some(3.0));
         assert_eq!(upd.extra["SpawnedInSession"], true);
+    }
+
+    /// The raw-JSON loose-loot path bypasses C#'s `StringToNumberFactoryConverter`, so this crate
+    /// has to accept what the database actually ships (lighthouse: `"StackObjectsCount": "20"`).
+    #[test]
+    fn stack_objects_count_accepts_a_numeric_string() {
+        let cases = [
+            (r#"{"StackObjectsCount":"20"}"#, Some(20.0)),
+            (r#"{"StackObjectsCount":20}"#, Some(20.0)),
+            (r#"{"StackObjectsCount":""}"#, None),
+            (r#"{"StackObjectsCount":"__REPLACEME__"}"#, None),
+            (r#"{"StackObjectsCount":null}"#, None),
+            ("{}", None),
+        ];
+
+        for (json, expected) in cases {
+            let upd: Upd = serde_json::from_str(json).unwrap();
+            assert_eq!(upd.stack_objects_count, expected, "parsing {json}");
+            assert!(
+                !upd.extra.contains_key("StackObjectsCount"),
+                "parsing {json}"
+            );
+        }
+
+        assert!(serde_json::from_str::<Upd>(r#"{"StackObjectsCount":[1]}"#).is_err());
     }
 
     #[test]
