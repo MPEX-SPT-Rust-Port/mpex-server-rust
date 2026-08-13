@@ -782,15 +782,8 @@ pub fn generate_mods_for_weapon(
         return Ok(());
     }
 
-    // Get pool of mods that fit weapon. `:536` reads `.Keys` off it unguarded.
-    let Some(compatible_mods_pool) = request.mod_pool.get(&request.parent_template).cloned() else {
-        return Err(LootError::new(format!(
-            "Object reference not set to an instance of an object: no mod pool for item: {} on bot: {}",
-            request.parent_template, request.bot_data.role
-        )));
-    };
-
-    // `:533` hands this to `GetBotRandomizationDetails`, which dereferences it.
+    // `:533` hands this to `GetBotRandomizationDetails`, which dereferences it — and `:533` runs
+    // before the `:536` pool read below, so a bot missing both fails on this one.
     let Some(bot_equip_config) = equipment.get(&request.bot_data.equipment_role) else {
         return Err(LootError::new(format!(
             "Object reference not set to an instance of an object: no equipment config for role: {}",
@@ -800,6 +793,14 @@ pub fn generate_mods_for_weapon(
     let bot_weapon_sight_whitelist = bot_equip_config.weapon_sight_whitelist.as_ref();
     let randomisation_settings =
         get_bot_randomization_details(request.bot_data.level, bot_equip_config);
+
+    // Get pool of mods that fit weapon. `:536` reads `.Keys` off it unguarded.
+    let Some(compatible_mods_pool) = request.mod_pool.get(&request.parent_template).cloned() else {
+        return Err(LootError::new(format!(
+            "Object reference not set to an instance of an object: no mod pool for item: {} on bot: {}",
+            request.parent_template, request.bot_data.role
+        )));
+    };
 
     // Iterate over mod pool and choose mods to attach
     let sorted_mod_keys = sort_mod_keys(items, &compatible_mods_pool, &request.parent_template);
@@ -1478,6 +1479,13 @@ fn get_compatible_mod_from_pool(
     let mut blocked_attempt_count = 0.0;
     while let Some(chosen_tpl) = exhaustable_mod_pool.get_random_value() {
         // Not valid item, try again
+        // parity: the second `continue` at `:1254-1258`, for an item found in the db whose
+        // `Properties` is null, has no analog — a flattened `ItemView` row *is* the `_props`, so
+        // "present but propless" is not expressible, and `slots.is_none()` would be a worse
+        // divergence (it would skip the slotless mods C# accepts here). Unreachable in practice:
+        // every tpl in a slot filter is a real mod template with `_props`. A `hasProperties` flag
+        // on `ItemView` would make the guard portable if that ever stops holding — note that it
+        // consumes another draw when it fires.
         let Some(picked_item_details) = get_item(items, &chosen_tpl) else {
             continue;
         };
@@ -1657,6 +1665,10 @@ fn get_mod_pool_for_default_slot(
         .and_then(|slot| slot.filter.as_deref());
 
     // Mod isn't in existing pool, only add if it has no children and exists inside parent filter
+    // parity: `:1399` calls `.Slots.Any()` on the preset mod's template unguarded, so a template
+    // with null `Slots` throws there and reads as "no children" here. Lenient for the same reason as
+    // the other four: a panic behind FFI is worse and every real mod template carries a `Slots`
+    // array, empty or not.
     if parent_slot_compatible_items.is_some_and(|filter| filter.contains(&matching_mod_from_preset))
         && !get_item(items, &matching_mod_from_preset)
             .and_then(|template| template.slots.as_ref())
@@ -4008,7 +4020,8 @@ mod tests {
             );
         }
 
-        /// `:536` and `:533` both dereference something a missing key leaves null.
+        /// `:536` and `:533` both dereference something a missing key leaves null, and `:533` is
+        /// the one that runs first.
         #[test]
         fn a_missing_pool_or_equipment_role_is_the_null_deref() {
             let fixture = WeaponFixture::new();
@@ -4026,6 +4039,19 @@ mod tests {
             let mut request = m4_request();
             request.bot_data.equipment_role = "pmc".to_owned();
             let error = generate_mods_for_weapon(&mut ctx, &mut request).unwrap_err();
+            assert!(
+                error.message.contains("no equipment config for role: pmc"),
+                "{}",
+                error.message
+            );
+
+            // Both missing: `GetBotRandomizationDetails` at `:533` throws before the `:536` pool
+            // read is reached.
+            let mut ctx = fixture.ctx();
+            let mut both_missing = m4_request();
+            both_missing.mod_pool.clear();
+            both_missing.bot_data.equipment_role = "pmc".to_owned();
+            let error = generate_mods_for_weapon(&mut ctx, &mut both_missing).unwrap_err();
             assert!(
                 error.message.contains("no equipment config for role: pmc"),
                 "{}",
