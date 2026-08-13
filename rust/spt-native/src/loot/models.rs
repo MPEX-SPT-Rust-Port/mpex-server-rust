@@ -413,6 +413,17 @@ pub struct ItemView {
     pub caliber: Option<String>,
     pub ammo_caliber: Option<String>,
     pub def_ammo: Option<String>,
+    /// `TemplateItem._name` — the sealed-crate pool is found by substring on it
+    /// (`LootGenerator.cs:57`).
+    pub name: Option<String>,
+    /// `TemplateItem._type` — the `"item"` type filter (`LootGenerator.cs:245,568`).
+    #[serde(rename = "type")]
+    pub item_type: Option<String>,
+    /// `TemplateItem.Properties.ArmorClass`, declared `int?` (`TemplateItem.cs:668`).
+    pub armor_class: Option<i32>,
+    /// `TemplateItem.Properties.QuestItem`. Null and `false` are not interchangeable:
+    /// `LootGenerator.cs:246` reads `GetValueOrDefault(false)`, `:571` tests `is null`.
+    pub quest_item: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -427,6 +438,12 @@ pub struct SlotView {
 #[serde(rename_all = "camelCase")]
 pub struct PresetView {
     pub items: Vec<Item>,
+    /// `Preset.Id` — debug message argument (`LootGenerator.cs:400`).
+    pub id: Option<String>,
+    /// `Preset.Name` — debug message argument (`LootGenerator.cs:633`).
+    pub name: Option<String>,
+    /// `Preset.Encyclopedia` — root tpl resolution (`LootGenerator.cs:396-407`).
+    pub encyclopedia: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -534,6 +551,142 @@ pub struct StaticContainersResult {
 pub struct DynamicLootResult {
     pub spawnpoints: Vec<SpawnpointTemplate>,
     pub tracked_counts: BTreeMap<String, i32>,
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+// ---------------------------------------------------------------------------
+// Reward-loot envelopes (`Generators/Loot/LootGenerator.cs`)
+// ---------------------------------------------------------------------------
+
+/// The database slice every reward-loot entry point needs, flattened into each request the way
+/// [`LootCommon`] is.
+///
+/// The five blacklists/whitelists are `HashSet` because every use is a membership test — none of
+/// them is ever iterated to make a draw, so a randomised order cannot reach the RNG.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RewardLootDb {
+    /// `IndexMap`, not `HashMap`: `LootGenerator.cs:56,244,567` filter `templateTable.Items.Values`
+    /// into a pool and then draw an index out of it, so the iteration order is observable.
+    pub items_view: IndexMap<String, ItemView>,
+    /// `presetHelper.GetDefaultPresets().Values` (`LootGenerator.cs:97`) — order preserved, the
+    /// weapon/armor preset draws index into the filtered result.
+    pub default_presets: Vec<PresetView>,
+    /// `presetHelper.GetDefaultPresetsByTplKey()` (`LootGenerator.cs:154,480,672`).
+    pub default_presets_by_tpl: IndexMap<String, PresetView>,
+    /// `itemFilterService.GetBlacklistedItems()` (`LootGenerator.cs:217`).
+    pub global_blacklist: HashSet<String>,
+    /// `itemFilterService.GetItemRewardBlacklist()` (`LootGenerator.cs:221`).
+    pub reward_item_blacklist: HashSet<String>,
+    /// `itemFilterService.GetItemRewardBaseTypeBlacklist()` (`LootGenerator.cs:224`).
+    pub reward_base_type_blacklist: HashSet<String>,
+    /// `itemFilterService.GetBossItems()` (`LootGenerator.cs:235`).
+    pub boss_items: HashSet<String>,
+    /// `seasonalEventService.GetInactiveSeasonalEventItems()` (`LootGenerator.cs:240`).
+    pub inactive_seasonal_items: HashSet<String>,
+    /// Test-only, as [`LootCommon::test_seed`].
+    pub test_seed: Option<u64>,
+}
+
+/// `Models/Common/MinMax.cs` closed over `int`. Neither member is `required` in C#, so a missing
+/// one is not a parse error there either.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MinMaxI32 {
+    pub min: Option<i32>,
+    pub max: Option<i32>,
+}
+
+/// `Models/Spt/Services/LootRequest.cs`. `UseForcedLoot`/`ForcedLoot` are absent by design: the C#
+/// caller branches on them before it reaches this crate, and forced loot arrives on its own
+/// envelope ([`CreateForcedLootRequest`]).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LootRequestView {
+    pub weapon_preset_count: Option<MinMaxI32>,
+    pub armor_preset_count: Option<MinMaxI32>,
+    pub item_count: Option<MinMaxI32>,
+    pub weapon_crate_count: Option<MinMaxI32>,
+    pub item_blacklist: Option<HashSet<String>>,
+    pub item_type_whitelist: Option<HashSet<String>>,
+    pub item_limits: Option<IndexMap<String, i32>>,
+    pub item_stack_limits: Option<IndexMap<String, MinMaxI32>>,
+    pub armor_level_whitelist: Option<HashSet<i32>>,
+    pub allow_boss_items: Option<bool>,
+    pub use_reward_item_blacklist: Option<bool>,
+    pub block_seasonal_items_out_of_season: Option<bool>,
+}
+
+/// `SealedAirdropContainerSettings` (`Models/Spt/Config/InventoryConfig.cs:54-79`). `FoundInRaid`
+/// is absent — the C# caller applies it after the native call.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SealedContainerSettingsView {
+    /// Ordered: `get_weighted_value` draws over it.
+    pub weapon_reward_weight: IndexMap<String, f64>,
+    pub default_presets_only: bool,
+    /// Ordered: iterated with a draw per entry (`LootGenerator.cs:615`).
+    pub weapon_mod_reward_limits: IndexMap<String, MinMaxI32>,
+    /// Ordered: iterated with a draw per entry (`LootGenerator.cs:520`).
+    pub reward_type_limits: IndexMap<String, MinMaxI32>,
+    pub ammo_box_whitelist: Vec<String>,
+    pub allow_boss_items: bool,
+}
+
+/// `RewardDetails` (`Models/Spt/Config/InventoryConfig.cs:36-52`). `FoundInRaid`/`_type` are absent
+/// for the same reason as on [`SealedContainerSettingsView`].
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RewardDetailsView {
+    pub reward_count: i32,
+    /// Ordered: the weighted pick walks it.
+    pub reward_tpl_pool: Option<IndexMap<String, f64>>,
+    pub reward_type_pool: Option<HashSet<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateRandomLootRequest {
+    #[serde(flatten)]
+    pub db: RewardLootDb,
+    pub loot_request: LootRequestView,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateForcedLootRequest {
+    #[serde(flatten)]
+    pub db: RewardLootDb,
+    /// Ordered: `LootGenerator.cs:155` draws a count per entry as it walks this map.
+    pub forced_loot: IndexMap<String, MinMaxI32>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SealedWeaponCaseRequest {
+    #[serde(flatten)]
+    pub db: RewardLootDb,
+    pub container_settings: SealedContainerSettingsView,
+    /// `presetHelper.GetPresets(tpl)` per weapon tpl (`LootGenerator.cs:481,487`) — the inner
+    /// `Vec` order is drawn from.
+    pub presets_by_tpl: IndexMap<String, Vec<PresetView>>,
+    /// `ragfairLinkedItemService.GetLinkedDbItems(tpl)` per `weaponRewardWeight` key
+    /// (`LootGenerator.cs:498`) — the inner `Vec` order is drawn from.
+    pub linked_items: IndexMap<String, Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RandomLootContainerRequest {
+    #[serde(flatten)]
+    pub db: RewardLootDb,
+    pub reward_details: RewardDetailsView,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RewardLootResult {
+    pub items: Vec<Vec<Item>>,
     pub diagnostics: Vec<Diagnostic>,
 }
 
@@ -739,6 +892,233 @@ mod tests {
                 .as_deref(),
             Some("ck1")
         );
+    }
+
+    /// Every required `RewardLootDb` member, for splicing into a reward-envelope test literal.
+    /// `testSeed` is deliberately absent, as in [`COMMON_JSON`].
+    const REWARD_DB_JSON: &str = r#"
+        "itemsView":{"aaaaaaaaaaaaaaaaaaaaaaaa":{"parent":"bbbbbbbbbbbbbbbbbbbbbbbb","name":"event_container_airdrop",
+            "type":"item","armorClass":4,"questItem":false,"width":2,"height":1}},
+        "defaultPresets":[{"id":"p1","name":"ak_default","encyclopedia":"bbbbbbbbbbbbbbbbbbbbbbbb",
+            "items":[{"_id":"aaaaaaaaaaaaaaaaaaaaaaaa","_tpl":"bbbbbbbbbbbbbbbbbbbbbbbb"}]}],
+        "defaultPresetsByTpl":{"bbbbbbbbbbbbbbbbbbbbbbbb":{"id":"p1","name":"ak_default",
+            "encyclopedia":"bbbbbbbbbbbbbbbbbbbbbbbb","items":[]}},
+        "globalBlacklist":["cccccccccccccccccccccccc"],
+        "rewardItemBlacklist":["dddddddddddddddddddddddd"],
+        "rewardBaseTypeBlacklist":["eeeeeeeeeeeeeeeeeeeeeeee"],
+        "bossItems":["ffffffffffffffffffffffff"],
+        "inactiveSeasonalItems":["111111111111111111111111"]
+    "#;
+
+    #[test]
+    fn item_view_reward_fields_deserialize() {
+        let parsed: ItemView = serde_json::from_str(
+            r#"{"parent":"bbbbbbbbbbbbbbbbbbbbbbbb","name":"weapon_ak","type":"Item",
+               "armorClass":6,"questItem":true}"#,
+        )
+        .unwrap();
+        assert_eq!(parsed.name.as_deref(), Some("weapon_ak"));
+        assert_eq!(parsed.item_type.as_deref(), Some("Item"));
+        assert_eq!(parsed.armor_class, Some(6));
+        assert_eq!(parsed.quest_item, Some(true));
+    }
+
+    /// `LootGenerator.cs:246` reads `QuestItem.GetValueOrDefault(false)` while `:571` tests
+    /// `QuestItem is null`, so an explicit `false` and an absent/null value are not interchangeable.
+    #[test]
+    fn quest_item_keeps_null_and_false_distinct() {
+        let null: ItemView = serde_json::from_str(r#"{"questItem":null}"#).unwrap();
+        assert_eq!(null.quest_item, None);
+
+        let absent: ItemView = serde_json::from_str("{}").unwrap();
+        assert_eq!(absent.quest_item, None);
+
+        let explicit: ItemView = serde_json::from_str(r#"{"questItem":false}"#).unwrap();
+        assert_eq!(explicit.quest_item, Some(false));
+    }
+
+    #[test]
+    fn preset_view_reward_fields_deserialize() {
+        let parsed: PresetView = serde_json::from_str(
+            r#"{"id":"p1","name":"ak_default","encyclopedia":"bbbbbbbbbbbbbbbbbbbbbbbb","items":[]}"#,
+        )
+        .unwrap();
+        assert_eq!(parsed.id.as_deref(), Some("p1"));
+        assert_eq!(parsed.name.as_deref(), Some("ak_default"));
+        assert_eq!(
+            parsed.encyclopedia.as_deref(),
+            Some("bbbbbbbbbbbbbbbbbbbbbbbb")
+        );
+    }
+
+    #[test]
+    fn create_random_loot_request_deserializes() {
+        let json = format!(
+            r#"{{{REWARD_DB_JSON},
+            "lootRequest":{{"weaponPresetCount":{{"min":1,"max":2}},"armorPresetCount":{{"min":0,"max":1}},
+                "itemCount":{{"min":3,"max":5}},"weaponCrateCount":{{"min":0,"max":2}},
+                "itemBlacklist":["222222222222222222222222"],"itemTypeWhitelist":["333333333333333333333333"],
+                "itemLimits":{{"444444444444444444444444":2}},
+                "itemStackLimits":{{"555555555555555555555555":{{"min":1,"max":4}}}},
+                "armorLevelWhitelist":[4,5,6],"allowBossItems":false,"useRewardItemBlacklist":true,
+                "blockSeasonalItemsOutOfSeason":true}}}}"#
+        );
+        let parsed: CreateRandomLootRequest = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed.db.default_presets.len(), 1);
+        assert_eq!(parsed.db.default_presets[0].id.as_deref(), Some("p1"));
+        assert!(parsed.db.boss_items.contains("ffffffffffffffffffffffff"));
+        assert!(parsed.db.test_seed.is_none());
+        assert_eq!(
+            parsed.db.items_view["aaaaaaaaaaaaaaaaaaaaaaaa"].armor_class,
+            Some(4)
+        );
+
+        let request = &parsed.loot_request;
+        assert_eq!(request.item_count.as_ref().unwrap().max, Some(5));
+        assert_eq!(
+            request.item_limits.as_ref().unwrap()["444444444444444444444444"],
+            2
+        );
+        assert_eq!(
+            request.item_stack_limits.as_ref().unwrap()["555555555555555555555555"].min,
+            Some(1)
+        );
+        assert!(request.armor_level_whitelist.as_ref().unwrap().contains(&6));
+        assert_eq!(request.allow_boss_items, Some(false));
+        assert_eq!(request.use_reward_item_blacklist, Some(true));
+        assert_eq!(request.block_seasonal_items_out_of_season, Some(true));
+    }
+
+    #[test]
+    fn create_forced_loot_request_deserializes() {
+        let json = format!(
+            r#"{{{REWARD_DB_JSON},
+            "forcedLoot":{{"666666666666666666666666":{{"min":1,"max":3}},
+                "777777777777777777777777":{{"min":2,"max":2}}}}}}"#
+        );
+        let parsed: CreateForcedLootRequest = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(
+            parsed.db.default_presets_by_tpl["bbbbbbbbbbbbbbbbbbbbbbbb"]
+                .name
+                .as_deref(),
+            Some("ak_default")
+        );
+        // The forced-loot map is walked in order, drawing a count per entry.
+        assert_eq!(
+            parsed.forced_loot.keys().collect::<Vec<_>>(),
+            vec!["666666666666666666666666", "777777777777777777777777"]
+        );
+        assert_eq!(parsed.forced_loot["666666666666666666666666"].max, Some(3));
+    }
+
+    #[test]
+    fn sealed_weapon_case_request_deserializes() {
+        let json = format!(
+            r#"{{{REWARD_DB_JSON},
+            "containerSettings":{{"weaponRewardWeight":{{"888888888888888888888888":5,"999999999999999999999999":1}},
+                "defaultPresetsOnly":false,
+                "weaponModRewardLimits":{{"aaaaaaaaaaaaaaaaaaaaaaa1":{{"min":0,"max":2}}}},
+                "rewardTypeLimits":{{"aaaaaaaaaaaaaaaaaaaaaaa2":{{"min":1,"max":1}}}},
+                "ammoBoxWhitelist":["aaaaaaaaaaaaaaaaaaaaaaa3"],"allowBossItems":false}},
+            "presetsByTpl":{{"888888888888888888888888":[{{"id":"p1","items":[]}},{{"id":"p2","items":[]}}]}},
+            "linkedItems":{{"888888888888888888888888":["aaaaaaaaaaaaaaaaaaaaaaa4","aaaaaaaaaaaaaaaaaaaaaaa5"]}}}}"#
+        );
+        let parsed: SealedWeaponCaseRequest = serde_json::from_str(&json).unwrap();
+
+        let settings = &parsed.container_settings;
+        // Weight order feeds `get_weighted_value`; limit maps are iterated for draws.
+        assert_eq!(
+            settings.weapon_reward_weight.keys().collect::<Vec<_>>(),
+            vec!["888888888888888888888888", "999999999999999999999999"]
+        );
+        assert_eq!(
+            settings.weapon_reward_weight["888888888888888888888888"],
+            5.0
+        );
+        assert!(!settings.default_presets_only);
+        assert!(!settings.allow_boss_items);
+        assert_eq!(
+            settings.weapon_mod_reward_limits["aaaaaaaaaaaaaaaaaaaaaaa1"].max,
+            Some(2)
+        );
+        assert_eq!(
+            settings.reward_type_limits["aaaaaaaaaaaaaaaaaaaaaaa2"].min,
+            Some(1)
+        );
+        assert_eq!(
+            settings.ammo_box_whitelist,
+            vec!["aaaaaaaaaaaaaaaaaaaaaaa3"]
+        );
+
+        let presets = &parsed.presets_by_tpl["888888888888888888888888"];
+        assert_eq!(presets.len(), 2);
+        assert_eq!(presets[1].id.as_deref(), Some("p2"));
+        assert_eq!(
+            parsed.linked_items["888888888888888888888888"],
+            vec!["aaaaaaaaaaaaaaaaaaaaaaa4", "aaaaaaaaaaaaaaaaaaaaaaa5"]
+        );
+    }
+
+    #[test]
+    fn random_loot_container_request_deserializes() {
+        let json = format!(
+            r#"{{{REWARD_DB_JSON},
+            "rewardDetails":{{"rewardCount":2,
+                "rewardTplPool":{{"aaaaaaaaaaaaaaaaaaaaaaa6":3.5,"aaaaaaaaaaaaaaaaaaaaaaa7":1}},
+                "rewardTypePool":["aaaaaaaaaaaaaaaaaaaaaaa8"]}},
+            "testSeed":42}}"#
+        );
+        let parsed: RandomLootContainerRequest = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed.db.test_seed, Some(42));
+        assert_eq!(parsed.reward_details.reward_count, 2);
+        let pool = parsed.reward_details.reward_tpl_pool.as_ref().unwrap();
+        assert_eq!(
+            pool.keys().collect::<Vec<_>>(),
+            vec!["aaaaaaaaaaaaaaaaaaaaaaa6", "aaaaaaaaaaaaaaaaaaaaaaa7"]
+        );
+        assert_eq!(pool["aaaaaaaaaaaaaaaaaaaaaaa6"], 3.5);
+        assert!(
+            parsed
+                .reward_details
+                .reward_type_pool
+                .as_ref()
+                .unwrap()
+                .contains("aaaaaaaaaaaaaaaaaaaaaaa8")
+        );
+
+        // Both pools are optional in C# (`InventoryConfig.cs:47,50`).
+        let json = format!(r#"{{{REWARD_DB_JSON},"rewardDetails":{{"rewardCount":0}}}}"#);
+        let parsed: RandomLootContainerRequest = serde_json::from_str(&json).unwrap();
+        assert!(parsed.reward_details.reward_tpl_pool.is_none());
+        assert!(parsed.reward_details.reward_type_pool.is_none());
+    }
+
+    #[test]
+    fn reward_loot_result_serializes_with_camel_case_keys() {
+        let out = serde_json::to_value(RewardLootResult {
+            items: vec![vec![Item {
+                id: "aaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+                template: "bbbbbbbbbbbbbbbbbbbbbbbb".to_owned(),
+                ..Default::default()
+            }]],
+            diagnostics: vec![Diagnostic {
+                level: DEBUG.to_owned(),
+                locale_key: None,
+                args: None,
+                message: Some("no items found".to_owned()),
+            }],
+        })
+        .unwrap();
+
+        assert_eq!(
+            out.as_object().unwrap().keys().collect::<Vec<_>>(),
+            vec!["items", "diagnostics"]
+        );
+        assert_eq!(out["items"][0][0]["_id"], "aaaaaaaaaaaaaaaaaaaaaaaa");
+        assert_eq!(out["diagnostics"][0]["message"], "no items found");
     }
 
     #[test]
