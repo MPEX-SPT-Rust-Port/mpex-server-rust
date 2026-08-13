@@ -479,7 +479,7 @@ fn is_preset_base_class(
 
 /// `Item.Upd.SptPresetId` — `loot::models::Upd` does not name the member, so it rides in its
 /// passthrough map under the C# wire name.
-fn spt_preset_id(item: &Item) -> Option<&str> {
+pub(super) fn spt_preset_id(item: &Item) -> Option<&str> {
     item.upd.as_ref()?.extra.get("sptPresetId")?.as_str()
 }
 

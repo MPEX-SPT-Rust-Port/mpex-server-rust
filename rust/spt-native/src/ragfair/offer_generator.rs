@@ -1,6 +1,6 @@
-//! `Generators/Ragfair/RagfairOfferGenerator.cs` — the barter schemes an offer is priced with, the
-//! offer object itself, and the condition randomisation and armor-plate removal its items go
-//! through.
+//! `Generators/Ragfair/RagfairOfferGenerator.cs` — the batch pass over a set of assorts
+//! ([`generate_dynamic_offers`]), the barter schemes each offer is priced with, the offer object
+//! itself, and the condition randomisation and armor-plate removal its items go through.
 //!
 //! **The offer-object draws**, in the order [`create_offer`] spends them:
 //!
@@ -54,31 +54,39 @@
 //!   property reads as `0`. Every one of them needs a template that omits the property its own
 //!   branch selected on, which real data never does.
 
+use std::collections::HashSet;
+use std::time::Instant;
+
+use indexmap::IndexSet;
 use serde_json::json;
 
-use super::RagfairContext;
+use super::{RagfairContext, plain};
 use crate::loot::item_helper::{
     AMMO_BOX, ARMOR_PLATE, ARMORED_EQUIPMENT, FUEL, LootError, WEAPON, add_cartridges_to_ammo_box,
     armor_item_can_hold_mods, armor_item_has_removable_plate_slots, get_item,
-    get_removable_plate_slot_ids, is_of_baseclass, is_of_baseclasses,
+    get_removable_plate_slot_ids, is_of_baseclass, is_of_baseclasses, reparent_item_and_children,
 };
 use crate::loot::models::{
     Item, UpdFoodDrink, UpdKey, UpdMedKit, UpdRepairKit, UpdRepairable, UpdResource,
 };
 use crate::loot::mongo_id;
 use crate::loot::random_util::{
-    generate_account_id, get_array_value, get_bool, get_chance_100, get_double, get_int,
-    round_half_even, round_to_digits,
+    TestSeedGuard, generate_account_id, get_array_value, get_bool, get_chance_100, get_double,
+    get_int, round_half_even, round_to_digits,
 };
+use crate::ragfair::assort_generator::generate_ragfair_assort_items;
 use crate::ragfair::models::{
-    ArmorPlateBlacklistSettingsWire, BarterDetailsWire, OfferRequirementWire, RagfairOfferUserWire,
-    RagfairOfferWire,
+    ArmorPlateBlacklistSettingsWire, BarterDetailsWire, DynamicOffersResult,
+    GenerateDynamicOffersRequest, OfferRequirementWire, RagfairOfferUserWire, RagfairOfferWire,
 };
 use crate::ragfair::price_service::{
     DOLLARS, EUROS, GP, ROUBLES, get_dynamic_offer_price_for_offer, get_flea_price_for_item,
-    get_static_price_for_item,
+    get_static_price_for_item, spt_preset_id,
 };
-use crate::ragfair::server_helper::get_dynamic_offer_currency;
+use crate::ragfair::server_helper::{
+    calculate_dynamic_stack_count, get_dynamic_offer_currency, get_offer_count_by_base_type,
+    is_item_valid_ragfair_item,
+};
 
 /// `Models/Enums/OfferCreator.cs` — the wire never carries it; it is a call-site constant on the
 /// C# side too.
@@ -354,6 +362,351 @@ pub fn get_offer_end_time(
             Ok(round_half_even(time as f64 + random_spread) as i64)
         }
     }
+}
+
+/// `RagfairOfferGenerator.GenerateDynamicOffers` (`:293-324`) — one whole dynamic pass: the assort
+/// walk (or the expired offers handed in), then an offer batch per assort entry.
+///
+/// **The `Task.Factory.StartNew` fan-out (`:309-317`) is deliberately not reproduced.** The walk
+/// here is sequential. Production draws come from a crypto-random generator and the legacy
+/// interleaving is nondeterministic anyway, so the parallel version has no output the sequential one
+/// lacks — and one thread is what makes a seeded run reproducible for the parity fixtures.
+///
+/// Natively this only *builds* offers: the C# `CreateAndAddFleaOffer` also stamps `CreatedBy` and
+/// inserts into `RagfairOfferService`, both of which stay in the caller's loop.
+///
+/// **The draw sequence for one plain item** — not a preset, not a pack, not a barter — which is
+/// what the parity fixtures pin:
+///
+/// | step | draws |
+/// |---|---|
+/// | [`get_offer_count_by_base_type`] | **1** [`get_int`] (none for a degenerate range) |
+/// | …then, per offer: [`calculate_dynamic_stack_count`] | **1** |
+/// | [`remove_armor_plates`] — armor only, and never for an expired offer | **1** |
+/// | the barter chance roll | **1** |
+/// | the pack chance roll, **skipped when the barter roll won** | **1** |
+/// | [`randomise_offer_item_upd_properties`] | the condition table above |
+/// | [`create_currency_barter_scheme`] | **1** currency + **1** price |
+/// | [`create_offer`] | **5** user-block + **1** end-time |
+///
+/// The two `Stopwatch` debug lines become diagnostics carrying the same text, timed with an
+/// [`Instant`]. The first keeps its `> 0` guard; the `IsLogEnabled` gates are the C# caller's, which
+/// decides whether to replay a diagnostic at all.
+///
+/// # Errors
+///
+/// Whatever the assort walk and the per-offer path propagate.
+pub fn generate_dynamic_offers(
+    request: GenerateDynamicOffersRequest,
+) -> Result<DynamicOffersResult, LootError> {
+    let _seed_guard = request.test_seed.map(TestSeedGuard::install);
+
+    let GenerateDynamicOffersRequest {
+        timestamp,
+        offer_counter_start,
+        expired_offers,
+        dynamic,
+        item_presets,
+        default_presets,
+        default_presets_by_tpl,
+        presets_by_tpl,
+        flea_prices,
+        handbook_prices,
+        highest_trader_prices,
+        config_blacklist,
+        seasonal_event_active,
+        seasonal_item_tpl_blacklist,
+        pmc_names_usec,
+        pmc_names_bear,
+        items,
+        ..
+    } = request;
+    let config_blacklist: HashSet<String> = config_blacklist.into_iter().collect();
+    let seasonal_item_tpl_blacklist: HashSet<String> =
+        seasonal_item_tpl_blacklist.into_iter().collect();
+
+    let mut ctx = RagfairContext {
+        items: &items,
+        dynamic: &dynamic,
+        item_presets: &item_presets,
+        default_presets: &default_presets,
+        default_presets_by_tpl: &default_presets_by_tpl,
+        presets_by_tpl: &presets_by_tpl,
+        flea_prices: &flea_prices,
+        handbook_prices: &handbook_prices,
+        highest_trader_prices: &highest_trader_prices,
+        config_blacklist: &config_blacklist,
+        seasonal_item_tpl_blacklist: &seasonal_item_tpl_blacklist,
+        pmc_names_usec: &pmc_names_usec,
+        pmc_names_bear: &pmc_names_bear,
+        timestamp,
+        seasonal_event_active,
+        diagnostics: Vec::new(),
+    };
+
+    let replacing_expired_offers = expired_offers
+        .as_ref()
+        .is_some_and(|offers| !offers.is_empty());
+
+    let stopwatch = Instant::now();
+    // get assort items from param if they exist, otherwise grab freshly generated assorts
+    let mut assort_items_to_process = if replacing_expired_offers {
+        expired_offers.unwrap_or_default()
+    } else {
+        generate_ragfair_assort_items(&ctx)?
+    };
+    let elapsed = stopwatch.elapsed().as_millis();
+    if elapsed > 0 {
+        ctx.diagnostics.push(plain(
+            "debug",
+            format!(
+                "Took {elapsed}ms to GetRagfairAssorts - {} items",
+                assort_items_to_process.len()
+            ),
+        ));
+    }
+
+    let stopwatch = Instant::now();
+    let mut offers = Vec::new();
+    let mut rejected = IndexSet::new();
+    let mut offer_counter = offer_counter_start;
+    for assort_item_with_children in &mut assort_items_to_process {
+        create_offers_from_assort(
+            &mut ctx,
+            assort_item_with_children,
+            replacing_expired_offers,
+            &mut offers,
+            &mut rejected,
+            &mut offer_counter,
+        )?;
+    }
+    ctx.diagnostics.push(plain(
+        "debug",
+        format!(
+            "Took {}ms to CreateOffersFromAssort",
+            stopwatch.elapsed().as_millis()
+        ),
+    ));
+
+    Ok(DynamicOffersResult {
+        offers,
+        rejected_can_sell_templates: rejected.into_iter().collect(),
+        diagnostics: ctx.diagnostics,
+    })
+}
+
+/// `RagfairOfferGenerator.CreateOffersFromAssort` (`:332-373`). The C# `config` parameter is not
+/// ported: the body never reads it, going to `ragfairConfig.Dynamic` directly instead.
+///
+/// The list is taken by `&mut` because `RemoveBannedPlatesFromPreset` mutates the *shared* assort
+/// entry, before the offer loop clones it — so every offer of one preset loses the same plates.
+///
+/// # Errors
+///
+/// An empty list (`rootItem.Template` is an unguarded deref in the C#), a root template the items
+/// view does not know, and whatever the per-offer path propagates.
+fn create_offers_from_assort(
+    ctx: &mut RagfairContext,
+    assort_item_with_children: &mut Vec<Item>,
+    is_expired_offer: bool,
+    offers: &mut Vec<RagfairOfferWire>,
+    rejected: &mut IndexSet<String>,
+    offer_counter: &mut i32,
+) -> Result<(), LootError> {
+    let root_tpl = assort_item_with_children
+        .first()
+        .map(|root_item| root_item.template.clone())
+        .ok_or_else(|| LootError::new("Object reference not set to an instance of an object."))?;
+
+    // Only perform checks on newly generated items, skip expired items being refreshed.
+    // Short-circuit: an expired offer never runs the validity check, so it never contributes to
+    // `rejected` either.
+    if !(is_expired_offer || is_item_valid_ragfair_item(ctx, &root_tpl, rejected)) {
+        return Ok(());
+    }
+
+    // Armor presets can hold plates above the allowed flea level, remove if necessary
+    let is_preset = spt_preset_id(&assort_item_with_children[0])
+        .is_some_and(|preset_id| ctx.item_presets.contains_key(preset_id));
+    let dynamic = ctx.dynamic;
+    if !is_expired_offer && is_preset && dynamic.blacklist.enable_bsg_list {
+        remove_banned_plates_from_preset(
+            ctx,
+            assort_item_with_children,
+            &dynamic.blacklist.armor_plate,
+        );
+    }
+
+    // Get number of offers to create
+    // Limit to 1 offer when processing expired - like-for-like replacement
+    let offer_count = if is_expired_offer {
+        1
+    } else {
+        // `:352` dereferences the `GetItem` result unguarded. Unreachable on a miss in practice:
+        // the validity check above already rejects a template the view does not know.
+        let Some(item_to_sell_details) = ctx.items.get(&root_tpl) else {
+            return Err(LootError::new(
+                "Object reference not set to an instance of an object.",
+            ));
+        };
+        let parent = item_to_sell_details.parent.clone().unwrap_or_default();
+
+        get_offer_count_by_base_type(ctx, &parent)?
+    };
+
+    for _ in 0..offer_count {
+        // Clone the item so we don't have shared references and generate new item IDs
+        let mut cloned_assort = assort_item_with_children.clone();
+        // C# hands `ReparentItemAndChildren` the very item it is about to overwrite slot 0 with;
+        // this port needs the root as a separate value, so it snapshots it first. The only
+        // difference — the snapshot misses the root's own re-parenting — is erased two lines below.
+        let cloned_root = cloned_assort[0].clone();
+        let mut cloned_assort = reparent_item_and_children(&cloned_root, &mut cloned_assort);
+
+        // Clear unnecessary properties
+        cloned_assort[0].parent_id = None;
+        cloned_assort[0].slot_id = None;
+
+        create_single_offer_for_item(
+            ctx,
+            &mongo_id::generate(),
+            cloned_assort,
+            is_preset,
+            &root_tpl,
+            is_expired_offer,
+            OfferCreator::FakePlayer,
+            offers,
+            offer_counter,
+        )?;
+    }
+
+    Ok(())
+}
+
+/// `RagfairOfferGenerator.CreateSingleOfferForItem` (`:427-501`). The C# takes the raw
+/// `TemplateItem`; the only thing the body does with it is hand it to
+/// [`randomise_offer_item_upd_properties`], which takes the tpl here, so the tpl is the parameter.
+///
+/// The item list is taken by value: it is a per-offer clone that nothing reads afterwards, so it
+/// moves into the offer rather than being cloned a second time.
+///
+/// **The draw order is the contract** — stack count, then the plate roll, then the barter roll,
+/// then the pack roll. The pack roll sits behind `!isBarterOffer` in a short-circuiting `&&` chain,
+/// so a barter win skips it entirely and everything after shifts by a draw.
+///
+/// # Errors
+///
+/// An empty item list (`rootItem.Template` is an unguarded deref in the C#), plus whatever the
+/// stack count, the barter schemes and [`create_offer`] propagate.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the C# method's six parameters plus the two accumulators the caller's loop owns"
+)]
+fn create_single_offer_for_item(
+    ctx: &mut RagfairContext,
+    seller_id: &str,
+    mut item_with_children: Vec<Item>,
+    is_preset: bool,
+    item_to_sell_tpl: &str,
+    is_expired_offer: bool,
+    offer_creator: OfferCreator,
+    offers: &mut Vec<RagfairOfferWire>,
+    offer_counter: &mut i32,
+) -> Result<(), LootError> {
+    let root_tpl = item_with_children
+        .first()
+        .map(|root_item| root_item.template.clone())
+        .ok_or_else(|| LootError::new("Object reference not set to an instance of an object."))?;
+
+    // Get randomised amount to list on flea
+    let mut desired_stack_size = calculate_dynamic_stack_count(ctx, &root_tpl, is_preset)?;
+
+    // Reset stack count to 1 from whatever it was prior
+    item_with_children[0]
+        .upd
+        .get_or_insert_default()
+        .stack_objects_count = Some(1.0);
+
+    if !is_expired_offer && armor_item_can_hold_mods(ctx.items, &root_tpl) {
+        // Run randomised chance to remove removable plates from new offers(not expired)
+        remove_armor_plates(ctx, &mut item_with_children);
+    }
+
+    let dynamic = ctx.dynamic;
+    let is_barter_offer = get_chance_100(dynamic.barter.chance_percent);
+    let is_pack_offer = !is_barter_offer
+        && get_chance_100(dynamic.pack.chance_percent)
+        && item_with_children.len() == 1
+        && is_of_baseclasses(
+            ctx.items,
+            &root_tpl,
+            &dynamic
+                .pack
+                .item_type_whitelist
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+        );
+
+    let barter_scheme = if is_pack_offer {
+        // Set pack size
+        desired_stack_size = get_int(dynamic.pack.item_count_min, dynamic.pack.item_count_max);
+
+        // Don't randomise pack items
+        create_currency_barter_scheme(
+            ctx,
+            &item_with_children,
+            is_pack_offer,
+            f64::from(desired_stack_size),
+        )?
+    } else if is_barter_offer {
+        // Apply randomised properties
+        randomise_offer_item_upd_properties(
+            ctx,
+            &mut item_with_children,
+            item_to_sell_tpl,
+            offer_creator,
+        )?;
+        let barter_scheme = create_barter_barter_scheme(ctx, &item_with_children, &dynamic.barter)?;
+        // The C# only resets an `Upd` that is already there; it never materialises one.
+        if dynamic.barter.make_single_stack_only
+            && let Some(upd) = item_with_children
+                .first_mut()
+                .and_then(|root_item| root_item.upd.as_mut())
+        {
+            upd.stack_objects_count = Some(1.0);
+        }
+
+        barter_scheme
+    } else {
+        // Not barter or pack offer
+        // Apply randomised properties
+        randomise_offer_item_upd_properties(
+            ctx,
+            &mut item_with_children,
+            item_to_sell_tpl,
+            offer_creator,
+        )?;
+        create_currency_barter_scheme(ctx, &item_with_children, false, 1.0)?
+    };
+
+    let create_offer_details = CreateFleaOfferDetails {
+        user_id: seller_id.to_owned(),
+        // `:491` re-reads the clock per offer; one timestamp for the batch is the sanctioned
+        // divergence documented on `GenerateDynamicOffersRequest`.
+        time: ctx.timestamp,
+        items: item_with_children,
+        barter_scheme,
+        loyal_level: 1,
+        quantity: desired_stack_size,
+        creator: offer_creator,
+        // sellAsOnePiece - pack offer
+        sell_in_one_piece: is_pack_offer,
+    };
+
+    offers.push(create_offer(ctx, &create_offer_details, offer_counter)?);
+
+    Ok(())
 }
 
 /// `RagfairOfferGenerator.RandomiseOfferItemUpdProperties` (`:641-666`). The C# `userId` parameter
@@ -916,14 +1269,14 @@ fn is_plate_slot(item: &Item) -> bool {
 mod tests {
     use std::collections::HashSet;
 
-    use indexmap::IndexMap;
+    use indexmap::{IndexMap, IndexSet};
     use serde_json::json;
 
     use super::*;
     use crate::loot::item_helper::{ARMOR, BUILT_IN_INSERTS};
     use crate::loot::models::{ItemView, PresetView, Upd};
     use crate::loot::random_util::TestSeedGuard;
-    use crate::ragfair::models::DynamicConfigWire;
+    use crate::ragfair::models::{DynamicConfigWire, MinMaxIntWire};
     use crate::ragfair::{NO_BLACKLIST, NO_DEFAULT_PRESETS};
 
     const SEED: u64 = 20260813;
@@ -1018,15 +1371,22 @@ mod tests {
                     PLAIN_TPL: {"name": "plain", "type": "Item"},
                     REPAIRABLE_MEDKIT_TPL: {"name": "two arms", "type": "Item",
                         "durability": 50.0, "maxHpResource": 400},
+                    // The four `canSellOnRagfair` tpls are the whole sellable set of a full batch
+                    // pass: every other priced tpl is filtered by the BSG-list arm of
+                    // `is_item_valid_ragfair_item`.
                     AMMO_BOX_TPL: {"name": "ammo box", "type": "Item", "parent": AMMO_BOX,
-                        "stackSlotMaxCount": 30.0, "stackSlotFirstFilterFirst": CARTRIDGE_TPL},
+                        "stackSlotMaxCount": 30.0, "stackSlotFirstFilterFirst": CARTRIDGE_TPL,
+                        "canSellOnRagfair": true},
                     CARTRIDGE_TPL: {"name": "cartridge", "type": "Item", "stackMaxSize": 30},
                     BARTER_ROOT_TPL: {"name": "barter root", "type": "Item"},
-                    CHEAP_ROOT_TPL: {"name": "cheap root", "type": "Item"},
+                    CHEAP_ROOT_TPL: {"name": "cheap root", "type": "Item",
+                        "canSellOnRagfair": true},
                     EXPENSIVE_ROOT_TPL: {"name": "expensive root", "type": "Item"},
-                    IN_RANGE_A_TPL: {"name": "in range a", "type": "Item"},
+                    IN_RANGE_A_TPL: {"name": "in range a", "type": "Item",
+                        "canSellOnRagfair": true},
                     IN_RANGE_B_TPL: {"name": "in range b", "type": "Item"},
-                    TOO_CHEAP_TPL: {"name": "too cheap", "type": "Item"},
+                    TOO_CHEAP_TPL: {"name": "too cheap", "type": "Item",
+                        "canSellOnRagfair": true},
                     TOO_PRICEY_TPL: {"name": "too pricey", "type": "Item"},
                     TPL_BLACKLISTED_TPL: {"name": "tpl blacklisted", "type": "Item"},
                     TYPE_BLACKLISTED_TPL: {"name": "type blacklisted", "type": "Item",
@@ -2535,5 +2895,524 @@ mod tests {
         );
         // The throw happens before the counter is bumped.
         assert_eq!(offer_counter, 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // generate_dynamic_offers — the batch pass
+    // -----------------------------------------------------------------------
+
+    /// The whole [`Fixture`] as one batch request; consumes it, since the request owns every view.
+    ///
+    /// `defaultPresetsByTpl`/`defaultPresets` stay empty: only the weapon-preset pricing arm reads
+    /// them, and no fixture offer is a weapon preset.
+    fn request(fixture: Fixture) -> GenerateDynamicOffersRequest {
+        GenerateDynamicOffersRequest {
+            test_seed: Some(SEED),
+            timestamp: OFFER_TIME,
+            offer_counter_start: 0,
+            expired_offers: None,
+            dynamic: fixture.dynamic,
+            item_presets: fixture.presets,
+            default_presets: Vec::new(),
+            default_presets_by_tpl: IndexMap::new(),
+            presets_by_tpl: fixture.preset_lists,
+            flea_prices: fixture.prices.clone(),
+            handbook_prices: fixture.prices.clone(),
+            highest_trader_prices: fixture.prices,
+            config_blacklist: fixture.blacklist.into_iter().collect(),
+            seasonal_event_active: false,
+            seasonal_item_tpl_blacklist: Vec::new(),
+            pmc_names_usec: fixture.names_usec,
+            pmc_names_bear: fixture.names_bear,
+            items: fixture.items,
+        }
+    }
+
+    /// `(root tpl, intId, quantity, sellInOnePiece, requirement tpl, requirement count)` — every
+    /// offer field a batch pass can be pinned on. Ids are minted off a process-local counter and
+    /// end times off the clock-independent seed, so they are normalised away here and asserted
+    /// separately.
+    fn normalised(offers: &[RagfairOfferWire]) -> Vec<(&str, i32, i32, bool, &str, f64)> {
+        offers
+            .iter()
+            .map(|offer| {
+                (
+                    offer.items[0].template.as_str(),
+                    offer.internal_id,
+                    offer.quantity,
+                    offer.sell_in_one_piece,
+                    offer.requirements[0].template_id.as_str(),
+                    offer.requirements[0].count,
+                )
+            })
+            .collect()
+    }
+
+    /// A range that costs no draw, so a test can zero out one step of the draw sequence.
+    fn fixed(value: i32) -> MinMaxIntWire {
+        MinMaxIntWire {
+            min: value,
+            max: value,
+        }
+    }
+
+    fn offers_of(fixture: Fixture) -> DynamicOffersResult {
+        generate_dynamic_offers(request(fixture)).expect("the fixture is complete")
+    }
+
+    #[test]
+    fn a_full_pass_makes_offers_for_the_sellable_templates_in_items_view_order() {
+        let result = offers_of(Fixture::new());
+
+        // The four `canSellOnRagfair` tpls, in items-view order — every other priced tpl is
+        // filtered by the BSG-list arm. `offerItemCount.default` is `{1, 1}`, so one offer each.
+        assert_eq!(
+            result
+                .offers
+                .iter()
+                .map(|offer| offer.items[0].template.as_str())
+                .collect::<Vec<_>>(),
+            [AMMO_BOX_TPL, CHEAP_ROOT_TPL, IN_RANGE_A_TPL, TOO_CHEAP_TPL]
+        );
+        assert!(result.rejected_can_sell_templates.is_empty());
+        // The ammo box is hydrated inside `create_offer`, so the cartridge is on the offer.
+        assert_eq!(result.offers[0].items.len(), 2);
+        assert_eq!(result.offers[0].items[1].template, CARTRIDGE_TPL);
+        for offer in &result.offers {
+            assert_eq!(offer.start_time, OFFER_TIME);
+            assert_eq!(offer.loyalty_level, 1);
+            assert!(!offer.sell_in_one_piece);
+            assert!(
+                (1..=4).contains(&offer.quantity),
+                "quantity was {}",
+                offer.quantity
+            );
+            assert!(
+                offer.end_time > OFFER_TIME + END_TIME_MIN as i64,
+                "end time was {}",
+                offer.end_time
+            );
+        }
+    }
+
+    #[test]
+    fn a_full_pass_is_reproducible_from_its_seed() {
+        // The whole normalised offer list, pinned to `SEED`: every draw the pass spends lands in
+        // one of these fields, so a reordered or extra draw anywhere moves a number here.
+        assert_eq!(
+            normalised(&offers_of(Fixture::new()).offers),
+            [
+                (AMMO_BOX_TPL, 0, 2, false, ROUBLES, 5_500.0),
+                (CHEAP_ROOT_TPL, 1, 1, false, DOLLARS, 1.0),
+                (IN_RANGE_A_TPL, 2, 1, false, ROUBLES, 16_651.0),
+                (TOO_CHEAP_TPL, 3, 4, false, ROUBLES, 106.0),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_expired_pass_replaces_one_for_one_and_never_runs_the_validity_check() {
+        let mut fixture = Fixture::new();
+        // Custom-blacklisted *and* not BSG-sellable: a full pass would reject it and record it.
+        fixture
+            .dynamic
+            .blacklist
+            .custom
+            .insert(BARTER_ROOT_TPL.to_owned());
+        // Three offers per assort for a fresh pass; an expired one is always a single replacement.
+        fixture
+            .dynamic
+            .offer_item_count
+            .insert("default".to_owned(), fixed(3));
+
+        let result = generate_dynamic_offers(GenerateDynamicOffersRequest {
+            expired_offers: Some(vec![vec![item("expired_root", BARTER_ROOT_TPL)]]),
+            ..request(fixture)
+        })
+        .expect("the expired root is in the items view");
+
+        // Exactly one offer despite the `{3, 3}` range — and the seeded values below are what pins
+        // the "no offer-count draw" half of that arm: an extra draw would move all of them.
+        assert_eq!(
+            normalised(&result.offers),
+            [(BARTER_ROOT_TPL, 0, 2, false, ROUBLES, 33_000.0)]
+        );
+        // The validity check was never reached, so the custom-blacklist arm never fired.
+        assert!(result.rejected_can_sell_templates.is_empty());
+    }
+
+    #[test]
+    fn a_custom_blacklisted_template_is_recorded_and_makes_no_offer() {
+        let mut fixture = Fixture::new();
+        fixture
+            .dynamic
+            .blacklist
+            .custom
+            .insert(TOO_CHEAP_TPL.to_owned());
+
+        let result = offers_of(fixture);
+
+        assert_eq!(result.rejected_can_sell_templates, [TOO_CHEAP_TPL]);
+        assert_eq!(
+            result
+                .offers
+                .iter()
+                .map(|offer| offer.items[0].template.as_str())
+                .collect::<Vec<_>>(),
+            [AMMO_BOX_TPL, CHEAP_ROOT_TPL, IN_RANGE_A_TPL]
+        );
+    }
+
+    #[test]
+    fn offers_are_numbered_from_the_requested_counter_start() {
+        let result = generate_dynamic_offers(GenerateDynamicOffersRequest {
+            offer_counter_start: 7,
+            ..request(Fixture::new())
+        })
+        .expect("the fixture is complete");
+
+        assert_eq!(
+            result
+                .offers
+                .iter()
+                .map(|offer| offer.internal_id)
+                .collect::<Vec<_>>(),
+            [7, 8, 9, 10]
+        );
+    }
+
+    #[test]
+    fn an_expired_offer_for_a_template_the_items_view_does_not_know_is_an_error() {
+        let error = generate_dynamic_offers(GenerateDynamicOffersRequest {
+            expired_offers: Some(vec![vec![item("ghost", "tpl_nothing_has_ever_heard_of")]]),
+            ..request(Fixture::new())
+        })
+        .expect_err("the stack-count lookup is the C# throw");
+
+        assert!(
+            error.message.contains("not found in db"),
+            "{}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn the_batch_reports_how_long_the_offer_pass_took() {
+        let result = offers_of(Fixture::new());
+
+        let last = result
+            .diagnostics
+            .last()
+            .expect("the pass always reports its offer timing");
+        let message = last.message.as_deref().unwrap_or_default();
+        assert_eq!(last.level, "debug");
+        assert!(
+            message.starts_with("Took ") && message.ends_with("ms to CreateOffersFromAssort"),
+            "{message}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // create_offers_from_assort
+    // -----------------------------------------------------------------------
+
+    /// An armor tpl the flea will sell: priced, and past the BSG-list arm.
+    fn sellable_armor_fixture() -> Fixture {
+        let mut fixture = Fixture::new();
+        fixture.prices.insert(ARMOR_TPL.to_owned(), 20_000.0);
+        fixture
+            .items
+            .get_mut(ARMOR_TPL)
+            .expect("the armor tpl is in the view")
+            .can_sell_on_ragfair = Some(true);
+        fixture.presets.insert(
+            "armor_preset".to_owned(),
+            serde_json::from_value(json!({"id": "armor_preset", "encyclopedia": ARMOR_TPL,
+                "items": []}))
+            .expect("the preset parses"),
+        );
+
+        fixture
+    }
+
+    /// The armor tree as an assort entry, flagged as the preset `armor_preset`.
+    fn armor_preset_assort() -> Vec<Item> {
+        let mut assort = armor_with_plates();
+        assort[0].upd = Some(Upd {
+            extra: [("sptPresetId".to_owned(), json!("armor_preset"))]
+                .into_iter()
+                .collect(),
+            ..Upd::default()
+        });
+
+        assort
+    }
+
+    fn offers_from_assort(
+        fixture: &Fixture,
+        assort: &mut Vec<Item>,
+        is_expired_offer: bool,
+    ) -> (Vec<RagfairOfferWire>, IndexSet<String>) {
+        let mut offers = Vec::new();
+        let mut rejected = IndexSet::new();
+        let mut offer_counter = 0;
+
+        seeded(|| {
+            create_offers_from_assort(
+                &mut fixture.ctx(),
+                assort,
+                is_expired_offer,
+                &mut offers,
+                &mut rejected,
+                &mut offer_counter,
+            )
+        })
+        .expect("the armor assort is sellable");
+
+        (offers, rejected)
+    }
+
+    #[test]
+    fn a_preset_assort_loses_its_banned_plates_once_for_the_whole_offer_loop() {
+        let mut fixture = sellable_armor_fixture();
+        fixture
+            .dynamic
+            .offer_item_count
+            .insert("default".to_owned(), fixed(2));
+        let mut assort = armor_preset_assort();
+
+        let (offers, _) = offers_from_assort(&fixture, &mut assort, false);
+
+        // The class 6 front plate is over the level cap; the class 6 back plate is in
+        // `ignoreSlots` and the class 4 left plate is at the cap. Removed off the *shared* list,
+        // before the offer loop clones it.
+        assert_eq!(
+            assort
+                .iter()
+                .map(|plate| plate.id.as_str())
+                .collect::<Vec<_>>(),
+            ["armor_root", "back", "left", "soft"]
+        );
+        // ...and then each offer's own clone loses the plates in `plateSlotIdToRemovePool`.
+        assert_eq!(offers.len(), 2);
+        for offer in &offers {
+            assert_eq!(
+                offer
+                    .items
+                    .iter()
+                    .map(|plate| plate.slot_id.as_deref())
+                    .collect::<Vec<_>>(),
+                [None, Some("back_plate"), Some("soft_armor_front")]
+            );
+            // A preset lists as a single item, with no stack-count draw.
+            assert_eq!(offer.quantity, 1);
+        }
+    }
+
+    #[test]
+    fn an_expired_preset_assort_keeps_its_banned_plates() {
+        let fixture = sellable_armor_fixture();
+        let mut assort = armor_preset_assort();
+
+        let (offers, _) = offers_from_assort(&fixture, &mut assort, true);
+
+        assert_eq!(assort.len(), 5);
+        // Neither removal ran: banned plates are gated on `!isExpiredOffer`, and so is the
+        // `RemoveArmorPlates` roll.
+        assert_eq!(offers.len(), 1);
+        assert_eq!(offers[0].items.len(), 5);
+    }
+
+    #[test]
+    fn every_offer_of_one_assort_is_a_detached_clone_with_its_own_seller() {
+        let mut fixture = sellable_armor_fixture();
+        fixture
+            .dynamic
+            .offer_item_count
+            .insert("default".to_owned(), fixed(2));
+        // Keep the plates on, so there are children to compare.
+        fixture.dynamic.armor.remove_removable_plate_chance = 0;
+        fixture.dynamic.blacklist.enable_bsg_list = false;
+        let mut assort = armor_preset_assort();
+
+        let (offers, _) = offers_from_assort(&fixture, &mut assort, false);
+
+        for offer in &offers {
+            // The root's assort parentage is cleared; `ReparentItemAndChildren` keeps its id.
+            assert_eq!(offer.items[0].id, "armor_root");
+            assert_eq!(offer.items[0].parent_id, None);
+            assert_eq!(offer.items[0].slot_id, None);
+            // Children are re-ided under it.
+            assert_eq!(offer.items[1].parent_id.as_deref(), Some("armor_root"));
+            assert_ne!(offer.items[1].id, "front");
+        }
+        assert_ne!(offers[0].user.id, offers[1].user.id);
+        assert_ne!(offers[0].items[1].id, offers[1].items[1].id);
+        // The shared assort list is untouched by the per-offer re-id.
+        assert_eq!(assort[1].id, "front");
+    }
+
+    // -----------------------------------------------------------------------
+    // create_single_offer_for_item — the draw order
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn a_barter_win_short_circuits_the_pack_chance_roll() {
+        let mut fixture = Fixture::new();
+        // Both rolls would fire; only the barter one is ever drawn.
+        fixture.dynamic.barter.chance_percent = 100.0;
+        fixture.dynamic.pack.chance_percent = 100.0;
+        fixture
+            .dynamic
+            .pack
+            .item_type_whitelist
+            .insert(CHEAP_ROOT_TPL.to_owned());
+        // A degenerate non-stackable range, so the stack-count arm spends no draw and the barter
+        // roll is the call's first.
+        fixture.dynamic.non_stackable_count = fixed(1);
+        let items = vec![item("root", CHEAP_ROOT_TPL)];
+
+        let after = stream_position_after(|| {
+            let mut offers = Vec::new();
+            let mut offer_counter = 0;
+            create_single_offer_for_item(
+                &mut fixture.ctx(),
+                USER_ID,
+                items.clone(),
+                false,
+                CHEAP_ROOT_TPL,
+                false,
+                OfferCreator::FakePlayer,
+                &mut offers,
+                &mut offer_counter,
+            )
+            .expect("the cheap root prices fine");
+        });
+
+        // The same draws, spelled out in order: the barter chance roll, the barter arm's own
+        // draws, then the offer's. No pack roll sits between the first two.
+        assert_eq!(
+            after,
+            stream_position_after(|| {
+                let mut ctx = fixture.ctx();
+                get_int(1, 99);
+                let mut items = items.clone();
+                randomise_offer_item_upd_properties(
+                    &ctx,
+                    &mut items,
+                    CHEAP_ROOT_TPL,
+                    OfferCreator::FakePlayer,
+                )
+                .expect("the cheap root has no condition entry");
+                let barter_scheme =
+                    create_barter_barter_scheme(&mut ctx, &items, &fixture.dynamic.barter)
+                        .expect("the cheap root falls back to currency");
+                create_offer(&mut ctx, &offer_details(items, barter_scheme), &mut 0)
+                    .expect("the cheap root is in the view");
+            })
+        );
+    }
+
+    #[test]
+    fn a_pack_offer_lists_a_random_pack_size_as_one_piece() {
+        let mut fixture = Fixture::new();
+        fixture.dynamic.pack.chance_percent = 100.0;
+        fixture.dynamic.pack.item_count_min = 5;
+        fixture.dynamic.pack.item_count_max = 5;
+        // The whitelist is a *base class* list: an item is never its own base class.
+        fixture
+            .dynamic
+            .pack
+            .item_type_whitelist
+            .insert(AMMO_BOX.to_owned());
+        let mut offers = Vec::new();
+        let mut offer_counter = 0;
+
+        seeded(|| {
+            create_single_offer_for_item(
+                &mut fixture.ctx(),
+                USER_ID,
+                vec![item("root", AMMO_BOX_TPL)],
+                false,
+                AMMO_BOX_TPL,
+                false,
+                OfferCreator::FakePlayer,
+                &mut offers,
+                &mut offer_counter,
+            )
+        })
+        .expect("the ammo box prices fine");
+
+        assert_eq!(offers[0].quantity, 5);
+        assert!(offers[0].sell_in_one_piece);
+        // `CreateCurrencyBarterScheme(items, true, desiredStackSize)`: the listing is the whole
+        // pack, so the per-item cost is a fifth of it.
+        assert_eq!(
+            offers[0].requirements_cost,
+            round_half_even(offers[0].summary_cost / 5.0)
+        );
+    }
+
+    #[test]
+    fn a_barter_offer_resets_the_root_stack_when_make_single_stack_only_is_set() {
+        let mut fixture = Fixture::new();
+        fixture.dynamic.barter.chance_percent = 100.0;
+        fixture.dynamic.barter.make_single_stack_only = true;
+        let mut root = item("root", BARTER_ROOT_TPL);
+        root.upd.as_mut().unwrap().stack_objects_count = Some(9.0);
+        let mut offers = Vec::new();
+        let mut offer_counter = 0;
+
+        seeded(|| {
+            create_single_offer_for_item(
+                &mut fixture.ctx(),
+                USER_ID,
+                vec![root],
+                false,
+                BARTER_ROOT_TPL,
+                false,
+                OfferCreator::FakePlayer,
+                &mut offers,
+                &mut offer_counter,
+            )
+        })
+        .expect("the barter root prices fine");
+
+        assert_eq!(
+            offers[0].items[0].upd.as_ref().unwrap().stack_objects_count,
+            Some(1.0)
+        );
+        // A barter offer's requirement is an item, not a currency.
+        assert!(
+            [IN_RANGE_A_TPL, IN_RANGE_B_TPL]
+                .contains(&offers[0].requirements[0].template_id.as_str())
+        );
+    }
+
+    #[test]
+    fn an_offer_for_an_empty_item_list_is_an_error() {
+        let fixture = Fixture::new();
+        let mut offers = Vec::new();
+        let mut offer_counter = 0;
+
+        let error = seeded(|| {
+            create_single_offer_for_item(
+                &mut fixture.ctx(),
+                USER_ID,
+                Vec::new(),
+                false,
+                CHEAP_ROOT_TPL,
+                false,
+                OfferCreator::FakePlayer,
+                &mut offers,
+                &mut offer_counter,
+            )
+        })
+        .expect_err("the C# dereferences a null root item");
+
+        assert_eq!(
+            error.message,
+            "Object reference not set to an instance of an object."
+        );
     }
 }
