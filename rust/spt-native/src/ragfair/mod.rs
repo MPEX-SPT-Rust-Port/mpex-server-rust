@@ -79,7 +79,9 @@ pub(crate) fn plain(level: &str, message: String) -> Diagnostic {
 
 #[expect(
     dead_code,
-    reason = "the ragfair port's first localised diagnostic lands with the offer generator; drop               this attribute when a caller arrives"
+    reason = "no caller arrives in this port: every localised log line in RagfairOfferGenerator.cs \
+              sits in GenerateFleaOffersForTrader, which stays C#. Kept for symmetry with the bot \
+              module's diagnostic pair; delete it if a future port has no use for it"
 )]
 pub(crate) fn localised(level: &str, locale_key: &str, args: serde_json::Value) -> Diagnostic {
     Diagnostic {

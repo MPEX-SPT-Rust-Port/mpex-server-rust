@@ -3013,12 +3013,15 @@ mod tests {
     #[test]
     fn an_expired_pass_replaces_one_for_one_and_never_runs_the_validity_check() {
         let mut fixture = Fixture::new();
-        // Custom-blacklisted *and* not BSG-sellable: a full pass would reject it and record it.
+        // BSG-sellable *and* custom-blacklisted: a full pass reaches the custom arm — the only one
+        // that writes to `rejected` — and both rejects and records it. So an empty `rejected` here
+        // can only mean the check never ran. A tpl the BSG arm rejects first would make the
+        // assertion below vacuous.
         fixture
             .dynamic
             .blacklist
             .custom
-            .insert(BARTER_ROOT_TPL.to_owned());
+            .insert(TOO_CHEAP_TPL.to_owned());
         // Three offers per assort for a fresh pass; an expired one is always a single replacement.
         fixture
             .dynamic
@@ -3026,19 +3029,21 @@ mod tests {
             .insert("default".to_owned(), fixed(3));
 
         let result = generate_dynamic_offers(GenerateDynamicOffersRequest {
-            expired_offers: Some(vec![vec![item("expired_root", BARTER_ROOT_TPL)]]),
+            expired_offers: Some(vec![vec![item("expired_root", TOO_CHEAP_TPL)]]),
             ..request(fixture)
         })
         .expect("the expired root is in the items view");
 
+        // The validity check was never reached, so the custom-blacklist arm never fired. Asserted
+        // first: it is the sharper of the two, and a validity check that did run would reject the
+        // offer outright, so the golden below would fail for a second reason.
+        assert!(result.rejected_can_sell_templates.is_empty());
         // Exactly one offer despite the `{3, 3}` range — and the seeded values below are what pins
         // the "no offer-count draw" half of that arm: an extra draw would move all of them.
         assert_eq!(
             normalised(&result.offers),
-            [(BARTER_ROOT_TPL, 0, 2, false, ROUBLES, 33_000.0)]
+            [(TOO_CHEAP_TPL, 0, 2, false, ROUBLES, 110.0)]
         );
-        // The validity check was never reached, so the custom-blacklist arm never fired.
-        assert!(result.rejected_can_sell_templates.is_empty());
     }
 
     #[test]
