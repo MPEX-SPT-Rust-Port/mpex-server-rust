@@ -1,3 +1,4 @@
+pub mod bot;
 pub mod ffi;
 pub mod loot;
 pub mod runtime;
