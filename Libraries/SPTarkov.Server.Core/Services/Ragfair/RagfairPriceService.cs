@@ -35,6 +35,15 @@ public class RagfairPriceService(
     protected Dictionary<MongoId, double>? StaticPrices;
 
     /// <summary>
+    ///     Exposed so the native ragfair projection can resolve the per-template highest trader
+    ///     price without a constructor change on <c>RagfairOfferGenerator</c>.
+    /// </summary>
+    internal TraderHelper TraderHelper
+    {
+        get { return traderHelper; }
+    }
+
+    /// <summary>
     ///     Generate static (handbook) and dynamic (prices.json) flea prices, store inside class as dictionaries
     /// </summary>
     public void Load()

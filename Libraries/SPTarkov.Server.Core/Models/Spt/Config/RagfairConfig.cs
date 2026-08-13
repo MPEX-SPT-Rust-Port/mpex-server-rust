@@ -43,6 +43,14 @@ public record RagfairConfig : BaseConfig
     /// </summary>
     [JsonPropertyName("offerListingTaxMultiplier")]
     public int OfferListingTaxMultiplier { get; set; }
+
+    /// <summary>
+    ///     Force dynamic flea offer generation down the retained 4.1.2 C# path instead of
+    ///     spt-native. The escape hatch for hooks the patch detection cannot see - patches on the
+    ///     shared helpers listed in ARCHITECTURE.md's ragfair section.
+    /// </summary>
+    [JsonPropertyName("forceLegacyRagfairGeneration")]
+    public bool ForceLegacyRagfairGeneration { get; set; }
 }
 
 public record Sell

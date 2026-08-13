@@ -1,9 +1,12 @@
 using System.Diagnostics;
+using System.Reflection;
+using HarmonyLib;
 using Microsoft.Extensions.Logging;
 using SPTarkov.Common.Extensions;
 using SPTarkov.Common.Models.Logging;
 using SPTarkov.DI.Annotations;
 using SPTarkov.Server.Core.Extensions;
+using SPTarkov.Server.Core.Generators.Loot;
 using SPTarkov.Server.Core.Helpers;
 using SPTarkov.Server.Core.Helpers.Bot;
 using SPTarkov.Server.Core.Helpers.Commerce;
@@ -17,6 +20,9 @@ using SPTarkov.Server.Core.Models.Enums;
 using SPTarkov.Server.Core.Models.Spt.Config;
 using SPTarkov.Server.Core.Models.Spt.Ragfair;
 using SPTarkov.Server.Core.Models.Spt.Tables;
+using SPTarkov.Server.Core.Native;
+using SPTarkov.Server.Core.Native.Loot;
+using SPTarkov.Server.Core.Native.Ragfair;
 using SPTarkov.Server.Core.Servers;
 using SPTarkov.Server.Core.Services;
 using SPTarkov.Server.Core.Services.Commerce;
@@ -57,6 +63,75 @@ public class RagfairOfferGenerator(
 
     /// Internal counter to ensure each offer created has a unique value for its intId property
     protected int OfferCounter;
+
+    /// <summary>
+    ///     Which implementation the most recent generation call ran - the spt-native path or the
+    ///     retained 4.1.2 C# path. Test seam; also handy in a debugger.
+    /// </summary>
+    internal LootGenerationPath LastPathTaken { get; private set; }
+
+    /// <summary>
+    ///     Test-only seed forwarded as <see cref="GenerateDynamicOffersRequest.TestSeed"/> on every
+    ///     native request.
+    /// </summary>
+    internal ulong? NativeTestSeed { get; set; }
+
+    /// <summary>
+    ///     The 4.1.2 members a mod can Harmony-patch, across this class and the three collaborators
+    ///     the native path folds in. Public, protected and protected-internal methods declared on
+    ///     each - exactly the surface the apicompat gate freezes, statics included.
+    ///     <see cref="GenerateDynamicOffers"/> itself is excluded: a patch on the dispatcher wraps
+    ///     whichever path runs and does not need the legacy body. Everything else is never called
+    ///     natively, so a patch on one would silently do nothing - including the dead-but-frozen
+    ///     <c>GetRating</c> and <c>GetAvatarUrl</c>.
+    /// </summary>
+    private static readonly List<MethodBase> _hookableMembers =
+    [
+        .. new[] { typeof(RagfairOfferGenerator), typeof(RagfairPriceService), typeof(RagfairServerHelper), typeof(RagfairAssortGenerator) }
+            .SelectMany(type =>
+                type.GetMethods(
+                    BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly
+                )
+            )
+            // Property accessors and operators are IsSpecialName; constructors are not returned at all
+            .Where(method => !method.IsSpecialName && (method.IsPublic || method.IsFamily || method.IsFamilyOrAssembly))
+            .Where(method => method != typeof(RagfairOfferGenerator).GetMethod(nameof(GenerateDynamicOffers))),
+    ];
+
+    /// <summary>
+    ///     The legacy path runs when forced by config, when any of the frozen 4.1.2 members carries a
+    ///     live Harmony patch, or when a mod has substituted one of the collaborators the native path
+    ///     folded in - running the retained C# implementation is the only way those hooks and
+    ///     replacements can take effect with real baseline semantics.
+    /// </summary>
+    private bool UseLegacyPath()
+    {
+        if (ragfairConfig.ForceLegacyRagfairGeneration)
+        {
+            return true;
+        }
+
+        if (
+            _hookableMembers.Any(member =>
+                Harmony.GetPatchInfo(member) is { } patches
+                && (
+                    patches.Prefixes.Count > 0
+                    || patches.Postfixes.Count > 0
+                    || patches.Transpilers.Count > 0
+                    || patches.Finalizers.Count > 0
+                )
+            )
+        )
+        {
+            return true;
+        }
+
+        // A mod registered its own subclass with a higher TypePriority, so the container handed us
+        // an implementation the native side does not have
+        return ragfairPriceService.GetType() != typeof(RagfairPriceService)
+            || ragfairServerHelper.GetType() != typeof(RagfairServerHelper)
+            || ragfairAssortGenerator.GetType() != typeof(RagfairAssortGenerator);
+    }
 
     /// <summary>
     ///     Create a flea offer and store it in the Ragfair server offers array
@@ -291,6 +366,66 @@ public class RagfairOfferGenerator(
     /// </summary>
     /// <param name="expiredOffers"> Optional, expired offers to regenerate </param>
     public void GenerateDynamicOffers(IEnumerable<List<Item>>? expiredOffers = null)
+    {
+        if (UseLegacyPath())
+        {
+            LastPathTaken = LootGenerationPath.Legacy;
+
+            GenerateDynamicOffersLegacy(expiredOffers);
+
+            return;
+        }
+
+        LastPathTaken = LootGenerationPath.Native;
+
+        var result = SptNative.GenerateDynamicOffers(
+            RagfairPayloadProjection.BuildRequest(
+                expiredOffers,
+                timeUtil.GetTimeStamp(),
+                OfferCounter,
+                NativeTestSeed,
+                templateTable,
+                handbookHelper,
+                ragfairPriceService.TraderHelper,
+                presetHelper,
+                ragfairAssortGenerator.ItemFilterService,
+                ragfairAssortGenerator.SeasonalEventService,
+                botHelper.BotTable,
+                itemHelper,
+                botConfig,
+                ragfairConfig
+            )
+        );
+
+        PayloadProjection.ReplayDiagnostics(result.Diagnostics, logger, localisationService);
+
+        // The native side decided these templates are unsellable and, unlike everything else it
+        // touched, that decision belongs to the live database (RagfairServerHelper.cs:61)
+        foreach (var tpl in result.RejectedCanSellTemplates)
+        {
+            if (templateTable.Items.TryGetValue(tpl, out var template) && template.Properties is not null)
+            {
+                template.Properties.CanSellOnRagfair = false;
+            }
+        }
+
+        // Legacy inserts each offer as it creates it; the holder's live per-template cap runs the
+        // same way either way, it just sees the whole batch at once here
+        foreach (var offer in result.Offers)
+        {
+            ragfairOfferService.AddOffer(offer.ToRagfairOffer());
+        }
+
+        // CreateOffer increments the counter per offer created, not per offer the holder accepted
+        OfferCounter += result.Offers.Count;
+    }
+
+    /// <summary>
+    ///     The retained 4.1.2 implementation of <see cref="GenerateDynamicOffers"/>, run when
+    ///     <see cref="UseLegacyPath"/> says a mod needs real baseline semantics.
+    /// </summary>
+    /// <param name="expiredOffers"> Optional, expired offers to regenerate </param>
+    private void GenerateDynamicOffersLegacy(IEnumerable<List<Item>>? expiredOffers = null)
     {
         var replacingExpiredOffers = expiredOffers is not null && expiredOffers.Any();
 
