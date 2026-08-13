@@ -3,6 +3,8 @@
 
 use std::collections::{HashMap, HashSet};
 
+use indexmap::IndexMap;
+
 use super::models::{
     CounterState, DEBUG, Diagnostic, ERROR, Item, ItemView, LootConfigView, PresetView,
     SeasonalView, SptLootItem, StaticAmmoDetails, Upd, WARNING,
@@ -35,13 +37,13 @@ pub const VEST: &str = "5448e5284bdc2dcb718b4567";
 pub const ARMOR: &str = "5448e54d4bdc2dcc718b4568";
 
 /// `ItemHelper.GetItem` (`ItemHelper.cs:491-501`) — a plain lookup, absent tpl included.
-pub fn get_item<'a>(items_view: &'a HashMap<String, ItemView>, tpl: &str) -> Option<&'a ItemView> {
+pub fn get_item<'a>(items_view: &'a IndexMap<String, ItemView>, tpl: &str) -> Option<&'a ItemView> {
     items_view.get(tpl)
 }
 
 /// `ItemHelper.IsOfBaseclass` (`ItemHelper.cs:296-299`).
 pub fn is_of_baseclass(
-    items_view: &HashMap<String, ItemView>,
+    items_view: &IndexMap<String, ItemView>,
     tpl: &str,
     base_class_tpl: &str,
 ) -> bool {
@@ -61,7 +63,7 @@ pub fn is_of_baseclass(
 /// parent chain would match. `ItemView` carries no `_type`, and the loot generator only ever asks
 /// about real item tpls, so nothing observable hangs on it.
 pub fn is_of_baseclasses(
-    items_view: &HashMap<String, ItemView>,
+    items_view: &IndexMap<String, ItemView>,
     tpl: &str,
     base_class_tpls: &[&str],
 ) -> bool {
@@ -87,7 +89,7 @@ pub fn is_of_baseclasses(
 
 /// `ItemHelper.ArmorItemCanHoldMods` (`ItemHelper.cs:319-322`) — `_armorSlotsThatCanHoldMods`
 /// (`ItemHelper.cs:102`).
-pub fn armor_item_can_hold_mods(items_view: &HashMap<String, ItemView>, tpl: &str) -> bool {
+pub fn armor_item_can_hold_mods(items_view: &IndexMap<String, ItemView>, tpl: &str) -> bool {
     is_of_baseclasses(items_view, tpl, &[HEADWEAR, VEST, ARMOR])
 }
 
@@ -218,7 +220,7 @@ pub fn reparent_item_and_children(root_item: &Item, item_with_children: &mut [It
 /// `ItemHelper.GetItemSize` (`ItemHelper.cs:1179-1234`) — `(width, height)`. Non-forced child extra
 /// size takes the largest per direction, forced extra size sums across every child.
 pub fn get_item_size(
-    items_view: &HashMap<String, ItemView>,
+    items_view: &IndexMap<String, ItemView>,
     items: &[Item],
     root_item_id: &str,
 ) -> Option<(i32, i32)> {
@@ -262,7 +264,7 @@ pub fn get_item_size(
 /// (`ItemHelper.cs:1794-1798`) — `CellsV` rows of `CellsH` free cells. C# throws
 /// `ItemHelperException` when either is missing; this returns the same message as an `Err`.
 pub fn get_container_mapping(
-    items_view: &HashMap<String, ItemView>,
+    items_view: &IndexMap<String, ItemView>,
     container_tpl: &str,
 ) -> Result<Vec<Vec<u8>>, String> {
     let container_template = get_item(items_view, container_tpl);
@@ -308,7 +310,7 @@ pub fn to_loot_item(item: &Item) -> SptLootItem {
 /// from `remainingCount` on every pass: the loop never ends and clones pile up until the process
 /// dies. A non-finite count loops forever the same way.
 pub fn split_stack(
-    items_view: &HashMap<String, ItemView>,
+    items_view: &IndexMap<String, ItemView>,
     item_to_split: &Item,
 ) -> Result<Vec<Item>, LootError> {
     // No count to split by — the template is never consulted.
@@ -375,7 +377,7 @@ pub fn split_stack(
 ///
 /// C# assigns `null` to `Upd.SpawnedInSession` and `WhenWritingNull` drops it on the way out, so
 /// removing the key is what reproduces the C# JSON.
-pub fn set_found_in_raid(items_view: &HashMap<String, ItemView>, items: &mut [Item]) {
+pub fn set_found_in_raid(items_view: &IndexMap<String, ItemView>, items: &mut [Item]) {
     for item in items.iter_mut() {
         if is_of_baseclasses(items_view, &item.template, &[MONEY, AMMO]) {
             if let Some(upd) = item.upd.as_mut() {
@@ -402,7 +404,7 @@ pub fn set_found_in_raid(items_view: &HashMap<String, ItemView>, items: &mut [It
 /// Every view is borrowed for `'a`, so copying one out (`let items_view = ctx.items_view;`) releases
 /// the `&mut ctx` and leaves the diagnostics writable — the ported functions lean on that.
 pub struct LootContext<'a> {
-    pub items_view: &'a HashMap<String, ItemView>,
+    pub items_view: &'a IndexMap<String, ItemView>,
     pub static_ammo_dist: &'a HashMap<String, Vec<StaticAmmoDetails>>,
     pub default_presets: &'a HashMap<String, PresetView>,
     pub money_tpls: &'a [String],
@@ -822,7 +824,7 @@ pub fn add_child_slot_items(
 /// makes `DrawRandomFromList` index `RandInt(0)`, or an item with no `Caliber`) — come back as
 /// [`LootError`] with the C# message.
 fn get_random_valid_caliber(
-    items_view: &HashMap<String, ItemView>,
+    items_view: &IndexMap<String, ItemView>,
     mag_tpl: &str,
 ) -> Result<String, LootError> {
     let Some(ammo_tpls) = get_item(items_view, mag_tpl)
@@ -943,7 +945,7 @@ mod tests {
 
     /// Every view is built through serde so the tests exercise the same wire shape the C# caller
     /// sends, rather than a hand-rolled struct literal.
-    fn fixture() -> HashMap<String, ItemView> {
+    fn fixture() -> IndexMap<String, ItemView> {
         serde_json::from_value(json!({
             // Parent chain: ITEM_NODE <- ARMOR <- ARMOR_VEST_TPL, ITEM_NODE <- HEADWEAR <- HELMET_TPL.
             ITEM_NODE: {},
@@ -1438,7 +1440,7 @@ mod tests {
     const ITEM_CONFLICT_TPL: &str = "e1e1e1e1e1e1e1e1e1e1e1e1";
     const ITEM_CONFLICT_DEAD_TPL: &str = "e2e2e2e2e2e2e2e2e2e2e2e2";
 
-    fn ammo_fixture() -> HashMap<String, ItemView> {
+    fn ammo_fixture() -> IndexMap<String, ItemView> {
         serde_json::from_value(json!({
             ITEM_NODE: {},
             AMMO_BOX: { "parent": ITEM_NODE },
@@ -1537,7 +1539,7 @@ mod tests {
     }
 
     fn context<'a>(
-        items_view: &'a HashMap<String, ItemView>,
+        items_view: &'a IndexMap<String, ItemView>,
         static_ammo_dist: &'a HashMap<String, Vec<StaticAmmoDetails>>,
     ) -> LootContext<'a> {
         // The assembly functions read neither presets, money, blacklist, config nor season, so

@@ -372,7 +372,9 @@ pub struct ContainerData {
 pub struct LootCommon {
     /// Already lowercased by the C# caller.
     pub location_id: String,
-    pub items_view: HashMap<String, ItemView>,
+    /// `IndexMap` only so the whole loot module shares one map type with [`RewardLootDb`] — this
+    /// envelope's view is looked up by key, never iterated, so the order never reaches the RNG.
+    pub items_view: IndexMap<String, ItemView>,
     pub default_presets: HashMap<String, PresetView>,
     pub money_tpls: Vec<String>,
     pub static_ammo_dist: HashMap<String, Vec<StaticAmmoDetails>>,
