@@ -11,12 +11,14 @@ namespace UnitTests.Tests.Generators;
 internal static class LootIdNormalizer
 {
     // The last six are BotBaseInventory's root pointers - each names one of the six base items the
-    // bot inventory starts with, so each is a fresh MongoId that would never match across paths
+    // bot inventory starts with, so each is a fresh MongoId that would never match across paths.
+    // "root" is RagfairOffer's, pointing at its own items[0].
     private static readonly string[] _idFields =
     [
         "_id",
         "parentId",
         "Root",
+        "root",
         "equipment",
         "stash",
         "sortingTable",
