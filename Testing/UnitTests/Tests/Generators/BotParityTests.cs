@@ -4,11 +4,14 @@ using SPTarkov.Server.Core.Generators.Loot;
 using SPTarkov.Server.Core.Helpers.Bot;
 using SPTarkov.Server.Core.Models.Common;
 using SPTarkov.Server.Core.Models.Eft.Common.Tables;
+using SPTarkov.Server.Core.Models.Eft.Match;
+using SPTarkov.Server.Core.Models.Enums;
 using SPTarkov.Server.Core.Models.Spt.Bots;
 using SPTarkov.Server.Core.Models.Spt.Config;
 using SPTarkov.Server.Core.Models.Spt.Tables;
 using SPTarkov.Server.Core.Servers;
 using SPTarkov.Server.Core.Services.Bot;
+using SPTarkov.Server.Core.Services.Profile;
 using SPTarkov.Server.Core.Utils;
 using SPTarkov.Server.Core.Utils.Cloners;
 using ProfileInfo = SPTarkov.Server.Core.Models.Eft.Profile.Info;
@@ -44,6 +47,7 @@ public class BotParityTests
     private JsonUtil _jsonUtil = default!;
     private BotTable _botTable = default!;
     private ICloner _cloner = default!;
+    private ProfileActivityService _profileActivityService = default!;
 
     private MongoId _sessionId;
 
@@ -61,6 +65,7 @@ public class BotParityTests
         _jsonUtil = di.GetService<JsonUtil>();
         _botTable = di.GetService<BotTable>();
         _cloner = di.GetService<ICloner>();
+        _profileActivityService = di.GetService<ProfileActivityService>();
 
         // ProfileHelper.GetPmcProfile and ProfileActivityService both key off a real session
         _sessionId = new MongoId();
@@ -86,6 +91,55 @@ public class BotParityTests
             Is.EqualTo(legacy.Randomisation),
             $"randomisation clamp state diverged for role={role} seed={seed}"
         );
+    }
+
+    /// <summary>
+    /// The other eight cases run without a raid, so randomisationClamps always comes back empty and
+    /// their clamp-equality assertion only proves both paths left the config alone. This one installs
+    /// a nighttime raid on a role and level whose randomisation bucket carries NighttimeChanges, so
+    /// the clamp is actually written - by GenerateAndAddEquipmentToBot on the legacy path and by
+    /// ReplayRandomisationClamps on the native one - and asserts both wrote the same thing.
+    ///
+    /// It deliberately does not compare the two inventories. pmc only carries NighttimeChanges from
+    /// level 15 up, and those buckets also set RandomisedArmorSlots, which sends equipment mod pools
+    /// through BotEquipmentModPoolService - a ConcurrentDictionary the native side cannot enumerate
+    /// in the same order. See the "Bot generation" limitations in ARCHITECTURE.md.
+    /// </summary>
+    [Test]
+    public void TheNighttimeRandomisationClampIsReplayedOnBothPaths()
+    {
+        const string role = "usec-at-night";
+        const ulong seed = 42;
+
+        PreWarmLootCache(role);
+
+        var equipmentFilters = _botConfig.Equipment[_botGeneratorHelper.GetBotEquipmentRole("pmcusec")];
+        var beforeRun = _jsonUtil.Serialize(equipmentFilters.Randomisation)!;
+        var raidData = _profileActivityService.GetProfileActivityRaidData(_sessionId);
+        var originalRaidConfiguration = raidData.RaidConfiguration;
+
+        try
+        {
+            // factory4_night is the one location IsNightTime answers true for without consulting the
+            // wall clock, so this case does not silently stop testing anything at 6am
+            raidData.RaidConfiguration = new GetRaidConfigurationRequestData
+            {
+                Location = "factory4_night",
+                TimeVariant = DateTimeEnum.CURR,
+            };
+
+            var native = Generate(role, seed, forceLegacy: false, LootGenerationPath.Native);
+            var legacy = Generate(role, seed, forceLegacy: true, LootGenerationPath.Legacy);
+
+            // Without this the two paths could agree by both doing nothing, which is exactly the
+            // hole the other eight cases have
+            Assert.That(native.Randomisation, Is.Not.EqualTo(beforeRun), "the clamp never fired, so this case proves nothing");
+            Assert.That(native.Randomisation, Is.EqualTo(legacy.Randomisation), "clamp replay diverged from the legacy write");
+        }
+        finally
+        {
+            raidData.RaidConfiguration = originalRaidConfiguration;
+        }
     }
 
     /// <summary>
@@ -201,6 +255,18 @@ public class BotParityTests
                 BotLevel = 1,
                 IsPmc = true,
             },
+            // The pmc equipment config only carries NighttimeChanges from level 15 up, so the
+            // nighttime case is the usec one at a level that selects such a bucket
+            "usec-at-night" => new BotGenerationDetails
+            {
+                Role = "pmcUSEC",
+                RoleLowercase = "pmcusec",
+                Side = "Usec",
+                BotDifficulty = "normal",
+                GameVersion = "standard",
+                BotLevel = 20,
+                IsPmc = true,
+            },
             "assault-as-playerscav" => new BotGenerationDetails
             {
                 Role = "assault",
@@ -216,7 +282,12 @@ public class BotParityTests
         };
 
         // PMCs read their template from the side, not the role - usec.json / bear.json
-        var templateKey = role == "assault-as-playerscav" ? "assault" : role;
+        var templateKey = role switch
+        {
+            "assault-as-playerscav" => "assault",
+            "usec-at-night" => "usec",
+            _ => role,
+        };
         var template = _cloner.Clone(_botTable.Types[templateKey])!;
 
         if (!details.IsPlayerScav)
