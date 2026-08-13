@@ -116,7 +116,7 @@ const SECURED_CONTAINER: &str = "SecuredContainer";
 pub fn generate_random_weapon(
     ctx: &mut BotContext,
     equipment_slot: &str,
-    bot_template_inventory: &BotTypeInventoryWire,
+    bot_template_inventory: &mut BotTypeInventoryWire,
     details: &BotGenerationDetailsWire,
     weapon_parent_id: &str,
     mod_chances: &IndexMap<String, f64>,
@@ -184,13 +184,12 @@ pub fn generate_weapon_by_tpl(
     ctx: &mut BotContext,
     weapon_tpl: &str,
     slot_name: &str,
-    bot_template_inventory: &BotTypeInventoryWire,
+    bot_template_inventory: &mut BotTypeInventoryWire,
     weapon_parent_id: &str,
     mod_chances: &IndexMap<String, f64>,
     details: &BotGenerationDetailsWire,
 ) -> Result<Option<GenerateWeaponResultWire>, LootError> {
     let items = ctx.items;
-    let mod_pool = &bot_template_inventory.mods;
 
     let Some(weapon_item_template) = get_item(items, weapon_tpl) else {
         ctx.diagnostics.push(localised(
@@ -242,7 +241,7 @@ pub fn generate_weapon_by_tpl(
     }
 
     // Add mods to weapon base
-    if mod_pool.contains_key(weapon_tpl) {
+    if bot_template_inventory.mods.contains_key(weapon_tpl) {
         // Role to treat bot as e.g. pmc/scav/boss
         let bot_equipment_role = get_bot_equipment_role(&details.role_lowercase).to_owned();
 
@@ -254,7 +253,10 @@ pub fn generate_weapon_by_tpl(
             weapon_id: weapon_with_mods[0].id.clone(),
             // Will become hydrated array of weapon + mods
             weapon: weapon_with_mods,
-            mod_pool: mod_pool.clone(),
+            // Moved out of the bot's template, not cloned: C# aliases `botTemplateInventory.Mods`
+            // here and `BotEquipmentModGenerator.cs:723/:735` write through the alias, so the
+            // cached sub-mod pools have to survive into the bot's *next* weapon.
+            mod_pool: std::mem::take(&mut bot_template_inventory.mods),
             parent_template: weapon_tpl.to_owned(),
             mod_spawn_chances: mod_chances.clone(),
             ammo_tpl: ammo_tpl.clone(),
@@ -266,7 +268,12 @@ pub fn generate_weapon_by_tpl(
             mod_limits,
             ..Default::default()
         };
-        generate_mods_for_weapon(ctx, &mut request)?;
+        let outcome = generate_mods_for_weapon(ctx, &mut request);
+        // Hand the pool back before propagating: the C# writes are already in the caller's object
+        // by the time it throws.
+        bot_template_inventory.mods = std::mem::take(&mut request.mod_pool);
+        outcome?;
+
         weapon_with_mods = request.weapon;
     }
 
@@ -316,7 +323,7 @@ pub fn generate_weapon_by_tpl(
                 .iter()
                 .map(|chamber| chamber.name.clone().unwrap_or_default())
                 .collect();
-            add_cartridge_to_chamber(&mut weapon_with_mods, &ammo_tpl, &chamber_slot_names);
+            add_cartridge_to_chamber(&mut weapon_with_mods, &ammo_tpl, &chamber_slot_names)?;
         }
     }
 
@@ -387,13 +394,22 @@ fn get_weapon_mod_limits(ctx: &BotContext, bot_role: &str) -> Result<BotModLimit
 }
 
 /// `BotWeaponGenerator.AddCartridgeToChamber` (`:253-279`).
+///
+/// # Errors
+///
+/// The `weaponWithModsList[0]` index at `:266`, reached when a preset fallback found no preset and
+/// left the weapon list empty.
 fn add_cartridge_to_chamber(
     weapon_with_mods_list: &mut Vec<Item>,
     ammo_template: &str,
     chamber_slot_ids: &[String],
-) {
+) -> Result<(), LootError> {
     for slot_id in chamber_slot_ids {
-        let root_id = weapon_with_mods_list[0].id.clone();
+        let Some(root_id) = weapon_with_mods_list.first().map(|item| item.id.clone()) else {
+            return Err(LootError::new(
+                "Index was out of range: weapon has no root item to chamber a round in",
+            ));
+        };
         let existing = weapon_with_mods_list
             .iter_mut()
             .find(|item| item.slot_id.as_deref() == Some(slot_id.as_str()));
@@ -421,6 +437,8 @@ fn add_cartridge_to_chamber(
             }),
         }
     }
+
+    Ok(())
 }
 
 /// `BotWeaponGenerator.ConstructWeaponBaseList` (`:291-310`).
@@ -1050,7 +1068,10 @@ fn fill_existing_magazines(
         return Ok(());
     };
 
-    // Magazine, usually
+    // Magazine, usually. **Deviation:** C# (`:774-779`) dereferences `parentDbItem.Name` unguarded
+    // and NREs for a magazine whose parent tpl is missing from the database; an absent parent or
+    // name is `""` here, which `MagazineIsCylinderRelated` answers false for — the same branch a
+    // normal magazine takes.
     let parent_name = magazine_template
         .parent
         .as_deref()
@@ -1096,11 +1117,16 @@ fn add_or_update_magazines_child_with_ammo(
 ) -> Result<(), LootError> {
     let items = ctx.items;
 
-    // Delete the existing cartridge object and create fresh below
-    weapon_with_mods.retain(|item| {
-        !(item.parent_id.as_deref() == Some(magazine.id.as_str())
-            && item.slot_id.as_deref() == Some("cartridges"))
+    // Delete the existing cartridge object and create fresh below. `FirstOrDefault` + `Remove`
+    // (`:823-828`) drops exactly one stack, not every one — a magazine that somehow carries two
+    // keeps the second.
+    let existing_cartridge = weapon_with_mods.iter().position(|item| {
+        item.parent_id.as_deref() == Some(magazine.id.as_str())
+            && item.slot_id.as_deref() == Some("cartridges")
     });
+    if let Some(existing_cartridge) = existing_cartridge {
+        weapon_with_mods.remove(existing_cartridge);
+    }
 
     // Create array with just magazine
     let mut magazine_with_cartridges = vec![magazine.clone()];
@@ -1141,7 +1167,9 @@ fn add_or_update_magazines_child_with_ammo(
 
 /// `BotWeaponGenerator.FillCamorasWithAmmo` (`:857-881`).
 fn fill_camoras_with_ammo(weapon_mods: &mut [Item], magazine_id: &str, ammo_tpl: &str) {
-    // For CylinderMagazine we exchange the ammo in the "camoras"
+    // For CylinderMagazine we exchange the ammo in the "camoras". **Deviation:** C# `:862` calls
+    // `SlotId.StartsWith` unguarded and NREs on an item with a null `slotId`; such an item is
+    // skipped here.
     for camora in weapon_mods.iter_mut().filter(|item| {
         item.parent_id.as_deref() == Some(magazine_id)
             && item
@@ -1207,6 +1235,11 @@ mod tests {
     const AMMO_BP: &str = "aaaaaaaaaaaaaaaaaaaaaaa7";
     const UBGL: &str = "aaaaaaaaaaaaaaaaaaaaaaa8";
     const GRENADE: &str = "aaaaaaaaaaaaaaaaaaaaaaa9";
+    /// A magazine with a **required** base slot and an optional extension slot, so the
+    /// required-only pool `:735` caches differs from the full pool `:723` would.
+    const MAG_MODULAR: &str = "aaaaaaaaaaaaaaaaaaaaaab3";
+    const MAG_BASE: &str = "aaaaaaaaaaaaaaaaaaaaaab4";
+    const MAG_EXTENSION: &str = "aaaaaaaaaaaaaaaaaaaaaab5";
     const VEST: &str = "aaaaaaaaaaaaaaaaaaaaaab1";
     const SECURE: &str = "aaaaaaaaaaaaaaaaaaaaaab2";
 
@@ -1245,7 +1278,8 @@ mod tests {
                         "reloadMode": "ExternalMagazine", "isChamberLoad": false,
                         "width": 4, "height": 2,
                         "chambers": [{"name": "patron_in_weapon", "filter": [AMMO_PS, AMMO_BP]}],
-                        "slots": [{"name": "mod_magazine", "required": false, "filter": [MAG]}],
+                        "slots": [{"name": "mod_magazine", "required": false,
+                                   "filter": [MAG, MAG_MODULAR]}],
                     },
                     RIFLE_UBGL: {
                         "name": "AK-ubgl", "weapClass": "assaultRifle", "maxDurability": 100.0,
@@ -1260,6 +1294,16 @@ mod tests {
                           "cartridgesMaxCount": 30, "cartridgesFirstFilter": [AMMO_PS],
                           "reloadMagType": "ExternalMagazine", "width": 1, "height": 1,
                           "cartridges": [{"name": "cartridges", "filter": [AMMO_PS, AMMO_BP]}]},
+                    MAG_MODULAR: {"name": "modular mag", "parent": MAGAZINE_PARENT,
+                        "cartridgesMaxCount": 30, "reloadMagType": "ExternalMagazine",
+                        "width": 1, "height": 1,
+                        "cartridges": [{"name": "cartridges", "filter": [AMMO_PS, AMMO_BP]}],
+                        "slots": [
+                            {"name": "mod_mag_base", "required": true, "filter": [MAG_BASE]},
+                            {"name": "mod_magazine_extension", "filter": [MAG_EXTENSION]},
+                        ]},
+                    MAG_BASE: {"name": "mag base"},
+                    MAG_EXTENSION: {"name": "mag extension"},
                     AMMO_PS: {"name": "PS", "caliber": RIFLE_CALIBER, "stackMaxSize": 60,
                               "width": 1, "height": 1},
                     AMMO_BP: {"name": "BP", "caliber": RIFLE_CALIBER, "stackMaxSize": 60,
@@ -1419,7 +1463,7 @@ mod tests {
             &mut ctx,
             RIFLE,
             "FirstPrimaryWeapon",
-            &bot_template(),
+            &mut bot_template(),
             "equipment-id",
             &no_chances(),
             &details("assault", false),
@@ -1490,7 +1534,7 @@ mod tests {
             &mut ctx,
             RIFLE_LOOSE,
             "Holster",
-            &bot_template(),
+            &mut bot_template(),
             "equipment-id",
             &no_chances(),
             &details("assault", false),
@@ -1522,7 +1566,7 @@ mod tests {
             &mut ctx,
             "cccccccccccccccccccccccc",
             "Holster",
-            &bot_template(),
+            &mut bot_template(),
             "equipment-id",
             &no_chances(),
             &details("assault", false),
@@ -1555,7 +1599,7 @@ mod tests {
             &mut ctx,
             RIFLE_LOOSE,
             "Holster",
-            &bot_template(),
+            &mut bot_template(),
             "equipment-id",
             &no_chances(),
             &details("pmcUSEC", true),
@@ -1579,7 +1623,7 @@ mod tests {
                 &mut ctx,
                 RIFLE_LOOSE,
                 "Holster",
-                &bot_template(),
+                &mut bot_template(),
                 "equipment-id",
                 &no_chances(),
                 &details(role, is_pmc),
@@ -1667,7 +1711,7 @@ mod tests {
             &mut ctx,
             RIFLE,
             "FirstPrimaryWeapon",
-            &bot_template(),
+            &mut bot_template(),
             "equipment-id",
             &no_chances(),
             &details("assault", false),
@@ -1726,7 +1770,7 @@ mod tests {
             &mut ctx,
             RIFLE,
             "FirstPrimaryWeapon",
-            &bot_template(),
+            &mut bot_template(),
             "equipment-id",
             &no_chances(),
             &details("assault", false),
@@ -1751,6 +1795,119 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // Mod pool aliasing (`BotEquipmentModGenerator.cs:723/:735`)
+    // -----------------------------------------------------------------------
+
+    /// A bot template whose mod pool has the weapon, so `GenerateModsForWeapon` runs and its
+    /// sub-mod caching writes land somewhere observable.
+    fn bot_template_with_mods() -> BotTypeInventoryWire {
+        serde_json::from_value(json!({
+            "equipment": {"FirstPrimaryWeapon": {RIFLE_LOOSE: 1}},
+            "Ammo": {RIFLE_CALIBER: {AMMO_PS: 1, AMMO_BP: 1}, UBGL_CALIBER: {GRENADE: 1}},
+            "items": {},
+            "mods": {RIFLE_LOOSE: {"mod_magazine": [MAG_MODULAR]}},
+        }))
+        .unwrap()
+    }
+
+    fn mod_chances() -> IndexMap<String, f64> {
+        IndexMap::from([
+            ("mod_magazine".to_owned(), 100.0),
+            ("mod_mag_base".to_owned(), 100.0),
+            ("mod_magazine_extension".to_owned(), 100.0),
+        ])
+    }
+
+    fn generate_into(
+        ctx: &mut BotContext,
+        template: &mut BotTypeInventoryWire,
+    ) -> GenerateWeaponResultWire {
+        generate_weapon_by_tpl(
+            ctx,
+            RIFLE_LOOSE,
+            "FirstPrimaryWeapon",
+            template,
+            "equipment-id",
+            &mod_chances(),
+            &details("assault", false),
+        )
+        .unwrap()
+        .unwrap()
+    }
+
+    /// C# aliases `botTemplateInventory.Mods` into `GenerateWeaponRequest.ModPool`, and
+    /// `:735` writes the required-mod pool of every sub-mod it adds back into it. The template is
+    /// cloned **per bot** (`BotGenerator.cs:147`), not per weapon, so those writes have to still be
+    /// there for the bot's next weapon.
+    #[test]
+    fn sub_mod_pool_writes_reach_the_callers_template() {
+        let fixture = Fixture::new();
+        let mut ctx = fixture.ctx();
+        let mut template = bot_template_with_mods();
+        let _guard = TestSeedGuard::install(SEED);
+
+        let weapon = generate_into(&mut ctx, &mut template);
+
+        // The magazine was added, and its required base slot filled from the cached pool.
+        assert!(
+            weapon
+                .weapon
+                .iter()
+                .any(|item| item.template == MAG_MODULAR)
+        );
+        assert!(weapon.weapon.iter().any(|item| item.template == MAG_BASE));
+
+        // `:735` cached the magazine's *required-only* pool into the bot's own template.
+        let cached = template
+            .mods
+            .get(MAG_MODULAR)
+            .expect("magazine pool written back into the caller's template");
+        assert_eq!(cached.keys().collect::<Vec<_>>(), vec!["mod_mag_base"]);
+        assert_eq!(
+            cached["mod_mag_base"].iter().collect::<Vec<_>>(),
+            vec![MAG_BASE]
+        );
+
+        // And the weapon's own entry is still there — the take/restore is not a swap.
+        assert!(template.mods.contains_key(RIFLE_LOOSE));
+    }
+
+    /// The next weapon reads what the last one cached instead of recomputing it: seed the pool with
+    /// the *full* sub-mod pool `:723` would have written and the optional extension slot, which the
+    /// required-only fallback never yields, gets filled.
+    #[test]
+    fn a_cached_sub_mod_pool_is_what_the_next_weapon_uses() {
+        let fixture = Fixture::new();
+        let mut ctx = fixture.ctx();
+        let mut template = bot_template_with_mods();
+        template.mods.insert(
+            MAG_MODULAR.to_owned(),
+            serde_json::from_value(json!({
+                "mod_mag_base": [MAG_BASE],
+                "mod_magazine_extension": [MAG_EXTENSION],
+            }))
+            .unwrap(),
+        );
+        let _guard = TestSeedGuard::install(SEED);
+
+        let weapon = generate_into(&mut ctx, &mut template);
+
+        assert!(
+            weapon
+                .weapon
+                .iter()
+                .any(|item| item.template == MAG_EXTENSION),
+            "the cached pool's optional slot was ignored: {:?}",
+            shape(&weapon.weapon)
+        );
+        // The cached entry is left as it was found, not overwritten by the fallback.
+        assert_eq!(
+            template.mods[MAG_MODULAR].keys().collect::<Vec<_>>(),
+            vec!["mod_mag_base", "mod_magazine_extension"]
+        );
+    }
+
+    // -----------------------------------------------------------------------
     // The UBGL path
     // -----------------------------------------------------------------------
 
@@ -1766,7 +1923,7 @@ mod tests {
             &mut ctx,
             RIFLE_UBGL,
             "FirstPrimaryWeapon",
-            &bot_template(),
+            &mut bot_template(),
             "equipment-id",
             &no_chances(),
             &details("assault", false),

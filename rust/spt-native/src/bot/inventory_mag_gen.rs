@@ -408,6 +408,11 @@ fn process_external(
 /// `ExternalInventoryMagGen.GetRandomExternalMagazineForInternalMagazineGun` (`:173-201`) — the
 /// chosen magazine's tpl, or `None` where the C# returns null.
 ///
+/// **Deviation:** C# `:176` calls `.Properties.Slots.FirstOrDefault(...)` unguarded, so a weapon
+/// missing from the database or declaring no `Slots` is an NRE/`ArgumentNullException` there; both
+/// return `None` here, which is the same "no magazine slot" path the C# `magSlot is null` check at
+/// `:177` takes two lines later.
+///
 /// # Errors
 ///
 /// The two unguarded derefs at `:184-186`: a weapon whose `mod_magazine` slot has no filter
