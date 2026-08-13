@@ -6,6 +6,10 @@ use serde::de::DeserializeOwned;
 
 use crate::loot::item_helper::LootError;
 use crate::loot::location_loot_generator::{generate_dynamic_loot, generate_static_containers};
+use crate::loot::loot_generator::{
+    create_forced_loot, create_random_loot, get_random_loot_container_loot,
+    get_sealed_weapon_case_loot,
+};
 use crate::runtime::runtime;
 use crate::verify;
 
@@ -71,7 +75,7 @@ unsafe fn write_buffer(bytes: Vec<u8>, out_ptr: *mut *mut u8, out_len: *mut usiz
     }
 }
 
-/// The shared body of the two generation exports: JSON request in, status plus either the JSON
+/// The shared body of the generation exports: JSON request in, status plus either the JSON
 /// result or an error message out. Runs on the calling thread.
 ///
 /// # Safety
@@ -157,6 +161,70 @@ pub unsafe extern "C" fn spt_generate_dynamic_loot(
 }
 
 /// # Safety
+/// See `spt_generate_static_containers`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn spt_create_random_loot(
+    req_ptr: *const u8,
+    req_len: usize,
+    out_ptr: *mut *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    unsafe { run_generator(req_ptr, req_len, out_ptr, out_len, create_random_loot) }
+}
+
+/// # Safety
+/// See `spt_generate_static_containers`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn spt_create_forced_loot(
+    req_ptr: *const u8,
+    req_len: usize,
+    out_ptr: *mut *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    unsafe { run_generator(req_ptr, req_len, out_ptr, out_len, create_forced_loot) }
+}
+
+/// # Safety
+/// See `spt_generate_static_containers`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn spt_get_sealed_weapon_case_loot(
+    req_ptr: *const u8,
+    req_len: usize,
+    out_ptr: *mut *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    unsafe {
+        run_generator(
+            req_ptr,
+            req_len,
+            out_ptr,
+            out_len,
+            get_sealed_weapon_case_loot,
+        )
+    }
+}
+
+/// # Safety
+/// See `spt_generate_static_containers`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn spt_get_random_loot_container_loot(
+    req_ptr: *const u8,
+    req_len: usize,
+    out_ptr: *mut *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    unsafe {
+        run_generator(
+            req_ptr,
+            req_len,
+            out_ptr,
+            out_len,
+            get_random_loot_container_loot,
+        )
+    }
+}
+
+/// # Safety
 /// `ptr` and `len` must come from a successful `spt_*` call that handed back a buffer, and be
 /// freed at most once.
 #[unsafe(no_mangle)]
@@ -191,6 +259,11 @@ mod tests {
     #[test]
     fn abi_version_export_matches_crate_const() {
         assert_eq!(spt_native_abi_version(), crate::ABI_VERSION);
+        assert_eq!(
+            crate::ABI_VERSION,
+            4,
+            "bump SptNative.ExpectedAbiVersion too"
+        );
     }
 
     #[test]
@@ -344,6 +417,104 @@ mod tests {
         assert_eq!(
             String::from_utf8(out).unwrap(),
             format!("Container: {CONTAINER_TPL} is missing from staticLoot.json")
+        );
+    }
+
+    /// Every required `RewardLootDb` member, spliced into the reward-loot request literals below.
+    /// The weapon tpl in `weaponRewardWeight` below is deliberately absent from `itemsView`.
+    const REWARD_DB_JSON: &str = r#"
+        "itemsView":{},"defaultPresets":[],"defaultPresetsByTpl":{},
+        "globalBlacklist":[],"rewardItemBlacklist":[],"rewardBaseTypeBlacklist":[],
+        "bossItems":[],"inactiveSeasonalItems":[]
+    "#;
+
+    #[test]
+    fn random_loot_roundtrips_result_json() {
+        // Every count zero and an empty type whitelist: nothing to draw, so no fixture is needed.
+        let request = format!(
+            r#"{{{REWARD_DB_JSON},"lootRequest":{{"weaponPresetCount":{{"min":0,"max":0}},
+            "armorPresetCount":{{"min":0,"max":0}},"itemCount":{{"min":0,"max":0}},
+            "weaponCrateCount":{{"min":0,"max":0}},"itemBlacklist":[],"itemTypeWhitelist":[],
+            "itemLimits":{{}},"itemStackLimits":{{}},"armorLevelWhitelist":[]}}}}"#
+        );
+
+        let (status, out) = call_generate(spt_create_random_loot, request.as_bytes());
+
+        assert_eq!(status, STATUS_OK);
+        let result: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(result["items"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn forced_loot_roundtrips_result_json() {
+        let request = format!(r#"{{{REWARD_DB_JSON},"forcedLoot":{{}}}}"#);
+
+        let (status, out) = call_generate(spt_create_forced_loot, request.as_bytes());
+
+        assert_eq!(status, STATUS_OK);
+        let result: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(result["items"], serde_json::json!([]));
+        assert_eq!(result["diagnostics"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn sealed_weapon_case_roundtrips_result_json() {
+        // The drawn weapon is not in `itemsView`, so the generator takes its diagnostic early-out —
+        // a result, not an error, which is what the transport has to carry.
+        let request = format!(
+            r#"{{{REWARD_DB_JSON},"containerSettings":{{
+            "weaponRewardWeight":{{"888888888888888888888888":1}},"defaultPresetsOnly":false,
+            "weaponModRewardLimits":{{}},"rewardTypeLimits":{{}},"ammoBoxWhitelist":[],
+            "allowBossItems":false}},"presetsByTpl":{{}},"linkedItems":{{}}}}"#
+        );
+
+        let (status, out) = call_generate(spt_get_sealed_weapon_case_loot, request.as_bytes());
+
+        assert_eq!(status, STATUS_OK);
+        let result: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(result["items"], serde_json::json!([]));
+        assert_eq!(
+            result["diagnostics"][0]["localeKey"],
+            "loot-non_item_picked_as_sealed_weapon_crate_reward"
+        );
+    }
+
+    #[test]
+    fn random_loot_container_roundtrips_result_json() {
+        let request =
+            format!(r#"{{{REWARD_DB_JSON},"rewardDetails":{{"rewardCount":0}},"presetTpls":[]}}"#);
+
+        let (status, out) = call_generate(spt_get_random_loot_container_loot, request.as_bytes());
+
+        assert_eq!(status, STATUS_OK);
+        let result: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(result["items"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn unparseable_reward_loot_request_returns_bad_args_with_the_parse_error() {
+        let (status, out) = call_generate(spt_create_random_loot, b"{\"itemsView\":");
+
+        assert_eq!(status, STATUS_BAD_ARGS);
+        let message = String::from_utf8(out).unwrap();
+        assert!(
+            message.contains("EOF while parsing"),
+            "expected the serde error, got: {message}"
+        );
+    }
+
+    #[test]
+    fn a_reward_loot_failure_returns_status_error_and_the_message() {
+        // An empty `lootRequest` parses — every member is optional — and then fails on the first
+        // null the C# would have thrown on.
+        let request = format!(r#"{{{REWARD_DB_JSON},"lootRequest":{{}}}}"#);
+
+        let (status, out) = call_generate(spt_create_random_loot, request.as_bytes());
+
+        assert_eq!(status, STATUS_ERROR);
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "LootRequest.ItemLimits is null"
         );
     }
 
