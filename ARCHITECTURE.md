@@ -183,7 +183,7 @@ hashing `SPT_Data` with XXH3-128 and comparing it against `checks.dat`, in paral
 process-wide tokio runtime (`runtime.rs`), replacing the per-file MD5 loop that used to run inside
 the import; and generating a location's static and loose loot (`src/loot/`).
 
-Five C-ABI exports (`src/ffi.rs`), consumed by `Libraries/SPTarkov.Server.Core/Native/`:
+Nine C-ABI exports (`src/ffi.rs`), consumed by `Libraries/SPTarkov.Server.Core/Native/`:
 
 | Export | Purpose |
 |---|---|
@@ -191,9 +191,13 @@ Five C-ABI exports (`src/ffi.rs`), consumed by `Libraries/SPTarkov.Server.Core/N
 | `spt_verify_database` | Hashes the tree, returns a heap-allocated JSON `VerifyReport` |
 | `spt_generate_static_containers` | Fills a map's static containers, returns spawn points as JSON |
 | `spt_generate_dynamic_loot` | Picks and fills a map's loose loot spawn points, returns them as JSON |
+| `spt_create_random_loot` | Airdrop loot: items, presets and sealed crates for one `LootRequest` |
+| `spt_create_forced_loot` | The forced-item half of airdrop loot |
+| `spt_get_sealed_weapon_case_loot` | A sealed weapon case's weapon, its mods and the extra rewards |
+| `spt_get_random_loot_container_loot` | A reward container's rolled contents |
 | `spt_buf_free` | Releases those buffers |
 
-The two generation exports take the request as UTF-8 JSON and write a buffer on failure as well as
+The six generation exports take the request as UTF-8 JSON and write a buffer on failure as well as
 on success — the error message — so `SptNative.Generate` decides ownership by the out-pointer, never
 by the status code. `SptNative.VerifyDatabase`'s free-on-success-only shape must not be copied into
 them.
@@ -332,6 +336,49 @@ call made from inside it, as `LocationLootGenerator` does. An instance method on
 can be patched by `SPTarkov.Reflection` and its registration replaced; a static class can be neither
 patched, mocked, nor overridden.
 
+### Reward loot generation
+
+`Generators/Loot/LootGenerator` — airdrop loot, sealed weapon cases and reward containers — runs
+native behind the same dual path, completing the loot family. Its four public entry points
+(`CreateRandomLoot`, `CreateForcedLoot`, `GetSealedWeaponCaseLoot`, `GetRandomLootContainerLoot`)
+project the live database and config into a payload and call `spt_create_random_loot`,
+`spt_create_forced_loot`, `spt_get_sealed_weapon_case_loot` or `spt_get_random_loot_container_loot`;
+the algorithms live in `rust/spt-native/src/loot/loot_generator.rs`, the envelopes in
+`Native/Loot/RewardLootPayloads.cs`. The 4.1.2 implementation is retained verbatim as the legacy
+path, the diagnostics are replayed through the same `PayloadProjection.ReplayDiagnostics` the
+location generator uses, and the items-view projection is shared between both generators.
+
+- **Dispatch is the same contract as `LocationLootGenerator`.** Harmony patches on the four *public*
+  entry points run around the native body — prefix and postfix fire on the dispatcher, arguments and
+  results included, whichever path runs underneath. Only a patch on one of the nine *protected*
+  members flips execution to the legacy path, because that is the only way those hooks can fire with
+  genuine baseline semantics.
+- **The escape hatch is shared.** `LocationConfig.ForceLegacyLootGeneration` forces *both* loot
+  generators onto their legacy paths — there is no per-generator flag. Deliberate for now: one flag
+  is the whole loot family, and a mod that needs baseline loot semantics almost certainly needs both
+  halves. Agreed future note: split it into per-generator flags when a real need appears — revisit
+  at the bot-family port, which will want its own flag anyway.
+- **The constructor addition is additive.** The frozen 11-parameter 4.1.2 constructor stays; a
+  12th-parameter overload adding `LocationConfig` is what the container selects (proven by the
+  dispatch test, which resolves the class and asserts the flag is honoured). A mod that constructs
+  the class manually through the 11-parameter constructor still gets Harmony hook detection, it just
+  has no config to read, so the flag check is skipped. Additive, so the apicompat gate is unaffected.
+- **The blacklist crosses as two collections, not one.** `configBlacklist`
+  (`ItemFilterService.GetBlacklistedItems()`) is what the reward-pool union reads; `globalBlacklist`
+  (`GetItemBlacklistCache()`, the mod-extensible cache behind `IsItemBlacklisted`) is what the sealed
+  container filters read. They are equal until a mod calls `AddItemToBlacklistCache` at runtime, and
+  the split mirrors the exact source each C# call site used — collapsing them would silently change
+  behaviour for those mods.
+
+**Performance: this port is a loss, deliberately.** Measured head to head (n=20, Release, airdrop
+`mixed`): native `CreateRandomLoot` ~53.3 ms median against ~17.0 ms for the retained legacy path.
+Roughly 50 ms of that is the fixed per-call items-view projection over the whole item table — the
+same cost location loot pays, but reward loot returns 15-35 items, so there is nothing to amortise it
+against. The projection is rebuilt on every call on purpose: that is what makes runtime table and
+config mutations by mods always visible (Porting playbook, rule 2), so it is not cached. Sanctioned
+future optimization if reward-loot latency ever matters: raw-JSON passthrough of the items table, or
+an invalidation-aware view cache — not a snapshot taken at startup.
+
 ### Porting playbook
 
 The rules every Rust cutover follows, learned from the loot port. The contract they protect:
@@ -373,6 +420,7 @@ binary compatibility with mods compiled against the frozen 4.1.2 assemblies, enf
    `dotnet build server-csharp.slnx -c Release` → `mpex-api-compat/ci/check-api-compat.sh` (all
    six assemblies clean) → `dotnet test` → `csharpier format .` before merge.
 
-Agreed port order: mod-compat test gaps (`todo/TODO-TESTING.md`), RNG parity, then
-`LootGenerator.cs` to finish loot, then the bot family and ragfair per `todo/TODO.md`. The
-checks.dat generate path (`todo/TODO.md` #12) is a detached quick win.
+The loot family is complete — `LocationLootGenerator` and `LootGenerator` both run native behind the
+dual path. Remaining agreed order: mod-compat test gaps (`todo/TODO-TESTING.md`), RNG parity, then
+the bot family and ragfair per `todo/TODO.md`. The checks.dat generate path (`todo/TODO.md` #12) is a
+detached quick win.
