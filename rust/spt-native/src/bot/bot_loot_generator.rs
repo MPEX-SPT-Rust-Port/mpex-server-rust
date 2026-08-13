@@ -122,13 +122,15 @@ const WALLET_GRID_SLOT_ID: &str = "main";
 
 /// Everything `BotLootGenerator` reads that is fixed for one bot: the configs C# takes through its
 /// constructor, the resolved loot pools, and the two ids the C# reaches for off objects this port
-/// does not carry whole (`botId`, and `botInventory.Equipment`).
+/// does not carry whole (`botInventory.Equipment`).
+///
+/// `botId` is **not** carried: C# threads it through every signature here only to reach
+/// `BotInventoryContainerService`'s per-bot cache key, and this port's [`ContainerGrids`] *is* one
+/// bot's entry, so nothing on this path has anything to key.
 ///
 /// A bundle rather than more [`BotContext`] fields: none of it is read outside this module, and the
 /// seven sibling fixtures that build a `BotContext` would otherwise all have to grow stubs for it.
 pub struct BotLootConfig<'a> {
-    /// Bots unique identifier — `botId` in every C# signature here.
-    pub bot_id: &'a str,
     /// `botInventory.Equipment`, the parent id a loose weapon is generated under (`:716`).
     pub equipment_id: &'a str,
     /// `botJsonTemplate.BotGeneration.Items`.
@@ -187,6 +189,8 @@ pub fn generate_loot(
         item_counts.stims.as_ref(),
         item_counts.grenades.as_ref(),
     ];
+    // `itemCounts?.X.Weights is null` for all eleven (`:79-91`). See [`weighted_count`] for what an
+    // empty map means here and how it differs from the C# null it stands in for.
     if weights
         .iter()
         .any(|block| block.is_none_or(|block| block.weights.is_empty()))
@@ -486,14 +490,30 @@ pub fn generate_loot(
 /// One of the eleven `GetWeightedValue` draws at `:97-107`. `GenerationData.Weights` is keyed by
 /// `double` in C#; here the drawn key is parsed back out, as everywhere else in the bot port.
 ///
+/// **Divergence, deliberate.** C# distinguishes a *null* `Weights` from an empty one: the guard at
+/// `:79-91` is a null check, so `"grenades": {}` (null `Weights`) warns and returns, while
+/// `"grenades": {"weights": {}}` (empty but present) sails past it and throws inside
+/// `GetWeightedValue`. `GenerationDataWire.weights` is `#[serde(default)]`, so absent, `null` and
+/// `{}` all arrive as one empty map and the two cases are not distinguishable on the wire — both
+/// take the warn-and-return exit. Making the field an `Option` would restore the distinction, but
+/// only for a bot json with a literally empty weights object, which no shipped bot has, and it
+/// would drag `bot_weapon_generator`'s magazine block into the same question. A lootless bot is the
+/// safer of the two outcomes behind FFI.
+///
 /// # Errors
 ///
-/// From `get_weighted_value`, plus the key parse the C# deserializer does up front.
+/// From `get_weighted_value`, plus the key parse the C# deserializer does up front. A block the
+/// caller did not null-check is a `LootError` rather than a panic; the caller does check.
 fn weighted_count(
     weights: Option<&crate::bot::models::GenerationDataWire>,
 ) -> Result<f64, LootError> {
-    let weights = &weights.expect("caller null-checked the block").weights;
-    let chosen = get_weighted_value(weights)?;
+    let Some(weights) = weights else {
+        return Err(LootError::new(
+            "Object reference not set to an instance of an object.",
+        ));
+    };
+
+    let chosen = get_weighted_value(&weights.weights)?;
 
     chosen.parse().map_err(|_| {
         LootError::new(format!(
@@ -878,11 +898,17 @@ fn get_container_slot_map(
         return Vec::new();
     };
 
-    // Rows = CellsV, columns = CellsH — `GetBlankContainerMap(cellsV, cellsH)` swaps its arguments
-    // on the way in (`:914`) and then builds `new int[verticalSizeY, horizontalSizeX]`.
+    // Rows = **CellsH**, columns = **CellsV** — the axes come out swapped, and deliberately so:
+    // `GetContainerSlotMap` names them backwards (`containerRowCount = CellsH`,
+    // `containerColumnCount = CellsV`, `:911-913`) and then hands them to
+    // `GetBlankContainerMap(horizontalSizeX: CellsV, verticalSizeY: CellsH)` (`:915`), which builds
+    // `new int[verticalSizeY, horizontalSizeX]` (`ItemHelper.cs:1804-1807`) — i.e.
+    // `new int[CellsH, CellsV]`. Note this is the *opposite* of
+    // `ContainerGrids::add_empty_container`, whose `BotInventoryContainerService` source sizes
+    // `int[CellsV, CellsH]`; the two C# helpers genuinely disagree and only square grids hide it.
     vec![
-        vec![0u8; first_grid.cells_h.unwrap_or(0).max(0) as usize];
-        first_grid.cells_v.unwrap_or(0).max(0) as usize
+        vec![0u8; first_grid.cells_v.unwrap_or(0).max(0) as usize];
+        first_grid.cells_h.unwrap_or(0).max(0) as usize
     ]
 }
 
@@ -1369,6 +1395,9 @@ mod tests {
     const BACKPACK_TPL: &str = "cont_backpack";
     const SECURE_TPL: &str = "cont_secure";
     const WALLET_TPL: &str = "wallet";
+    /// A deliberately **non-square** wallet: 3 cells horizontally, 2 vertically. Every vanilla
+    /// wallet is 2x2, which hides `GetContainerSlotMap`'s axis swap; this one does not.
+    const WALLET_TALL_TPL: &str = "wallet_tall";
     const ROUBLES: &str = "money_rub";
     const DOLLARS: &str = "money_usd";
     const RIFLE: &str = "rifle";
@@ -1423,6 +1452,8 @@ mod tests {
                         "stackSlotMaxCount": 20, "stackSlotFirstFilterFirst": AMMO_PS},
                     WALLET_TPL: {"name": "wallet", "width": 1, "height": 1,
                         "grids": [{"name": "main", "cellsH": 2, "cellsV": 2}]},
+                    WALLET_TALL_TPL: {"name": "tall wallet", "width": 1, "height": 1,
+                        "grids": [{"name": "main", "cellsH": 3, "cellsV": 2}]},
                     RIFLE: {"name": "rifle", "parent": crate::loot::item_helper::WEAPON,
                         "width": 3, "height": 1, "weapClass": "assaultRifle",
                         "maxDurability": 100.0, "caliber": RIFLE_CALIBER, "defAmmo": AMMO_PS,
@@ -1488,7 +1519,7 @@ mod tests {
                     "itemCount": {"min": 2, "max": 2},
                     "stackSizeWeight": {"5000": 1, "10000": 1},
                     "currencyWeight": {ROUBLES: 1},
-                    "walletTplPool": [WALLET_TPL],
+                    "walletTplPool": [WALLET_TPL, WALLET_TALL_TPL],
                 }))
                 .unwrap(),
                 currency_stack_size: serde_json::from_value(json!({
@@ -1558,7 +1589,6 @@ mod tests {
 
         fn config(&self) -> BotLootConfig<'_> {
             BotLootConfig {
-                bot_id: "bot1",
                 equipment_id: "equipment1",
                 item_counts: &self.item_counts,
                 weapon_mod_chances: &self.mod_chances,
@@ -1836,6 +1866,35 @@ mod tests {
                 "secureloot1"
             ]
         );
+
+        // Same run with the vest count raised and the backpack count still zero: the vest branch
+        // is the one that places an item, which is the positive half of the asymmetry — the gate
+        // at `:317` is the slot, not the count, so only the backpack's `> 0` (`:273`) can skip.
+        fixture.item_counts.vest_loot =
+            serde_json::from_value(json!({"weights": {"1": 1}})).unwrap();
+        let mut ctx = fixture.ctx();
+        let (mut grids, mut inventory) = bot_with_containers(&ctx);
+        let _guard = TestSeedGuard::install(SEED);
+
+        generate_loot(
+            &mut ctx,
+            &mut grids,
+            &mut inventory,
+            &details("pmcusec", true),
+            &mut BotTypeInventoryWire::default(),
+            &fixture.config(),
+        )
+        .unwrap();
+
+        let vest_item = &inventory[4];
+        assert_eq!(vest_item.template, "vestloot1");
+        assert_eq!(vest_item.parent_id.as_deref(), Some("vest1"));
+        // Still no backpack loot and still no loose weapon, despite the 100% chance.
+        assert!(
+            !inventory
+                .iter()
+                .any(|item| item.template == "bp1" || item.template == RIFLE)
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1997,6 +2056,49 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    /// `GetContainerSlotMap` (`InventoryHelper.cs:906-916`) sizes the wallet grid as
+    /// `new int[CellsH, CellsV]` — rows from **CellsH**, columns from **CellsV** — the opposite of
+    /// `BotInventoryContainerService`'s `int[CellsV, CellsH]`. A 3x2 wallet is 3 rows of 2 columns,
+    /// so the third 1x1 stack wraps to `(0, 1)`; the un-swapped 2 rows of 3 columns would put it at
+    /// `(2, 0)` instead. Every vanilla wallet is square, which is exactly why this is worth pinning.
+    #[test]
+    fn a_non_square_wallet_uses_cells_h_for_rows_and_cells_v_for_columns() {
+        let mut fixture = Fixture::new();
+        fixture.wallet_loot.item_count = crate::bot::repair_service::MinMax { min: 3, max: 3 };
+        let mut ctx = fixture.ctx();
+        let config = fixture.config();
+        let (mut grids, mut inventory) = bot_with_containers(&ctx);
+        let _guard = TestSeedGuard::install(SEED);
+
+        add_loot_from_pool(
+            &mut ctx,
+            &mut grids,
+            &config,
+            IndexMap::from([(WALLET_TALL_TPL.to_owned(), 1.0)]),
+            &[BACKPACK.to_owned()],
+            1.0,
+            &mut inventory,
+            "assault",
+            None,
+            0.0,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(inventory[4].template, WALLET_TALL_TPL);
+        let positions: Vec<_> = inventory[5..]
+            .iter()
+            .map(|item| {
+                let location = item.location.as_ref().unwrap();
+                (
+                    location["x"].as_i64().unwrap(),
+                    location["y"].as_i64().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(positions, vec![(0, 0), (1, 0), (0, 1)]);
     }
 
     #[test]
