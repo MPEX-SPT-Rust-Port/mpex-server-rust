@@ -1472,7 +1472,8 @@ fn get_armor_items(ctx: &mut LootContext, chosen_tpl: &str, items: Vec<Item>) ->
         .is_some_and(|slots| !slots.is_empty());
     if has_slots {
         return item_helper::add_child_slot_items(
-            ctx,
+            items_view,
+            &mut ctx.diagnostics,
             items,
             chosen_tpl,
             Some(&config.mod_spawn_chance_percent),

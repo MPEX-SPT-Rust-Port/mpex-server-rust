@@ -117,6 +117,67 @@ pub fn armor_item_can_hold_mods(items_view: &IndexMap<String, ItemView>, tpl: &s
     is_of_baseclasses(items_view, tpl, &[HEADWEAR, VEST, ARMOR])
 }
 
+/// `ItemHelper._softInsertIds` (`ItemHelper.cs:82-98`).
+const SOFT_INSERT_IDS: [&str; 14] = [
+    "groin",
+    "groin_back",
+    "soft_armor_back",
+    "soft_armor_front",
+    "soft_armor_left",
+    "soft_armor_right",
+    "shoulder_l",
+    "shoulder_r",
+    "collar",
+    "helmet_top",
+    "helmet_back",
+    "helmet_eyes",
+    "helmet_jaw",
+    "helmet_ears",
+];
+
+/// `ItemHelper.ItemRequiresSoftInserts` (`ItemHelper.cs:369-392`). The `GetItem` miss and the
+/// no-slots exit collapse into the same `is_none_or` here — both return false there too.
+pub fn item_requires_soft_inserts(items_view: &IndexMap<String, ItemView>, item_tpl: &str) -> bool {
+    // Not a slot that takes soft-inserts
+    if !armor_item_can_hold_mods(items_view, item_tpl) {
+        return false;
+    }
+
+    get_item(items_view, item_tpl)
+        .and_then(|details| details.slots.as_deref())
+        .is_some_and(|slots| {
+            slots.iter().any(|slot| {
+                SOFT_INSERT_IDS.contains(
+                    &slot
+                        .name
+                        .as_deref()
+                        .unwrap_or_default()
+                        .to_lowercase()
+                        .as_str(),
+                )
+            })
+        })
+}
+
+/// `ItemHelper.GetRandomisedAmmoStackSize` (`ItemHelper.cs:1767-1775`) with its `maxLimit` default
+/// of 60, which is the only value any caller passes.
+pub fn get_randomised_ammo_stack_size(ammo_item_template: &ItemView) -> i32 {
+    const MAX_LIMIT: i32 = 60;
+
+    if ammo_item_template.stack_max_size == Some(1) {
+        // Max is one, nothing to randomise
+        return 1;
+    }
+
+    random_util::get_int(
+        ammo_item_template.stack_min_random.unwrap_or(1),
+        ammo_item_template
+            .stack_max_random
+            .unwrap_or(1)
+            .min(MAX_LIMIT),
+    )
+}
+
 /// `ItemExtensions.GetItemWithChildren` (`ItemExtensions.cs:240-278`) — a stack walk that emits the
 /// root first and then pops children last-in-first-out, cloning as it goes.
 pub fn get_item_with_children(items: &[Item], base_item_id: &str) -> Vec<Item> {
@@ -775,13 +836,16 @@ pub fn fill_magazine_with_cartridge(
 
 /// `ItemHelper.AddChildSlotItems` (`ItemHelper.cs:1557-1636`), minus the `requiredOnly` flag no loot
 /// call site passes, with `GetCompatibleTplFromArray` (`ItemHelper.cs:1644-1653`) inlined.
+///
+/// Takes the two things it reads off the context rather than the context itself: the bot family has
+/// its own ([`crate::bot::BotContext`]) and calls this from `AddRequiredChildItemsToParent`.
 pub fn add_child_slot_items(
-    ctx: &mut LootContext,
+    items_view: &IndexMap<String, ItemView>,
+    diagnostics: &mut Vec<Diagnostic>,
     item_to_add: Vec<Item>,
     item_tpl: &str,
     mod_spawn_chance_dict: Option<&HashMap<String, f64>>,
 ) -> Vec<Item> {
-    let items_view = ctx.items_view;
     let mut result = item_to_add;
     let mut incompatible_mod_tpls: HashSet<&str> = HashSet::new();
     // C# reads `result[0]` per slot and throws on an empty list; the root never moves, so it is read
@@ -809,7 +873,7 @@ pub fn add_child_slot_items(
 
         let item_pool = slot.filter.as_deref().unwrap_or_default();
         if item_pool.is_empty() {
-            ctx.diagnostics.push(diagnostic(
+            diagnostics.push(diagnostic(
                 DEBUG,
                 format!("Unable to choose a mod for slot: {slot_name} on item: {item_tpl}, parents' 'Filter' array is empty, skipping"),
             ));
@@ -822,7 +886,7 @@ pub fn add_child_slot_items(
             .filter(|tpl| !incompatible_mod_tpls.contains(tpl.as_str()))
             .collect();
         if compatible_tpls.is_empty() {
-            ctx.diagnostics.push(diagnostic(
+            diagnostics.push(diagnostic(
                 DEBUG,
                 format!(
                     "Unable to choose a mod for slot: {slot_name} on item: {item_tpl}, no compatible tpl found in pool of {}, skipping",
@@ -2188,7 +2252,8 @@ mod tests {
         let mut ctx = context(&view, &dist);
 
         let result = add_child_slot_items(
-            &mut ctx,
+            &view,
+            &mut ctx.diagnostics,
             root(ITEM_WITH_SLOTS_TPL),
             ITEM_WITH_SLOTS_TPL,
             None,
@@ -2226,7 +2291,8 @@ mod tests {
             let mut ctx = context(&view, &dist);
 
             let result = add_child_slot_items(
-                &mut ctx,
+                &view,
+                &mut ctx.diagnostics,
                 root(ITEM_WITH_SLOTS_TPL),
                 ITEM_WITH_SLOTS_TPL,
                 Some(&chances),
@@ -2249,7 +2315,8 @@ mod tests {
             let mut ctx = context(&view, &dist);
 
             let result = add_child_slot_items(
-                &mut ctx,
+                &view,
+                &mut ctx.diagnostics,
                 root(ITEM_WITH_SLOTS_TPL),
                 ITEM_WITH_SLOTS_TPL,
                 Some(&chances),
@@ -2273,8 +2340,13 @@ mod tests {
         for _ in 0..50 {
             let mut ctx = context(&view, &dist);
 
-            let result =
-                add_child_slot_items(&mut ctx, root(ITEM_CONFLICT_TPL), ITEM_CONFLICT_TPL, None);
+            let result = add_child_slot_items(
+                &view,
+                &mut ctx.diagnostics,
+                root(ITEM_CONFLICT_TPL),
+                ITEM_CONFLICT_TPL,
+                None,
+            );
 
             // MOD_A conflicts with MOD_B, so slot two can only ever land on MOD_C.
             assert_eq!(result.len(), 3);
@@ -2290,7 +2362,8 @@ mod tests {
         let mut ctx = context(&view, &dist);
 
         let result = add_child_slot_items(
-            &mut ctx,
+            &view,
+            &mut ctx.diagnostics,
             root(ITEM_CONFLICT_DEAD_TPL),
             ITEM_CONFLICT_DEAD_TPL,
             None,

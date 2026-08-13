@@ -341,6 +341,137 @@ pub struct GenerateWeaponResultWire {
     pub weapon_template: String,
 }
 
+/// `Models/Eft/Common/Tables/BotType.cs:158-198` (`GenerationWeightingItems`), narrowed to the
+/// eleven blocks `BotLootGenerator.GenerateLoot` draws from (`:97-107`). `magazines` and `looseLoot`
+/// belong to the weapon path and land here when it reads them.
+///
+/// Every block is an `Option` because C# leaves the unset ones null: `itemCounts?.BackpackLoot.Weights
+/// is null` (`:80`) null-checks only the *outer* `Items`, so a bot json missing one of these blocks
+/// is an NRE there. Here it lands on the same warn-and-return exit as an empty weights map, which is
+/// a deviation from a crash, not from an outcome.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ItemCountsWire {
+    #[serde(rename = "grenades")]
+    pub grenades: Option<GenerationDataWire>,
+    #[serde(rename = "healing")]
+    pub healing: Option<GenerationDataWire>,
+    #[serde(rename = "drugs")]
+    pub drugs: Option<GenerationDataWire>,
+    #[serde(rename = "food")]
+    pub food: Option<GenerationDataWire>,
+    #[serde(rename = "drink")]
+    pub drink: Option<GenerationDataWire>,
+    #[serde(rename = "currency")]
+    pub currency: Option<GenerationDataWire>,
+    #[serde(rename = "stims")]
+    pub stims: Option<GenerationDataWire>,
+    #[serde(rename = "backpackLoot")]
+    pub backpack_loot: Option<GenerationDataWire>,
+    #[serde(rename = "pocketLoot")]
+    pub pocket_loot: Option<GenerationDataWire>,
+    #[serde(rename = "vestLoot")]
+    pub vest_loot: Option<GenerationDataWire>,
+    #[serde(rename = "specialItems")]
+    pub special_items: Option<GenerationDataWire>,
+}
+
+/// `Models/Spt/Bots/BotLootCache.cs:6-46` — the thirteen pools `BotLootCacheService` resolves, sent
+/// pre-built because the service itself (and the PMC pool generation behind it) stays C#-side.
+///
+/// `combined_pool_loot` is carried for completeness; `GenerateLoot` never reads it. See the module
+/// doc of [`crate::bot::bot_loot_generator`] for the twelve reads it does perform.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct BotLootCacheWire {
+    pub backpack_loot: IndexMap<String, f64>,
+    pub pocket_loot: IndexMap<String, f64>,
+    pub vest_loot: IndexMap<String, f64>,
+    pub secure_loot: IndexMap<String, f64>,
+    pub combined_pool_loot: IndexMap<String, f64>,
+    pub special_items: IndexMap<String, f64>,
+    pub healing_items: IndexMap<String, f64>,
+    pub drug_items: IndexMap<String, f64>,
+    pub food_items: IndexMap<String, f64>,
+    pub drink_items: IndexMap<String, f64>,
+    pub currency_items: IndexMap<String, f64>,
+    pub stim_items: IndexMap<String, f64>,
+    pub grenade_items: IndexMap<String, f64>,
+}
+
+/// `Models/Spt/Bots/ItemSpawnLimitSettings.cs` — the pair `GetItemSpawnLimitsForBot`
+/// (`BotLootGenerator.cs:47-58`) builds: a zeroed running total and the untouched reference copy.
+/// Both are owned here; C# clones the first and hands out a second live read of the config for the
+/// second, which nothing mutates.
+#[derive(Debug, Clone, Default)]
+pub struct ItemSpawnLimitSettingsWire {
+    pub current_limits: IndexMap<String, f64>,
+    pub global_limits: IndexMap<String, f64>,
+}
+
+/// `Models/Spt/Config/BotConfig.cs:185-207` (`WalletLootSettings`).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct WalletLootSettingsWire {
+    pub chance_percent: f64,
+    pub item_count: MinMax<i32>,
+    /// Stack size → weight. The key is parsed back out with `int.Parse` (`:633`).
+    pub stack_size_weight: IndexMap<String, f64>,
+    /// Currency tpl → weight.
+    pub currency_weight: IndexMap<String, f64>,
+    /// Wallet tpls that get currency put in them.
+    pub wallet_tpl_pool: std::collections::HashSet<String>,
+}
+
+/// `Models/Spt/Config/PmcConfig.cs`, narrowed to what the loot generator reads.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct PmcLootConfigWire {
+    pub force_healing_items_into_secure: bool,
+    pub loose_weapon_in_backpack_chance_percent: f64,
+    pub loose_weapon_in_backpack_loot_min_max: MinMax<i32>,
+    pub loot_settings: PmcLootSettingsWire,
+    pub add_secure_container_loot_from_bot_config: bool,
+    pub loot_item_limits_rub: Vec<MinMaxLootItemValueWire>,
+}
+
+/// `Models/Spt/Config/PmcConfig.cs:164-175` (`PmcLootSettings`).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct PmcLootSettingsWire {
+    pub pocket: LootContainerSettingsWire,
+    pub vest: LootContainerSettingsWire,
+    pub backpack: LootContainerSettingsWire,
+}
+
+/// `Models/Spt/Config/PmcConfig.cs:177-185` (`LootContainerSettings`), read through
+/// `Extensions/LootContainerSettingsExtensions.cs:10-50`.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct LootContainerSettingsWire {
+    pub total_rub_by_level: Vec<MinMaxLootValueWire>,
+    pub location_multiplier: IndexMap<String, f64>,
+}
+
+/// `Models/Spt/Config/PmcConfig.cs:233-237` (`MinMaxLootValue : MinMax<int>`).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct MinMaxLootValueWire {
+    pub min: i32,
+    pub max: i32,
+    pub value: f64,
+}
+
+/// `Models/Spt/Config/PmcConfig.cs:239-249` (`MinMaxLootItemValue : MinMax<double>`).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct MinMaxLootItemValueWire {
+    pub min: f64,
+    pub max: f64,
+    pub backpack: MinMax<f64>,
+    pub pocket: MinMax<f64>,
+    pub vest: MinMax<f64>,
+}
+
 /// `Models/Spt/Bots/ChooseRandomCompatibleModResult.cs`. Every member is nullable there and the
 /// four `IsItemIncompatibleWithCurrentItems` exits each set a different subset, so the `Option`s
 /// are load-bearing — `found` and `slotBlocked` are absent, not false, on the final compatible
@@ -420,7 +551,7 @@ pub struct GenerateBotInventoryRequest {
     pub equipment_blacklist: serde_json::Value,
     pub sight_whitelist: IndexMap<String, Vec<String>>,
     /// The 13 resolved `BotLootCacheService` pools.
-    pub loot_pools: IndexMap<String, serde_json::Value>,
+    pub loot_pools: BotLootCacheWire,
     /// `GlobalTable.ItemPresets`.
     pub item_presets: IndexMap<String, serde_json::Value>,
     pub default_presets_by_tpl: IndexMap<String, serde_json::Value>,
@@ -589,9 +720,11 @@ mod tests {
             vec!["55818add4bdc2d5b648b456f"]
         );
         assert_eq!(
-            parsed.loot_pools["backpackLoot"]["aaaaaaaaaaaaaaaaaaaaaab1"],
-            4
+            parsed.loot_pools.backpack_loot["aaaaaaaaaaaaaaaaaaaaaab1"],
+            4.0
         );
+        // Pools the payload omits deserialize empty, not missing.
+        assert!(parsed.loot_pools.combined_pool_loot.is_empty());
         assert_eq!(parsed.item_presets["p1"]["_id"], "p1");
         assert_eq!(
             parsed.default_presets_by_tpl["aaaaaaaaaaaaaaaaaaaaaab2"]["_id"],

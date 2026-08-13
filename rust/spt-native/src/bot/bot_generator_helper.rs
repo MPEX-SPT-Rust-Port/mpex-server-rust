@@ -971,7 +971,7 @@ fn item_allowed_in_container(
 /// The C# breadth-first queue is replaced by a scan of `items` per parent; both aggregate with
 /// `max`/`+=`, so order cannot change the answer. Where C# dereferences a child template it failed
 /// to look up (`:704-710`) this skips the child instead of panicking behind the FFI boundary.
-fn get_item_size(
+pub(crate) fn get_item_size(
     items_view: &IndexMap<String, ItemView>,
     item_tpl: &str,
     item_id: &str,
