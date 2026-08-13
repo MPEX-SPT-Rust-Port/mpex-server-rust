@@ -1,0 +1,102 @@
+using System.Text.Json;
+using System.Text.Json.Nodes;
+using NUnit.Framework;
+using SPTarkov.Server.Core.Helpers.Items;
+using SPTarkov.Server.Core.Helpers.Profile;
+using SPTarkov.Server.Core.Helpers.Traders;
+using SPTarkov.Server.Core.Models.Common;
+using SPTarkov.Server.Core.Models.Spt.Config;
+using SPTarkov.Server.Core.Models.Spt.Tables;
+using SPTarkov.Server.Core.Native.Ragfair;
+using SPTarkov.Server.Core.Services.Items;
+using SPTarkov.Server.Core.Services.Server;
+using SPTarkov.Server.Core.Utils;
+
+namespace UnitTests.Tests.Generators;
+
+/// <summary>
+/// Pins the wire contract between the ragfair payload records and <c>spt_generate_dynamic_offers</c>.
+/// The request is built by <see cref="RagfairPayloadProjection"/> off the live test database, so a
+/// renamed member, a dropped projection or a dictionary key that serialises as a number fails here
+/// rather than as a silently emptier flea market at runtime.
+/// </summary>
+[TestFixture]
+public class SptNativeRagfairWireTests
+{
+    private const ulong TestSeed = 42;
+
+    private GenerateDynamicOffersRequest _request = default!;
+    private RagfairConfig _ragfairConfig = default!;
+
+    [OneTimeSetUp]
+    public void Initialize()
+    {
+        var di = DI.GetInstance();
+
+        // Publishes the static JsonSerializerOptions the wrapper serialises the payload with
+        di.GetService<JsonUtil>();
+        _ragfairConfig = di.GetService<RagfairConfig>();
+
+        _request = RagfairPayloadProjection.BuildRequest(
+            null,
+            di.GetService<TimeUtil>().GetTimeStamp(),
+            0,
+            TestSeed,
+            di.GetService<TemplateTable>(),
+            di.GetService<HandbookHelper>(),
+            di.GetService<TraderHelper>(),
+            di.GetService<PresetHelper>(),
+            di.GetService<ItemFilterService>(),
+            di.GetService<SeasonalEventService>(),
+            di.GetService<BotTable>(),
+            di.GetService<ItemHelper>(),
+            di.GetService<BotConfig>(),
+            _ragfairConfig
+        );
+    }
+
+    [Test]
+    public void TheProjectionFillsEveryBlockTheNativeSideReads()
+    {
+        Assert.Multiple(() =>
+        {
+            Assert.That(_request.Items, Is.Not.Empty);
+            Assert.That(_request.FleaPrices, Is.Not.Empty);
+            Assert.That(_request.HandbookPrices, Is.Not.Empty);
+            Assert.That(_request.HighestTraderPrices, Is.Not.Empty);
+            Assert.That(_request.ItemPresets, Is.Not.Empty);
+            Assert.That(_request.DefaultPresets, Is.Not.Empty);
+            Assert.That(_request.DefaultPresetsByTpl, Is.Not.Empty);
+            Assert.That(_request.PresetsByTpl, Is.Not.Empty);
+            Assert.That(_request.PmcNamesUsec, Is.Not.Empty);
+            Assert.That(_request.PmcNamesBear, Is.Not.Empty);
+            Assert.That(_request.ExpiredOffers, Is.Null);
+        });
+    }
+
+    /// <summary>
+    /// The EftEnumConverter pitfall the bot port hit: System.Text.Json writes enum dictionary keys
+    /// as numbers. Every ragfair map that crosses must be keyed by a string or a MongoId, never by
+    /// an enum, or the native side silently finds nothing.
+    /// </summary>
+    [Test]
+    public void EveryProjectedDictionaryKeyIsAStringOnTheWire()
+    {
+        var json = JsonNode.Parse(JsonSerializer.Serialize(_request, JsonUtil.JsonSerializerOptionsNoIndent))!.AsObject();
+
+        foreach (var block in new[] { "fleaPrices", "handbookPrices", "highestTraderPrices", "itemPresets", "defaultPresetsByTpl" })
+        {
+            foreach (var entry in json[block]!.AsObject())
+            {
+                Assert.That(long.TryParse(entry.Key, out _), Is.False, $"{block} key '{entry.Key}' serialised as a number");
+            }
+        }
+
+        // dynamic.condition and dynamic.offerItemCount are the two config maps the native side
+        // iterates by key; a numeric key here would break the baseclass match and the offer count
+        foreach (var entry in json["dynamic"]!["condition"]!.AsObject())
+        {
+            Assert.That(new MongoId(entry.Key).IsEmpty, Is.False, $"condition key '{entry.Key}' is not a tpl");
+        }
+    }
+}
