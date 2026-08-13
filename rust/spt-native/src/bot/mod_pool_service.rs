@@ -29,11 +29,6 @@
 //! # RNG calls
 //!
 //! None. Every function here is a pure read of the items view.
-#![allow(
-    dead_code,
-    reason = "consumed by the equipment- and weapon-mod paths in tasks 7 and 8"
-)]
-
 use indexmap::{IndexMap, IndexSet};
 
 use crate::bot::BotContext;

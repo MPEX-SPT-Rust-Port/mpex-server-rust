@@ -42,11 +42,6 @@
 //!
 //! `GetBotEquipmentSettingFromConfig` (`:204-207`) is resolved between steps 4 and 5 and draws
 //! nothing.
-#![allow(
-    dead_code,
-    reason = "consumed by the bot generators in the tasks that follow"
-)]
-
 use indexmap::IndexMap;
 
 use crate::bot::BotContext;
@@ -856,6 +851,10 @@ impl ContainerGrids {
     }
 
     /// `BotInventoryContainerService.GetBotContainer` (`:393-396`).
+    #[allow(
+        dead_code,
+        reason = "no production reader: the generators hold the `ContainerGrids` they built and the C# side reads the state back off `into_wire`, so only the tests call this"
+    )]
     pub fn get(&self, container_name: &str) -> Option<&ContainerDetailsWire> {
         self.containers.get(container_name)
     }

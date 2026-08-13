@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
+use crate::bot::bot_inventory_generator::generate_inventory;
 use crate::loot::item_helper::LootError;
 use crate::loot::location_loot_generator::{generate_dynamic_loot, generate_static_containers};
 use crate::loot::loot_generator::{
@@ -225,6 +226,18 @@ pub unsafe extern "C" fn spt_get_random_loot_container_loot(
 }
 
 /// # Safety
+/// See `spt_generate_static_containers`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn spt_generate_bot_inventory(
+    req_ptr: *const u8,
+    req_len: usize,
+    out_ptr: *mut *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    unsafe { run_generator(req_ptr, req_len, out_ptr, out_len, generate_inventory) }
+}
+
+/// # Safety
 /// `ptr` and `len` must come from a successful `spt_*` call that handed back a buffer, and be
 /// freed at most once.
 #[unsafe(no_mangle)]
@@ -261,7 +274,7 @@ mod tests {
         assert_eq!(spt_native_abi_version(), crate::ABI_VERSION);
         assert_eq!(
             crate::ABI_VERSION,
-            4,
+            5,
             "bump SptNative.ExpectedAbiVersion too"
         );
     }
@@ -516,6 +529,110 @@ mod tests {
         assert_eq!(
             String::from_utf8(out).unwrap(),
             "LootRequest.ItemLimits is null"
+        );
+    }
+
+    /// Every required `GenerateBotInventoryRequest` member, pared down from the orchestrator's own
+    /// fixture: no items view, an empty `Pockets` pool (present, or `:516` derefs a null), and zero
+    /// loot counts, so the bot generates nothing but the six inventory roots. `equipmentChances` is
+    /// left open because the failure case below is the missing `FirstPrimaryWeapon` key.
+    fn bot_request(equipment_chances: &str) -> String {
+        format!(
+            r#"{{
+            "botId":"bbbbbbbbbbbbbbbbbbbbbbbb",
+            "details":{{"role":"assault","roleLowercase":"assault","side":"Savage","botLevel":15,
+                "isPmc":false,"isPlayerScav":false,"gameVersion":"standard","location":"bigmap",
+                "botDifficulty":"normal","clearBotContainerCacheAfterGeneration":false}},
+            "template":{{
+                "inventory":{{"equipment":{{"Pockets":{{}},"Holster":{{}}}},"Ammo":{{}},
+                    "items":{{"Backpack":{{}},"Pockets":{{}},"SecuredContainer":{{}},
+                        "SpecialLoot":{{}},"TacticalVest":{{}}}},
+                    "mods":{{}}}},
+                "chances":{{"equipment":{equipment_chances},"weaponMods":{{}},
+                    "equipmentMods":{{}}}},
+                "generation":{{"items":{{"grenades":{{"weights":{{"0":1}}}},
+                    "healing":{{"weights":{{"0":1}}}},"drugs":{{"weights":{{"0":1}}}},
+                    "food":{{"weights":{{"0":1}}}},"drink":{{"weights":{{"0":1}}}},
+                    "currency":{{"weights":{{"0":1}}}},"stims":{{"weights":{{"0":1}}}},
+                    "backpackLoot":{{"weights":{{"0":1}}}},"pocketLoot":{{"weights":{{"0":1}}}},
+                    "vestLoot":{{"weights":{{"0":1}}}},"specialItems":{{"weights":{{"0":1}}}},
+                    "magazines":{{"weights":{{"0":1}}}}}}}}}},
+            "generatingPlayerLevel":20,
+            "isNightTime":false,
+            "equipment":{{}},
+            "bosses":[],
+            "durability":{{
+                "default":{{"armor":{{"maxDelta":10,"minDelta":0,"minLimitPercent":15}},
+                    "weapon":{{"lowestMax":60,"highestMax":100,"maxDelta":10,"minDelta":0,
+                        "minLimitPercent":15}}}},
+                "botDurabilities":{{}},
+                "pmc":{{"armor":{{"lowestMaxPercent":90,"highestMaxPercent":100,"maxDelta":10,
+                        "minDelta":0,"minLimitPercent":15}},
+                    "weapon":{{"lowestMax":95,"highestMax":100,"maxDelta":5,"minDelta":0,
+                        "minLimitPercent":15}}}}}},
+            "itemSpawnLimits":{{}},
+            "walletLoot":{{"chancePercent":0}},
+            "currencyStackSize":{{}},
+            "secureContainerAmmoStackCount":0,
+            "disableLootOnBotTypes":[],
+            "lowProfileGasBlockTpls":[],
+            "lootItemResourceRandomization":{{}},
+            "pmcConfig":{{}},
+            "repairKitWeapon":{{"rarityWeight":{{}},"bonusTypeWeight":{{}},"Common":{{}},
+                "Rare":{{}}}},
+            "equipmentBlacklist":{{}},
+            "lootPools":{{}},
+            "itemPresets":{{}},
+            "defaultPresetsByTpl":{{}},
+            "presetsById":{{}},
+            "configBlacklist":[],
+            "handbookPrices":{{}},
+            "items":{{}}
+        }}"#
+        )
+    }
+
+    #[test]
+    fn bot_inventory_roundtrips_result_json() {
+        let request = bot_request(r#"{"FirstPrimaryWeapon":0}"#);
+
+        let (status, out) = call_generate(spt_generate_bot_inventory, request.as_bytes());
+
+        assert_eq!(status, STATUS_OK);
+        let result: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        // The six `GenerateInventoryBase` roots and nothing else: every pool is empty.
+        assert_eq!(result["inventory"]["items"].as_array().unwrap().len(), 6);
+        assert_eq!(
+            result["inventory"]["items"][0]["_id"],
+            result["inventory"]["equipment"]
+        );
+        assert_eq!(result["randomisationClamps"], serde_json::json!({}));
+    }
+
+    #[test]
+    fn unparseable_bot_request_returns_bad_args_with_the_parse_error() {
+        let (status, out) = call_generate(spt_generate_bot_inventory, b"{\"botId\":");
+
+        assert_eq!(status, STATUS_BAD_ARGS);
+        let message = String::from_utf8(out).unwrap();
+        assert!(
+            message.contains("EOF while parsing"),
+            "expected the serde error, got: {message}"
+        );
+    }
+
+    #[test]
+    fn a_bot_generation_failure_returns_status_error_and_the_message() {
+        // `GetDesiredWeaponsForBot` indexes `chances.equipment["FirstPrimaryWeapon"]`
+        // unconditionally, so a chances map without it throws where the C# dictionary would.
+        let request = bot_request("{}");
+
+        let (status, out) = call_generate(spt_generate_bot_inventory, request.as_bytes());
+
+        assert_eq!(status, STATUS_ERROR);
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "The given key 'FirstPrimaryWeapon' was not present in the dictionary."
         );
     }
 

@@ -31,11 +31,6 @@
 //!
 //! The C# `logger.Debug("… doesn't exist in bot config durability values, using default fallback")`
 //! is dropped: these functions have no diagnostic sink and the fallback itself is ported verbatim.
-#![allow(
-    dead_code,
-    reason = "consumed by bot_generator_helper in the task that follows"
-)]
-
 use indexmap::IndexMap;
 use serde::Deserialize;
 

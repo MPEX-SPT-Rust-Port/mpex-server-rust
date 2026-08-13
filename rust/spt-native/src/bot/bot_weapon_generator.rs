@@ -48,11 +48,6 @@
 //! [`add_extra_magazines_to_inventory`] then draws: the UBGL grenade count (1 `GetWeightedValue`,
 //! `:506`), then whatever the dispatched [`crate::bot::inventory_mag_gen`] implementation draws.
 //! Both `AddAmmoToSecureContainer` calls draw nothing.
-#![allow(
-    dead_code,
-    reason = "consumed by the bot inventory generator in the tasks that follow"
-)]
-
 use indexmap::IndexMap;
 
 use crate::bot::BotContext;

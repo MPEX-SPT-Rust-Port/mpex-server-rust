@@ -10,11 +10,6 @@
 //!   (`:28`), before the parent lookup, so the failure path below still consumes it.
 //! - [`create_magazine_with_ammo`] — one `GetInt`, inside `FillMagazineWithCartridge`.
 //! - [`magazine_is_cylinder_related`] and [`add_ammo_into_equipment_slots`] draw nothing.
-#![allow(
-    dead_code,
-    reason = "consumed by the weapon and magazine generators in tasks 8 and 9"
-)]
-
 use indexmap::IndexMap;
 
 use crate::bot::BotContext;

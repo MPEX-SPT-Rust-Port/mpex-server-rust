@@ -18,11 +18,6 @@
 //! `randomUtil.GetPercentOfValue(thresholdPercent, durability, 0)` (`:521`) is pure arithmetic and
 //! consumes nothing. Each `GetWeightedValue` is itself one draw, or none when its map holds a
 //! single entry — that shortcut lives in `random_util` and applies here unchanged.
-#![allow(
-    dead_code,
-    reason = "consumed by bot_weapon_generator in the task that follows"
-)]
-
 use indexmap::IndexMap;
 use serde::Deserialize;
 

@@ -28,11 +28,6 @@
 //!   `FillMagazineWithCartridge`, plus one `GetArrayValue` (`:200`) each time the internal-magazine
 //!   fallback has to pick a replacement magazine. A pass that fails to fit repeats without
 //!   advancing the counter, so it draws again.
-#![allow(
-    dead_code,
-    reason = "consumed by the bot inventory generator in the tasks that follow"
-)]
-
 use indexmap::IndexMap;
 
 use crate::bot::BotContext;
@@ -75,6 +70,10 @@ pub enum MagGenKind {
 
 impl MagGenKind {
     /// `IInventoryMagGen.GetPriority()`, the key `MagGenSetUp` sorts on.
+    #[allow(
+        dead_code,
+        reason = "nothing sorts at runtime — `MAG_GEN_ORDER` pins the sorted order; kept so the tests can check the ported priorities against it"
+    )]
     pub fn priority(self) -> i32 {
         match self {
             Self::InternalMagazine => 0,

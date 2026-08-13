@@ -69,11 +69,6 @@
 //!    SecondPrimaryWeapon, Holster: `GenerateRandomWeapon` then `AddExtraMagazinesToInventory`, both
 //!    as listed in [`crate::bot::bot_weapon_generator`].
 //! 4. `GenerateLoot` (`:111`) — as listed in [`crate::bot::bot_loot_generator`].
-#![allow(
-    dead_code,
-    reason = "`generate_inventory` is exported over the FFI in the task that follows"
-)]
-
 use indexmap::{IndexMap, IndexSet};
 
 use crate::bot::BotContext;

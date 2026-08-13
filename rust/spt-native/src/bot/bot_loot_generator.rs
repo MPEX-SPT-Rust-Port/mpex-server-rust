@@ -66,11 +66,6 @@
 //!
 //! [`add_loose_weapons_to_inventory_slot`] draws 1 `GetArrayValue` (`:693`) and 1 `GetInt` (`:699`)
 //! before anything else, then whatever [`generate_random_weapon`] draws per weapon.
-#![allow(
-    dead_code,
-    reason = "consumed by the bot inventory generator in the tasks that follow"
-)]
-
 use std::collections::HashSet;
 
 use indexmap::IndexMap;
@@ -526,6 +521,10 @@ fn weighted_count(
 ///
 /// Not called on this path — the pools arrive already filtered, see the module doc. Ported so the
 /// limits the C# projection must filter with are pinned on this side too.
+#[allow(
+    dead_code,
+    reason = "see the doc comment: pinned for the C# projection, exercised only by this module's tests"
+)]
 pub fn get_single_item_loot_price_limits(
     pmc: &PmcConfigWire,
     bot_level: i32,

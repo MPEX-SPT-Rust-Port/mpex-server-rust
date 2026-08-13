@@ -47,11 +47,6 @@
 //!    ammo tpl until a compatible one is found. The clones it then makes draw nothing, and it is an
 //!    alternative to step 5, not an addition.
 //! 5. The recursion at `:761` repeats all of the above for the added mod's own pool.
-#![allow(
-    dead_code,
-    reason = "consumed by the bot inventory generator in the tasks that follow"
-)]
-
 use indexmap::{IndexMap, IndexSet};
 
 use crate::bot::BotContext;
@@ -189,6 +184,10 @@ impl ModSpawn {
 /// which would shadow the prelude here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlateFilterResult {
+    #[expect(
+        dead_code,
+        reason = "the C# enum's zero value; `filter_plate_mods_for_slot_by_level` never returns it, and dropping it would renumber the rest"
+    )]
     UnknownFailure,
     Success,
     NoDefaultFilter,
