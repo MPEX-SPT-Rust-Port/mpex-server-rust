@@ -1,3 +1,4 @@
+pub mod assort_generator;
 pub mod models;
 pub mod price_service;
 pub mod server_helper;
