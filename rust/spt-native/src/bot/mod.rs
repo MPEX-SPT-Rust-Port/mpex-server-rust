@@ -1,6 +1,8 @@
 pub(crate) mod bot_generator_helper;
+pub(crate) mod bot_weapon_generator_helper;
 pub(crate) mod durability_limits_helper;
 pub(crate) mod exhaustable_array;
+pub(crate) mod mod_pool_service;
 pub mod models;
 pub(crate) mod repair_service;
 

@@ -35,6 +35,10 @@ pub const HEADWEAR: &str = "5a341c4086f77401f2541505";
 pub const VEST: &str = "5448e5284bdc2dcb718b4567";
 /// `BaseClasses.ARMOR`
 pub const ARMOR: &str = "5448e54d4bdc2dcc718b4568";
+/// `BaseClasses.ARMORED_EQUIPMENT`
+pub const ARMORED_EQUIPMENT: &str = "57bef4c42459772e8d35a53b";
+/// `BaseClasses.MOD`
+pub const MOD: &str = "5448fe124bdc2da5018b4567";
 
 /// `ItemHelper.GetItem` (`ItemHelper.cs:491-501`) — a plain lookup, absent tpl included.
 pub fn get_item<'a>(items_view: &'a IndexMap<String, ItemView>, tpl: &str) -> Option<&'a ItemView> {
@@ -610,7 +614,16 @@ pub fn fill_magazine_with_random_cartridge(
         return Ok(());
     };
 
-    fill_magazine_with_cartridge(ctx, magazine, mag_tpl, &cartridge_tpl, min_size_percent)
+    let diagnostics = &mut ctx.diagnostics;
+
+    fill_magazine_with_cartridge(
+        items_view,
+        diagnostics,
+        magazine,
+        mag_tpl,
+        &cartridge_tpl,
+        min_size_percent,
+    )
 }
 
 /// `ItemHelper.FillMagazineWithCartridge` (`ItemHelper.cs:1339-1418`) — stacks ascend from location
@@ -619,15 +632,18 @@ pub fn fill_magazine_with_random_cartridge(
 /// The `Err` case is the C# crash at `ItemHelper.cs:1409`: a cartridge with no `StackMaxSize` leaves
 /// `cartridgeCountToAdd` null and `+= cartridgeCountToAdd!.Value` throws. Like C#, that is only
 /// reached once the loop actually runs.
+///
+/// Takes the two things it reads rather than a whole [`LootContext`], the way
+/// [`add_cartridges_to_ammo_box`] does: `bot::bot_weapon_generator_helper::create_magazine_with_ammo`
+/// calls it with a `BotContext`'s fields.
 pub fn fill_magazine_with_cartridge(
-    ctx: &mut LootContext,
+    items_view: &IndexMap<String, ItemView>,
+    diagnostics: &mut Vec<Diagnostic>,
     magazine: &mut Vec<Item>,
     mag_tpl: &str,
     cartridge_tpl: &str,
     min_size_multiplier: f64,
 ) -> Result<(), LootError> {
-    let items_view = ctx.items_view;
-
     // UBGL don't have mags
     if is_of_baseclass(items_view, mag_tpl, LAUNCHER) {
         return Ok(());
@@ -636,7 +652,7 @@ pub fn fill_magazine_with_cartridge(
     // Get cartridge properties and max allowed stack size
     let cartridge_details = get_item(items_view, cartridge_tpl);
     if cartridge_details.is_none() {
-        ctx.diagnostics.push(Diagnostic {
+        diagnostics.push(Diagnostic {
             level: ERROR.to_owned(),
             locale_key: Some("item-invalid_tpl_item".to_owned()),
             args: Some(serde_json::Value::String(cartridge_tpl.to_owned())),
@@ -646,7 +662,7 @@ pub fn fill_magazine_with_cartridge(
 
     let cartridge_max_stack_size = cartridge_details.and_then(|details| details.stack_max_size);
     if cartridge_max_stack_size.is_none() {
-        ctx.diagnostics.push(diagnostic(
+        diagnostics.push(diagnostic(
             ERROR,
             format!("Item with tpl: {cartridge_tpl} lacks a _props or StackMaxSize property"),
         ));
@@ -665,7 +681,7 @@ pub fn fill_magazine_with_cartridge(
         };
 
     let Some(magazine_cartridge_max_count) = magazine_cartridge_max_count else {
-        ctx.diagnostics.push(diagnostic(
+        diagnostics.push(diagnostic(
             WARNING,
             format!(
                 "Magazine: {mag_tpl} lacks a Cartridges array, unable to fill magazine with ammo"
@@ -681,7 +697,7 @@ pub fn fill_magazine_with_cartridge(
     );
 
     if magazine.len() > 1 {
-        ctx.diagnostics.push(diagnostic(
+        diagnostics.push(diagnostic(
             WARNING,
             format!("Magazine {mag_tpl} already has cartridges defined,  this may cause issues"),
         ));
@@ -1719,8 +1735,15 @@ mod tests {
         let mut ctx = context(&view, &dist);
         let mut magazine = root(UBGL_TPL);
 
-        fill_magazine_with_cartridge(&mut ctx, &mut magazine, UBGL_TPL, CARTRIDGE_A_TPL, 1.0)
-            .unwrap();
+        fill_magazine_with_cartridge(
+            ctx.items_view,
+            &mut ctx.diagnostics,
+            &mut magazine,
+            UBGL_TPL,
+            CARTRIDGE_A_TPL,
+            1.0,
+        )
+        .unwrap();
 
         assert_eq!(magazine.len(), 1);
         assert!(ctx.diagnostics.is_empty());
@@ -1734,8 +1757,15 @@ mod tests {
         let mut magazine = root(MAGAZINE_TPL);
 
         // A multiplier of 1 pins the desired count to the magazine's 60, so 30-round stacks fill it.
-        fill_magazine_with_cartridge(&mut ctx, &mut magazine, MAGAZINE_TPL, CARTRIDGE_A_TPL, 1.0)
-            .unwrap();
+        fill_magazine_with_cartridge(
+            ctx.items_view,
+            &mut ctx.diagnostics,
+            &mut magazine,
+            MAGAZINE_TPL,
+            CARTRIDGE_A_TPL,
+            1.0,
+        )
+        .unwrap();
 
         assert_eq!(magazine.len(), 3);
         assert_eq!(location_of(&magazine[1]), Some(0));
@@ -1753,8 +1783,15 @@ mod tests {
         let mut magazine = root(MAGAZINE_TPL);
 
         // A 60-round stack size swallows the whole 60-round magazine in one go.
-        fill_magazine_with_cartridge(&mut ctx, &mut magazine, MAGAZINE_TPL, CARTRIDGE_B_TPL, 1.0)
-            .unwrap();
+        fill_magazine_with_cartridge(
+            ctx.items_view,
+            &mut ctx.diagnostics,
+            &mut magazine,
+            MAGAZINE_TPL,
+            CARTRIDGE_B_TPL,
+            1.0,
+        )
+        .unwrap();
 
         assert_eq!(magazine.len(), 2);
         assert_eq!(stack_count_of(&magazine[1]), Some(60.0));
@@ -1768,8 +1805,15 @@ mod tests {
         let mut ctx = context(&view, &dist);
         let mut magazine = root(CYLINDER_TPL);
 
-        fill_magazine_with_cartridge(&mut ctx, &mut magazine, CYLINDER_TPL, CARTRIDGE_B_TPL, 1.0)
-            .unwrap();
+        fill_magazine_with_cartridge(
+            ctx.items_view,
+            &mut ctx.diagnostics,
+            &mut magazine,
+            CYLINDER_TPL,
+            CARTRIDGE_B_TPL,
+            1.0,
+        )
+        .unwrap();
 
         // Six slots, no Cartridges entry at all.
         assert_eq!(magazine.len(), 2);
@@ -1784,7 +1828,8 @@ mod tests {
         let mut magazine = root(MAGAZINE_NO_CARTRIDGES_TPL);
 
         fill_magazine_with_cartridge(
-            &mut ctx,
+            ctx.items_view,
+            &mut ctx.diagnostics,
             &mut magazine,
             MAGAZINE_NO_CARTRIDGES_TPL,
             CARTRIDGE_A_TPL,
@@ -1806,7 +1851,8 @@ mod tests {
 
         // C# adds `cartridgeCountToAdd!.Value` on a null and crashes.
         let error = fill_magazine_with_cartridge(
-            &mut ctx,
+            ctx.items_view,
+            &mut ctx.diagnostics,
             &mut magazine,
             MAGAZINE_TPL,
             CARTRIDGE_NO_STACK_TPL,
@@ -1826,8 +1872,15 @@ mod tests {
         let mut magazine = root(MAGAZINE_TPL);
 
         let unknown = "999999999999999999999999";
-        fill_magazine_with_cartridge(&mut ctx, &mut magazine, MAGAZINE_TPL, unknown, 1.0)
-            .unwrap_err();
+        fill_magazine_with_cartridge(
+            ctx.items_view,
+            &mut ctx.diagnostics,
+            &mut magazine,
+            MAGAZINE_TPL,
+            unknown,
+            1.0,
+        )
+        .unwrap_err();
 
         assert_eq!(levels(&ctx), vec![ERROR, ERROR]);
         assert_eq!(
@@ -1850,7 +1903,8 @@ mod tests {
 
             // 0.5 * 5 = 2.5, which banker's rounding takes to 2 — away-from-zero would say 3.
             fill_magazine_with_cartridge(
-                &mut ctx,
+                ctx.items_view,
+                &mut ctx.diagnostics,
                 &mut magazine,
                 MAGAZINE_SMALL_TPL,
                 CARTRIDGE_B_TPL,
@@ -1877,8 +1931,15 @@ mod tests {
             ..Default::default()
         });
 
-        fill_magazine_with_cartridge(&mut ctx, &mut magazine, MAGAZINE_TPL, CARTRIDGE_B_TPL, 1.0)
-            .unwrap();
+        fill_magazine_with_cartridge(
+            ctx.items_view,
+            &mut ctx.diagnostics,
+            &mut magazine,
+            MAGAZINE_TPL,
+            CARTRIDGE_B_TPL,
+            1.0,
+        )
+        .unwrap();
 
         assert_eq!(levels(&ctx), vec![WARNING]);
         assert!(messages(&ctx).contains("already has cartridges defined"));
