@@ -146,8 +146,9 @@ public class SptNativeBotWireTests
         Assert.That(_request.Equipment, Does.ContainKey("assault"));
         Assert.That(_request.Bosses, Is.Not.Empty);
         Assert.That(_request.ItemPresets, Is.Not.Empty);
-        Assert.That(_request.PresetsById, Is.Not.Empty);
         Assert.That(_request.DefaultPresetsByTpl, Is.Not.Empty);
+        // The defaults ride as ids, so every one has to resolve against the only preset map sent
+        Assert.That(_request.DefaultPresetsByTpl.Values, Is.SubsetOf(_request.ItemPresets.Keys));
         Assert.That(_request.ConfigBlacklist, Is.Not.Empty);
         Assert.That(_request.LootPools.BackpackLoot, Is.Not.Empty);
         // Every pool tpl has to be priceable, or the running rouble total silently reads 0

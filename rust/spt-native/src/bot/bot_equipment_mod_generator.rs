@@ -711,8 +711,7 @@ fn get_default_preset_armor_slot<'a>(
     armor_item_tpl: &str,
     mod_slot: &str,
 ) -> Option<&'a Item> {
-    ctx.default_presets_by_tpl
-        .get(armor_item_tpl)?
+    default_preset_for(ctx, armor_item_tpl)?
         .items
         .iter()
         .find(|item| {
@@ -1729,9 +1728,14 @@ fn get_matching_mod_from_preset<'a>(
         })
 }
 
-/// `BotEquipmentModGenerator.GetMatchingPreset` (`:1463-1481`), against the two preset projections
-/// [`BotContext`] carries: `presets_by_id` for the two edge cases, `default_presets_by_tpl` for
-/// everything else.
+/// `PresetHelper.GetDefaultPreset(tpl)`: [`BotContext::default_presets_by_tpl`] carries the
+/// default's id, and every default is an entry of [`BotContext::item_presets`].
+fn default_preset_for<'a>(ctx: &'a BotContext, tpl: &str) -> Option<&'a PresetView> {
+    ctx.item_presets.get(ctx.default_presets_by_tpl.get(tpl)?)
+}
+
+/// `BotEquipmentModGenerator.GetMatchingPreset` (`:1463-1481`). Both halves resolve against
+/// `item_presets`: `PresetHelper.GetPreset(id)` reads that same map, and the defaults index into it.
 fn get_matching_preset<'a>(
     ctx: &'a BotContext,
     weapon_tpl: &str,
@@ -1739,15 +1743,15 @@ fn get_matching_preset<'a>(
 ) -> Option<&'a PresetView> {
     // Edge case - using MP5SD receiver means default mp5 handguard doesn't fit
     if parent_item_tpl == RECEIVER_HK_MP5SD_9X19_UPPER {
-        return ctx.presets_by_id.get(MP5SD_PRESET_ID);
+        return ctx.item_presets.get(MP5SD_PRESET_ID);
     }
 
     // Edge case - dvl 500mm is the silenced barrel and has specific muzzle mods
     if parent_item_tpl == BARREL_DVL10_762X51_500MM_SUPPRESSED {
-        return ctx.presets_by_id.get(DVL_SILENCED_PRESET_ID);
+        return ctx.item_presets.get(DVL_SILENCED_PRESET_ID);
     }
 
-    ctx.default_presets_by_tpl.get(weapon_tpl)
+    default_preset_for(ctx, weapon_tpl)
 }
 
 /// `BotEquipmentModGenerator.WeaponModComboIsIncompatible` (`:1489-1498`).
@@ -2511,6 +2515,8 @@ mod tests {
     /// Class 1, so no weighted draw ever selects it — it is only reachable as a slot default.
     const DEFAULT_PLATE: &str = "bbbbbbbbbbbbbbbbbbbbbbb1";
     const PRESET_PLATE: &str = "bbbbbbbbbbbbbbbbbbbbbbb7";
+    /// The id `default_presets_by_tpl` points at for [`PRESET_ARMOR`]'s default.
+    const ARMOR_PRESET_ID: &str = "cccccccccccccccccccccc10";
     const HELMET: &str = "ccccccccccccccccccccccc1";
     const NVG: &str = "ccccccccccccccccccccccc2";
     const NVG_MOUNT: &str = "ccccccccccccccccccccccc3";
@@ -2542,7 +2548,8 @@ mod tests {
         equipment: IndexMap<String, EquipmentFilters>,
         randomization: IndexMap<String, RandomisedResourceDetails>,
         item_blacklist: HashSet<String>,
-        default_presets_by_tpl: IndexMap<String, PresetView>,
+        default_presets_by_tpl: IndexMap<String, String>,
+        item_presets: IndexMap<String, PresetView>,
     }
 
     impl Fixture {
@@ -2587,8 +2594,13 @@ mod tests {
                 equipment: IndexMap::new(),
                 randomization: IndexMap::new(),
                 item_blacklist: HashSet::new(),
+                // The default rides as an id and resolves through `item_presets`
                 default_presets_by_tpl: serde_json::from_value(json!({
-                    PRESET_ARMOR: {"items": [
+                    PRESET_ARMOR: ARMOR_PRESET_ID,
+                }))
+                .unwrap(),
+                item_presets: serde_json::from_value(json!({
+                    ARMOR_PRESET_ID: {"id": ARMOR_PRESET_ID, "items": [
                         {"_id": "eeeeeeeeeeeeeeeeeeeeeee1", "_tpl": PRESET_ARMOR},
                         {"_id": "eeeeeeeeeeeeeeeeeeeeeee2", "_tpl": PRESET_PLATE,
                          "parentId": "eeeeeeeeeeeeeeeeeeeeeee1", "slotId": "front_plate"},
@@ -2608,10 +2620,9 @@ mod tests {
                 is_night_time: false,
                 item_blacklist: &self.item_blacklist,
                 default_presets_by_tpl: &self.default_presets_by_tpl,
-                presets_by_id: &crate::bot::NO_PRESETS,
                 equipment_blacklist: &crate::bot::NO_EQUIP_BLACKLIST,
                 low_profile_gas_block_tpls: &crate::bot::NO_BLACKLIST,
-                item_presets: &crate::bot::NO_PRESETS,
+                item_presets: &self.item_presets,
                 weapon_has_enhancement_chance_percent: 0.0,
                 repair_kit_weapon: &crate::bot::NO_BUFFS,
                 secure_container_ammo_stack_count: 0,
@@ -3288,8 +3299,8 @@ mod tests {
             equipment: IndexMap<String, EquipmentFilters>,
             randomization: IndexMap<String, RandomisedResourceDetails>,
             item_blacklist: HashSet<String>,
-            default_presets_by_tpl: IndexMap<String, PresetView>,
-            presets_by_id: IndexMap<String, PresetView>,
+            default_presets_by_tpl: IndexMap<String, String>,
+            item_presets: IndexMap<String, PresetView>,
             equipment_blacklist: EquipmentFilterDetails,
             low_profile_gas_block_tpls: HashSet<String>,
         }
@@ -3372,7 +3383,7 @@ mod tests {
                     randomization: IndexMap::new(),
                     item_blacklist: HashSet::new(),
                     default_presets_by_tpl: IndexMap::new(),
-                    presets_by_id: IndexMap::new(),
+                    item_presets: IndexMap::new(),
                     equipment_blacklist: EquipmentFilterDetails::default(),
                     low_profile_gas_block_tpls: HashSet::new(),
                 }
@@ -3388,8 +3399,7 @@ mod tests {
                     is_night_time: false,
                     item_blacklist: &self.item_blacklist,
                     default_presets_by_tpl: &self.default_presets_by_tpl,
-                    presets_by_id: &self.presets_by_id,
-                    item_presets: &crate::bot::NO_PRESETS,
+                    item_presets: &self.item_presets,
                     equipment_blacklist: &self.equipment_blacklist,
                     low_profile_gas_block_tpls: &self.low_profile_gas_block_tpls,
                     weapon_has_enhancement_chance_percent: 0.0,

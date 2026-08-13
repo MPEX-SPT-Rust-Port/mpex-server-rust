@@ -185,7 +185,6 @@ pub fn generate_inventory(
         equipment_blacklist,
         item_presets,
         default_presets_by_tpl,
-        presets_by_id,
         config_blacklist,
         items,
     } = request;
@@ -209,7 +208,6 @@ pub fn generate_inventory(
             equipment_blacklist,
             item_presets,
             default_presets_by_tpl,
-            presets_by_id,
             config_blacklist,
             items,
         },
@@ -282,7 +280,6 @@ fn generate_one(
         equipment_blacklist,
         item_presets,
         default_presets_by_tpl,
-        presets_by_id,
         config_blacklist,
         items,
         ..
@@ -304,7 +301,6 @@ fn generate_one(
         is_night_time: *is_night_time,
         item_blacklist: config_blacklist,
         default_presets_by_tpl,
-        presets_by_id,
         item_presets,
         equipment_blacklist,
         low_profile_gas_block_tpls,

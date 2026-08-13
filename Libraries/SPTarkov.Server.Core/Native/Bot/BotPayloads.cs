@@ -116,17 +116,21 @@ internal record GenerateBotInventoryRequest
     public required BotLootCache LootPools { get; set; }
 
     /// <summary>
-    /// <c>GlobalTable.ItemPresets</c>. Scanned in order by the preset-weapon lookup, so the
-    /// insertion order of the source dictionary is the contract.
+    /// <c>GlobalTable.ItemPresets</c>, keyed by preset id. Scanned in order by the preset-weapon
+    /// lookup, so the insertion order of the source dictionary is the contract. This is also the map
+    /// <c>PresetHelper.GetPreset(id)</c> reads, so the native side resolves both against it.
     /// </summary>
     [JsonPropertyName("itemPresets")]
     public required Dictionary<MongoId, PresetView> ItemPresets { get; set; }
 
+    /// <summary>
+    /// Which preset is the default for a tpl, as its id rather than the preset itself -
+    /// <c>PresetHelper</c> resolves every default out of <c>GlobalTable.ItemPresets</c>, so the
+    /// native side looks the id up in <see cref="ItemPresets"/>. Inlining the presets here put ~0.26
+    /// MiB of duplicate on a wire that is rebuilt per bot.
+    /// </summary>
     [JsonPropertyName("defaultPresetsByTpl")]
-    public required Dictionary<MongoId, PresetView> DefaultPresetsByTpl { get; set; }
-
-    [JsonPropertyName("presetsById")]
-    public required Dictionary<MongoId, PresetView> PresetsById { get; set; }
+    public required Dictionary<MongoId, MongoId> DefaultPresetsByTpl { get; set; }
 
     /// <summary>
     /// <c>ItemFilterService.GetBlacklistedItems()</c>.
@@ -216,11 +220,9 @@ internal record SharedBotViews
     [JsonPropertyName("itemPresets")]
     public required Dictionary<MongoId, PresetView> ItemPresets { get; set; }
 
+    /// <inheritdoc cref="GenerateBotInventoryRequest.DefaultPresetsByTpl"/>
     [JsonPropertyName("defaultPresetsByTpl")]
-    public required Dictionary<MongoId, PresetView> DefaultPresetsByTpl { get; set; }
-
-    [JsonPropertyName("presetsById")]
-    public required Dictionary<MongoId, PresetView> PresetsById { get; set; }
+    public required Dictionary<MongoId, MongoId> DefaultPresetsByTpl { get; set; }
 
     [JsonPropertyName("configBlacklist")]
     public required HashSet<MongoId> ConfigBlacklist { get; set; }

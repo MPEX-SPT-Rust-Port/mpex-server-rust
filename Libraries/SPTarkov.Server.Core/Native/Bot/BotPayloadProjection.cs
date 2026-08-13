@@ -57,7 +57,8 @@ internal static class BotPayloadProjection
         var raidConfig = profileActivityService.GetProfileActivityRaidData(sessionId)?.RaidConfiguration;
         var isNightTime = raidConfig is not null && weatherHelper.IsNightTime(raidConfig.TimeVariant, raidConfig.Location!);
 
-        // One dictionary, two members: `GetPreset(id)` reads the same map `ItemPresets` is
+        // `GetPreset(id)` reads the same map `ItemPresets` is, and every default preset is one of
+        // its entries, so this is the only projection of it that goes on the wire
         var presets = ToPresetViews(globalTable.ItemPresets);
         var lootPools = BuildLootPools(botLootCacheService, botJsonTemplate, botGenerationDetails, pmcConfig);
 
@@ -114,8 +115,7 @@ internal static class BotPayloadProjection
                 botEquipmentFilterService.GetBotEquipmentBlacklist(equipmentRole, generatingPlayerLevel) ?? new EquipmentFilterDetails(),
             LootPools = lootPools,
             ItemPresets = presets,
-            DefaultPresetsByTpl = ToPresetViews(presetHelper.GetDefaultPresetByTpl()),
-            PresetsById = presets,
+            DefaultPresetsByTpl = ToDefaultPresetIds(presetHelper.GetDefaultPresetByTpl()),
             ConfigBlacklist = itemFilterService.GetBlacklistedItems(),
             HandbookPrices = BuildHandbookPrices(lootPools, handbookHelper),
             Items = PayloadProjection.BuildItemsView(itemHelper.TemplateTable.Items),
@@ -171,8 +171,7 @@ internal static class BotPayloadProjection
             EquipmentBlacklist =
                 botEquipmentFilterService.GetBotEquipmentBlacklist(equipmentRole, generatingPlayerLevel) ?? new EquipmentFilterDetails(),
             ItemPresets = presets,
-            DefaultPresetsByTpl = ToPresetViews(presetHelper.GetDefaultPresetByTpl()),
-            PresetsById = presets,
+            DefaultPresetsByTpl = ToDefaultPresetIds(presetHelper.GetDefaultPresetByTpl()),
             ConfigBlacklist = itemFilterService.GetBlacklistedItems(),
             Items = PayloadProjection.BuildItemsView(itemHelper.TemplateTable.Items),
         };
@@ -320,6 +319,16 @@ internal static class BotPayloadProjection
         yield return lootPools.VestLoot;
         yield return lootPools.PocketLoot;
         yield return lootPools.SecureLoot;
+    }
+
+    /// <summary>
+    /// The default preset of each tpl as its id. <c>PresetHelper</c> resolves every default out of
+    /// <c>GlobalTable.ItemPresets</c> - both cache halves are filtered from it and the fallback
+    /// indexes it directly - so the id always hits <c>ItemPresets</c> on the far side.
+    /// </summary>
+    private static Dictionary<MongoId, MongoId> ToDefaultPresetIds(Dictionary<MongoId, Preset> defaultPresets)
+    {
+        return defaultPresets.ToDictionary(preset => preset.Key, preset => preset.Value.Id);
     }
 
     private static Dictionary<MongoId, PresetView> ToPresetViews(Dictionary<MongoId, Preset> presets)

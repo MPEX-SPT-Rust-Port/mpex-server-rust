@@ -50,12 +50,10 @@ pub struct BotContext<'a> {
     /// `ItemFilterService.GetBlacklistedItems()` — one half of the union
     /// `BotEquipmentModGenerator.FilterModsByBlacklist` builds.
     pub item_blacklist: &'a HashSet<String>,
-    /// `PresetHelper.GetDefaultPresetByTpl()`, keyed by the tpl the preset is the default for — the
-    /// projection `GetDefaultPresetArmorSlot` reads.
-    pub default_presets_by_tpl: &'a IndexMap<String, PresetView>,
-    /// `PresetHelper.GetPreset(id)`, keyed by preset `_id`. Only `GetMatchingPreset`'s two hardcoded
-    /// edge cases (the MP5SD receiver and the suppressed DVL barrel) look a preset up by id.
-    pub presets_by_id: &'a IndexMap<String, PresetView>,
+    /// `PresetHelper.GetDefaultPresetByTpl()`, keyed by the tpl the preset is the default for and
+    /// valued by the preset's own id — resolve it through [`Self::item_presets`], which is what
+    /// `PresetHelper` resolves every default out of. `GetDefaultPresetArmorSlot` reads it.
+    pub default_presets_by_tpl: &'a IndexMap<String, String>,
     /// `GlobalTable.ItemPresets`, keyed by preset `_id` — scanned **in order** by
     /// `BotWeaponGenerator.GetPresetWeaponMods` (`:337`), which takes the first preset whose root
     /// item matches the weapon tpl, so the map has to stay ordered.
@@ -83,6 +81,9 @@ pub(crate) static NO_BLACKLIST: std::sync::LazyLock<HashSet<String>> =
     std::sync::LazyLock::new(HashSet::new);
 #[cfg(test)]
 pub(crate) static NO_PRESETS: std::sync::LazyLock<IndexMap<String, PresetView>> =
+    std::sync::LazyLock::new(IndexMap::new);
+#[cfg(test)]
+pub(crate) static NO_DEFAULT_PRESETS: std::sync::LazyLock<IndexMap<String, String>> =
     std::sync::LazyLock::new(IndexMap::new);
 #[cfg(test)]
 pub(crate) static NO_EQUIP_BLACKLIST: std::sync::LazyLock<EquipmentFilterDetails> =

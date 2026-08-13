@@ -625,10 +625,11 @@ pub struct GenerateBotInventoryRequest {
     pub equipment_blacklist: EquipmentFilterDetails,
     /// The 13 resolved `BotLootCacheService` pools.
     pub loot_pools: BotLootCacheWire,
-    /// `GlobalTable.ItemPresets`.
+    /// `GlobalTable.ItemPresets`, keyed by preset id. Also the map `PresetHelper.GetPreset(id)`
+    /// reads, so it stands in for the `presetsById` the payload used to carry separately.
     pub item_presets: IndexMap<String, PresetView>,
-    pub default_presets_by_tpl: IndexMap<String, PresetView>,
-    pub presets_by_id: IndexMap<String, PresetView>,
+    /// Which preset is the default for a tpl, as its id — resolve it through [`Self::item_presets`].
+    pub default_presets_by_tpl: IndexMap<String, String>,
     /// `ItemFilterService.GetBlacklistedItems()`.
     pub config_blacklist: std::collections::HashSet<String>,
     pub handbook_prices: IndexMap<String, f64>,
@@ -661,8 +662,9 @@ pub struct SharedBotViewsWire {
     pub repair_kit_weapon: crate::bot::repair_service::BonusSettings,
     pub equipment_blacklist: EquipmentFilterDetails,
     pub item_presets: IndexMap<String, PresetView>,
-    pub default_presets_by_tpl: IndexMap<String, PresetView>,
-    pub presets_by_id: IndexMap<String, PresetView>,
+    /// Keyed by tpl, valued by the default preset's own id - resolve through
+    /// [`Self::item_presets`], which is the map `PresetHelper` resolves every default out of.
+    pub default_presets_by_tpl: IndexMap<String, String>,
     pub config_blacklist: std::collections::HashSet<String>,
     pub items: IndexMap<String, ItemView>,
 }
@@ -806,9 +808,8 @@ mod tests {
         "repairKitWeapon":{"rarityWeight":{},"bonusTypeWeight":{},"Common":{},"Rare":{}},
         "equipmentBlacklist":{"equipment":{"Headwear":["aaaaaaaaaaaaaaaaaaaaaaa9"]}},
         "lootPools":{"backpackLoot":{"aaaaaaaaaaaaaaaaaaaaaab1":4}},
-        "itemPresets":{"p1":{"id":"p1","items":[]}},
-        "defaultPresetsByTpl":{"aaaaaaaaaaaaaaaaaaaaaab2":{"id":"p2","items":[]}},
-        "presetsById":{"p2":{"id":"p2","items":[]}},
+        "itemPresets":{"p1":{"id":"p1","items":[]},"p2":{"id":"p2","items":[]}},
+        "defaultPresetsByTpl":{"aaaaaaaaaaaaaaaaaaaaaab2":"p2"},
         "configBlacklist":["aaaaaaaaaaaaaaaaaaaaaab3"],
         "handbookPrices":{"aaaaaaaaaaaaaaaaaaaaaab4":12500.5},
         "items":{"aaaaaaaaaaaaaaaaaaaaaab5":{"parent":"aaaaaaaaaaaaaaaaaaaaaab6","width":2,"height":1}}
@@ -950,13 +951,12 @@ mod tests {
         // Pools the payload omits deserialize empty, not missing.
         assert!(parsed.loot_pools.combined_pool_loot.is_empty());
         assert_eq!(parsed.item_presets["p1"].id.as_deref(), Some("p1"));
+        // The default rides as an id and is resolved against `item_presets`, not inlined
         assert_eq!(
-            parsed.default_presets_by_tpl["aaaaaaaaaaaaaaaaaaaaaab2"]
-                .id
-                .as_deref(),
-            Some("p2")
+            parsed.default_presets_by_tpl["aaaaaaaaaaaaaaaaaaaaaab2"],
+            "p2"
         );
-        assert_eq!(parsed.presets_by_id["p2"].id.as_deref(), Some("p2"));
+        assert_eq!(parsed.item_presets["p2"].id.as_deref(), Some("p2"));
         assert!(parsed.config_blacklist.contains("aaaaaaaaaaaaaaaaaaaaaab3"));
         assert_eq!(parsed.handbook_prices["aaaaaaaaaaaaaaaaaaaaaab4"], 12500.5);
         assert_eq!(parsed.items["aaaaaaaaaaaaaaaaaaaaaab5"].width, Some(2));
