@@ -7,13 +7,17 @@
 //!   loot generator reads back after this call; this port's [`ContainerGrids`] is one bot's entry,
 //!   so "clear it" is expressed as *not* emitting it in
 //!   [`BotInventoryResult::container_grids`](crate::bot::models::BotInventoryResult).
-//! - **The `:204` clamp writes nowhere.** C# assigns into
-//!   `randomistionDetails.EquipmentMods`, which is a slice of the *shared* `BotConfig` object and
-//!   which nothing in the codebase ever reads — the only two references to that dictionary are the
-//!   `TryGetValue` at `:200` and this assignment. So the write is observable only across calls, as
-//!   the modifier re-applies to the already-clamped value on the next bot. The clamped values ride
-//!   out in `randomisation_clamps` for the C# caller to write back into its own config; nothing on
-//!   the native side re-reads them, exactly as nothing on the C# side does within one call.
+//! - **The `:204` clamp is recorded, not applied.** C# assigns into
+//!   `randomistionDetails.EquipmentMods`, a slice of the *shared* `BotConfig` object. **No in-call
+//!   reader:** nothing between `:204` and the end of `GenerateInventory` touches that dictionary
+//!   again, so recording the clamped values instead of applying them cannot change this bot.
+//!   The consumer is the *next* bot — `BotEquipmentFilterService.cs:63`
+//!   (`AdjustChances(randomisationDetails.EquipmentMods, baseBotNode.BotChances.EquipmentModsChances)`),
+//!   which `BotGenerator.cs:205` runs through `FilterBotEquipment` *before* `GenerateInventory`
+//!   (`:284`). So the clamp is a cross-bot feedback loop into the very chances
+//!   [`crate::bot::bot_equipment_mod_generator`] reads. Task 14's replay of
+//!   `randomisation_clamps` back into the live config is therefore a **hard requirement**, not
+//!   cosmetic: skip it and bot N+1 diverges.
 //! - **The `:503` "no spawn chance defined" warning is unreachable and not ported.** `spawnChance`
 //!   is a `double?` fed by `Dictionary<string, double>.GetValueOrDefault`, which yields `0.0`, never
 //!   `null`; a slot with no chance therefore rolls `GetChance100(0)` — **consuming a draw** — and
@@ -412,6 +416,9 @@ pub fn generate_and_add_equipment_to_bot(
             level: details.bot_level,
             equipment_role: bot_equipment_role,
         },
+        // C# passes a reference. `GenerateEquipmentPropertiesWire` owns this member (it is a
+        // `Deserialize` wire type, so borrowing would put a lifetime on it and on every Task 7
+        // fixture) — one clone of ~15 `Option`s and 4 small maps per bot.
         bot_equipment_config: bot_equip_config.clone(),
     };
 
@@ -1326,7 +1333,8 @@ mod tests {
             vec![("front_plate", 70.0), ("mod_nvg", 100.0)]
         );
 
-        // The clamp is a dead write in C# too: `front_plate` went to 70 above, yet the vest's own
+        // The clamp has no in-call reader in C# either — its consumer is the next bot's
+        // `FilterBotEquipment`. `front_plate` went to 70 above, yet the vest's own
         // mod chances still come from the bot template's `equipmentMods` (100), unchanged.
         let baseline = worn(&generate(base_request()).unwrap());
         let mut night = base_request();
