@@ -149,11 +149,16 @@ per-assort-item tasks over a shared RNG (`:311`, `Task.WaitAll` :318), so draw i
 varies run to run. Whole-pass byte-parity against the legacy oracle is therefore impossible
 without modifying the frozen legacy body — not done. What this port promises instead:
 
-1. **Per-item byte-parity.** With the assort restricted to a single template, legacy runs one
-   task and its seeded draw sequence is deterministic. Fixtures pin native == legacy
-   byte-equality per item class: weapon default preset, armor with removable plates, ammo,
-   plain barter-eligible item, pack-eligible item, money. Same `LootIdNormalizer` mechanism as
-   the bot parity tests.
+1. **Per-item byte-parity.** With the pass restricted to a single item, legacy runs one task
+   and its seeded draw sequence is deterministic. The vehicle is the *expired-offers* entry
+   point — `GenerateDynamicOffers(expiredOffers)` takes item lists directly and bypasses the
+   assort walk, and there is no side-effect-free way to restrict the assort itself (the only
+   per-template lever, `dynamic.blacklist.custom`, mutates `CanSellOnRagfair` on the live db).
+   The branches that mode skips (validity check, banned-plate removal, `RemoveArmorPlates`,
+   the offer-count draw) are covered by Rust module tests, the replay test and the whole-pass
+   structural checks instead. Fixtures pin native == legacy byte-equality per item class:
+   weapon default preset, armor with removable plates, ammo, plain barter-eligible item,
+   pack-eligible item, money. Same `LootIdNormalizer` mechanism as the bot parity tests.
 2. **Primitive parity.** Twin KATs for every RNG primitive, existing and new.
 3. **Whole-pass structural checks.** Offer counts within configured bounds per template,
    all MongoIds valid and internally consistent (parent/child links), barter schemes
