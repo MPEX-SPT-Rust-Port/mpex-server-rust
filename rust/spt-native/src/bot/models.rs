@@ -6,14 +6,15 @@
 //! envelopes, which are a fresh contract between the C# caller and this crate and so are plain
 //! camelCase.
 //!
-//! Blocks typed `serde_json::Value` here are deliberate: each grows a real type in the task that
-//! first reads it, the way the loot port grew its models.
+//! Every request block grew its real type in the task that first read it, the way the loot port
+//! grew its models; the orchestrator typed the last of them, so nothing here is a
+//! `serde_json::Value` any more.
 
 use indexmap::{IndexMap, IndexSet};
 use serde::{Deserialize, Serialize};
 
 use crate::bot::repair_service::MinMax;
-use crate::loot::models::{Diagnostic, Item, ItemView};
+use crate::loot::models::{Diagnostic, Item, ItemView, PresetView};
 
 /// Mod-added fields captured on the way in and replayed on the way out.
 type Extra = serde_json::Map<String, serde_json::Value>;
@@ -27,12 +28,10 @@ type Extra = serde_json::Map<String, serde_json::Value>;
 pub struct BotTemplateWire {
     #[serde(rename = "inventory")]
     pub inventory: BotTypeInventoryWire,
-    /// `BotType.Chances` — typed by the task that reads it.
     #[serde(rename = "chances")]
-    pub chances: serde_json::Value,
-    /// `BotType.Generation` — typed by the task that reads it.
+    pub chances: ChancesWire,
     #[serde(rename = "generation")]
-    pub generation: serde_json::Value,
+    pub generation: GenerationWire,
     #[serde(flatten)]
     pub extra: Extra,
 }
@@ -148,6 +147,14 @@ pub struct EquipmentFilters {
     /// `is_of_baseclasses` takes a slice; the C# `HashSet` is only ever membership-tested through it.
     #[serde(rename = "weaponSightWhitelist")]
     pub weapon_sight_whitelist: Option<IndexMap<String, Vec<String>>>,
+
+    // -- Read by `bot::bot_inventory_generator` (`BotConfig.cs:223-224,320-321`).
+    /// Narrow the vest pool to armored rigs when the bot rolled no armor vest (`:378`).
+    #[serde(rename = "forceOnlyArmoredRigWhenNoArmor")]
+    pub force_only_armored_rig_when_no_armor: Option<bool>,
+    /// Force the `TacticalVest` spawn chance to 100% when the bot rolled no armor vest (`:392`).
+    #[serde(rename = "forceRigWhenNoVest")]
+    pub force_rig_when_no_vest: Option<bool>,
 }
 
 /// `Models/Spt/Config/BotConfig.cs:320-337` (`ModLimits`).
@@ -159,7 +166,7 @@ pub struct ModLimitsWire {
     pub light_laser_limit: Option<i32>,
 }
 
-/// `Models/Spt/Config/BotConfig.cs:339-388`, narrowed to the two members the weapon-mod path reads.
+/// `Models/Spt/Config/BotConfig.cs:339-388`, narrowed to the members the bot generators read.
 /// `LevelRange` is `required` in C#; the rest of the record belongs to tasks that read it.
 #[derive(Debug, Clone, Deserialize)]
 pub struct RandomisationDetails {
@@ -168,9 +175,29 @@ pub struct RandomisationDetails {
     /// Slots whose pool is rebuilt from `items.json` instead of the bot's own mod pool.
     #[serde(rename = "randomisedWeaponModSlots")]
     pub randomised_weapon_mod_slots: Option<IndexSet<String>>,
+    /// Equipment slots whose mod pool is rebuilt from the gear pool and filtered
+    /// (`BotInventoryGenerator.cs:592`).
+    #[serde(rename = "randomisedArmorSlots")]
+    pub randomised_armor_slots: Option<IndexSet<String>>,
+    /// Equipment *mod* slot name → chance. Written by the nighttime clamp
+    /// (`BotInventoryGenerator.cs:204`) and read by nothing — see
+    /// [`crate::bot::bot_inventory_generator`].
+    #[serde(rename = "equipmentMods")]
+    pub equipment_mods: Option<IndexMap<String, f64>>,
+    #[serde(rename = "nighttimeChanges")]
+    pub nighttime_changes: Option<NighttimeChanges>,
     /// Weapon tpl → smallest magazine capacity allowed on it.
     #[serde(rename = "minimumMagazineSize")]
     pub minimum_magazine_size: Option<IndexMap<String, f64>>,
+}
+
+/// `Models/Spt/Config/BotConfig.cs:390-397`. `EquipmentModsModifiers` is `required` in C#, so an
+/// absent key is a deserialization failure there and here.
+#[derive(Debug, Clone, Deserialize)]
+pub struct NighttimeChanges {
+    /// Equipment mod slot name → the delta added to the matching `equipmentMods` chance.
+    #[serde(rename = "equipmentModsModifiers")]
+    pub equipment_mods_modifiers: IndexMap<String, f64>,
 }
 
 /// `Models/Spt/Config/BotConfig.cs:456-463`. `MinMax` is reused from
@@ -213,12 +240,29 @@ pub struct GenerateEquipmentPropertiesWire {
     pub bot_equipment_config: EquipmentFilters,
 }
 
-/// `Models/Eft/Common/Tables/BotType.cs:63-73`, narrowed to the one chance map the equipment path
-/// reads; `equipment` and `weaponMods` land here when their tasks read them.
-#[derive(Debug, Clone, Default, Deserialize)]
+/// `Models/Eft/Common/Tables/BotType.cs:63-73` (`Chances`) — all three maps.
+///
+/// Mutable for the whole of one bot's generation: the armband forcing (`:223`) and the
+/// no-vest forcing (`:394`) both write into `equipment`, and `GenerateEquipment` reads it back on
+/// every later slot.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ChancesWire {
+    /// `Chances.EquipmentChances` — equipment *slot* name → spawn chance.
+    #[serde(rename = "equipment", default)]
+    pub equipment: IndexMap<String, f64>,
+    /// `Chances.WeaponModsChances` — weapon mod slot name → spawn chance.
+    #[serde(rename = "weaponMods", default)]
+    pub weapon_mods: IndexMap<String, f64>,
+    /// `Chances.EquipmentModsChances` — equipment mod slot name → spawn chance.
     #[serde(rename = "equipmentMods", default)]
     pub equipment_mods: IndexMap<String, f64>,
+}
+
+/// `Models/Eft/Common/Tables/BotType.cs:136-140` (`Generation`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct GenerationWire {
+    #[serde(rename = "items", default)]
+    pub items: ItemCountsWire,
 }
 
 /// `Models/Spt/Bots/GenerateWeaponRequest.cs:70-89`. Every member is nullable in C#; `role` is
@@ -313,7 +357,7 @@ pub struct ItemCountWire {
 /// `Weights` is a `Dictionary<double, double>` in C# and an `IndexMap<String, f64>` here: JSON
 /// object keys are strings and `f64` is not hashable. `bot_weapon_generator_helper` parses the
 /// drawn key back out.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct GenerationDataWire {
     /// Key: number of items, value: weighting.
     #[serde(rename = "weights", default)]
@@ -342,14 +386,15 @@ pub struct GenerateWeaponResultWire {
 }
 
 /// `Models/Eft/Common/Tables/BotType.cs:158-198` (`GenerationWeightingItems`), narrowed to the
-/// eleven blocks `BotLootGenerator.GenerateLoot` draws from (`:97-107`). `magazines` and `looseLoot`
-/// belong to the weapon path and land here when it reads them.
+/// eleven blocks `BotLootGenerator.GenerateLoot` draws from (`:97-107`) plus the `magazines` block
+/// `BotInventoryGenerator.cs:771` hands to `AddExtraMagazinesToInventory`. `looseLoot` is read by
+/// nothing this port carries.
 ///
 /// Every block is an `Option` because C# leaves the unset ones null: `itemCounts?.BackpackLoot.Weights
 /// is null` (`:80`) null-checks only the *outer* `Items`, so a bot json missing one of these blocks
 /// is an NRE there. Here it lands on the same warn-and-return exit as an empty weights map, which is
 /// a deviation from a crash, not from an outcome.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ItemCountsWire {
     #[serde(rename = "grenades")]
     pub grenades: Option<GenerationDataWire>,
@@ -373,6 +418,10 @@ pub struct ItemCountsWire {
     pub vest_loot: Option<GenerationDataWire>,
     #[serde(rename = "specialItems")]
     pub special_items: Option<GenerationDataWire>,
+    /// Spare-magazine counts. `BotInventoryGenerator.cs:771` passes it on unguarded, so an absent
+    /// block is an NRE the moment a weapon spawns.
+    #[serde(rename = "magazines")]
+    pub magazines: Option<GenerationDataWire>,
 }
 
 /// `Models/Spt/Bots/BotLootCache.cs:6-46` — the thirteen pools `BotLootCacheService` resolves, sent
@@ -422,16 +471,30 @@ pub struct WalletLootSettingsWire {
     pub wallet_tpl_pool: std::collections::HashSet<String>,
 }
 
-/// `Models/Spt/Config/PmcConfig.cs`, narrowed to what the loot generator reads.
+/// `Models/Spt/Config/PmcConfig.cs`, narrowed to what bot generation reads.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
-pub struct PmcLootConfigWire {
+pub struct PmcConfigWire {
     pub force_healing_items_into_secure: bool,
     pub loose_weapon_in_backpack_chance_percent: f64,
     pub loose_weapon_in_backpack_loot_min_max: MinMax<i32>,
     pub loot_settings: PmcLootSettingsWire,
     pub add_secure_container_loot_from_bot_config: bool,
     pub loot_item_limits_rub: Vec<MinMaxLootItemValueWire>,
+    /// `PmcConfig.ForceArmband` (`:152-162`).
+    pub force_armband: ForceArmbandSettingsWire,
+    /// `PmcConfig.WeaponHasEnhancementChancePercent`, hoisted into
+    /// [`crate::bot::BotContext::weapon_has_enhancement_chance_percent`].
+    pub weapon_has_enhancement_chance_percent: f64,
+}
+
+/// `Models/Spt/Config/PmcConfig.cs:152-162` (`ForceArmbandSettings`).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ForceArmbandSettingsWire {
+    pub enabled: bool,
+    pub usec: String,
+    pub bear: String,
 }
 
 /// `Models/Spt/Config/PmcConfig.cs:164-175` (`PmcLootSettings`).
@@ -532,32 +595,42 @@ pub struct GenerateBotInventoryRequest {
     pub test_seed: Option<u64>,
     pub details: BotGenerationDetailsWire,
     pub template: BotTemplateWire,
-    /// Hoisted live state — `PlayerProfile.Info.Level`.
+    /// Hoisted live state — `PlayerProfile.Info.Level` (`BotInventoryGenerator.cs:228`). Read only
+    /// C#-side, to resolve [`Self::equipment_blacklist`]; see
+    /// [`crate::bot::bot_inventory_generator`].
     pub generating_player_level: i32,
     /// Hoisted live state — `RaidTime`/`WeatherHelper.IsNightTime`.
     pub is_night_time: bool,
-    /// `BotConfig.Equipment[role]`; typed fields grow per-task.
-    pub equipment_config: serde_json::Map<String, serde_json::Value>,
+    /// `BotConfig.Equipment`, keyed by equipment role. The whole map, not one resolved entry: the
+    /// orchestrator does its own `GetBotEquipmentRole` lookup (`:180`) *and* a `ContainsKey` on the
+    /// bot data's role (`:590`), and `GenerateExtraPropertiesForItem` looks roles up per item.
+    pub equipment: IndexMap<String, EquipmentFilters>,
+    /// `BotConfig.Bosses`.
+    pub bosses: Vec<String>,
+    /// `BotConfig.Durability`.
+    pub durability: crate::bot::durability_limits_helper::BotDurability,
     pub item_spawn_limits: IndexMap<String, IndexMap<String, f64>>,
-    pub wallet_loot: serde_json::Value,
-    pub currency_stack_size: serde_json::Value,
-    pub secure_container_ammo_stack_count: serde_json::Value,
-    pub disable_loot_on_bot_types: Vec<String>,
-    pub low_profile_gas_block_tpls: Vec<String>,
+    pub wallet_loot: WalletLootSettingsWire,
+    /// `BotConfig.CurrencyStackSize` — bot role → money tpl → stack size → weight.
+    pub currency_stack_size: IndexMap<String, IndexMap<String, IndexMap<String, f64>>>,
+    /// `BotConfig.SecureContainerAmmoStackCount`.
+    pub secure_container_ammo_stack_count: i32,
+    pub disable_loot_on_bot_types: std::collections::HashSet<String>,
+    pub low_profile_gas_block_tpls: std::collections::HashSet<String>,
     pub loot_item_resource_randomization: IndexMap<String, RandomisedResourceDetails>,
-    pub pmc_config: serde_json::Value,
-    pub repair_kit_weapon: serde_json::Value,
+    pub pmc_config: PmcConfigWire,
+    /// `RepairConfig.RepairKit.Weapon`.
+    pub repair_kit_weapon: crate::bot::repair_service::BonusSettings,
     /// `GetBotEquipmentBlacklist(role, level)` result.
-    pub equipment_blacklist: serde_json::Value,
-    pub sight_whitelist: IndexMap<String, Vec<String>>,
+    pub equipment_blacklist: EquipmentFilterDetails,
     /// The 13 resolved `BotLootCacheService` pools.
     pub loot_pools: BotLootCacheWire,
     /// `GlobalTable.ItemPresets`.
-    pub item_presets: IndexMap<String, serde_json::Value>,
-    pub default_presets_by_tpl: IndexMap<String, serde_json::Value>,
-    pub presets_by_id: IndexMap<String, serde_json::Value>,
+    pub item_presets: IndexMap<String, PresetView>,
+    pub default_presets_by_tpl: IndexMap<String, PresetView>,
+    pub presets_by_id: IndexMap<String, PresetView>,
     /// `ItemFilterService.GetBlacklistedItems()`.
-    pub config_blacklist: Vec<String>,
+    pub config_blacklist: std::collections::HashSet<String>,
     pub handbook_prices: IndexMap<String, f64>,
     /// The `TemplateItem` slice, flattened by the C# caller exactly as the loot envelopes take it.
     pub items: IndexMap<String, ItemView>,
@@ -579,15 +652,43 @@ pub struct BotGenerationDetailsWire {
     pub clear_bot_container_cache_after_generation: bool,
 }
 
+/// `Models/Eft/Common/Tables/BotBase.cs:358-401` (`BotBaseInventory`), in C# member order so the
+/// serialized key order matches too. Write-only — the C# caller deserializes it straight into the
+/// bot it is building — so there is no passthrough map and every member is populated.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct BotBaseInventoryWire {
+    #[serde(rename = "items")]
+    pub items: Vec<Item>,
+    #[serde(rename = "equipment")]
+    pub equipment: String,
+    #[serde(rename = "stash")]
+    pub stash: String,
+    #[serde(rename = "sortingTable")]
+    pub sorting_table: String,
+    #[serde(rename = "questRaidItems")]
+    pub quest_raid_items: String,
+    #[serde(rename = "questStashItems")]
+    pub quest_stash_items: String,
+    #[serde(rename = "hideoutAreaStashes")]
+    pub hideout_area_stashes: IndexMap<String, String>,
+    #[serde(rename = "fastPanel")]
+    pub fast_panel: IndexMap<String, String>,
+    #[serde(rename = "favoriteItems")]
+    pub favorite_items: Vec<String>,
+    #[serde(rename = "hideoutCustomizationStashId")]
+    pub hideout_customization_stash_id: String,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BotInventoryResult {
-    /// `BotBaseInventory` shape, built by the orchestrator task.
-    pub inventory: serde_json::Value,
+    pub inventory: BotBaseInventoryWire,
     pub diagnostics: Vec<Diagnostic>,
-    /// Slot → grid state, from `bot_generator_helper::ContainerGrids::into_wire`.
+    /// Slot → grid state, from `bot_generator_helper::ContainerGrids::into_wire`. Empty when the
+    /// request asked for the cache to be cleared (`BotInventoryGenerator.cs:114-117`).
     pub container_grids: IndexMap<String, ContainerDetailsWire>,
-    /// Equipment-slot → clamped chance.
+    /// Equipment *mod* slot → the chance the nighttime clamp (`:204`) left behind, for the C#
+    /// caller to write back into its shared `BotConfig` object.
     pub randomisation_clamps: IndexMap<String, f64>,
 }
 
@@ -610,27 +711,43 @@ mod tests {
                     "SecuredContainer":{},"SpecialLoot":{},"TacticalVest":{}},
                 "mods":{"aaaaaaaaaaaaaaaaaaaaaaa5":{"mod_magazine":["aaaaaaaaaaaaaaaaaaaaaaa6"]}},
                 "modAddedInventoryField":"kept"},
-            "chances":{"equipment":{"Headwear":75}},
-            "generation":{"items":{"backpackLoot":{"weights":{"1":1}}}},
+            "chances":{"equipment":{"Headwear":75},"weaponMods":{"mod_scope":30},
+                "equipmentMods":{"mod_nvg":40}},
+            "generation":{"items":{"backpackLoot":{"weights":{"1":1}},
+                "magazines":{"weights":{"2":1}}}},
             "modAddedTemplateField":7},
         "generatingPlayerLevel":30,
         "isNightTime":true,
-        "equipmentConfig":{"weaponModLimits":{"scopeLimit":2}},
+        "equipment":{"assault":{"weaponModLimits":{"scopeLimit":2},
+            "forceRigWhenNoVest":true,"forceOnlyArmoredRigWhenNoArmor":false,
+            "randomisation":[{"levelRange":{"min":1,"max":99},
+                "randomisedArmorSlots":["Headwear"],"equipmentMods":{"mod_nvg":40},
+                "nighttimeChanges":{"equipmentModsModifiers":{"mod_nvg":90}}}]}},
+        "bosses":["bossknight"],
+        "durability":{"default":{"armor":{"maxDelta":10,"minDelta":0,"minLimitPercent":15},
+                "weapon":{"lowestMax":60,"highestMax":100,"maxDelta":10,"minDelta":0,
+                          "minLimitPercent":15}},
+            "botDurabilities":{},
+            "pmc":{"armor":{"lowestMaxPercent":90,"highestMaxPercent":100,"maxDelta":10,
+                            "minDelta":0,"minLimitPercent":15},
+                "weapon":{"lowestMax":95,"highestMax":100,"maxDelta":5,"minDelta":0,
+                          "minLimitPercent":15}}},
         "itemSpawnLimits":{"assault":{"aaaaaaaaaaaaaaaaaaaaaaa7":1}},
         "walletLoot":{"chancePercent":10},
-        "currencyStackSize":{"RUB":{"min":1,"max":2}},
-        "secureContainerAmmoStackCount":{"min":5,"max":10},
+        "currencyStackSize":{"default":{"RUB":{"1000":1}}},
+        "secureContainerAmmoStackCount":3,
         "disableLootOnBotTypes":["bosstest"],
         "lowProfileGasBlockTpls":["aaaaaaaaaaaaaaaaaaaaaaa8"],
         "lootItemResourceRandomization":{"assault":{"food":{"chanceMaxResourcePercent":60}}},
-        "pmcConfig":{"forceHealingItemsIntoSecure":true},
-        "repairKitWeapon":{"maxUsePercent":20},
+        "pmcConfig":{"forceHealingItemsIntoSecure":true,
+            "forceArmband":{"enabled":true,"usec":"armband_usec","bear":"armband_bear"},
+            "weaponHasEnhancementChancePercent":25},
+        "repairKitWeapon":{"rarityWeight":{},"bonusTypeWeight":{},"Common":{},"Rare":{}},
         "equipmentBlacklist":{"equipment":{"Headwear":["aaaaaaaaaaaaaaaaaaaaaaa9"]}},
-        "sightWhitelist":{"55818ad54bdc2ddc698b4569":["55818add4bdc2d5b648b456f"]},
         "lootPools":{"backpackLoot":{"aaaaaaaaaaaaaaaaaaaaaab1":4}},
-        "itemPresets":{"p1":{"_id":"p1","_items":[]}},
-        "defaultPresetsByTpl":{"aaaaaaaaaaaaaaaaaaaaaab2":{"_id":"p2"}},
-        "presetsById":{"p2":{"_id":"p2"}},
+        "itemPresets":{"p1":{"id":"p1","items":[]}},
+        "defaultPresetsByTpl":{"aaaaaaaaaaaaaaaaaaaaaab2":{"id":"p2","items":[]}},
+        "presetsById":{"p2":{"id":"p2","items":[]}},
         "configBlacklist":["aaaaaaaaaaaaaaaaaaaaaab3"],
         "handbookPrices":{"aaaaaaaaaaaaaaaaaaaaaab4":12500.5},
         "items":{"aaaaaaaaaaaaaaaaaaaaaab5":{"parent":"aaaaaaaaaaaaaaaaaaaaaab6","width":2,"height":1}}
@@ -676,26 +793,69 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["aaaaaaaaaaaaaaaaaaaaaaa6"]
         );
-        assert_eq!(parsed.template.chances["equipment"]["Headwear"], 75);
+        assert_eq!(parsed.template.chances.equipment["Headwear"], 75.0);
+        assert_eq!(parsed.template.chances.weapon_mods["mod_scope"], 30.0);
+        assert_eq!(parsed.template.chances.equipment_mods["mod_nvg"], 40.0);
+        let generation_items = &parsed.template.generation.items;
         assert_eq!(
-            parsed.template.generation["items"]["backpackLoot"]["weights"]["1"],
-            1
+            generation_items.backpack_loot.as_ref().unwrap().weights["1"],
+            1.0
+        );
+        assert_eq!(
+            generation_items.magazines.as_ref().unwrap().weights["2"],
+            1.0
         );
 
         assert_eq!(parsed.generating_player_level, 30);
         assert!(parsed.is_night_time);
-        assert_eq!(parsed.equipment_config["weaponModLimits"]["scopeLimit"], 2);
+        let assault_equipment = &parsed.equipment["assault"];
+        assert_eq!(
+            assault_equipment
+                .weapon_mod_limits
+                .as_ref()
+                .unwrap()
+                .scope_limit,
+            Some(2)
+        );
+        assert_eq!(assault_equipment.force_rig_when_no_vest, Some(true));
+        assert_eq!(
+            assault_equipment.force_only_armored_rig_when_no_armor,
+            Some(false)
+        );
+        let randomisation = &assault_equipment.randomisation.as_ref().unwrap()[0];
+        assert!(
+            randomisation
+                .randomised_armor_slots
+                .as_ref()
+                .unwrap()
+                .contains("Headwear")
+        );
+        assert_eq!(
+            randomisation.equipment_mods.as_ref().unwrap()["mod_nvg"],
+            40.0
+        );
+        assert_eq!(
+            randomisation
+                .nighttime_changes
+                .as_ref()
+                .unwrap()
+                .equipment_mods_modifiers["mod_nvg"],
+            90.0
+        );
+        assert_eq!(parsed.bosses, vec!["bossknight"]);
+        assert_eq!(parsed.durability.default.weapon.lowest_max, 60);
         assert_eq!(
             parsed.item_spawn_limits["assault"]["aaaaaaaaaaaaaaaaaaaaaaa7"],
             1.0
         );
-        assert_eq!(parsed.wallet_loot["chancePercent"], 10);
-        assert_eq!(parsed.currency_stack_size["RUB"]["max"], 2);
-        assert_eq!(parsed.secure_container_ammo_stack_count["min"], 5);
-        assert_eq!(parsed.disable_loot_on_bot_types, vec!["bosstest"]);
-        assert_eq!(
-            parsed.low_profile_gas_block_tpls,
-            vec!["aaaaaaaaaaaaaaaaaaaaaaa8"]
+        assert_eq!(parsed.wallet_loot.chance_percent, 10.0);
+        assert_eq!(parsed.currency_stack_size["default"]["RUB"]["1000"], 1.0);
+        assert_eq!(parsed.secure_container_ammo_stack_count, 3);
+        assert!(parsed.disable_loot_on_bot_types.contains("bosstest"));
+        assert!(
+            parsed
+                .low_profile_gas_block_tpls
+                .contains("aaaaaaaaaaaaaaaaaaaaaaa8")
         );
         let food = parsed.loot_item_resource_randomization["assault"]
             .food
@@ -709,15 +869,18 @@ mod tests {
                 .meds
                 .is_none()
         );
-        assert_eq!(parsed.pmc_config["forceHealingItemsIntoSecure"], true);
-        assert_eq!(parsed.repair_kit_weapon["maxUsePercent"], 20);
+        assert!(parsed.pmc_config.force_healing_items_into_secure);
+        assert!(parsed.pmc_config.force_armband.enabled);
+        assert_eq!(parsed.pmc_config.force_armband.usec, "armband_usec");
+        assert_eq!(parsed.pmc_config.force_armband.bear, "armband_bear");
         assert_eq!(
-            parsed.equipment_blacklist["equipment"]["Headwear"][0],
-            "aaaaaaaaaaaaaaaaaaaaaaa9"
+            parsed.pmc_config.weapon_has_enhancement_chance_percent,
+            25.0
         );
-        assert_eq!(
-            parsed.sight_whitelist["55818ad54bdc2ddc698b4569"],
-            vec!["55818add4bdc2d5b648b456f"]
+        assert!(parsed.repair_kit_weapon.rarity_weight.is_empty());
+        assert!(
+            parsed.equipment_blacklist.equipment.as_ref().unwrap()["Headwear"]
+                .contains("aaaaaaaaaaaaaaaaaaaaaaa9")
         );
         assert_eq!(
             parsed.loot_pools.backpack_loot["aaaaaaaaaaaaaaaaaaaaaab1"],
@@ -725,13 +888,15 @@ mod tests {
         );
         // Pools the payload omits deserialize empty, not missing.
         assert!(parsed.loot_pools.combined_pool_loot.is_empty());
-        assert_eq!(parsed.item_presets["p1"]["_id"], "p1");
+        assert_eq!(parsed.item_presets["p1"].id.as_deref(), Some("p1"));
         assert_eq!(
-            parsed.default_presets_by_tpl["aaaaaaaaaaaaaaaaaaaaaab2"]["_id"],
-            "p2"
+            parsed.default_presets_by_tpl["aaaaaaaaaaaaaaaaaaaaaab2"]
+                .id
+                .as_deref(),
+            Some("p2")
         );
-        assert_eq!(parsed.presets_by_id["p2"]["_id"], "p2");
-        assert_eq!(parsed.config_blacklist, vec!["aaaaaaaaaaaaaaaaaaaaaab3"]);
+        assert_eq!(parsed.presets_by_id["p2"].id.as_deref(), Some("p2"));
+        assert!(parsed.config_blacklist.contains("aaaaaaaaaaaaaaaaaaaaaab3"));
         assert_eq!(parsed.handbook_prices["aaaaaaaaaaaaaaaaaaaaaab4"], 12500.5);
         assert_eq!(parsed.items["aaaaaaaaaaaaaaaaaaaaaab5"].width, Some(2));
     }
@@ -777,7 +942,10 @@ mod tests {
     #[test]
     fn bot_inventory_result_serializes_with_camel_case_keys() {
         let out = serde_json::to_value(BotInventoryResult {
-            inventory: serde_json::json!({"items":[],"equipment":"aaaaaaaaaaaaaaaaaaaaaaaa"}),
+            inventory: BotBaseInventoryWire {
+                equipment: "aaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+                ..Default::default()
+            },
             diagnostics: vec![Diagnostic {
                 level: crate::loot::models::DEBUG.to_owned(),
                 locale_key: Some("bot-missing_item".to_owned()),
@@ -809,6 +977,26 @@ mod tests {
             ]
         );
         assert_eq!(out["inventory"]["equipment"], "aaaaaaaaaaaaaaaaaaaaaaaa");
+        // `BotBaseInventory` member order, so the C# deserializer sees its own shape back.
+        assert_eq!(
+            out["inventory"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .collect::<Vec<_>>(),
+            vec![
+                "items",
+                "equipment",
+                "stash",
+                "sortingTable",
+                "questRaidItems",
+                "questStashItems",
+                "hideoutAreaStashes",
+                "fastPanel",
+                "favoriteItems",
+                "hideoutCustomizationStashId"
+            ]
+        );
         assert_eq!(out["diagnostics"][0]["localeKey"], "bot-missing_item");
         assert_eq!(out["diagnostics"][0]["args"]["tpl"], "x");
         let grids = &out["containerGrids"]["TacticalVest"];

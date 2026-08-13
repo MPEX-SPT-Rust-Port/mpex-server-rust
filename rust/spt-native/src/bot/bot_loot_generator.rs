@@ -84,8 +84,8 @@ use crate::bot::bot_weapon_generator_helper::item_added_result_name;
 use crate::bot::durability_limits_helper::is_bot_pmc;
 use crate::bot::models::{
     BotGenerationDetailsWire, BotLootCacheWire, BotTypeInventoryWire, ItemCountsWire,
-    ItemSpawnLimitSettingsWire, LootContainerSettingsWire, MinMaxLootItemValueWire,
-    PmcLootConfigWire, WalletLootSettingsWire,
+    ItemSpawnLimitSettingsWire, LootContainerSettingsWire, MinMaxLootItemValueWire, PmcConfigWire,
+    WalletLootSettingsWire,
 };
 use crate::loot::container_extensions::{find_slot_for_item, try_fill_container_map_with_item};
 use crate::loot::item_helper::{
@@ -146,7 +146,7 @@ pub struct BotLootConfig<'a> {
     /// `BotConfig.CurrencyStackSize` — bot role → money tpl → stack size → weight.
     pub currency_stack_size: &'a IndexMap<String, IndexMap<String, IndexMap<String, f64>>>,
     /// `PmcConfig`, narrowed.
-    pub pmc: &'a PmcLootConfigWire,
+    pub pmc: &'a PmcConfigWire,
     /// `HandbookHelper.GetTemplatePrice` — a tpl the handbook does not carry is worth 0 there.
     pub handbook_prices: &'a IndexMap<String, f64>,
     /// The resolved `BotLootCacheService` pools.
@@ -527,7 +527,7 @@ fn weighted_count(
 /// Not called on this path — the pools arrive already filtered, see the module doc. Ported so the
 /// limits the C# projection must filter with are pinned on this side too.
 pub fn get_single_item_loot_price_limits(
-    pmc: &PmcLootConfigWire,
+    pmc: &PmcConfigWire,
     bot_level: i32,
     is_pmc: bool,
 ) -> Option<&MinMaxLootItemValueWire> {
@@ -1417,7 +1417,7 @@ mod tests {
         item_spawn_limits: IndexMap<String, IndexMap<String, f64>>,
         wallet_loot: WalletLootSettingsWire,
         currency_stack_size: IndexMap<String, IndexMap<String, IndexMap<String, f64>>>,
-        pmc: PmcLootConfigWire,
+        pmc: PmcConfigWire,
         handbook_prices: IndexMap<String, f64>,
         loot_pools: BotLootCacheWire,
         disable_loot_on_bot_types: HashSet<String>,

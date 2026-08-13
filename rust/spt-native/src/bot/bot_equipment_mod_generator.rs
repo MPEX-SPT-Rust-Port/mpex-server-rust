@@ -2228,7 +2228,7 @@ fn has_no_slots_cartridges_or_chambers(template: Option<&ItemView>) -> bool {
 }
 
 /// `BotHelper.GetBotRandomizationDetails` (`Helpers/Bot/BotHelper.cs:74-81`).
-fn get_bot_randomization_details(
+pub(crate) fn get_bot_randomization_details(
     bot_level: i32,
     bot_equip_config: &EquipmentFilters,
 ) -> Option<&RandomisationDetails> {

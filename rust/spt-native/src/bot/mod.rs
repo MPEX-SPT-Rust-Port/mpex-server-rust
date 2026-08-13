@@ -1,5 +1,6 @@
 pub(crate) mod bot_equipment_mod_generator;
 pub(crate) mod bot_generator_helper;
+pub(crate) mod bot_inventory_generator;
 pub(crate) mod bot_loot_generator;
 pub(crate) mod bot_weapon_generator;
 pub(crate) mod bot_weapon_generator_helper;
