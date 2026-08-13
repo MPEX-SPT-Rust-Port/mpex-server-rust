@@ -59,6 +59,8 @@ pub const COLLIMATOR: &str = "55818ad54bdc2ddc698b4569";
 pub const COMPACT_COLLIMATOR: &str = "55818acf4bdc2dde698b456b";
 /// `BaseClasses.PORTABLE_RANGE_FINDER`
 pub const PORTABLE_RANGE_FINDER: &str = "61605ddea09d851a0a0c1bbc";
+/// `BaseClasses.BUILT_IN_INSERTS`
+pub const BUILT_IN_INSERTS: &str = "65649eb40bf0ed77b8044453";
 
 /// `ItemHelper.GetItem` (`ItemHelper.cs:491-501`) — a plain lookup, absent tpl included.
 pub fn get_item<'a>(items_view: &'a IndexMap<String, ItemView>, tpl: &str) -> Option<&'a ItemView> {
