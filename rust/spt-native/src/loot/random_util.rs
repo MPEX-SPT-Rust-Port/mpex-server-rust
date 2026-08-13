@@ -246,6 +246,9 @@ pub fn get_array_value<T>(list: &[T]) -> &T {
 ///
 /// The C#'s `logger.Error` calls for empty or mismatched inputs are not ported: keys and weights
 /// come from one map here so they cannot disagree, and no ported call site passes an empty one.
+/// Its `logger.Warning("Weight at index: {i} is negative...")` is dropped too — the negative weight
+/// is still skipped with the same bug-for-bug effect below, only the log line is missing, so a mod
+/// shipping negative weights gets the same items without the diagnostic it would see on 4.1.2.
 ///
 /// # Errors
 ///

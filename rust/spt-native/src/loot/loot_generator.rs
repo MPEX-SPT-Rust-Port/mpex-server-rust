@@ -1003,9 +1003,9 @@ pub fn get_random_loot_container_loot(
                 })?;
 
             // Ensure preset has unique ids and is cloned so we don't alter the preset data stored in
-            // memory. C# skips the clone here (`:675` calls `ReplaceIDs()` straight on the cached
-            // `preset.Items`, mutating it) — this port owns its deserialized copy, so the cache
-            // corruption cannot happen and the items handed back are the same either way.
+            // memory. C# does not mutate the cache either: `GetDefaultPreset` hands back
+            // `cloner.Clone(...)` (`PresetHelper.cs:226,230`), so `:675`'s `ReplaceIDs()` runs on a
+            // clone. Both sides operate on their own copy, so the items handed back are identical.
             let mut preset_and_mods = preset.items.clone();
             item_helper::replace_ids(&mut preset_and_mods);
             item_helper::remap_root_item_id(&mut preset_and_mods);

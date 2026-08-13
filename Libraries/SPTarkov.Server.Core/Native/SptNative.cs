@@ -221,7 +221,7 @@ public static class SptNative
         }
 
         // Throwing before the try/finally is safe here only because verify writes a buffer on
-        // success alone. Do NOT copy this shape into the generate exports (ABI 3): those also write
+        // success alone. Do NOT copy this shape into the generate exports (ABI 4): those also write
         // a message buffer on BAD_ARGS and ERROR, so their wrappers must branch on outPtr, never on
         // the status, and free whenever it is non-null (null-arg BAD_ARGS and PANIC write nothing).
         if (status != 0)

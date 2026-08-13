@@ -373,6 +373,27 @@ location generator uses, and the items-view projection is shared between both ge
   the split mirrors the exact source each C# call site used — collapsing them would silently change
   behaviour for those mods.
 
+**Still limited for mods.**
+
+- Patches on the collaborators the set projection replaces do not reach the native path. The payload
+  projects sets up front and Rust makes every per-item decision from them, so on the default path
+  these are never called during generation: `ItemFilterService.IsItemBlacklisted`/`IsBossItem`
+  (projected into the blacklist and boss-item sets), `PresetHelper.HasPreset`/`GetDefaultPreset`
+  (projected into `presetTpls`/`defaultPresetsByTpl`), `WeightedRandomHelper.GetWeightedValue` (Rust
+  twin), `ItemHelper.SplitStack`/`SetFoundInRaid`/`IsOfBaseclass`/`IsOfBaseclasses`/
+  `ArmorItemCanHoldMods`/`AddCartridgesToAmmoBox` (Rust twins), and `ICloner` (Rust-owned copies).
+  Patching any of them leaves native generation unchanged; the escape hatch is
+  `ForceLegacyLootGeneration` or a patch on one of the nine protected members, either of which routes
+  the call to the legacy path where all of them run again.
+- Templates without `_props` are absent from `itemsView`, so on the native path such a template is
+  treated as "not in the db" at three reward-loot decision points — the sealed-case weapon lookup,
+  the linked-item mod pool, and the preset encyclopedia lookup — where 4.1.2 would have proceeded (or
+  thrown an NRE later). Vanilla data always carries `_props`; this is a documented limitation for
+  mod-added props-less templates.
+- The ported retry loops (`CreateRandomLoot`) can spin forever on an always-rejecting pool exactly as
+  4.1.2 does, but on the native path the hang sits inside an FFI call with no managed stack trace to
+  dump — `forceLegacyLootGeneration` restores the C# diagnosability.
+
 **Performance: this port is a loss, deliberately.** Measured head to head (n=20, Release, airdrop
 `mixed`): native `CreateRandomLoot` ~53.3 ms median against ~17.0 ms for the retained legacy path.
 Roughly 50 ms of that is the fixed per-call items-view projection over the whole item table — the
