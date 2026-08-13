@@ -787,11 +787,24 @@ mod tests {
 
         // Root is class 0, the three mods are classes 6, 6, 4 and 3 - all above 1.
         assert!(items[0].upd.as_ref().unwrap().repairable.is_none());
-        for plate in &items[1..] {
-            let repairable = plate.upd.as_ref().unwrap().repairable.as_ref().unwrap();
-            assert!(repairable.durability.unwrap() > 0.0);
-            assert!(repairable.max_durability.unwrap() > 0.0);
-        }
+        // Pinned to the seed, which pins the `(current, max)` parameter order this call site has
+        // to pass them in: the first of each child's four draws is `GetDouble(maxMultiplier, 1)`,
+        // so swapping the two arguments moves every number below.
+        let durabilities: Vec<(f64, f64)> = items[1..]
+            .iter()
+            .map(|plate| {
+                let repairable = plate.upd.as_ref().unwrap().repairable.as_ref().unwrap();
+                (
+                    repairable.max_durability.unwrap(),
+                    repairable.durability.unwrap(),
+                )
+            })
+            .collect();
+        // Base max durabilities are 60, 60, 40 and 30.
+        assert_eq!(
+            durabilities,
+            [(45.0, 42.0), (59.0, 59.0), (36.0, 35.0), (29.0, 25.0)]
+        );
 
         let after = stream_position_after(|| {
             let mut items = armor_with_plates();
@@ -838,6 +851,10 @@ mod tests {
         let repairable = items[0].upd.as_ref().unwrap().repairable.as_ref().unwrap();
         let max = repairable.max_durability.unwrap();
         let current = repairable.durability.unwrap();
+        // Pinned to the seed, which also pins which multiplier reaches which bound: `max` comes
+        // off `GetDouble(maxMultiplier, 1) * 100` and `current` off `GetDouble(currentMultiplier,
+        // 1) * max`, so swapping the two multipliers moves both numbers.
+        assert_eq!((max, current), (76.0, 71.0));
         assert!((50.0..=100.0).contains(&max), "max was {max}");
         assert!(current <= max && current > 0.0, "current was {current}");
         // Rounded, both of them.
