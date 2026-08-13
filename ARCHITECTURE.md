@@ -444,7 +444,10 @@ complete 4.1.2 surface; the algorithms live in `rust/spt-native/src/bot/` and th
   second-to-last — `pmcConfig` is last), so unlike
   the reward-loot port there is no overload and no new parameter — the frozen 4.1.2 constructor is
   untouched. It is the bot family's own flag, separate from `LocationConfig.ForceLegacyLootGeneration`
-  (the split the reward-loot section said to revisit here).
+  (the split the reward-loot section said to revisit here). It ships defaulted to `false` — native —
+  for consistency with the loot ports; flipping the shipped default to legacy is a one-line config
+  change should the ~45-65x per-bot cost or the PMC level 15+ divergence below matter more than
+  exercising the native path, and the performance follow-up is the trigger to revisit that choice.
 - **Two pieces of state are replayed after the call**, because the native side keeps them to itself:
   - `RestoreContainerGrids` writes the container grid occupancy back into
     `BotInventoryContainerService` when `ClearBotContainerCacheAfterGeneration` is false. Only player
@@ -458,6 +461,13 @@ complete 4.1.2 surface; the algorithms live in `rust/spt-native/src/bot/` and th
     skipping the replay would diverge that bot, not this one. The native side reports clamps only
     under the same condition legacy applies them (nighttime, with `NighttimeChanges` configured), so
     the collection is empty otherwise.
+- **All native log lines surface under one category.** The native path emits every one of the four
+  generators' log lines through `ISptLogger<BotInventoryGenerator>`, where legacy emits them from
+  four separate categories — the messages are the same, but a log-category filter will see the shift.
+- **Legacy's in-place template mutations are not replayed** (the armband pool clear and
+  `EquipmentChances["Armband"] = 100`). `BotGenerator` clones the bot template per bot and discards
+  it after generation, so nothing outside that call can observe either write — unobservable by
+  design, not an omission.
 
 **Still limited for mods.**
 
@@ -474,23 +484,34 @@ complete 4.1.2 surface; the algorithms live in `rust/spt-native/src/bot/` and th
   reads as "not in the db" wherever bot generation looks an id up. Vanilla data always carries
   `_props`; this is a documented limitation for mod-added props-less templates, shared with the loot
   ports.
-- **Bots whose role and level select a `randomisedArmorSlots` bucket do not match the legacy path.**
-  When that bucket applies, `GenerateEquipment` replaces the equipment mod pool with
-  `BotEquipmentModPoolService.GetModsForGearSlot`, whose per-item entry is a
-  `ConcurrentDictionary<string, HashSet<MongoId>>` — enumerated in hash-bucket order, not database
-  slot order. The Rust `mod_pool_service` derives the same pool in database slot order, so the slots
-  are filled in a different order and every draw after the first diverges. The legacy order is
-  process-stable in practice — .NET gives `ConcurrentDictionary<string, …>` an internal
-  non-randomized string comparer — but that comparer and the bucket layout are **unspecified runtime
-  implementation details**, so a Rust emulation of them would be correct only until a runtime patch
-  silently changed one, and it would fail quietly rather than loudly. If parity at PMC level 15+ is
-  ever required, the cheaper and stabler fix shape is to **project the C# enumeration order across
-  the FFI per item** — the order is already in hand on the managed side — rather than reproduce the
-  hash. In shipped config only `pmc` sets `randomisedArmorSlots` (`configs/bot.json`, randomisation
-  buckets 1-3, level 15 and up), plus any mod-added bucket that sets it. This is why `BotParityTests`'
-  nighttime clamp case asserts the config write only and not the inventory; the eight seeded
-  role×seed parity cases all run at level 1, where the branch is not taken, and are byte-equal.
-  Tracked in `todo/TODO.md`; `ForceLegacyBotGeneration` is the workaround.
+- **Bots whose role and level select a randomised-slot bucket do not match the legacy path — in both
+  the armor and the weapon mod pools.** Both halves have the same cause: a
+  `ConcurrentDictionary<string, HashSet<MongoId>>` in `BotEquipmentModPoolService`, enumerated in
+  hash-bucket order rather than database slot order, while the Rust `mod_pool_service` derives the
+  same pool in database slot order. The slots are then filled in a different order and every draw
+  after the first diverges.
+  - *Armor*, gated on `randomisedArmorSlots`: `GenerateEquipment` replaces the equipment mod pool
+    with `BotEquipmentModPoolService.GetModsForGearSlot`.
+  - *Weapons*, gated on `randomisedWeaponModSlots`: `BotEquipmentModGenerator.cs:736` bakes
+    `GetModsForWeaponSlot`'s ConcurrentDictionary order into the request pool via `.ToDictionary()`,
+    and `SortModKeys`' trailing `UnionWith` of the unsorted remainder preserves it, so the order
+    reaches the draw intact.
+
+  The required-mods fallback just below (`:748`) does **not** diverge:
+  `GetRequiredModsForWeaponSlot` builds its result by reading `Properties.Slots` off the item
+  template directly, in database order, and never touches the ConcurrentDictionary — which is
+  exactly why level-1 parity is clean. The legacy order is process-stable in practice — .NET gives
+  `ConcurrentDictionary<string, …>` an internal non-randomized string comparer — but that comparer
+  and the bucket layout are **unspecified runtime implementation details**, so a Rust emulation of
+  them would be correct only until a runtime patch silently changed one, and it would fail quietly
+  rather than loudly. If parity at PMC level 15+ is ever required, the cheaper and stabler fix shape
+  is to **project the C# enumeration order across the FFI per item, for both pools** — the order is
+  already in hand on the managed side — rather than reproduce the hash. In shipped config only `pmc`
+  sets either flag, and it sets both on the same three buckets (`configs/bot.json`, randomisation
+  buckets 1-3, levels 15-22 / 23-45 / 46-100), plus any mod-added bucket that sets one. This is why
+  `BotParityTests`' nighttime clamp case asserts the config write only and not the inventory; the
+  eight seeded role×seed parity cases all run at level 1, where neither branch is taken, and are
+  byte-equal. Tracked in `todo/TODO.md`; `ForceLegacyBotGeneration` is the workaround.
 - **The ported retry loops can spin exactly as 4.1.2 does**, but on the native path the hang sits
   inside an FFI call with no managed stack trace to dump — `ForceLegacyBotGeneration` restores the
   C# diagnosability.

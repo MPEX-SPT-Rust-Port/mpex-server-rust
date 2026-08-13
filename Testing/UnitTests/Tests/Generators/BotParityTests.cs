@@ -101,9 +101,14 @@ public class BotParityTests
     /// ReplayRandomisationClamps on the native one - and asserts both wrote the same thing.
     ///
     /// It deliberately does not compare the two inventories. pmc only carries NighttimeChanges from
-    /// level 15 up, and those buckets also set RandomisedArmorSlots, which sends equipment mod pools
-    /// through BotEquipmentModPoolService - a ConcurrentDictionary the native side cannot enumerate
-    /// in the same order. See the "Bot generation" limitations in ARCHITECTURE.md.
+    /// level 15 up, and those same buckets set both RandomisedArmorSlots and RandomisedWeaponModSlots,
+    /// which send the equipment and weapon mod pools through BotEquipmentModPoolService - a
+    /// ConcurrentDictionary the native side cannot enumerate in the same order. The weapon half is
+    /// baked in at BotEquipmentModGenerator:736, where GetModsForWeaponSlot's ConcurrentDictionary
+    /// order is copied into the request pool and then preserved by SortModKeys' trailing UnionWith.
+    /// The required-mods fallback at :748 does not diverge - GetRequiredModsForWeaponSlot reads
+    /// Properties.Slots directly in database order - which is why the level-1 cases above are clean.
+    /// See the "Bot generation" limitations in ARCHITECTURE.md.
     /// </summary>
     [Test]
     public void TheNighttimeRandomisationClampIsReplayedOnBothPaths()
