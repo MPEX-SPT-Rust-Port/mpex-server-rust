@@ -10,7 +10,7 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rand::Rng;
+use rand::RngExt;
 
 /// Generates a new id as 24 lowercase hex characters.
 pub fn generate() -> String {

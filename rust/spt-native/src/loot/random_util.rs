@@ -8,7 +8,7 @@
 
 use std::cell::RefCell;
 
-use rand::{RngCore, SeedableRng};
+use rand::{Rng, SeedableRng};
 use rand_xoshiro::Xoshiro256StarStar;
 
 thread_local! {
