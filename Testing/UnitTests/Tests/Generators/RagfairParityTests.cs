@@ -40,12 +40,14 @@ namespace UnitTests.Tests.Generators;
 /// holder's <c>_fakePlayerOffers</c> lookup succeed, which fires its per-template cap draw
 /// (<c>RagfairServerHelper.GetOfferCountByBaseType</c>, a seeded <c>GetInt</c>) inside
 /// <c>AddOffer</c> - at a different point in the stream on each path, and possibly rejecting the
-/// offer on one path but not the other. So every run purges the holder of *all* offers for its case
-/// tpl first, pre-existing ones included; they are test-session state and are not restored.
+/// offer on one path but not the other. So every run first purges the holder of every *fake-player*
+/// offer for its case tpl, pre-existing ones included; they are test-session state and are not
+/// restored. Trader and player offers for that tpl are left alone - the cap never reads them.
 /// </item>
 /// <item>
-/// The config flag, the <c>RandomUtil</c> seam and <c>ProbabilityRandomSource.Current</c> are
-/// restored in a <c>finally</c>, along with the offers each run adds.
+/// The config flag, the two forced-branch chances, the <c>RandomUtil</c> seam and
+/// <c>ProbabilityRandomSource.Current</c> are restored in a <c>finally</c>, along with the offers
+/// each run adds.
 /// </item>
 /// <item>
 /// <c>OfferCounter</c> is a live instance counter, so <c>intId</c> starts from a different value on
@@ -114,6 +116,54 @@ public class RagfairParityTests
         var legacy = Generate(item, seed, forceLegacy: true, LootGenerationPath.Legacy);
 
         LootJsonAssert.AssertEqual(legacy, native, $"itemClass={itemClass} tpl={item[0].Template}", seed);
+    }
+
+    /// <summary>
+    /// The barter arm of <c>CreateSingleOfferForItem</c> is unreachable on shipped config
+    /// (<c>barter.chancePercent</c> is 0), so <see cref="Generate"/> forces it. It is the one case
+    /// that puts the whole price table's ordering under test end to end: <c>CreateBarterBarterScheme</c>
+    /// filters <c>TemplateTable.Prices</c> to a price band and then index-draws over what survives,
+    /// so C#'s dictionary order and the Rust <c>IndexMap</c> order have to agree across the entire
+    /// table for the two paths to pick the same barter item.
+    /// </summary>
+    [Test]
+    public void AForcedBarterOfferMatchesOnBothPaths([ValueSource(nameof(_seeds))] ulong seed)
+    {
+        var item = BuildItem("expensive-barter-eligible");
+
+        var native = Generate(item, seed, forceLegacy: false, LootGenerationPath.Native, ForcedBranch.Barter);
+        var legacy = Generate(item, seed, forceLegacy: true, LootGenerationPath.Legacy, ForcedBranch.Barter);
+
+        LootJsonAssert.AssertEqual(legacy, native, $"forced-barter tpl={item[0].Template}", seed);
+
+        // Both fall-through arms of CreateBarterBarterScheme (price under
+        // minRoubleCostToBecomeBarter, or no item inside the price band) produce a currency scheme,
+        // which would leave the index draw this case exists for untested
+        var requirementTpl = JsonNode.Parse(native)![0]!["requirements"]![0]!["_tpl"]!.GetValue<string>();
+        Assert.That(
+            Money.GetMoneyTpls().Select(tpl => tpl.ToString()),
+            Does.Not.Contain(requirementTpl),
+            $"seed={seed} fell through to a currency scheme, so the barter item draw never ran"
+        );
+    }
+
+    /// <summary>
+    /// The pack arm, likewise unreachable on shipped config (<c>pack.chancePercent</c> is 0.5), and
+    /// likewise forced: it covers the pack stack-size draw and <c>CreateCurrencyBarterScheme</c>'s
+    /// multiplier arm, neither of which any other case reaches.
+    /// </summary>
+    [Test]
+    public void AForcedPackOfferMatchesOnBothPaths([ValueSource(nameof(_seeds))] ulong seed)
+    {
+        var item = BuildItem("pack-eligible");
+
+        var native = Generate(item, seed, forceLegacy: false, LootGenerationPath.Native, ForcedBranch.Pack);
+        var legacy = Generate(item, seed, forceLegacy: true, LootGenerationPath.Legacy, ForcedBranch.Pack);
+
+        LootJsonAssert.AssertEqual(legacy, native, $"forced-pack tpl={item[0].Template}", seed);
+
+        // The pack arm is the only thing that sets it, so this is the proof the arm ran
+        Assert.That(JsonNode.Parse(native)![0]!["sellInOnePiece"]!.GetValue<bool>(), Is.True, $"seed={seed} did not produce a pack offer");
     }
 
     /// <summary>
@@ -243,11 +293,19 @@ public class RagfairParityTests
     /// One regeneration pass over exactly one item, on one path, returning the normalized JSON of
     /// the offers it added to the holder.
     /// </summary>
-    private string Generate(List<Item> itemWithChildren, ulong seed, bool forceLegacy, LootGenerationPath expected)
+    private string Generate(
+        List<Item> itemWithChildren,
+        ulong seed,
+        bool forceLegacy,
+        LootGenerationPath expected,
+        ForcedBranch forcedBranch = ForcedBranch.None
+    )
     {
         var originalForce = _ragfairConfig.ForceLegacyRagfairGeneration;
         var originalSource = _randomUtil.RandomSource;
         var originalProbabilitySource = ProbabilityRandomSource.Current;
+        var originalBarterChance = _ragfairConfig.Dynamic.Barter.ChancePercent;
+        var originalPackChance = _ragfairConfig.Dynamic.Pack.ChancePercent;
         List<MongoId> addedIds = [];
 
         // Must happen before the seed is installed: a stocked tpl makes AddOffer spend a seeded cap
@@ -258,6 +316,19 @@ public class RagfairParityTests
         try
         {
             _ragfairConfig.ForceLegacyRagfairGeneration = forceLegacy;
+
+            // RagfairPayloadProjection hands the live Dynamic object across per call, so one write
+            // reaches both paths. The pack roll sits behind !isBarterOffer, so forcing barter also
+            // takes the pack arm out - which is why the two branches are separate cases.
+            if (forcedBranch == ForcedBranch.Barter)
+            {
+                _ragfairConfig.Dynamic.Barter.ChancePercent = 100;
+            }
+            else if (forcedBranch == ForcedBranch.Pack)
+            {
+                _ragfairConfig.Dynamic.Pack.ChancePercent = 100;
+            }
+
             if (forceLegacy)
             {
                 // One instance in both seams: one shared draw stream, mirroring the single
@@ -292,10 +363,19 @@ public class RagfairParityTests
             }
 
             _ragfairConfig.ForceLegacyRagfairGeneration = originalForce;
+            _ragfairConfig.Dynamic.Barter.ChancePercent = originalBarterChance;
+            _ragfairConfig.Dynamic.Pack.ChancePercent = originalPackChance;
             _randomUtil.RandomSource = originalSource;
             ProbabilityRandomSource.Current = originalProbabilitySource;
             _ragfairOfferGenerator.NativeTestSeed = null;
         }
+    }
+
+    private enum ForcedBranch
+    {
+        None,
+        Barter,
+        Pack,
     }
 
     /// <summary>
@@ -390,6 +470,13 @@ public class RagfairParityTests
             "money" => Money.DOLLARS,
             "plain-barter-eligible" => FirstTplWhere(template =>
                 _itemHelper.IsOfBaseclass(template.Id, BaseClasses.BARTER_ITEM) && _templateTable.Prices.ContainsKey(template.Id)
+            ),
+            // Same class, but priced far enough above barter.minRoubleCostToBecomeBarter that the
+            // 0.8-1.2 dynamic price multiplier can never drop it under and send the forced-barter
+            // case down the currency fall-through instead of the item draw it exists to test
+            "expensive-barter-eligible" => FirstTplWhere(template =>
+                _itemHelper.IsOfBaseclass(template.Id, BaseClasses.BARTER_ITEM)
+                && _templateTable.Prices.GetValueOrDefault(template.Id) >= 250_000
             ),
             _ => throw new ArgumentOutOfRangeException(nameof(itemClass), itemClass, "no case defined"),
         };
