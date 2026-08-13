@@ -1,0 +1,229 @@
+using NUnit.Framework;
+using SPTarkov.Server.Core.Generators.Bot;
+using SPTarkov.Server.Core.Generators.Loot;
+using SPTarkov.Server.Core.Helpers.Bot;
+using SPTarkov.Server.Core.Models.Common;
+using SPTarkov.Server.Core.Models.Eft.Common.Tables;
+using SPTarkov.Server.Core.Models.Spt.Bots;
+using SPTarkov.Server.Core.Models.Spt.Config;
+using SPTarkov.Server.Core.Models.Spt.Tables;
+using SPTarkov.Server.Core.Servers;
+using SPTarkov.Server.Core.Services.Bot;
+using SPTarkov.Server.Core.Utils;
+using SPTarkov.Server.Core.Utils.Cloners;
+using ProfileInfo = SPTarkov.Server.Core.Models.Eft.Profile.Info;
+
+namespace UnitTests.Tests.Generators;
+
+/// <summary>
+/// Golden parity gate on the bot generation port: the same seed must make the legacy 4.1.2 C# path
+/// and the spt-native path build an equivalent bot inventory (deep-equal after LootIdNormalizer),
+/// and must leave the shared randomisation config in the same state afterwards. Mutates the shared
+/// config singleton, the RandomUtil seam and the ProbabilityRandomSource static, so it restores all
+/// of them and never runs in parallel with other fixtures.
+/// </summary>
+[TestFixture]
+[NonParallelizable]
+public class BotParityTests
+{
+    // "assault-as-playerscav" is the player scav shape - no equipment filtering, container cache
+    // kept - which PlayerScavGenerator drives. The spiritspring/spiritwinter roles are deliberately
+    // absent: the legacy path NREs on them (no food/drink/currency generation blocks in their
+    // template), so there is no legacy result to compare against.
+    private static readonly string[] _roles = ["assault", "usec", "bear", "assault-as-playerscav"];
+    private static readonly ulong[] _seeds = [42, 1337];
+
+    private readonly HashSet<string> _preWarmedRoles = [];
+
+    private BotInventoryGenerator _botInventoryGenerator = default!;
+    private BotGeneratorHelper _botGeneratorHelper = default!;
+    private BotEquipmentFilterService _botEquipmentFilterService = default!;
+    private BotInventoryContainerService _botInventoryContainerService = default!;
+    private BotConfig _botConfig = default!;
+    private RandomUtil _randomUtil = default!;
+    private JsonUtil _jsonUtil = default!;
+    private BotTable _botTable = default!;
+    private ICloner _cloner = default!;
+
+    private MongoId _sessionId;
+
+    [OneTimeSetUp]
+    public void OneTimeSetUp()
+    {
+        var di = DI.GetInstance();
+
+        _botInventoryGenerator = di.GetService<BotInventoryGenerator>();
+        _botGeneratorHelper = di.GetService<BotGeneratorHelper>();
+        _botEquipmentFilterService = di.GetService<BotEquipmentFilterService>();
+        _botInventoryContainerService = di.GetService<BotInventoryContainerService>();
+        _botConfig = di.GetService<BotConfig>();
+        _randomUtil = di.GetService<RandomUtil>();
+        _jsonUtil = di.GetService<JsonUtil>();
+        _botTable = di.GetService<BotTable>();
+        _cloner = di.GetService<ICloner>();
+
+        // ProfileHelper.GetPmcProfile and ProfileActivityService both key off a real session
+        _sessionId = new MongoId();
+        di.GetService<SaveServer>().CreateProfile(new ProfileInfo { ProfileId = _sessionId });
+    }
+
+    [Test]
+    public void TheSameSeedGeneratesEquivalentInventoryOnBothPaths(
+        [ValueSource(nameof(_roles))] string role,
+        [ValueSource(nameof(_seeds))] ulong seed
+    )
+    {
+        // Hydrating BotLootCacheService is a one-off cost the legacy path pays inside the seeded
+        // window and the native path pays outside it, so it has to be paid before either run
+        PreWarmLootCache(role);
+
+        var native = Generate(role, seed, forceLegacy: false, LootGenerationPath.Native);
+        var legacy = Generate(role, seed, forceLegacy: true, LootGenerationPath.Legacy);
+
+        LootJsonAssert.AssertEqual(legacy.Inventory, native.Inventory, $"role={role}", seed);
+        Assert.That(
+            native.Randomisation,
+            Is.EqualTo(legacy.Randomisation),
+            $"randomisation clamp state diverged for role={role} seed={seed}"
+        );
+    }
+
+    /// <summary>
+    /// One unseeded legacy generation, purely to fill BotLootCacheService for this role.
+    /// </summary>
+    private void PreWarmLootCache(string role)
+    {
+        if (!_preWarmedRoles.Add(role))
+        {
+            return;
+        }
+
+        Generate(role, seed: 0, forceLegacy: true, LootGenerationPath.Legacy, seedRandomSource: false);
+    }
+
+    private (string Inventory, string Randomisation) Generate(
+        string role,
+        ulong seed,
+        bool forceLegacy,
+        LootGenerationPath expected,
+        bool seedRandomSource = true
+    )
+    {
+        var (template, details) = BuildCase(role);
+        var equipmentRole = _botGeneratorHelper.GetBotEquipmentRole(details.RoleLowercase);
+        var equipmentFilters = _botConfig.Equipment[equipmentRole];
+
+        var botId = new MongoId();
+        var originalForce = _botConfig.ForceLegacyBotGeneration;
+        var originalSource = _randomUtil.RandomSource;
+        var originalProbabilitySource = ProbabilityRandomSource.Current;
+        // The nighttime clamp is written straight into the shared config object, so later cases
+        // would see the previous case's drift
+        var originalRandomisation = _cloner.Clone(equipmentFilters.Randomisation);
+
+        try
+        {
+            _botConfig.ForceLegacyBotGeneration = forceLegacy;
+            if (forceLegacy)
+            {
+                if (seedRandomSource)
+                {
+                    // One instance in both seams: one shared draw stream, mirroring the single
+                    // thread-local the Rust side installs for testSeed.
+                    var seeded = new SeededRandomSource(seed);
+                    _randomUtil.RandomSource = seeded;
+                    ProbabilityRandomSource.Current = seeded;
+                }
+            }
+            else
+            {
+                _botInventoryGenerator.NativeTestSeed = seed;
+            }
+
+            var inventory = _botInventoryGenerator.GenerateInventory(botId, _sessionId, template, details);
+
+            // Fail fast on silent fallback before comparing anything.
+            Assert.That(_botInventoryGenerator.LastPathTaken, Is.EqualTo(expected), $"generation did not take the {expected} path");
+
+            // Two bare inventories compare equal, which would make every parity case pass
+            // vacuously - GenerateInventoryBase alone yields six stash/container items, so anything
+            // at or below that means nothing was actually equipped or looted.
+            Assert.That(inventory.Items!.Count, Is.GreaterThan(6), $"{expected} path generated no equipment or loot for {role}");
+
+            return (LootIdNormalizer.Normalize(_jsonUtil.Serialize(inventory)!), _jsonUtil.Serialize(equipmentFilters.Randomisation)!);
+        }
+        finally
+        {
+            _botConfig.ForceLegacyBotGeneration = originalForce;
+            _randomUtil.RandomSource = originalSource;
+            ProbabilityRandomSource.Current = originalProbabilitySource;
+            _botInventoryGenerator.NativeTestSeed = null;
+            equipmentFilters.Randomisation = originalRandomisation;
+            _botInventoryContainerService.ClearCache(botId);
+        }
+    }
+
+    /// <summary>
+    /// The template and details as BotGenerator hands them to GenerateInventory at :284 - a clone of
+    /// the live template with BotEquipmentFilterService.FilterBotEquipment already applied (:205),
+    /// which it skips for player scavs.
+    /// </summary>
+    private (BotType Template, BotGenerationDetails Details) BuildCase(string role)
+    {
+        var details = role switch
+        {
+            "assault" => new BotGenerationDetails
+            {
+                Role = "assault",
+                RoleLowercase = "assault",
+                Side = "Savage",
+                BotDifficulty = "normal",
+                GameVersion = "standard",
+                BotLevel = 1,
+            },
+            "usec" => new BotGenerationDetails
+            {
+                Role = "pmcUSEC",
+                RoleLowercase = "pmcusec",
+                Side = "Usec",
+                BotDifficulty = "normal",
+                GameVersion = "standard",
+                BotLevel = 1,
+                IsPmc = true,
+            },
+            "bear" => new BotGenerationDetails
+            {
+                Role = "pmcBEAR",
+                RoleLowercase = "pmcbear",
+                Side = "Bear",
+                BotDifficulty = "normal",
+                GameVersion = "standard",
+                BotLevel = 1,
+                IsPmc = true,
+            },
+            "assault-as-playerscav" => new BotGenerationDetails
+            {
+                Role = "assault",
+                RoleLowercase = "assault",
+                Side = "Savage",
+                BotDifficulty = "easy",
+                GameVersion = "standard",
+                BotLevel = 1,
+                IsPlayerScav = true,
+                ClearBotContainerCacheAfterGeneration = false,
+            },
+            _ => throw new ArgumentOutOfRangeException(nameof(role), role, "no case defined"),
+        };
+
+        // PMCs read their template from the side, not the role - usec.json / bear.json
+        var templateKey = role == "assault-as-playerscav" ? "assault" : role;
+        var template = _cloner.Clone(_botTable.Types[templateKey])!;
+
+        if (!details.IsPlayerScav)
+        {
+            _botEquipmentFilterService.FilterBotEquipment(_sessionId, template, details);
+        }
+
+        return (template, details);
+    }
+}

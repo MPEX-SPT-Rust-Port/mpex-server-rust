@@ -5,12 +5,25 @@ namespace UnitTests.Tests.Generators;
 /// <summary>
 /// Rewrites item IDs in serialized loot output to positional placeholders so the two loot paths
 /// can be compared: fresh MongoIds are time/PID/counter-derived on both sides and never match.
-/// Every _id value maps to "id-N" in document order of first appearance; _id, parentId and Root
-/// values found in the map are rewritten; everything else (notably _tpl) is untouched.
+/// Every _id value maps to "id-N" in document order of first appearance; the id-bearing fields
+/// below are rewritten when their value is a known id; everything else (notably _tpl) is untouched.
 /// </summary>
 internal static class LootIdNormalizer
 {
-    private static readonly string[] _idFields = ["_id", "parentId", "Root"];
+    // The last six are BotBaseInventory's root pointers - each names one of the six base items the
+    // bot inventory starts with, so each is a fresh MongoId that would never match across paths
+    private static readonly string[] _idFields =
+    [
+        "_id",
+        "parentId",
+        "Root",
+        "equipment",
+        "stash",
+        "sortingTable",
+        "questRaidItems",
+        "questStashItems",
+        "hideoutCustomizationStashId",
+    ];
 
     internal static string Normalize(string json)
     {
