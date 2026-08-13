@@ -11,6 +11,7 @@ use crate::loot::loot_generator::{
     create_forced_loot, create_random_loot, get_random_loot_container_loot,
     get_sealed_weapon_case_loot,
 };
+use crate::ragfair::offer_generator::generate_dynamic_offers;
 use crate::runtime::runtime;
 use crate::verify;
 
@@ -238,6 +239,18 @@ pub unsafe extern "C" fn spt_generate_bot_inventory(
 }
 
 /// # Safety
+/// See `spt_generate_static_containers`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn spt_generate_dynamic_offers(
+    req_ptr: *const u8,
+    req_len: usize,
+    out_ptr: *mut *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    unsafe { run_generator(req_ptr, req_len, out_ptr, out_len, generate_dynamic_offers) }
+}
+
+/// # Safety
 /// `ptr` and `len` must come from a successful `spt_*` call that handed back a buffer, and be
 /// freed at most once.
 #[unsafe(no_mangle)]
@@ -274,7 +287,7 @@ mod tests {
         assert_eq!(spt_native_abi_version(), crate::ABI_VERSION);
         assert_eq!(
             crate::ABI_VERSION,
-            5,
+            6,
             "bump SptNative.ExpectedAbiVersion too"
         );
     }
@@ -633,6 +646,114 @@ mod tests {
         assert_eq!(
             String::from_utf8(out).unwrap(),
             "The given key 'FirstPrimaryWeapon' was not present in the dictionary."
+        );
+    }
+
+    /// `RagfairConfig.Dynamic` pared to the members the wire type names, every chance at zero so no
+    /// draw the offer path makes can change the outcome. `offerItemCount` is left open: the failure
+    /// case below is a config with neither an entry for the item's parent nor a `"default"`.
+    fn ragfair_dynamic(offer_item_count: &str) -> String {
+        format!(
+            r#"{{"useTraderPriceForOffersIfHigher":true,
+            "barter":{{"chancePercent":0,"itemCountMin":1,"itemCountMax":3,
+                "priceRangeVariancePercent":15,"minRoubleCostToBecomeBarter":15000,
+                "makeSingleStackOnly":false,"itemTplBlacklist":[],"itemTypeBlacklist":[]}},
+            "pack":{{"chancePercent":0,"itemCountMin":2,"itemCountMax":10,"itemTypeWhitelist":[]}},
+            "offerAdjustment":{{"adjustPriceWhenBelowHandbookPrice":true,
+                "maxPriceDifferenceBelowHandbookPercent":70,"handbookPriceMultiplier":1.5,
+                "priceThresholdRub":6000}},
+            "offerItemCount":{offer_item_count},
+            "priceRanges":{{"default":{{"min":0.8,"max":1.2}},"preset":{{"min":0.9,"max":1.4}},
+                "pack":{{"min":0.5,"max":0.8}}}},
+            "showDefaultPresetsOnly":false,"ignoreQualityPriceVarianceBlacklist":[],
+            "endTimeSeconds":{{"min":1000,"max":36000}},"condition":{{}},
+            "stackablePercent":{{"min":10,"max":100}},"nonStackableCount":{{"min":1,"max":2}},
+            "rating":{{"min":0.2,"max":0.95}},
+            "armor":{{"removeRemovablePlateChance":0,"plateSlotIdToRemovePool":[]}},
+            "offerCurrencyChancePercent":{{"5449016a4bdc2d6f028b456f":100}},
+            "showAsSingleStack":[],"removeSeasonalItemsWhenNotInEvent":true,
+            "blacklist":{{"damagedAmmoPacks":true,"custom":[],"enableBsgList":true,
+                "enableQuestList":true,"traderItems":false,
+                "armorPlate":{{"maxProtectionLevel":3,"ignoreSlots":[]}},
+                "enableCustomItemCategoryList":false,"customItemCategoryList":[]}},
+            "unreasonableModPrices":{{}},
+            "generateBaseFleaPrices":{{"useHandbookPrice":true,"priceMultiplier":1.1,
+                "preventPriceBeingBelowTraderBuyPrice":true,"itemTplMultiplierOverride":{{}},
+                "itemTypeMultiplierOverride":{{}},"useHideoutCraftMultiplier":false,
+                "hideoutCraftMultiplier":1,"generatePresetPriceByChildren":true}}}}"#
+        )
+    }
+
+    /// Every required `GenerateDynamicOffersRequest` member. The two price tables always know
+    /// `SELLABLE_TPL`, which only matters when the items view carries it.
+    fn ragfair_request_with(items: &str, offer_item_count: &str) -> String {
+        let dynamic = ragfair_dynamic(offer_item_count);
+        format!(
+            r#"{{"timestamp":1700000000,"offerCounterStart":0,"dynamic":{dynamic},
+            "itemPresets":{{}},"defaultPresets":[],"defaultPresetsByTpl":{{}},"presetsByTpl":{{}},
+            "fleaPrices":{{"{SELLABLE_TPL}":25000}},"handbookPrices":{{"{SELLABLE_TPL}":20000}},
+            "highestTraderPrices":{{"{SELLABLE_TPL}":12000}},"configBlacklist":[],
+            "seasonalEventActive":false,"seasonalItemTplBlacklist":[],
+            "pmcNamesUsec":["Deagle"],"pmcNamesBear":["Kirill"],"items":{items}}}"#
+        )
+    }
+
+    /// The one tpl the offer path would accept, were it in the items view.
+    const SELLABLE_TPL: &str = "bbbbbbbbbbbbbbbbbbbbbbbb";
+
+    fn ragfair_request() -> String {
+        ragfair_request_with("{}", r#"{"default":{"min":2,"max":5}}"#)
+    }
+
+    /// One sellable item and an `offerItemCount` with neither its parent nor a `"default"` entry.
+    fn ragfair_request_missing_default() -> String {
+        ragfair_request_with(
+            &format!(
+                r#"{{"{SELLABLE_TPL}":{{"parent":"cccccccccccccccccccccccc","type":"Item",
+                "stackMaxSize":1,"canSellOnRagfair":true}}}}"#
+            ),
+            "{}",
+        )
+    }
+
+    #[test]
+    fn a_minimal_dynamic_offers_request_returns_an_empty_offer_list() {
+        // Empty items view and empty presets: the assort walk yields nothing, so no draws happen.
+        let (status, out) =
+            call_generate(spt_generate_dynamic_offers, ragfair_request().as_bytes());
+
+        assert_eq!(status, STATUS_OK);
+        let result: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(result["offers"].as_array().unwrap().len(), 0);
+        assert_eq!(result["rejectedCanSellTemplates"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn unparseable_dynamic_offers_request_returns_bad_args_with_the_parse_error() {
+        let (status, out) = call_generate(spt_generate_dynamic_offers, b"{\"timestamp\":");
+
+        assert_eq!(status, STATUS_BAD_ARGS);
+        assert!(
+            String::from_utf8(out)
+                .unwrap()
+                .contains("EOF while parsing")
+        );
+    }
+
+    #[test]
+    fn a_dynamic_offers_failure_returns_status_error_and_the_message() {
+        // `offerItemCount` without a "default" entry is the unguarded C# dictionary miss: it
+        // dereferences the null `MinMax` `GetValueOrDefault` hands back, so the message is the
+        // null-reference one, not one naming the key.
+        let (status, out) = call_generate(
+            spt_generate_dynamic_offers,
+            ragfair_request_missing_default().as_bytes(),
+        );
+
+        assert_eq!(status, STATUS_ERROR);
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "Object reference not set to an instance of an object."
         );
     }
 

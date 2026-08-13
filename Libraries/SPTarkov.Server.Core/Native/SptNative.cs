@@ -3,6 +3,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using SPTarkov.Server.Core.Native.Bot;
 using SPTarkov.Server.Core.Native.Loot;
+using SPTarkov.Server.Core.Native.Ragfair;
 using SPTarkov.Server.Core.Utils;
 
 namespace SPTarkov.Server.Core.Native;
@@ -40,11 +41,12 @@ internal enum LootExport
     SealedWeaponCase,
     RandomLootContainer,
     BotInventory,
+    DynamicOffers,
 }
 
 public static class SptNative
 {
-    private const uint ExpectedAbiVersion = 5;
+    private const uint ExpectedAbiVersion = 6;
 
     // ffi.rs
     private const int StatusOk = 0;
@@ -137,6 +139,16 @@ public static class SptNative
     }
 
     /// <summary>
+    /// Generates one full batch of dynamic flea offers - the assort walk, the per-item offer
+    /// creation and the pricing math.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">Generation failed, or the native side misbehaved.</exception>
+    internal static DynamicOffersResult GenerateDynamicOffers(GenerateDynamicOffersRequest request)
+    {
+        return Generate<DynamicOffersResult>(LootExport.DynamicOffers, JsonSerializer.SerializeToUtf8Bytes(request, LootJsonOptions));
+    }
+
+    /// <summary>
     /// The shared body of the generation wrappers, taking the request as the UTF-8 JSON the
     /// native side reads. Internal so tests can hand it JSON that no typed payload can express: a
     /// mod-added field, or a deliberately malformed request.
@@ -175,6 +187,7 @@ public static class SptNative
                     &outLen
                 ),
                 LootExport.BotInventory => NativeMethods.GenerateBotInventory(requestPtr, (nuint)requestUtf8.Length, &outPtr, &outLen),
+                LootExport.DynamicOffers => NativeMethods.GenerateDynamicOffers(requestPtr, (nuint)requestUtf8.Length, &outPtr, &outLen),
                 _ => throw new ArgumentOutOfRangeException(nameof(export), export, null),
             };
         }

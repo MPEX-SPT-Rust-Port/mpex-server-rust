@@ -7,6 +7,7 @@ using SPTarkov.Server.Core.Helpers.Traders;
 using SPTarkov.Server.Core.Models.Common;
 using SPTarkov.Server.Core.Models.Spt.Config;
 using SPTarkov.Server.Core.Models.Spt.Tables;
+using SPTarkov.Server.Core.Native;
 using SPTarkov.Server.Core.Native.Ragfair;
 using SPTarkov.Server.Core.Services.Items;
 using SPTarkov.Server.Core.Services.Server;
@@ -98,5 +99,39 @@ public class SptNativeRagfairWireTests
         {
             Assert.That(new MongoId(entry.Key).IsEmpty, Is.False, $"condition key '{entry.Key}' is not a tpl");
         }
+    }
+
+    [Test]
+    public void TheRequestRoundTripsThroughTheNativeSide()
+    {
+        var result = SptNative.GenerateDynamicOffers(_request);
+
+        Assert.That(result.Offers, Is.Not.Empty);
+        Assert.That(result.Offers[0].Items, Is.Not.Empty);
+        Assert.That(result.Offers[0].User.Nickname, Is.Not.Null.And.Not.Empty);
+        Assert.That(result.Offers[0].SummaryCost, Is.GreaterThan(0));
+        // Id is declared MongoId on the C# record, so a malformed hex string would already have
+        // failed the deserialize; this catches an all-zero default
+        Assert.That(result.Offers[0].Id.IsEmpty, Is.False);
+    }
+
+    /// <summary>
+    /// A mod-added field on a game-data object inside the payload must survive the round trip - the
+    /// `[serde(flatten)] extra` contract that mirrors Ceciler's `[JsonExtensionData]`.
+    /// </summary>
+    [Test]
+    public void AModAddedConfigFieldSurvivesTheRoundTrip()
+    {
+        var json = JsonNode.Parse(JsonSerializer.Serialize(_request, JsonUtil.JsonSerializerOptionsNoIndent))!.AsObject();
+        json["dynamic"]!["modAddedField"] = "kept";
+
+        // No assertion on the value coming back - the native result carries offers, not the config;
+        // this asserts only that an unknown key does not fail the parse.
+        var result = SptNative.Generate<DynamicOffersResult>(
+            LootExport.DynamicOffers,
+            System.Text.Encoding.UTF8.GetBytes(json.ToJsonString())
+        );
+
+        Assert.That(result.Offers, Is.Not.Empty);
     }
 }
