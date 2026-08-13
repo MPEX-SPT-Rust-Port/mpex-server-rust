@@ -154,7 +154,7 @@ fn row_is_full(container_2d: &[Vec<u8>], row_index: i32) -> bool {
 }
 
 /// `ContainerExtensions.ContainerIsFull` (`ContainerExtensions.cs:168-190`).
-fn container_is_full(container_2d: &[Vec<u8>]) -> bool {
+pub(crate) fn container_is_full(container_2d: &[Vec<u8>]) -> bool {
     container_2d.iter().flatten().all(|&cell| cell != 0)
 }
 

@@ -77,9 +77,94 @@ pub struct ItemPoolsWire {
     pub extra: Extra,
 }
 
+/// `Models/Spt/Config/BotConfig.cs:465-472` — `BotConfig.LootItemResourceRandomization[botRole]`.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct RandomisedResourceDetails {
+    #[serde(rename = "food")]
+    pub food: Option<RandomisedResourceValues>,
+    #[serde(rename = "meds")]
+    pub meds: Option<RandomisedResourceValues>,
+}
+
+/// `Models/Spt/Config/BotConfig.cs:474-487`. Both members are non-nullable `float`s in C#, so a key
+/// missing from the config lands on 0 rather than disabling randomisation — `#[serde(default)]`
+/// reproduces that.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct RandomisedResourceValues {
+    #[serde(rename = "resourcePercent", default)]
+    pub resource_percent: f64,
+    #[serde(rename = "chanceMaxResourcePercent", default)]
+    pub chance_max_resource_percent: f64,
+}
+
+/// The six `EquipmentFilters` chance percentages `BotGeneratorHelper.GenerateExtraPropertiesForItem`
+/// reads (`Models/Spt/Config/BotConfig.cs:287-318`). All nullable in C#; each call site supplies its
+/// own literal fallback, so the `Option`s are carried through rather than defaulted here.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct EquipmentFilters {
+    #[serde(rename = "faceShieldIsActiveChancePercent")]
+    pub face_shield_is_active_chance_percent: Option<f64>,
+    #[serde(rename = "lightIsActiveDayChancePercent")]
+    pub light_is_active_day_chance_percent: Option<f64>,
+    #[serde(rename = "lightIsActiveNightChancePercent")]
+    pub light_is_active_night_chance_percent: Option<f64>,
+    #[serde(rename = "laserIsActiveChancePercent")]
+    pub laser_is_active_chance_percent: Option<f64>,
+    #[serde(rename = "nvgIsActiveChanceDayPercent")]
+    pub nvg_is_active_chance_day_percent: Option<f64>,
+    #[serde(rename = "nvgIsActiveChanceNightPercent")]
+    pub nvg_is_active_chance_night_percent: Option<f64>,
+}
+
+/// `Models/Spt/Bots/ChooseRandomCompatibleModResult.cs`. Every member is nullable there and the
+/// four `IsItemIncompatibleWithCurrentItems` exits each set a different subset, so the `Option`s
+/// are load-bearing — `found` and `slotBlocked` are absent, not false, on the final compatible
+/// return.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct ChooseRandomCompatibleModResult {
+    #[serde(rename = "incompatible", skip_serializing_if = "Option::is_none")]
+    pub incompatible: Option<bool>,
+    #[serde(rename = "found", skip_serializing_if = "Option::is_none")]
+    pub found: Option<bool>,
+    #[serde(rename = "chosenTpl", skip_serializing_if = "Option::is_none")]
+    pub chosen_template: Option<String>,
+    #[serde(rename = "reason", skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(rename = "slotBlocked", skip_serializing_if = "Option::is_none")]
+    pub slot_blocked: Option<bool>,
+}
+
 // ---------------------------------------------------------------------------
 // Request / response envelopes
 // ---------------------------------------------------------------------------
+
+/// `BotInventoryContainerService.ContainerDetails` (`BotInventoryContainerService.cs:415-451`),
+/// serialized so the C# side can rebuild the service's per-bot cache after a native call.
+///
+/// `ContainerDbItem` and `ContainerInventoryItem` ride as ids: the C# rebuild resolves the first
+/// through `itemHelper.GetItem` and the second out of the inventory it was just handed, exactly as
+/// `AddEmptyContainerToBot` does. `ContainerFull` is not carried — it is initialised `false` and
+/// nothing in the codebase ever assigns it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContainerDetailsWire {
+    /// `ContainerDetails.ContainerDbItem.Id`.
+    pub container_tpl: String,
+    /// `ContainerDetails.ContainerInventoryItem.Id`.
+    pub container_item_id: String,
+    /// `ContainerDetails.ContainerGridDetails`, in the container template's grid order.
+    pub grids: Vec<ContainerMapDetailsWire>,
+}
+
+/// `BotInventoryContainerService.ContainerMapDetails` (`BotInventoryContainerService.cs:453-457`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContainerMapDetailsWire {
+    /// `int[CellsV, CellsH]` as rows of columns, `1` = occupied. Dimensions are implied, matching
+    /// the `[Vec<Vec<u8>>]` grids `loot::container_extensions` already packs into.
+    pub grid_map: Vec<Vec<u8>>,
+    pub grid_full: bool,
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -103,7 +188,7 @@ pub struct GenerateBotInventoryRequest {
     pub secure_container_ammo_stack_count: serde_json::Value,
     pub disable_loot_on_bot_types: Vec<String>,
     pub low_profile_gas_block_tpls: Vec<String>,
-    pub loot_item_resource_randomization: serde_json::Value,
+    pub loot_item_resource_randomization: IndexMap<String, RandomisedResourceDetails>,
     pub pmc_config: serde_json::Value,
     pub repair_kit_weapon: serde_json::Value,
     /// `GetBotEquipmentBlacklist(role, level)` result.
@@ -144,8 +229,8 @@ pub struct BotInventoryResult {
     /// `BotBaseInventory` shape, built by the orchestrator task.
     pub inventory: serde_json::Value,
     pub diagnostics: Vec<Diagnostic>,
-    /// Slot → grid state.
-    pub container_grids: IndexMap<String, serde_json::Value>,
+    /// Slot → grid state, from `bot_generator_helper::ContainerGrids::into_wire`.
+    pub container_grids: IndexMap<String, ContainerDetailsWire>,
     /// Equipment-slot → clamped chance.
     pub randomisation_clamps: IndexMap<String, f64>,
 }
@@ -254,9 +339,17 @@ mod tests {
             parsed.low_profile_gas_block_tpls,
             vec!["aaaaaaaaaaaaaaaaaaaaaaa8"]
         );
-        assert_eq!(
-            parsed.loot_item_resource_randomization["assault"]["food"]["chanceMaxResourcePercent"],
-            60
+        let food = parsed.loot_item_resource_randomization["assault"]
+            .food
+            .as_ref()
+            .unwrap();
+        assert_eq!(food.chance_max_resource_percent, 60.0);
+        // Absent in the payload; C#'s non-nullable float lands on 0, not on "no randomisation".
+        assert_eq!(food.resource_percent, 0.0);
+        assert!(
+            parsed.loot_item_resource_randomization["assault"]
+                .meds
+                .is_none()
         );
         assert_eq!(parsed.pmc_config["forceHealingItemsIntoSecure"], true);
         assert_eq!(parsed.repair_kit_weapon["maxUsePercent"], 20);
@@ -333,7 +426,14 @@ mod tests {
             }],
             container_grids: IndexMap::from([(
                 "TacticalVest".to_owned(),
-                serde_json::json!({"width":3,"height":2}),
+                ContainerDetailsWire {
+                    container_tpl: "aaaaaaaaaaaaaaaaaaaaaac1".to_owned(),
+                    container_item_id: "aaaaaaaaaaaaaaaaaaaaaac2".to_owned(),
+                    grids: vec![ContainerMapDetailsWire {
+                        grid_map: vec![vec![0, 1], vec![0, 0]],
+                        grid_full: false,
+                    }],
+                },
             )]),
             randomisation_clamps: IndexMap::from([("Headwear".to_owned(), 62.5)]),
         })
@@ -351,7 +451,11 @@ mod tests {
         assert_eq!(out["inventory"]["equipment"], "aaaaaaaaaaaaaaaaaaaaaaaa");
         assert_eq!(out["diagnostics"][0]["localeKey"], "bot-missing_item");
         assert_eq!(out["diagnostics"][0]["args"]["tpl"], "x");
-        assert_eq!(out["containerGrids"]["TacticalVest"]["width"], 3);
+        let grids = &out["containerGrids"]["TacticalVest"];
+        assert_eq!(grids["containerTpl"], "aaaaaaaaaaaaaaaaaaaaaac1");
+        assert_eq!(grids["containerItemId"], "aaaaaaaaaaaaaaaaaaaaaac2");
+        assert_eq!(grids["grids"][0]["gridMap"][0][1], 1);
+        assert_eq!(grids["grids"][0]["gridFull"], false);
         assert_eq!(out["randomisationClamps"]["Headwear"], 62.5);
     }
 }

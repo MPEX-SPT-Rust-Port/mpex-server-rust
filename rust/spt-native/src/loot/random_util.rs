@@ -203,7 +203,7 @@ pub fn roll_chance(chance: f64) -> bool {
 /// `Math.Round(value, digits)` with the default `MidpointRounding.ToEven`: .NET scales by a power
 /// of ten, rounds half to even, and scales back, leaving anything at or past its `1e16` round limit
 /// untouched.
-fn round_to_digits(value: f64, digits: i32) -> f64 {
+pub(crate) fn round_to_digits(value: f64, digits: i32) -> f64 {
     if value.abs() >= 1e16 {
         return value;
     }

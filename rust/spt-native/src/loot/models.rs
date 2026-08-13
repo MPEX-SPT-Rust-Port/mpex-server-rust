@@ -104,8 +104,67 @@ pub struct Upd {
     pub repairable: Option<UpdRepairable>,
     #[serde(rename = "Buff", skip_serializing_if = "Option::is_none")]
     pub buff: Option<UpdBuff>,
+    #[serde(rename = "Togglable", skip_serializing_if = "Option::is_none")]
+    pub togglable: Option<UpdTogglable>,
+    #[serde(rename = "Foldable", skip_serializing_if = "Option::is_none")]
+    pub foldable: Option<UpdFoldable>,
+    #[serde(rename = "FireMode", skip_serializing_if = "Option::is_none")]
+    pub fire_mode: Option<UpdFireMode>,
+    #[serde(rename = "MedKit", skip_serializing_if = "Option::is_none")]
+    pub med_kit: Option<UpdMedKit>,
+    #[serde(rename = "FoodDrink", skip_serializing_if = "Option::is_none")]
+    pub food_drink: Option<UpdFoodDrink>,
+    #[serde(rename = "Light", skip_serializing_if = "Option::is_none")]
+    pub light: Option<UpdLight>,
     #[serde(flatten)]
     pub extra: Extra,
+}
+
+/// `Models/Eft/Common/Tables/Item.cs:212-216` — written by
+/// `bot_generator_helper::generate_extra_properties_for_item` for hinged, night-vision and face
+/// shield items.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UpdTogglable {
+    #[serde(rename = "On", skip_serializing_if = "Option::is_none")]
+    pub on: Option<bool>,
+}
+
+/// `Models/Eft/Common/Tables/Item.cs:292-296`. Also read by `InventoryHelper.GetItemSize`'s folding
+/// arithmetic, which the container-grid port mirrors.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UpdFoldable {
+    #[serde(rename = "Folded", skip_serializing_if = "Option::is_none")]
+    pub folded: Option<bool>,
+}
+
+/// `Models/Eft/Common/Tables/Item.cs:298-302`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UpdFireMode {
+    #[serde(rename = "FireMode", skip_serializing_if = "Option::is_none")]
+    pub fire_mode: Option<String>,
+}
+
+/// `Models/Eft/Common/Tables/Item.cs:272-276`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UpdMedKit {
+    #[serde(rename = "HpResource", skip_serializing_if = "Option::is_none")]
+    pub hp_resource: Option<f64>,
+}
+
+/// `Models/Eft/Common/Tables/Item.cs:304-308`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UpdFoodDrink {
+    #[serde(rename = "HpPercent", skip_serializing_if = "Option::is_none")]
+    pub hp_percent: Option<f64>,
+}
+
+/// `Models/Eft/Common/Tables/Item.cs:326-333`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UpdLight {
+    #[serde(rename = "IsActive", skip_serializing_if = "Option::is_none")]
+    pub is_active: Option<bool>,
+    #[serde(rename = "SelectedMode", skip_serializing_if = "Option::is_none")]
+    pub selected_mode: Option<i32>,
 }
 
 /// `Models/Eft/Common/Tables/Item.cs` — written by the bot generator's durability rolls and read
@@ -489,6 +548,70 @@ pub struct ItemView {
     /// `TemplateItem.Properties.QuestItem`. Null and `false` are not interchangeable:
     /// `LootGenerator.cs:246` reads `GetValueOrDefault(false)`, `:571` tests `is null`.
     pub quest_item: Option<bool>,
+
+    // -- Added for the bot port (`bot::bot_generator_helper`). Every one is an `Option`, so a loot
+    // -- payload that omits them still deserializes.
+    /// `TemplateItem.Properties.MaxDurability` (`TemplateItem.cs:659`).
+    pub max_durability: Option<f64>,
+    /// `TemplateItem.Properties.WeapClass`, wire name `weapClass` (`TemplateItem.cs:695`). Only its
+    /// presence is read — it is what marks a template "is weapon".
+    pub weap_class: Option<String>,
+    /// `TemplateItem.Properties.HasHinge` (`TemplateItem.cs:492`).
+    pub has_hinge: Option<bool>,
+    /// `TemplateItem.Properties.Foldable` (`TemplateItem.cs:580`).
+    pub foldable: Option<bool>,
+    /// `TemplateItem.Properties.FoldedSlot` (`TemplateItem.cs:831`).
+    pub folded_slot: Option<String>,
+    /// `TemplateItem.Properties.SizeReduceRight` (`TemplateItem.cs:586`).
+    pub size_reduce_right: Option<i32>,
+    /// `TemplateItem.Properties.WeapFireType`, wire name `weapFireType` (`TemplateItem.cs:746`).
+    /// A `HashSet<string>` in C#; a `Vec` here because it is drawn from by index and a set
+    /// deserialized from a JSON array keeps that array's order in C# too.
+    pub weap_fire_type: Option<Vec<String>>,
+    /// `TemplateItem.Properties.MaxHpResource` (`TemplateItem.cs:1205`).
+    pub max_hp_resource: Option<i32>,
+    /// `TemplateItem.Properties.MaxResource` (`TemplateItem.cs:330`).
+    pub max_resource: Option<i32>,
+    /// `TemplateItem.Properties.FoodUseTime`, wire name `foodUseTime` (`TemplateItem.cs:1092`).
+    pub food_use_time: Option<f64>,
+    /// `TemplateItem.Properties.FaceShieldComponent` (`TemplateItem.cs:987`).
+    pub face_shield_component: Option<bool>,
+    /// The seven `Blocks*` props `TemplateItem.Blocks` (`TemplateItem.cs:48-63`) is built from,
+    /// plus `BlocksArmorVest`, which that dictionary pointedly omits.
+    pub blocks_earpiece: Option<bool>,
+    pub blocks_eyewear: Option<bool>,
+    pub blocks_face_cover: Option<bool>,
+    pub blocks_headwear: Option<bool>,
+    pub blocks_folding: Option<bool>,
+    pub blocks_collapsible: Option<bool>,
+    /// Wire name `blockLeftStance` — the C# prop is `BlockLeftStance`, not `Blocks…`
+    /// (`TemplateItem.cs:767`).
+    pub block_left_stance: Option<bool>,
+    /// `TemplateItem.Properties.BlocksArmorVest` (`TemplateItem.cs:604`).
+    pub blocks_armor_vest: Option<bool>,
+    /// `TemplateItem.Properties.Grids` (`TemplateItem.cs:339`) in full. [`ItemView::grid_cells_h`]
+    /// / [`ItemView::grid_cells_v`] flatten the *first* grid only, which is all the loot port needs;
+    /// a bot container is walked grid by grid, so it needs every one of them.
+    pub grids: Option<Vec<GridView>>,
+}
+
+/// `Models/Eft/Common/Tables/TemplateItem.cs:1641-1681` — `Grid` plus its `_props`, flattened.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GridView {
+    /// `Grid._name` — becomes the placed item's `slotId`.
+    pub name: Option<String>,
+    pub cells_h: Option<i32>,
+    pub cells_v: Option<i32>,
+    pub filters: Option<Vec<GridFilterView>>,
+}
+
+/// `Models/Eft/Common/Tables/TemplateItem.cs:1683-1693`.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GridFilterView {
+    pub filter: Option<Vec<String>>,
+    pub excluded_filter: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
