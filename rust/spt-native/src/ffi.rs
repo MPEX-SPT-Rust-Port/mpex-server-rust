@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use crate::bot::bot_inventory_generator::generate_inventory;
+use crate::bot::bot_inventory_generator::{generate_inventory, generate_inventory_batch};
 use crate::loot::item_helper::LootError;
 use crate::loot::location_loot_generator::{generate_dynamic_loot, generate_static_containers};
 use crate::loot::loot_generator::{
@@ -236,6 +236,20 @@ pub unsafe extern "C" fn spt_generate_bot_inventory(
     out_len: *mut usize,
 ) -> i32 {
     unsafe { run_generator(req_ptr, req_len, out_ptr, out_len, generate_inventory) }
+}
+
+/// One wave of bots in one call - the shared views ride once instead of once per bot.
+///
+/// # Safety
+/// See `spt_generate_static_containers`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn spt_generate_bot_inventory_batch(
+    req_ptr: *const u8,
+    req_len: usize,
+    out_ptr: *mut *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    unsafe { run_generator(req_ptr, req_len, out_ptr, out_len, generate_inventory_batch) }
 }
 
 /// # Safety

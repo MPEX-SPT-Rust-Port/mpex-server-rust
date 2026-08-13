@@ -41,6 +41,7 @@ internal enum LootExport
     SealedWeaponCase,
     RandomLootContainer,
     BotInventory,
+    BotInventoryBatch,
     DynamicOffers,
 }
 
@@ -139,6 +140,19 @@ public static class SptNative
     }
 
     /// <summary>
+    /// Generates a whole wave of bots in one call, with the shared database and config views on the
+    /// wire once instead of once per bot.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">Generation failed, or the native side misbehaved.</exception>
+    internal static BotInventoryBatchResult GenerateBotInventoryBatch(GenerateBotInventoryBatchRequest request)
+    {
+        return Generate<BotInventoryBatchResult>(
+            LootExport.BotInventoryBatch,
+            JsonSerializer.SerializeToUtf8Bytes(request, LootJsonOptions)
+        );
+    }
+
+    /// <summary>
     /// Generates one full batch of dynamic flea offers - the assort walk, the per-item offer
     /// creation and the pricing math.
     /// </summary>
@@ -187,6 +201,12 @@ public static class SptNative
                     &outLen
                 ),
                 LootExport.BotInventory => NativeMethods.GenerateBotInventory(requestPtr, (nuint)requestUtf8.Length, &outPtr, &outLen),
+                LootExport.BotInventoryBatch => NativeMethods.GenerateBotInventoryBatch(
+                    requestPtr,
+                    (nuint)requestUtf8.Length,
+                    &outPtr,
+                    &outLen
+                ),
                 LootExport.DynamicOffers => NativeMethods.GenerateDynamicOffers(requestPtr, (nuint)requestUtf8.Length, &outPtr, &outLen),
                 _ => throw new ArgumentOutOfRangeException(nameof(export), export, null),
             };

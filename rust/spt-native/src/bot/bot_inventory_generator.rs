@@ -83,9 +83,10 @@ use crate::bot::bot_loot_generator::{BotLootConfig, generate_loot};
 use crate::bot::bot_weapon_generator::{add_extra_magazines_to_inventory, generate_random_weapon};
 use crate::bot::mod_pool_service::get_mods_for_gear_slot;
 use crate::bot::models::{
-    BotBaseInventoryWire, BotGenerationDetailsWire, BotInventoryResult, BotTemplateWire,
-    BotTypeInventoryWire, ChancesWire, EquipmentFilterDetails, GenerateBotInventoryRequest,
-    GenerateEquipmentPropertiesWire, GenerationWire, PmcConfigWire, RandomisationDetails,
+    BotBaseInventoryWire, BotGenerationDetailsWire, BotInventoryBatchResult, BotInventoryResult,
+    BotSliceWire, BotTemplateWire, BotTypeInventoryWire, ChancesWire, EquipmentFilterDetails,
+    GenerateBotInventoryBatchRequest, GenerateBotInventoryRequest, GenerateEquipmentPropertiesWire,
+    GenerationWire, PmcConfigWire, RandomisationDetails, SharedBotViewsWire,
 };
 use crate::loot::item_helper::{LootError, get_item};
 use crate::loot::models::{DEBUG, Diagnostic, ERROR, Item, ItemView, WARNING};
@@ -160,11 +161,14 @@ pub struct DesiredWeapons {
 pub fn generate_inventory(
     request: GenerateBotInventoryRequest,
 ) -> Result<BotInventoryResult, LootError> {
-    let _seed_guard = request.test_seed.map(TestSeedGuard::install);
-
     let GenerateBotInventoryRequest {
+        bot_id,
+        test_seed,
         details,
         template,
+        loot_pools,
+        handbook_prices,
+        generating_player_level,
         is_night_time,
         equipment,
         bosses,
@@ -179,15 +183,111 @@ pub fn generate_inventory(
         pmc_config,
         repair_kit_weapon,
         equipment_blacklist,
-        loot_pools,
         item_presets,
         default_presets_by_tpl,
         presets_by_id,
         config_blacklist,
+        items,
+    } = request;
+
+    generate_one(
+        &SharedBotViewsWire {
+            generating_player_level,
+            is_night_time,
+            equipment,
+            bosses,
+            durability,
+            item_spawn_limits,
+            wallet_loot,
+            currency_stack_size,
+            secure_container_ammo_stack_count,
+            disable_loot_on_bot_types,
+            low_profile_gas_block_tpls,
+            loot_item_resource_randomization,
+            pmc_config,
+            repair_kit_weapon,
+            equipment_blacklist,
+            item_presets,
+            default_presets_by_tpl,
+            presets_by_id,
+            config_blacklist,
+            items,
+        },
+        BotSliceWire {
+            bot_id,
+            test_seed,
+            details,
+            template,
+            loot_pools,
+            handbook_prices,
+        },
+    )
+}
+
+/// One wave in one call: the shared views are parsed and borrowed once, then every bot is generated
+/// against them.
+///
+/// Bots are generated in request order on the calling thread. The clamp feedback loop
+/// (`randomisation_clamps`, see the module docs) still travels back to C# per bot rather than being
+/// applied to [`SharedBotViewsWire::equipment`] between iterations, which is what the per-bot path
+/// does today - `BotController.GenerateBotWave` generates a wave under `.AsParallel()`, so no bot
+/// has ever been able to rely on seeing its predecessor's clamps.
+///
+/// # Errors
+///
+/// The first bot that fails aborts the wave; see [`generate_inventory`].
+pub fn generate_inventory_batch(
+    request: GenerateBotInventoryBatchRequest,
+) -> Result<BotInventoryBatchResult, LootError> {
+    let GenerateBotInventoryBatchRequest { shared, bots } = request;
+
+    let mut results = Vec::with_capacity(bots.len());
+    for slice in bots {
+        results.push(generate_one(&shared, slice)?);
+    }
+
+    Ok(BotInventoryBatchResult { bots: results })
+}
+
+/// `BotInventoryGenerator.GenerateInventory` (`:80-120`) proper - one bot against views the caller
+/// already owns.
+fn generate_one(
+    shared: &SharedBotViewsWire,
+    slice: BotSliceWire,
+) -> Result<BotInventoryResult, LootError> {
+    let BotSliceWire {
+        test_seed,
+        details,
+        template,
+        loot_pools,
         handbook_prices,
+        ..
+    } = slice;
+    let _seed_guard = test_seed.map(TestSeedGuard::install);
+
+    let SharedBotViewsWire {
+        is_night_time,
+        equipment,
+        bosses,
+        durability,
+        item_spawn_limits,
+        wallet_loot,
+        currency_stack_size,
+        secure_container_ammo_stack_count,
+        disable_loot_on_bot_types,
+        low_profile_gas_block_tpls,
+        loot_item_resource_randomization,
+        pmc_config,
+        repair_kit_weapon,
+        equipment_blacklist,
+        item_presets,
+        default_presets_by_tpl,
+        presets_by_id,
+        config_blacklist,
         items,
         ..
-    } = request;
+    } = shared;
+
     let BotTemplateWire {
         inventory: mut template_inventory,
         chances: mut worn_item_chances,
@@ -196,21 +296,21 @@ pub fn generate_inventory(
     } = template;
 
     let mut ctx = BotContext {
-        items: &items,
-        bosses: &bosses,
-        durability: &durability,
-        equipment: &equipment,
-        loot_item_resource_randomization: &loot_item_resource_randomization,
-        is_night_time,
-        item_blacklist: &config_blacklist,
-        default_presets_by_tpl: &default_presets_by_tpl,
-        presets_by_id: &presets_by_id,
-        item_presets: &item_presets,
-        equipment_blacklist: &equipment_blacklist,
-        low_profile_gas_block_tpls: &low_profile_gas_block_tpls,
+        items,
+        bosses,
+        durability,
+        equipment,
+        loot_item_resource_randomization,
+        is_night_time: *is_night_time,
+        item_blacklist: config_blacklist,
+        default_presets_by_tpl,
+        presets_by_id,
+        item_presets,
+        equipment_blacklist,
+        low_profile_gas_block_tpls,
         weapon_has_enhancement_chance_percent: pmc_config.weapon_has_enhancement_chance_percent,
-        repair_kit_weapon: &repair_kit_weapon,
-        secure_container_ammo_stack_count,
+        repair_kit_weapon,
+        secure_container_ammo_stack_count: *secure_container_ammo_stack_count,
         diagnostics: Vec::new(),
     };
     let mut grids = ContainerGrids::default();
@@ -226,7 +326,7 @@ pub fn generate_inventory(
         &mut worn_item_chances,
         &mut bot_inventory,
         &details,
-        &pmc_config,
+        pmc_config,
         &mut randomisation_clamps,
     )?;
 
@@ -246,11 +346,11 @@ pub fn generate_inventory(
         equipment_id: &bot_inventory.equipment,
         item_counts: &item_generation_limits_min_max.items,
         weapon_mod_chances: &worn_item_chances.weapon_mods,
-        disable_loot_on_bot_types: &disable_loot_on_bot_types,
-        item_spawn_limits: &item_spawn_limits,
-        wallet_loot: &wallet_loot,
-        currency_stack_size: &currency_stack_size,
-        pmc: &pmc_config,
+        disable_loot_on_bot_types,
+        item_spawn_limits,
+        wallet_loot,
+        currency_stack_size,
+        pmc: pmc_config,
         handbook_prices: &handbook_prices,
         loot_pools: &loot_pools,
     };

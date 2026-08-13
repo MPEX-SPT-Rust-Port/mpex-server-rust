@@ -636,6 +636,67 @@ pub struct GenerateBotInventoryRequest {
     pub items: IndexMap<String, ItemView>,
 }
 
+/// The 20 request members that do not vary between the bots of one wave — every database view,
+/// every config slice, and the blacklist the caller resolved from the wave's role and the player's
+/// level. 95.7% of a single-bot request's bytes by measurement.
+///
+/// Deserialized as a nested object rather than `#[serde(flatten)]`: flatten routes the whole map
+/// through serde's buffering path, which would cost more than the duplication it removes.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SharedBotViewsWire {
+    pub generating_player_level: i32,
+    pub is_night_time: bool,
+    pub equipment: IndexMap<String, EquipmentFilters>,
+    pub bosses: Vec<String>,
+    pub durability: crate::bot::durability_limits_helper::BotDurability,
+    pub item_spawn_limits: IndexMap<String, IndexMap<String, f64>>,
+    pub wallet_loot: WalletLootSettingsWire,
+    pub currency_stack_size: IndexMap<String, IndexMap<String, IndexMap<String, f64>>>,
+    pub secure_container_ammo_stack_count: i32,
+    pub disable_loot_on_bot_types: std::collections::HashSet<String>,
+    pub low_profile_gas_block_tpls: std::collections::HashSet<String>,
+    pub loot_item_resource_randomization: IndexMap<String, RandomisedResourceDetails>,
+    pub pmc_config: PmcConfigWire,
+    pub repair_kit_weapon: crate::bot::repair_service::BonusSettings,
+    pub equipment_blacklist: EquipmentFilterDetails,
+    pub item_presets: IndexMap<String, PresetView>,
+    pub default_presets_by_tpl: IndexMap<String, PresetView>,
+    pub presets_by_id: IndexMap<String, PresetView>,
+    pub config_blacklist: std::collections::HashSet<String>,
+    pub items: IndexMap<String, ItemView>,
+}
+
+/// The six request members that do vary per bot. `template` is per-bot because
+/// `BotEquipmentFilterService.FilterBotEquipment` mutates a fresh clone for each one, and
+/// `loot_pools`/`handbook_prices` because the loot price bands are resolved from the bot's level.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BotSliceWire {
+    pub bot_id: String,
+    #[serde(default)]
+    pub test_seed: Option<u64>,
+    pub details: BotGenerationDetailsWire,
+    pub template: BotTemplateWire,
+    pub loot_pools: BotLootCacheWire,
+    pub handbook_prices: IndexMap<String, f64>,
+}
+
+/// One wave: the shared views once, then a slice per bot.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GenerateBotInventoryBatchRequest {
+    pub shared: SharedBotViewsWire,
+    pub bots: Vec<BotSliceWire>,
+}
+
+/// One result per requested bot, in request order.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BotInventoryBatchResult {
+    pub bots: Vec<BotInventoryResult>,
+}
+
 /// `Models/Spt/Bots/BotGenerationDetails.cs`, narrowed to what the generator reads.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]

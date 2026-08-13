@@ -147,6 +147,126 @@ internal record GenerateBotInventoryRequest
 }
 
 /// <summary>
+/// One wave in one call: the shared views once, then a slice per bot. The envelope of
+/// <c>spt_generate_bot_inventory_batch</c>.
+/// </summary>
+internal record GenerateBotInventoryBatchRequest
+{
+    [JsonPropertyName("shared")]
+    public required SharedBotViews Shared { get; set; }
+
+    [JsonPropertyName("bots")]
+    public required List<BotSlice> Bots { get; set; }
+}
+
+/// <summary>
+/// The <see cref="GenerateBotInventoryRequest"/> members that do not vary between the bots of one
+/// wave - every database view, every config slice, and the blacklist resolved from the wave's role
+/// and the player's level. 95.7% of a single-bot request's bytes by measurement, which is what
+/// makes batching worth anything.
+/// </summary>
+internal record SharedBotViews
+{
+    /// <inheritdoc cref="GenerateBotInventoryRequest.GeneratingPlayerLevel"/>
+    [JsonPropertyName("generatingPlayerLevel")]
+    public required int GeneratingPlayerLevel { get; set; }
+
+    [JsonPropertyName("isNightTime")]
+    public required bool IsNightTime { get; set; }
+
+    [JsonPropertyName("equipment")]
+    public required Dictionary<string, EquipmentFilters> Equipment { get; set; }
+
+    [JsonPropertyName("bosses")]
+    public required List<string> Bosses { get; set; }
+
+    [JsonPropertyName("durability")]
+    public required BotDurability Durability { get; set; }
+
+    [JsonPropertyName("itemSpawnLimits")]
+    public required Dictionary<string, Dictionary<MongoId, double>> ItemSpawnLimits { get; set; }
+
+    [JsonPropertyName("walletLoot")]
+    public required WalletLootSettings WalletLoot { get; set; }
+
+    [JsonPropertyName("currencyStackSize")]
+    public required Dictionary<string, Dictionary<string, Dictionary<string, double>>> CurrencyStackSize { get; set; }
+
+    [JsonPropertyName("secureContainerAmmoStackCount")]
+    public required int SecureContainerAmmoStackCount { get; set; }
+
+    [JsonPropertyName("disableLootOnBotTypes")]
+    public required HashSet<string> DisableLootOnBotTypes { get; set; }
+
+    [JsonPropertyName("lowProfileGasBlockTpls")]
+    public required HashSet<MongoId> LowProfileGasBlockTpls { get; set; }
+
+    [JsonPropertyName("lootItemResourceRandomization")]
+    public required Dictionary<string, RandomisedResourceDetails> LootItemResourceRandomization { get; set; }
+
+    [JsonPropertyName("pmcConfig")]
+    public required PmcConfig PmcConfig { get; set; }
+
+    [JsonPropertyName("repairKitWeapon")]
+    public required BonusSettings RepairKitWeapon { get; set; }
+
+    [JsonPropertyName("equipmentBlacklist")]
+    public required EquipmentFilterDetails EquipmentBlacklist { get; set; }
+
+    [JsonPropertyName("itemPresets")]
+    public required Dictionary<MongoId, PresetView> ItemPresets { get; set; }
+
+    [JsonPropertyName("defaultPresetsByTpl")]
+    public required Dictionary<MongoId, PresetView> DefaultPresetsByTpl { get; set; }
+
+    [JsonPropertyName("presetsById")]
+    public required Dictionary<MongoId, PresetView> PresetsById { get; set; }
+
+    [JsonPropertyName("configBlacklist")]
+    public required HashSet<MongoId> ConfigBlacklist { get; set; }
+
+    /// <inheritdoc cref="LootCommon.ItemsView"/>
+    [JsonPropertyName("items")]
+    public required Dictionary<MongoId, ItemView> Items { get; set; }
+}
+
+/// <summary>
+/// The <see cref="GenerateBotInventoryRequest"/> members that do vary per bot.
+/// <see cref="Template"/> is per-bot because <c>BotEquipmentFilterService.FilterBotEquipment</c>
+/// mutates a fresh clone for each one, and the two loot members because the price bands are
+/// resolved from the bot's own level.
+/// </summary>
+internal record BotSlice
+{
+    [JsonPropertyName("botId")]
+    public required MongoId BotId { get; set; }
+
+    [JsonPropertyName("testSeed")]
+    public ulong? TestSeed { get; set; }
+
+    [JsonPropertyName("details")]
+    public required BotGenerationDetailsView Details { get; set; }
+
+    [JsonPropertyName("template")]
+    public required BotTemplateView Template { get; set; }
+
+    [JsonPropertyName("lootPools")]
+    public required BotLootCache LootPools { get; set; }
+
+    [JsonPropertyName("handbookPrices")]
+    public required Dictionary<MongoId, double> HandbookPrices { get; set; }
+}
+
+/// <summary>
+/// One result per requested bot, in request order.
+/// </summary>
+internal record BotInventoryBatchResult
+{
+    [JsonPropertyName("bots")]
+    public required List<BotInventoryResult> Bots { get; set; }
+}
+
+/// <summary>
 /// The <c>BotGenerationDetails</c> members bot generation reads. Declared rather than reused:
 /// <c>BotGenerationDetails.RoleLowercase</c> rides as <c>BotRoleLowercase</c> on its own wire, and
 /// the request envelope is plain camelCase.

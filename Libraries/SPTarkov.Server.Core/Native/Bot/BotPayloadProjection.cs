@@ -123,6 +123,111 @@ internal static class BotPayloadProjection
     }
 
     /// <summary>
+    /// The 20 request members that do not vary between the bots of one wave, built once for the
+    /// whole wave. The role and player level are the wave's, which is what lets the equipment
+    /// blacklist ride here rather than per bot.
+    /// </summary>
+    internal static SharedBotViews BuildSharedViews(
+        MongoId sessionId,
+        string roleLowercase,
+        ProfileHelper profileHelper,
+        ProfileActivityService profileActivityService,
+        WeatherHelper weatherHelper,
+        BotGeneratorHelper botGeneratorHelper,
+        BotEquipmentFilterService botEquipmentFilterService,
+        PresetHelper presetHelper,
+        ItemFilterService itemFilterService,
+        ItemHelper itemHelper,
+        GlobalTable globalTable,
+        BotConfig botConfig,
+        PmcConfig pmcConfig,
+        RepairConfig repairConfig
+    )
+    {
+        var generatingPlayerLevel = profileHelper.GetPmcProfile(sessionId)?.Info?.Level ?? 1;
+        var equipmentRole = botGeneratorHelper.GetBotEquipmentRole(roleLowercase);
+
+        var raidConfig = profileActivityService.GetProfileActivityRaidData(sessionId)?.RaidConfiguration;
+        var isNightTime = raidConfig is not null && weatherHelper.IsNightTime(raidConfig.TimeVariant, raidConfig.Location!);
+
+        var presets = ToPresetViews(globalTable.ItemPresets);
+
+        return new SharedBotViews
+        {
+            GeneratingPlayerLevel = generatingPlayerLevel,
+            IsNightTime = isNightTime,
+            Equipment = botConfig.Equipment.Where(role => role.Value is not null).ToDictionary(role => role.Key, role => role.Value!),
+            Bosses = botConfig.Bosses,
+            Durability = botConfig.Durability,
+            ItemSpawnLimits = botConfig.ItemSpawnLimits,
+            WalletLoot = botConfig.WalletLoot,
+            CurrencyStackSize = botConfig.CurrencyStackSize,
+            SecureContainerAmmoStackCount = botConfig.SecureContainerAmmoStackCount,
+            DisableLootOnBotTypes = botConfig.DisableLootOnBotTypes,
+            LowProfileGasBlockTpls = botConfig.LowProfileGasBlockTpls,
+            LootItemResourceRandomization = botConfig.LootItemResourceRandomization,
+            PmcConfig = pmcConfig,
+            RepairKitWeapon = repairConfig.RepairKit.Weapon,
+            EquipmentBlacklist =
+                botEquipmentFilterService.GetBotEquipmentBlacklist(equipmentRole, generatingPlayerLevel) ?? new EquipmentFilterDetails(),
+            ItemPresets = presets,
+            DefaultPresetsByTpl = ToPresetViews(presetHelper.GetDefaultPresetByTpl()),
+            PresetsById = presets,
+            ConfigBlacklist = itemFilterService.GetBlacklistedItems(),
+            Items = PayloadProjection.BuildItemsView(itemHelper.TemplateTable.Items),
+        };
+    }
+
+    /// <summary>
+    /// The six request members that do vary per bot.
+    /// </summary>
+    internal static BotSlice BuildBotSlice(
+        MongoId botId,
+        BotType botJsonTemplate,
+        BotGenerationDetails botGenerationDetails,
+        ulong? testSeed,
+        BotLootCacheService botLootCacheService,
+        HandbookHelper handbookHelper,
+        PmcConfig pmcConfig
+    )
+    {
+        var lootPools = BuildLootPools(botLootCacheService, botJsonTemplate, botGenerationDetails, pmcConfig);
+
+        return new BotSlice
+        {
+            BotId = botId,
+            TestSeed = testSeed,
+            Details = new BotGenerationDetailsView
+            {
+                Role = botGenerationDetails.Role,
+                RoleLowercase = botGenerationDetails.RoleLowercase,
+                Side = botGenerationDetails.Side,
+                BotLevel = botGenerationDetails.BotLevel,
+                IsPmc = botGenerationDetails.IsPmc,
+                IsPlayerScav = botGenerationDetails.IsPlayerScav,
+                GameVersion = botGenerationDetails.GameVersion,
+                Location = botGenerationDetails.Location,
+                BotDifficulty = botGenerationDetails.BotDifficulty ?? string.Empty,
+                ClearBotContainerCacheAfterGeneration = botGenerationDetails.ClearBotContainerCacheAfterGeneration,
+            },
+            Template = new BotTemplateView
+            {
+                Inventory = new BotTypeInventoryView
+                {
+                    Equipment = botJsonTemplate.BotInventory.Equipment.ToDictionary(slot => slot.Key.ToString(), slot => slot.Value),
+                    Ammo = botJsonTemplate.BotInventory.Ammo,
+                    Items = botJsonTemplate.BotInventory.Items,
+                    Mods = botJsonTemplate.BotInventory.Mods,
+                },
+                Chances = botJsonTemplate.BotChances,
+                Generation = botJsonTemplate.BotGeneration,
+            },
+            LootPools = lootPools,
+            HandbookPrices = BuildHandbookPrices(lootPools, handbookHelper),
+        };
+    }
+
+    /// <summary>
     /// The twelve <c>GetLootFromCache</c> calls <c>BotLootGenerator.GenerateLoot</c> makes, in its
     /// order and with its arguments, so the service hydrates exactly as it does on the legacy path.
     /// <c>CombinedPoolLoot</c> is left at its empty default: it is the one <c>LootCacheType</c>
