@@ -1,8 +1,12 @@
 using System.Collections.Frozen;
+using System.Reflection;
+using HarmonyLib;
 using Microsoft.Extensions.Logging;
 using SPTarkov.Common.Models.Logging;
 using SPTarkov.DI.Annotations;
 using SPTarkov.Server.Core.Generators.Loot;
+using SPTarkov.Server.Core.Generators.Weapons;
+using SPTarkov.Server.Core.Generators.Weapons.Implementations;
 using SPTarkov.Server.Core.Helpers;
 using SPTarkov.Server.Core.Helpers.Bot;
 using SPTarkov.Server.Core.Helpers.InRaid;
@@ -14,6 +18,9 @@ using SPTarkov.Server.Core.Models.Eft.Match;
 using SPTarkov.Server.Core.Models.Enums;
 using SPTarkov.Server.Core.Models.Spt.Bots;
 using SPTarkov.Server.Core.Models.Spt.Config;
+using SPTarkov.Server.Core.Native;
+using SPTarkov.Server.Core.Native.Bot;
+using SPTarkov.Server.Core.Native.Loot;
 using SPTarkov.Server.Core.Services;
 using SPTarkov.Server.Core.Services.Bot;
 using SPTarkov.Server.Core.Services.Locales;
@@ -22,6 +29,17 @@ using SPTarkov.Server.Core.Utils;
 
 namespace SPTarkov.Server.Core.Generators.Bot;
 
+/// <summary>
+/// Bot inventory generation runs in <c>rust/spt-native/src/bot/bot_inventory_generator.rs</c> by
+/// default; <see cref="GenerateInventory"/> projects the live database, services and config into the
+/// native payload and replays what the native side collected - log lines, the container grid state
+/// and the nighttime randomisation clamps. The full 4.1.2 C# implementation is retained below as the
+/// legacy path - it is the frozen mod contract (constructor, public/protected members and DTOs are
+/// apicompat-gated against the 4.1.2 baseline) and runs instead of the native path when a Harmony
+/// patch is detected on any hookable member of this class or of the three generators below it, when
+/// one of those generators or the mag-gen component set has been replaced, or when
+/// BotConfig.ForceLegacyBotGeneration is set, so mod hooks fire with genuine baseline semantics.
+/// </summary>
 [Injectable]
 public class BotInventoryGenerator(
     ISptLogger<BotInventoryGenerator> logger,
@@ -70,6 +88,107 @@ public class BotInventoryGenerator(
     private readonly FrozenSet<string> _slotsToCheck = [nameof(EquipmentSlots.Pockets), nameof(EquipmentSlots.SecuredContainer)];
 
     /// <summary>
+    ///     Which implementation the most recent generation call ran - the spt-native path or the
+    ///     retained 4.1.2 C# path. Test seam; also handy in a debugger.
+    /// </summary>
+    internal LootGenerationPath LastPathTaken { get; private set; }
+
+    /// <summary>
+    ///     Test-only seed forwarded as <see cref="GenerateBotInventoryRequest.TestSeed"/> on every
+    ///     native request.
+    /// </summary>
+    internal ulong? NativeTestSeed { get; set; }
+
+    /// <summary>
+    ///     The 4.1.2 members a mod can Harmony-patch, across the four classes the native path
+    ///     replaces: this one plus the three generators it drives. Public, protected and
+    ///     protected-internal methods declared on each - exactly the surface the apicompat gate
+    ///     freezes, statics included. <see cref="GenerateInventory"/> itself is excluded: a patch on
+    ///     the dispatcher wraps whichever path runs and does not need the legacy body.
+    /// </summary>
+    private static readonly List<MethodBase> _hookableMembers =
+    [
+        .. new[] { typeof(BotInventoryGenerator), typeof(BotEquipmentModGenerator), typeof(BotWeaponGenerator), typeof(BotLootGenerator) }
+            .SelectMany(type =>
+                type.GetMethods(
+                    BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly
+                )
+            )
+            // Property accessors and operators are IsSpecialName; constructors are not returned at all
+            .Where(method => !method.IsSpecialName && (method.IsPublic || method.IsFamily || method.IsFamilyOrAssembly))
+            .Where(method => method != typeof(BotInventoryGenerator).GetMethod(nameof(GenerateInventory))),
+    ];
+
+    /// <summary>
+    ///     The mag-gen components the native path implements. A set that is not exactly these four
+    ///     means a mod added, removed or replaced one, and only the C# path runs it.
+    /// </summary>
+    private static readonly HashSet<Type> _builtInMagGens =
+    [
+        typeof(BarrelInventoryMagGen),
+        typeof(ExternalInventoryMagGen),
+        typeof(InternalMagazineInventoryMagGen),
+        typeof(UbglExternalMagGen),
+    ];
+
+    /// <summary>
+    ///     <c>BotWeaponGenerator.InventoryMagGenComponents</c> - protected there, so it is read by
+    ///     reflection. Resolved once.
+    /// </summary>
+    private static readonly FieldInfo? _magGenComponentsField = typeof(BotWeaponGenerator).GetField(
+        "InventoryMagGenComponents",
+        BindingFlags.Instance | BindingFlags.NonPublic
+    );
+
+    /// <summary>
+    ///     The legacy path runs when forced by config, when any of the frozen 4.1.2 members carries a
+    ///     live Harmony patch, or when a mod has substituted one of the components the native path
+    ///     folded in - running the retained C# implementation is the only way those hooks and
+    ///     replacements can take effect with real baseline semantics. Cheapest check first.
+    /// </summary>
+    private bool UseLegacyPath()
+    {
+        if (botConfig.ForceLegacyBotGeneration)
+        {
+            return true;
+        }
+
+        if (
+            _hookableMembers.Any(member =>
+                Harmony.GetPatchInfo(member) is { } patches
+                && (
+                    patches.Prefixes.Count > 0
+                    || patches.Postfixes.Count > 0
+                    || patches.Transpilers.Count > 0
+                    || patches.Finalizers.Count > 0
+                )
+            )
+        )
+        {
+            return true;
+        }
+
+        // A mod registered its own subclass with a higher TypePriority, so the container handed us
+        // an implementation the native side does not have
+        if (
+            botEquipmentModGenerator.GetType() != typeof(BotEquipmentModGenerator)
+            || botWeaponGenerator.GetType() != typeof(BotWeaponGenerator)
+            || botLootGenerator.GetType() != typeof(BotLootGenerator)
+        )
+        {
+            return true;
+        }
+
+        if (_magGenComponentsField?.GetValue(botWeaponGenerator) is not IEnumerable<IInventoryMagGen> magGenComponents)
+        {
+            // The field moved or was renamed - assume the set cannot be trusted
+            return true;
+        }
+
+        return !magGenComponents.Select(magGen => magGen.GetType()).ToHashSet().SetEquals(_builtInMagGens);
+    }
+
+    /// <summary>
     ///     Add equipment/weapons/loot to bot
     /// </summary>
     /// <param name="botId">Bots unique identifier</param>
@@ -78,6 +197,144 @@ public class BotInventoryGenerator(
     /// <param name="botGenerationDetails">Details related to generating a bot</param>
     /// <returns>PmcInventory object with equipment/weapons/loot</returns>
     public BotBaseInventory GenerateInventory(
+        MongoId botId,
+        MongoId sessionId,
+        BotType botJsonTemplate,
+        BotGenerationDetails botGenerationDetails
+    )
+    {
+        if (UseLegacyPath())
+        {
+            LastPathTaken = LootGenerationPath.Legacy;
+
+            return GenerateInventoryLegacy(botId, sessionId, botJsonTemplate, botGenerationDetails);
+        }
+
+        LastPathTaken = LootGenerationPath.Native;
+
+        var result = SptNative.GenerateBotInventory(
+            BotPayloadProjection.BuildRequest(
+                botId,
+                sessionId,
+                botJsonTemplate,
+                botGenerationDetails,
+                NativeTestSeed,
+                profileHelper,
+                profileActivityService,
+                weatherHelper,
+                botGeneratorHelper,
+                botEquipmentFilterService,
+                botLootGenerator.BotLootCacheService,
+                botEquipmentModGenerator.PresetHelper,
+                botEquipmentModGenerator.ItemFilterService,
+                botLootGenerator.HandbookHelper,
+                itemHelper,
+                botWeaponGenerator.GlobalTable,
+                botConfig,
+                pmcConfig,
+                botWeaponGenerator.RepairConfig
+            )
+        );
+
+        PayloadProjection.ReplayDiagnostics(result.Diagnostics, logger, serverLocalisationService);
+
+        // The cache is state the native side kept to itself; when the caller wants it afterwards the
+        // grids have to be put back. Legacy clears it instead when the flag is set, and there is
+        // nothing to clear here - nothing on this path ever wrote to the service
+        if (!botGenerationDetails.ClearBotContainerCacheAfterGeneration)
+        {
+            RestoreContainerGrids(botId, result.ContainerGrids);
+        }
+
+        ReplayRandomisationClamps(botGenerationDetails, result.RandomisationClamps);
+
+        return result.Inventory;
+    }
+
+    /// <summary>
+    ///     Put the native side's container grid state into <c>BotInventoryContainerService</c>, so
+    ///     later additions to this bots containers - the player scav pass - see the space already
+    ///     taken.
+    /// </summary>
+    /// <param name="botId">Bots unique identifier</param>
+    /// <param name="containerGrids">Container state keyed by equipment slot name</param>
+    private void RestoreContainerGrids(MongoId botId, Dictionary<string, ContainerDetailsView> containerGrids)
+    {
+        foreach (var (slotName, container) in containerGrids)
+        {
+            if (!Enum.TryParse<EquipmentSlots>(slotName, out var equipmentSlot))
+            {
+                logger.Error($"Unable to restore bot container cache, unknown equipment slot: {slotName}");
+
+                continue;
+            }
+
+            botInventoryContainerService.RestoreContainerToBot(
+                botId,
+                equipmentSlot,
+                new Item { Id = container.ContainerItemId, Template = container.ContainerTpl },
+                [.. container.Grids.Select(ToContainerMapDetails)]
+            );
+        }
+    }
+
+    private static BotInventoryContainerService.ContainerMapDetails ToContainerMapDetails(ContainerMapDetailsView grid)
+    {
+        var rowCount = grid.GridMap.Count;
+        var columnCount = rowCount == 0 ? 0 : grid.GridMap[0].Count;
+        var gridMap = new int[rowCount, columnCount];
+
+        for (var row = 0; row < rowCount; row++)
+        {
+            for (var column = 0; column < columnCount; column++)
+            {
+                gridMap[row, column] = grid.GridMap[row][column];
+            }
+        }
+
+        return new BotInventoryContainerService.ContainerMapDetails { GridMap = gridMap, GridFull = grid.GridFull };
+    }
+
+    /// <summary>
+    ///     Write the nighttime mod chance clamps back into the shared config object legacy mutates in
+    ///     place (see <see cref="GenerateAndAddEquipmentToBot"/>). Nothing reads it during this call,
+    ///     but <c>BotEquipmentFilterService.AdjustChances</c> does when the *next* bot is filtered,
+    ///     so skipping this diverges that bot. The native side only reports clamps under the same
+    ///     condition legacy applies them - nighttime, with nighttime changes configured - so the
+    ///     collection is empty otherwise.
+    /// </summary>
+    /// <param name="botGenerationDetails">Details related to generating a bot</param>
+    /// <param name="randomisationClamps">Equipment mod slot to clamped chance</param>
+    private void ReplayRandomisationClamps(BotGenerationDetails botGenerationDetails, Dictionary<string, double> randomisationClamps)
+    {
+        if (randomisationClamps.Count == 0)
+        {
+            return;
+        }
+
+        if (
+            !botConfig.Equipment.TryGetValue(
+                botGeneratorHelper.GetBotEquipmentRole(botGenerationDetails.RoleLowercase),
+                out var botEquipConfig
+            ) || botEquipConfig is null
+        )
+        {
+            return;
+        }
+
+        var randomistionDetails = botHelper.GetBotRandomizationDetails(botGenerationDetails.BotLevel, botEquipConfig);
+        if (randomistionDetails?.EquipmentMods is null)
+        {
+            return;
+        }
+
+        foreach (var (equipment, chance) in randomisationClamps)
+        {
+            randomistionDetails.EquipmentMods[equipment] = chance;
+        }
+    }
+
+    private BotBaseInventory GenerateInventoryLegacy(
         MongoId botId,
         MongoId sessionId,
         BotType botJsonTemplate,

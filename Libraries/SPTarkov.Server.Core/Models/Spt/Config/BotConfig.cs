@@ -11,6 +11,14 @@ public record BotConfig : BaseConfig
     public override string Kind { get; set; } = "spt-bot";
 
     /// <summary>
+    ///     Route bot inventory generation through the retained 4.1.2 C# implementation instead of
+    ///     spt-native. Escape hatch for mods that hook bot generation internals outside the four
+    ///     generator classes (hooks on their own members are detected automatically).
+    /// </summary>
+    [JsonPropertyName("forceLegacyBotGeneration")]
+    public bool ForceLegacyBotGeneration { get; set; }
+
+    /// <summary>
     ///     How many variants of each bot should be generated on raid start
     /// </summary>
     [JsonPropertyName("presetBatch")]

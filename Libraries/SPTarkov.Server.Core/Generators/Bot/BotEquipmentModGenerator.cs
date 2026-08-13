@@ -43,6 +43,22 @@ public class BotEquipmentModGenerator(
     ICloner cloner
 )
 {
+    /// <summary>
+    ///     Collaborators <c>BotPayloadProjection</c> needs, for same-assembly callers that hold this
+    ///     generator but not the services — <c>BotInventoryGenerator</c>'s constructor is frozen to
+    ///     its 4.1.2 signature and never took them.
+    /// </summary>
+    internal ItemFilterService ItemFilterService
+    {
+        get { return itemFilterService; }
+    }
+
+    /// <inheritdoc cref="ItemFilterService"/>
+    internal PresetHelper PresetHelper
+    {
+        get { return presetHelper; }
+    }
+
     protected static readonly HashSet<string> _modSightIds = ["mod_sight_front", "mod_sight_rear"];
 
     // Slots that hold scopes
