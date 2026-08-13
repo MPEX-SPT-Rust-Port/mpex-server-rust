@@ -309,10 +309,22 @@ pub fn get_item_quality_modifier(
 ///
 /// Two dropped diagnostics, both log-only in the C#: the `logger.Debug` for a durability above the
 /// max, and the `logger.Error(GetText("item-durability_value_invalid_use_default"))` behind the
-/// zero-durability arm. The C# `Debug` arm also *writes* the raised max back onto the item's
-/// `Upd.Repairable.MaxDurability`; the item is borrowed immutably here, so the raise is applied to
-/// the local copy only. Nothing observable hangs on the write — it can only change this same
-/// calculation, and only when the template carries no `MaxDurability` of its own.
+/// zero-durability arm.
+///
+/// The `Debug` arm also *writes* the raised max back onto `repairable.MaxDurability`
+/// (`ItemHelper.cs:658-664`), and that write is not local to the calculation: `UpdRepairable` is a
+/// reference the caller keeps holding. `RagfairOfferGenerator.CreateSingleOfferForItem` hands the
+/// same priced list to `CreateFleaOfferDetails.Items` (`RagfairOfferGenerator.cs:492`), so a
+/// mutation there is serialized into the offer the client receives; the profile-side callers
+/// (`RagfairOfferHelper.cs:1043`, `RagfairController.cs:577/680/777`) price live player items, where
+/// it persists into the save. This port cannot reproduce it — the brief pins an immutable `&Item` —
+/// so the raise is applied to a local copy and the write is dropped.
+///
+/// The *return value* is identical either way, and the trigger is unreachable on the generator's own
+/// path: `RandomiseWeaponDurability` / `RandomiseArmorDurabilityValues` never emit a `Durability`
+/// above the `MaxDurability` they write alongside it. So a hand-edited or mod-supplied item with an
+/// inverted pair is the only thing that can diverge, and only in the write, never in the price. Lift
+/// the signature to `&mut Item` if a caller ever needs the write back.
 fn get_repairable_item_quality_value(item_details: &ItemView, repairable: &UpdRepairable) -> f64 {
     // Edge case, durability above max
     let repairable_max_durability = match (repairable.durability, repairable.max_durability) {
