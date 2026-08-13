@@ -275,7 +275,7 @@ pub fn generate_mods_for_equipment(
                     ctx.diagnostics.push(diagnostic(
                         DEBUG,
                         format!(
-                            "Plate slot: {mod_slot_name} selection for armor: {parent_tpl} failed: {outcome:?}, skipping"
+                            "Plate slot: {mod_slot_name} selection for armor: {parent_tpl} failed: {outcome}, skipping"
                         ),
                     ));
 
@@ -409,13 +409,16 @@ pub fn generate_mods_for_equipment(
 /// .Value` at `:367`, and `item.Properties` at `:399`/`:448`), and an empty plate pool reaching
 /// `GetMinMaxArmorPlateClass` (`platePool[0]`).
 fn filter_plate_mods_for_slot_by_level(
-    ctx: &BotContext,
+    ctx: &mut BotContext,
     settings: &GenerateEquipmentPropertiesWire,
     mod_slot: &str,
     existing_plate_tpl_pool: &IndexSet<String>,
     armor_item_tpl: &str,
     max_armor_level: Option<i32>,
 ) -> Result<FilterPlateModsForSlotByLevelResult, LootError> {
+    // Copied out so the items view stays readable while `ctx` is borrowed mutably for diagnostics.
+    let items = ctx.items;
+
     // Not pmc or not a plate slot, return original mod pool array
     if !is_removable_plate_slot(mod_slot) {
         return Ok(FilterPlateModsForSlotByLevelResult {
@@ -463,7 +466,7 @@ fn filter_plate_mods_for_slot_by_level(
     let plates_from_db = existing_plate_tpl_pool
         .iter()
         .map(|plate_tpl| {
-            let armor_class = get_item(ctx.items, plate_tpl)
+            let armor_class = get_item(items, plate_tpl)
                 .ok_or_else(|| {
                     LootError::new(format!(
                         "Object reference not set to an instance of an object: plate tpl: {plate_tpl} is not in the items view"
@@ -519,7 +522,17 @@ fn filter_plate_mods_for_slot_by_level(
 
         // No valid plate class found in 3 tries, attempt default plates
         if find_compatible_plate_attempts >= MAX_ATTEMPTS {
-            let default_plate = get_item(ctx.items, armor_item_tpl)
+            let armor_item_name = get_item(items, armor_item_tpl)
+                .and_then(|armor_item| armor_item.name.clone())
+                .unwrap_or_default();
+            ctx.diagnostics.push(diagnostic(
+                DEBUG,
+                format!(
+                    "Plate filter too restrictive for armor: {armor_item_name} {armor_item_tpl}, unable to find plates of level: {chosen_armor_plate_level_string}, using items default plate"
+                ),
+            ));
+
+            let default_plate = get_item(items, armor_item_tpl)
                 .and_then(|armor_item| get_default_plate_tpl(armor_item, mod_slot));
             if let Some(default_plate) = default_plate {
                 // Return Default Plates cause couldn't get the lowest level available from original
@@ -538,7 +551,7 @@ fn filter_plate_mods_for_slot_by_level(
             if let Some(default_preset_plate_slot) = default_preset_plate_slot {
                 // Found a plate, exit
                 let plate_tpl = default_preset_plate_slot.template.clone();
-                if get_item(ctx.items, &plate_tpl).is_none() {
+                if get_item(items, &plate_tpl).is_none() {
                     return Err(LootError::new(format!(
                         "Object reference not set to an instance of an object: default preset plate tpl: {plate_tpl} is not in the items view"
                     )));
@@ -1115,7 +1128,7 @@ mod tests {
     #[test]
     fn the_weighted_plate_draw_is_consumed_before_the_clamp_applies() {
         let fixture = Fixture::new();
-        let ctx = fixture.ctx();
+        let mut ctx = fixture.ctx();
         let settings = settings();
         let pool: IndexSet<String> = settings.mod_pool[CARRIER]["front_plate"].clone();
 
@@ -1133,7 +1146,7 @@ mod tests {
 
         let _guard = TestSeedGuard::install(CLAMP_SEED);
         let outcome = filter_plate_mods_for_slot_by_level(
-            &ctx,
+            &mut ctx,
             &settings,
             "front_plate",
             &pool,
@@ -1158,7 +1171,7 @@ mod tests {
     #[test]
     fn the_plate_class_wraparound_wraps_to_min() {
         let fixture = Fixture::new();
-        let ctx = fixture.ctx();
+        let mut ctx = fixture.ctx();
         let mut settings = settings();
         // A single weight draws nothing and pins the chosen class to one above the pool's max.
         settings
@@ -1170,7 +1183,7 @@ mod tests {
         let pool = IndexSet::from([PLATE_C2.to_owned(), PLATE_C3.to_owned()]);
 
         let outcome = filter_plate_mods_for_slot_by_level(
-            &ctx,
+            &mut ctx,
             &settings,
             "front_plate",
             &pool,
@@ -1192,7 +1205,7 @@ mod tests {
     #[test]
     fn three_failed_attempts_fall_back_to_the_slot_default_plate() {
         let fixture = Fixture::new();
-        let ctx = fixture.ctx();
+        let mut ctx = fixture.ctx();
         let mut settings = settings();
         settings
             .bot_equipment_config
@@ -1203,7 +1216,7 @@ mod tests {
         let pool = IndexSet::from([PLATE_C2.to_owned()]);
 
         let outcome = filter_plate_mods_for_slot_by_level(
-            &ctx,
+            &mut ctx,
             &settings,
             "front_plate",
             &pool,
@@ -1217,13 +1230,25 @@ mod tests {
             outcome.plate_mod_templates,
             Some(IndexSet::from([DEFAULT_PLATE.to_owned()]))
         );
+        // `:409-414`, with the wrapped-to-min level string the loop left behind.
+        assert_eq!(ctx.diagnostics.len(), 1);
+        assert_eq!(ctx.diagnostics[0].level, DEBUG);
+        assert_eq!(
+            ctx.diagnostics[0].message.as_deref(),
+            Some(
+                format!(
+                    "Plate filter too restrictive for armor: plate_carrier {CARRIER}, unable to find plates of level: 2, using items default plate"
+                )
+                .as_str()
+            )
+        );
     }
 
     /// No slot default either: the default preset's own plate is the last resort.
     #[test]
     fn the_default_preset_plate_is_the_last_resort() {
         let fixture = Fixture::new();
-        let ctx = fixture.ctx();
+        let mut ctx = fixture.ctx();
         let mut settings = settings();
         settings
             .bot_equipment_config
@@ -1234,7 +1259,7 @@ mod tests {
         let pool = IndexSet::from([PLATE_C2.to_owned()]);
 
         let outcome = filter_plate_mods_for_slot_by_level(
-            &ctx,
+            &mut ctx,
             &settings,
             "front_plate",
             &pool,
@@ -1254,7 +1279,7 @@ mod tests {
     #[test]
     fn no_default_plate_and_no_preset_is_no_default_filter() {
         let fixture = Fixture::new();
-        let ctx = fixture.ctx();
+        let mut ctx = fixture.ctx();
         let mut settings = settings();
         settings
             .bot_equipment_config
@@ -1265,7 +1290,7 @@ mod tests {
         let pool = IndexSet::from([PLATE_C2.to_owned()]);
 
         let outcome = filter_plate_mods_for_slot_by_level(
-            &ctx,
+            &mut ctx,
             &settings,
             "front_plate",
             &pool,
@@ -1282,13 +1307,13 @@ mod tests {
     #[test]
     fn a_slot_without_weights_returns_the_original_pool() {
         let fixture = Fixture::new();
-        let ctx = fixture.ctx();
+        let mut ctx = fixture.ctx();
         let mut settings = settings();
         settings.bot_data.level = 200;
         let pool = IndexSet::from([PLATE_C2.to_owned()]);
 
         let outcome = filter_plate_mods_for_slot_by_level(
-            &ctx,
+            &mut ctx,
             &settings,
             "front_plate",
             &pool,
@@ -1304,13 +1329,14 @@ mod tests {
     #[test]
     fn a_non_plate_slot_is_returned_untouched() {
         let fixture = Fixture::new();
-        let ctx = fixture.ctx();
+        let mut ctx = fixture.ctx();
         let settings = settings();
         let pool = IndexSet::from([NVG.to_owned()]);
 
-        let outcome =
-            filter_plate_mods_for_slot_by_level(&ctx, &settings, "mod_nvg", &pool, HELMET, None)
-                .unwrap();
+        let outcome = filter_plate_mods_for_slot_by_level(
+            &mut ctx, &settings, "mod_nvg", &pool, HELMET, None,
+        )
+        .unwrap();
 
         assert_eq!(outcome.result, PlateFilterResult::NotPlateHoldingSlot);
         assert_eq!(outcome.plate_mod_templates, Some(pool));
@@ -1426,6 +1452,52 @@ mod tests {
         assert_eq!(
             filter_mods_by_blacklist(&ctx, &pool, &blacklist, "back_plate"),
             pool
+        );
+    }
+
+    /// `:229-236` names the outcome bare, as C#'s enum `ToString()` does — no quotes.
+    #[test]
+    fn a_failed_plate_selection_is_reported_and_the_slot_skipped() {
+        let fixture = Fixture::new();
+        let mut ctx = fixture.ctx();
+        let mut settings = settings();
+        // REQUIRED_ARMOR has neither a slot default plate nor a default preset, and a single weight
+        // pins the class above anything its pool holds.
+        settings.mod_pool[REQUIRED_ARMOR]["front_plate"] = IndexSet::from([PLATE_C2.to_owned()]);
+        settings
+            .bot_equipment_config
+            .armor_plate_weighting
+            .as_mut()
+            .unwrap()[0]
+            .values["front_plate"] = IndexMap::from([("6".to_owned(), 1.0)]);
+        let mut equipment = root(REQUIRED_ARMOR);
+
+        let _guard = TestSeedGuard::install(SEED);
+        generate_mods_for_equipment(
+            &mut ctx,
+            &mut equipment,
+            ROOT_ID,
+            REQUIRED_ARMOR,
+            &settings,
+            &EquipmentFilterDetails::default(),
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(equipment.len(), 1, "the slot should have been skipped");
+        let reported = ctx
+            .diagnostics
+            .last()
+            .expect("the failed selection is reported");
+        assert_eq!(reported.level, DEBUG);
+        assert_eq!(
+            reported.message.as_deref(),
+            Some(
+                format!(
+                    "Plate slot: front_plate selection for armor: {REQUIRED_ARMOR} failed: NO_DEFAULT_FILTER, skipping"
+                )
+                .as_str()
+            )
         );
     }
 
