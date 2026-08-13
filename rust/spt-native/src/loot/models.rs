@@ -116,8 +116,38 @@ pub struct Upd {
     pub food_drink: Option<UpdFoodDrink>,
     #[serde(rename = "Light", skip_serializing_if = "Option::is_none")]
     pub light: Option<UpdLight>,
+    #[serde(rename = "Key", skip_serializing_if = "Option::is_none")]
+    pub key: Option<UpdKey>,
+    #[serde(rename = "Resource", skip_serializing_if = "Option::is_none")]
+    pub resource: Option<UpdResource>,
+    #[serde(rename = "RepairKit", skip_serializing_if = "Option::is_none")]
+    pub repair_kit: Option<UpdRepairKit>,
     #[serde(flatten)]
     pub extra: Extra,
+}
+
+/// `Models/Eft/Common/Tables/Item.cs:310-315` — read by
+/// `item_helper::get_item_quality_modifier`'s key arm.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UpdKey {
+    #[serde(rename = "NumberOfUsages", skip_serializing_if = "Option::is_none")]
+    pub number_of_usages: Option<i32>,
+}
+
+/// `Models/Eft/Common/Tables/Item.cs:317-324`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UpdResource {
+    #[serde(rename = "Value", skip_serializing_if = "Option::is_none")]
+    pub value: Option<f64>,
+    #[serde(rename = "UnitsConsumed", skip_serializing_if = "Option::is_none")]
+    pub units_consumed: Option<f64>,
+}
+
+/// `Models/Eft/Common/Tables/Item.cs:389-393`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UpdRepairKit {
+    #[serde(rename = "Resource", skip_serializing_if = "Option::is_none")]
+    pub resource: Option<f64>,
 }
 
 /// `Models/Eft/Common/Tables/Item.cs:212-216` — written by

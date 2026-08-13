@@ -7,7 +7,7 @@ use indexmap::IndexMap;
 
 use super::models::{
     CounterState, DEBUG, Diagnostic, ERROR, Item, ItemView, LootConfigView, PresetView,
-    SeasonalView, SptLootItem, StaticAmmoDetails, Upd, WARNING,
+    SeasonalView, SptLootItem, StaticAmmoDetails, Upd, UpdRepairable, WARNING,
 };
 use super::probability_object_array::{ProbabilityObject, ProbabilityObjectArray};
 use super::{mongo_id, random_util};
@@ -157,6 +157,184 @@ pub fn item_requires_soft_inserts(items_view: &IndexMap<String, ItemView>, item_
                 )
             })
         })
+}
+
+/// `ItemHelper._removablePlateSlotIds` (`ItemHelper.cs:100`).
+const REMOVABLE_PLATE_SLOT_IDS: [&str; 4] = [
+    "front_plate",
+    "back_plate",
+    "left_side_plate",
+    "right_side_plate",
+];
+
+/// `ItemHelper.GetRemovablePlateSlotIds` (`ItemHelper.cs:1679-1682`).
+pub fn get_removable_plate_slot_ids() -> &'static [&'static str] {
+    &REMOVABLE_PLATE_SLOT_IDS
+}
+
+/// `ItemHelper.IsRemovablePlateSlot` (`ItemHelper.cs:1670-1673`). Every call site lowercases the
+/// name before the call, as the C# helper itself does.
+pub fn is_removable_plate_slot(slot_name: &str) -> bool {
+    get_removable_plate_slot_ids().contains(&slot_name.to_lowercase().as_str())
+}
+
+/// `ItemHelper.ArmorItemHasRemovablePlateSlots` (`ItemHelper.cs:354-362`). The `GetItem` miss and
+/// the null-slots exit collapse into the same `is_some_and` here — both are false there too, and a
+/// null slot name tests as the empty string either way.
+pub fn armor_item_has_removable_plate_slots(
+    items_view: &IndexMap<String, ItemView>,
+    tpl: &str,
+) -> bool {
+    get_item(items_view, tpl)
+        .and_then(|details| details.slots.as_deref())
+        .is_some_and(|slots| {
+            slots
+                .iter()
+                .any(|slot| is_removable_plate_slot(slot.name.as_deref().unwrap_or_default()))
+        })
+}
+
+/// `ItemHelper.GetItemPrice` (`ItemHelper.cs:431-440`) — the handbook price when it is at least 1,
+/// the flea price otherwise, and `None` when neither table knows the tpl.
+fn get_item_price(
+    handbook_prices: &IndexMap<String, f64>,
+    flea_prices: &IndexMap<String, f64>,
+    tpl: &str,
+) -> Option<f64> {
+    match handbook_prices.get(tpl) {
+        // `GetStaticItemPrice` folds anything below 1 to 0, so only `>= 1` short-circuits here.
+        Some(price) if *price >= 1.0 => Some(*price),
+        _ => flea_prices.get(tpl).copied(),
+    }
+}
+
+/// `ItemHelper.IsValidItem` (`ItemHelper.cs:289-298`) reached through its tpl overload
+/// (`ItemHelper.cs:267-276`), so a tpl the view does not know is invalid rather than a panic.
+///
+/// `invalid_base_types` is the caller's list; the C# `_defaultInvalidBaseTypes` fallback
+/// (`ItemHelper.cs:35-44`) is not reproduced because every ported call site passes its own.
+pub fn is_valid_item(
+    items_view: &IndexMap<String, ItemView>,
+    blacklist: &HashSet<String>,
+    handbook_prices: &IndexMap<String, f64>,
+    flea_prices: &IndexMap<String, f64>,
+    tpl: &str,
+    invalid_base_types: &[&str],
+) -> bool {
+    let Some(details) = get_item(items_view, tpl) else {
+        return false;
+    };
+
+    !details.quest_item.unwrap_or(false)
+        && details
+            .item_type
+            .as_deref()
+            .is_some_and(|item_type| item_type.eq_ignore_ascii_case("Item"))
+        && get_item_price(handbook_prices, flea_prices, tpl).is_some_and(|price| price > 0.0)
+        && !blacklist.contains(tpl)
+        // `baseTypes.All(x => !IsOfBaseclass(...))` — none of them may match.
+        && !is_of_baseclasses(items_view, tpl, invalid_base_types)
+}
+
+/// `ItemHelper.GetItemQualityModifier` (`ItemHelper.cs:582-646`) — a 0-1 condition ratio, `-1` for
+/// a zero-durability armor when `skip_armor_items_without_durability` is set, and a `0.01` floor so
+/// a fully spent item never prices at nothing.
+///
+/// Pure, so no draw is consumed. The C#'s
+/// `logger.Warning("Item: {tpl} lacks properties, cannot ascertain quality level, assuming 100%")`
+/// is dropped — an unknown tpl still returns 1 here, only without the diagnostic.
+pub fn get_item_quality_modifier(
+    items_view: &IndexMap<String, ItemView>,
+    item: &Item,
+    skip_armor_items_without_durability: bool,
+) -> f64 {
+    // Default to 100%
+    let mut result = 1.0;
+
+    let Some(item_details) = get_item(items_view, &item.template) else {
+        return 1.0;
+    };
+
+    // Is armor and has 0 max durability
+    if skip_armor_items_without_durability
+        && is_of_baseclass(items_view, &item.template, ARMOR)
+        && item_details.max_durability == Some(0.0)
+    {
+        return -1.0;
+    }
+
+    let Some(upd) = item.upd.as_ref() else {
+        return result;
+    };
+
+    if let Some(med_kit) = upd.med_kit.as_ref() {
+        // Meds
+        result = med_kit.hp_resource.unwrap_or(0.0)
+            / f64::from(item_details.max_hp_resource.unwrap_or(0));
+    } else if let Some(repairable) = upd.repairable.as_ref() {
+        result = get_repairable_item_quality_value(item_details, repairable);
+    } else if let Some(food_drink) = upd.food_drink.as_ref() {
+        result = food_drink.hp_percent.unwrap_or(0.0)
+            / f64::from(item_details.max_resource.unwrap_or(0));
+    } else if let Some(key) = upd.key.as_ref()
+        && let Some(number_of_usages) = key.number_of_usages
+        && number_of_usages > 0
+        && let Some(maximum_number_of_usage) = item_details.maximum_number_of_usage
+        && maximum_number_of_usage > 0
+    {
+        // keys - keys count upwards, not down like everything else
+        let max_num_of_usages = f64::from(maximum_number_of_usage);
+        result = (max_num_of_usages - f64::from(number_of_usages)) / max_num_of_usages;
+    } else if let Some(resource) = upd.resource.as_ref()
+        // Item is less than 100% usage
+        && resource.units_consumed.is_some_and(|units| units > 0.0)
+    {
+        // E.g. fuel tank
+        result = resource.value.unwrap_or(0.0) / f64::from(item_details.max_resource.unwrap_or(0));
+    } else if let Some(repair_kit) = upd.repair_kit.as_ref() {
+        result =
+            repair_kit.resource.unwrap_or(0.0) / item_details.max_repair_resource.unwrap_or(0.0);
+    }
+
+    // Exact, as the C# is: only a ratio of precisely zero is floored.
+    if result == 0.0 {
+        // make item non-zero but still very low
+        result = 0.01;
+    }
+
+    result
+}
+
+/// `ItemHelper.GetRepairableItemQualityValue` (`ItemHelper.cs:655-680`).
+///
+/// Two dropped diagnostics, both log-only in the C#: the `logger.Debug` for a durability above the
+/// max, and the `logger.Error(GetText("item-durability_value_invalid_use_default"))` behind the
+/// zero-durability arm. The C# `Debug` arm also *writes* the raised max back onto the item's
+/// `Upd.Repairable.MaxDurability`; the item is borrowed immutably here, so the raise is applied to
+/// the local copy only. Nothing observable hangs on the write — it can only change this same
+/// calculation, and only when the template carries no `MaxDurability` of its own.
+fn get_repairable_item_quality_value(item_details: &ItemView, repairable: &UpdRepairable) -> f64 {
+    // Edge case, durability above max
+    let repairable_max_durability = match (repairable.durability, repairable.max_durability) {
+        (Some(durability), Some(max_durability)) if durability > max_durability => Some(durability),
+        _ => repairable.max_durability,
+    };
+
+    // Attempt to get the max durability from _props. If not available, use Repairable max durability
+    // value instead.
+    let max_possible_durability = item_details.max_durability.or(repairable_max_durability);
+    let durability = repairable
+        .durability
+        .zip(max_possible_durability)
+        .map(|(durability, max)| durability / max);
+
+    // `double? == 0` in the C#, so a null ratio is not a zero one.
+    if durability == Some(0.0) {
+        return 1.0;
+    }
+
+    // A null ratio falls through the C# `?? 0` to a sqrt of zero, not to 1.
+    durability.unwrap_or(0.0).sqrt()
 }
 
 /// `ItemHelper.GetRandomisedAmmoStackSize` (`ItemHelper.cs:1767-1775`) with its `maxLimit` default
@@ -1164,6 +1342,264 @@ mod tests {
         assert!(armor_item_can_hold_mods(&view, HELMET_TPL));
         assert!(armor_item_can_hold_mods(&view, ARMOR_VEST_TPL));
         assert!(!armor_item_can_hold_mods(&view, CONTAINER_TPL));
+    }
+
+    /// Condition-bearing templates for the quality-modifier chain, one per `if`/`else if` arm.
+    const MEDKIT_TPL: &str = "a1a1a1a1a1a1a1a1a1a1a1a1";
+    const REPAIRABLE_WEAPON_TPL: &str = "a2a2a2a2a2a2a2a2a2a2a2a2";
+    const FOOD_TPL: &str = "a3a3a3a3a3a3a3a3a3a3a3a3";
+    const KEY_TPL: &str = "a4a4a4a4a4a4a4a4a4a4a4a4";
+    const FUEL_TPL: &str = "a5a5a5a5a5a5a5a5a5a5a5a5";
+    const REPAIR_KIT_TPL: &str = "a6a6a6a6a6a6a6a6a6a6a6a6";
+    /// Armor whose template max durability is 0 — the `-1` early-out.
+    const PLATELESS_ARMOR_TPL: &str = "a7a7a7a7a7a7a7a7a7a7a7a7";
+    /// Armor carrying one removable plate slot plus a soft-insert slot that is not one.
+    const PLATED_ARMOR_TPL: &str = "a8a8a8a8a8a8a8a8a8a8a8a8";
+
+    fn quality_fixture() -> IndexMap<String, ItemView> {
+        serde_json::from_value(json!({
+            ITEM_NODE: {},
+            ARMOR: { "parent": ITEM_NODE },
+            MEDKIT_TPL: { "parent": ITEM_NODE, "type": "Item", "maxHpResource": 100 },
+            REPAIRABLE_WEAPON_TPL: { "parent": ITEM_NODE, "type": "Item", "maxDurability": 100 },
+            FOOD_TPL: { "parent": ITEM_NODE, "type": "Item", "maxResource": 100 },
+            KEY_TPL: { "parent": ITEM_NODE, "type": "Item", "maximumNumberOfUsage": 10 },
+            FUEL_TPL: { "parent": ITEM_NODE, "type": "Item", "maxResource": 100 },
+            REPAIR_KIT_TPL: { "parent": ITEM_NODE, "type": "Item", "maxRepairResource": 40 },
+            PLATELESS_ARMOR_TPL: { "parent": ARMOR, "type": "Item", "maxDurability": 0 },
+            PLATED_ARMOR_TPL: {
+                "parent": ARMOR, "type": "Item", "maxDurability": 50,
+                "slots": [{ "name": "Soft_armor_front" }, { "name": "Front_plate" }]
+            },
+            // A quest item, and one the base-type filter rejects.
+            "a9a9a9a9a9a9a9a9a9a9a9a9": { "parent": ITEM_NODE, "type": "Item", "questItem": true },
+            "b1b1b1b1b1b1b1b1b1b1b1b1": { "parent": ARMOR, "type": "Item" },
+            // Typed as a node rather than an item.
+            "b2b2b2b2b2b2b2b2b2b2b2b2": { "parent": ITEM_NODE, "type": "Node" },
+        }))
+        .unwrap()
+    }
+
+    /// An item of `template` whose `upd` is built from the same wire shape the C# `Upd` serializes
+    /// to, so the renames are exercised rather than bypassed by a struct literal.
+    fn item_with_upd(template: &str, upd: serde_json::Value) -> Item {
+        Item {
+            id: "quality".to_owned(),
+            template: template.to_owned(),
+            upd: serde_json::from_value(upd).unwrap(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn get_item_quality_modifier_reads_each_condition_arm() {
+        let view = quality_fixture();
+        let modifier = |item: &Item| get_item_quality_modifier(&view, item, false);
+
+        // Meds: half the template's max HP resource.
+        assert_eq!(
+            modifier(&item_with_upd(
+                MEDKIT_TPL,
+                json!({ "MedKit": { "HpResource": 50 } })
+            )),
+            0.5
+        );
+        // Repairable: the square root of durability over the template's max.
+        assert_eq!(
+            modifier(&item_with_upd(
+                REPAIRABLE_WEAPON_TPL,
+                json!({ "Repairable": { "Durability": 25, "MaxDurability": 100 } })
+            )),
+            0.5
+        );
+        assert_eq!(
+            modifier(&item_with_upd(
+                FOOD_TPL,
+                json!({ "FoodDrink": { "HpPercent": 40 } })
+            )),
+            0.4
+        );
+        // Keys count upwards: 4 of 10 uses spent leaves 60%.
+        assert_eq!(
+            modifier(&item_with_upd(
+                KEY_TPL,
+                json!({ "Key": { "NumberOfUsages": 4 } })
+            )),
+            0.6
+        );
+        // Fuel: only read once something has been consumed.
+        assert_eq!(
+            modifier(&item_with_upd(
+                FUEL_TPL,
+                json!({ "Resource": { "Value": 30, "UnitsConsumed": 70 } })
+            )),
+            0.3
+        );
+        assert_eq!(
+            modifier(&item_with_upd(
+                REPAIR_KIT_TPL,
+                json!({ "RepairKit": { "Resource": 10 } })
+            )),
+            0.25
+        );
+    }
+
+    #[test]
+    fn get_item_quality_modifier_defaults_to_full_condition() {
+        let view = quality_fixture();
+
+        // No `upd` at all.
+        assert_eq!(
+            get_item_quality_modifier(&view, &item("no-upd", MEDKIT_TPL, None), false),
+            1.0
+        );
+        // An `upd` with none of the condition members.
+        assert_eq!(
+            get_item_quality_modifier(
+                &view,
+                &item_with_upd(MEDKIT_TPL, json!({ "StackObjectsCount": 2 })),
+                false
+            ),
+            1.0
+        );
+        // A tpl the view does not know — the C# warns and assumes 100%.
+        assert_eq!(
+            get_item_quality_modifier(&view, &item("unknown", ORPHAN_TPL, None), false),
+            1.0
+        );
+        // Unconsumed fuel skips the resource arm entirely rather than pricing at zero.
+        assert_eq!(
+            get_item_quality_modifier(
+                &view,
+                &item_with_upd(
+                    FUEL_TPL,
+                    json!({ "Resource": { "Value": 0, "UnitsConsumed": 0 } })
+                ),
+                false
+            ),
+            1.0
+        );
+    }
+
+    #[test]
+    fn get_item_quality_modifier_floors_a_zero_ratio_and_skips_durabilityless_armor() {
+        let view = quality_fixture();
+
+        // A spent medkit rates 0, which the floor lifts to a non-zero minimum.
+        assert_eq!(
+            get_item_quality_modifier(
+                &view,
+                &item_with_upd(MEDKIT_TPL, json!({ "MedKit": { "HpResource": 0 } })),
+                false
+            ),
+            0.01
+        );
+        // Armor with a 0 max durability, only when the caller asks to skip it.
+        let armor = item("armor", PLATELESS_ARMOR_TPL, None);
+        assert_eq!(get_item_quality_modifier(&view, &armor, true), -1.0);
+        assert_eq!(get_item_quality_modifier(&view, &armor, false), 1.0);
+        // The skip is armor-only: a weapon with no max durability is untouched by it.
+        assert_eq!(
+            get_item_quality_modifier(&view, &item("gun", REPAIRABLE_WEAPON_TPL, None), true),
+            1.0
+        );
+    }
+
+    #[test]
+    fn get_item_quality_modifier_treats_a_zeroed_durability_as_full_condition() {
+        // `GetRepairableItemQualityValue` logs and returns 1 for a 0 ratio rather than falling
+        // through to the 0.01 floor, and a durability above the max is raised to it.
+        let view = quality_fixture();
+
+        assert_eq!(
+            get_item_quality_modifier(
+                &view,
+                &item_with_upd(
+                    REPAIRABLE_WEAPON_TPL,
+                    json!({ "Repairable": { "Durability": 0, "MaxDurability": 100 } })
+                ),
+                false
+            ),
+            1.0
+        );
+        // The template's own max wins over the `Upd` one, so this is sqrt(64/100), not sqrt(1).
+        assert_eq!(
+            get_item_quality_modifier(
+                &view,
+                &item_with_upd(
+                    REPAIRABLE_WEAPON_TPL,
+                    json!({ "Repairable": { "Durability": 64, "MaxDurability": 10 } })
+                ),
+                false
+            ),
+            0.8
+        );
+    }
+
+    #[test]
+    fn is_valid_item_requires_a_priced_unblacklisted_item_of_an_allowed_base_type() {
+        let view = quality_fixture();
+        let blacklist = HashSet::from([REPAIR_KIT_TPL.to_owned()]);
+        let handbook: IndexMap<String, f64> = view
+            .keys()
+            .map(|tpl| (tpl.clone(), 100.0))
+            .collect::<IndexMap<_, _>>();
+        let flea = IndexMap::new();
+        let valid = |tpl: &str| is_valid_item(&view, &blacklist, &handbook, &flea, tpl, &[ARMOR]);
+
+        assert!(valid(MEDKIT_TPL));
+        // Quest item, blacklisted, an excluded base type, a node, and an unknown tpl.
+        assert!(!valid("a9a9a9a9a9a9a9a9a9a9a9a9"));
+        assert!(!valid(REPAIR_KIT_TPL));
+        assert!(!valid("b1b1b1b1b1b1b1b1b1b1b1b1"));
+        assert!(!valid("b2b2b2b2b2b2b2b2b2b2b2b2"));
+        assert!(!valid(ORPHAN_TPL));
+    }
+
+    #[test]
+    fn is_valid_item_falls_back_to_the_flea_price_below_a_handbook_price_of_one() {
+        let view = quality_fixture();
+        let blacklist = HashSet::new();
+        let flea = IndexMap::from([(MEDKIT_TPL.to_owned(), 250.0)]);
+        let valid = |handbook: &IndexMap<String, f64>| {
+            is_valid_item(&view, &blacklist, handbook, &flea, MEDKIT_TPL, &[])
+        };
+
+        // A handbook price of at least 1 is taken as-is.
+        assert!(valid(&IndexMap::from([(MEDKIT_TPL.to_owned(), 1.0)])));
+        // Below 1, and missing entirely, both fall through to the flea table.
+        assert!(valid(&IndexMap::from([(MEDKIT_TPL.to_owned(), 0.5)])));
+        assert!(valid(&IndexMap::new()));
+        // Neither table knows the tpl, so there is no price at all.
+        assert!(!is_valid_item(
+            &view,
+            &blacklist,
+            &IndexMap::new(),
+            &IndexMap::new(),
+            FOOD_TPL,
+            &[]
+        ));
+    }
+
+    #[test]
+    fn removable_plate_slots_are_matched_case_insensitively() {
+        let view = quality_fixture();
+
+        assert_eq!(get_removable_plate_slot_ids().len(), 4);
+        assert!(is_removable_plate_slot("front_plate"));
+        assert!(is_removable_plate_slot("Left_Side_Plate"));
+        assert!(!is_removable_plate_slot("soft_armor_front"));
+
+        assert!(armor_item_has_removable_plate_slots(
+            &view,
+            PLATED_ARMOR_TPL
+        ));
+        // No slots at all, and a tpl the view does not know.
+        assert!(!armor_item_has_removable_plate_slots(
+            &view,
+            PLATELESS_ARMOR_TPL
+        ));
+        assert!(!armor_item_has_removable_plate_slots(&view, ORPHAN_TPL));
     }
 
     #[test]

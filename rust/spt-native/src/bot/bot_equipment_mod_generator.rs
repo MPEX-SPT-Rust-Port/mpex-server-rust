@@ -66,7 +66,7 @@ use crate::bot::models::{
 };
 use crate::loot::item_helper::{
     ASSAULT_SCOPE, IRON_SIGHT, LAUNCHER, LootError, MOUNT, OPTIC_SCOPE, SIGHTS, SPECIAL_SCOPE,
-    get_item, is_of_baseclass, is_of_baseclasses,
+    get_item, is_of_baseclass, is_of_baseclasses, is_removable_plate_slot,
 };
 use crate::loot::models::{
     DEBUG, Diagnostic, ERROR, Item, ItemView, PresetView, SlotView, WARNING,
@@ -152,14 +152,6 @@ const DVL_SILENCED_PRESET_ID: &str = "59e8d2b386f77445830dd299";
 
 /// `MongoId.Empty()`, the fallback `:1119` hands `GetRandomModTplFromItemDb`.
 const MONGO_ID_EMPTY: &str = "000000000000000000000000";
-
-/// `ItemHelper._removablePlateSlotIds` (`Helpers/Items/ItemHelper.cs:100`).
-const REMOVABLE_PLATE_SLOT_IDS: [&str; 4] = [
-    "front_plate",
-    "back_plate",
-    "left_side_plate",
-    "right_side_plate",
-];
 
 /// `Models/Enums/ModSpawn.cs`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2445,12 +2437,6 @@ fn get_default_plate_tpl(armor_item: &ItemView, mod_slot: &str) -> Option<String
         })?
         .plate
         .clone()
-}
-
-/// `ItemHelper.IsRemovablePlateSlot` (`Helpers/Items/ItemHelper.cs:1670-1673`). Both call sites
-/// lowercase the name before the call, as the C# helper itself does.
-fn is_removable_plate_slot(slot_name: &str) -> bool {
-    REMOVABLE_PLATE_SLOT_IDS.contains(&slot_name.to_lowercase().as_str())
 }
 
 /// One re-run of the `:366`/`:399` `Where`, which the lazy C# sequence performs afresh each time.

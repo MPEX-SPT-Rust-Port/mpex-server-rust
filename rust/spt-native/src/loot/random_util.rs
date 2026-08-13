@@ -178,6 +178,21 @@ pub fn get_double(min: f64, max: f64) -> f64 {
     min + next_double48() * (max - min)
 }
 
+/// A coin flip, matching `RandomUtil.GetBool` (`RandomUtil.cs:87-90`) — one draw, `true` below 0.5.
+pub fn get_bool() -> bool {
+    next_double48() < 0.5
+}
+
+/// A profile account id, matching `HashUtil.GenerateAccountId` (`HashUtil.cs:118-124`) — one
+/// [`get_int`] over its two hard-coded bounds. It lives here rather than in a `hash_util` module
+/// because the bounds are all there is to it and the draw is the only part parity depends on.
+pub fn generate_account_id() -> i32 {
+    const MIN: i32 = 1_000_000;
+    const MAX: i32 = 1_999_999;
+
+    get_int(MIN, MAX)
+}
+
 /// Whether an event with `chance_percent` (0-100) fires, matching `RandomUtil.GetChance100`
 /// (`RandomUtil.cs:145-150`).
 ///
@@ -267,6 +282,68 @@ pub fn get_normally_distributed_random_number(mean: f64, sigma: f64) -> f64 {
 
         return value_drawn;
     }
+}
+
+/// A gaussian-ish draw in `[min, max]` biased by `shift`, matching
+/// `RandomUtil.GetBiasedRandomNumber` (`RandomUtil.cs:361-432`).
+///
+/// `n` averages that many `next_double48` draws (`GetGaussianRandom`), and every rejected attempt
+/// of the `do`/`while` consumes its full `n` draws again — so the draw count is
+/// `n * attempts`, not `n`. The three guard arms below consume nothing at all.
+///
+/// The C# logs on the way out of those arms; `random_util` is context-free and has no logger, so
+/// the lines are dropped and recorded here instead, the same treatment
+/// [`get_chance_100`]'s clamp gets:
+/// - `max < min` → `logger.Error("Invalid argument, Bounded random number generation max is smaller than min({max} < {min}")` (the missing closing paren is in the C#), then `-1`.
+/// - `n < 1` → `logger.Error("Invalid argument, 'n' must be 1 or greater(received {n})")`, then `-1`.
+/// - `shift > max - min` → `logger.Warning("Bias shift for random number generation is greater than the range of available numbers. This will have a severe performance impact")` and `logger.Warning("min-> {min}; max-> {max}; shift-> {shift}")`, then carries on regardless.
+pub fn get_biased_random_number(min: f64, max: f64, shift: f64, n: f64) -> f64 {
+    if max < min {
+        return -1.0;
+    }
+
+    if n < 1.0 {
+        return -1.0;
+    }
+
+    #[expect(
+        clippy::float_cmp,
+        reason = "the C# compares exactly; a degenerate range is the intended trigger"
+    )]
+    if min == max {
+        return min;
+    }
+
+    // A shift past the range only warns in the C#; the rerolls below absorb it either way.
+    let biased_min = if shift >= 0.0 { min - shift } else { min };
+    let biased_max = if shift < 0.0 { max + shift } else { max };
+
+    // `do`/`while`: out-of-bounds rolls are thrown away and redrawn.
+    loop {
+        let num = bounded_gaussian(biased_min, biased_max, n);
+        if num >= min && num <= max {
+            return num;
+        }
+    }
+}
+
+/// `RandomUtil.GetBoundedGaussian` (`RandomUtil.cs:418-421`).
+fn bounded_gaussian(start: f64, end: f64, n: f64) -> f64 {
+    round_half_even(start + gaussian_random(n) * (end - start + 1.0))
+}
+
+/// `RandomUtil.GetGaussianRandom` (`RandomUtil.cs:423-432`). The C# loop counter is an `int`
+/// against a `double` bound, so a fractional `n` still draws `ceil(n)` times while dividing by the
+/// fraction — transcribed rather than simplified.
+fn gaussian_random(n: f64) -> f64 {
+    let mut rand = 0.0;
+    let mut i = 0i32;
+    while f64::from(i) < n {
+        rand += next_double48();
+        i += 1;
+    }
+
+    rand / n
 }
 
 /// A random element of `list`, matching `RandomUtil.GetRandomElement` (`RandomUtil.cs:159-175`).
@@ -639,7 +716,25 @@ mod tests {
             draw_indices(&kat_int_map(), 5)
         };
 
+        let biased: Vec<f64> = {
+            let _g = TestSeedGuard::install(42);
+            (0..5)
+                .map(|_| get_biased_random_number(80.0, 120.0, 2.0, 2.0))
+                .collect()
+        };
+        let bools: Vec<bool> = {
+            let _g = TestSeedGuard::install(42);
+            (0..8).map(|_| get_bool()).collect()
+        };
+        let account_ids: Vec<i32> = {
+            let _g = TestSeedGuard::install(42);
+            (0..4).map(|_| generate_account_id()).collect()
+        };
+
         println!("GET_CHANCE100_50: {chances:?}");
+        println!("BIASED_80_120_SHIFT2_N2: {biased:?}");
+        println!("GET_BOOL: {bools:?}");
+        println!("ACCOUNT_IDS: {account_ids:?}");
         println!("WEIGHTED_MIXED_5: {:?}", weighted.0);
         println!("WEIGHTED_SINGLE: {:?}", weighted.1);
         println!("WEIGHTED_UNIFORM_3: {:?}", weighted.2);
@@ -797,6 +892,10 @@ mod tests {
     ];
     /// Positions drawn from the mixed weights `{5, 0, 1, 1}` — identical whatever the key type.
     const KAT_WEIGHTED_GENERIC_INDICES: [usize; 5] = [0, 2, 0, 0, 3];
+    /// `RandomiseOfferPrice`'s exact arguments for the default price range (0.8..1.2 * 100).
+    const KAT_BIASED_80_120_SHIFT2_N2: [f64; 5] = [97.0, 100.0, 110.0, 88.0, 95.0];
+    const KAT_GET_BOOL: [bool; 8] = [true, false, true, false, false, false, true, true];
+    const KAT_ACCOUNT_IDS: [i32; 4] = [1_968_470, 1_080_510, 1_301_473, 1_221_345];
 
     #[test]
     fn kat_roll_chance_is_pinned() {
@@ -905,6 +1004,46 @@ mod tests {
         let _g = TestSeedGuard::install(KAT_SEED);
         let chances: Vec<bool> = (0..5).map(|_| get_chance_100(50.0)).collect();
         assert_eq!(chances, KAT_GET_CHANCE100_50);
+    }
+
+    #[test]
+    fn get_biased_random_number_matches_the_csharp_kat() {
+        let _g = TestSeedGuard::install(KAT_SEED);
+        // RandomiseOfferPrice's exact arguments for the default price range (0.8..1.2 * 100).
+        let values: Vec<f64> = (0..5)
+            .map(|_| get_biased_random_number(80.0, 120.0, 2.0, 2.0))
+            .collect();
+
+        assert_eq!(values, KAT_BIASED_80_120_SHIFT2_N2);
+    }
+
+    #[test]
+    fn get_biased_random_number_guard_arms_consume_no_draws() {
+        let _g = TestSeedGuard::install(KAT_SEED);
+        assert_eq!(get_biased_random_number(120.0, 80.0, 2.0, 2.0), -1.0);
+        assert_eq!(get_biased_random_number(80.0, 120.0, 2.0, 0.5), -1.0);
+        assert_eq!(get_biased_random_number(80.0, 80.0, 2.0, 2.0), 80.0);
+        // The stream is untouched, so this is the same value the previous test's first draw was.
+        assert_eq!(
+            get_biased_random_number(80.0, 120.0, 2.0, 2.0),
+            KAT_BIASED_80_120_SHIFT2_N2[0]
+        );
+    }
+
+    #[test]
+    fn get_bool_matches_the_csharp_kat() {
+        let _g = TestSeedGuard::install(KAT_SEED);
+        let values: Vec<bool> = (0..8).map(|_| get_bool()).collect();
+
+        assert_eq!(values, KAT_GET_BOOL);
+    }
+
+    #[test]
+    fn generate_account_id_matches_the_csharp_kat() {
+        let _g = TestSeedGuard::install(KAT_SEED);
+        let values: Vec<i32> = (0..4).map(|_| generate_account_id()).collect();
+
+        assert_eq!(values, KAT_ACCOUNT_IDS);
     }
 
     #[test]

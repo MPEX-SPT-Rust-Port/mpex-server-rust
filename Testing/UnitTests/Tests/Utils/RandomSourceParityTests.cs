@@ -124,6 +124,17 @@ public sealed class RandomSourceParityTests
     /// </summary>
     private static readonly int[] _katWeightedGenericIndices = [0, 2, 0, 0, 3];
 
+    /// <summary>
+    ///     RandomiseOfferPrice's exact arguments for the default price range (0.8..1.2 * 100).
+    ///     GetBiasedRandomNumber averages n draws per attempt and rerolls anything outside [min, max],
+    ///     so the sequence pins the reroll behaviour as well as the arithmetic.
+    /// </summary>
+    private static readonly double[] _katBiased80To120Shift2N2 = [97, 100, 110, 88, 95];
+
+    private static readonly bool[] _katGetBool = [true, false, true, false, false, false, true, true];
+
+    private static readonly int[] _katAccountIds = [1968470, 1080510, 1301473, 1221345];
+
     [Test]
     public void RawXoshiroSequenceMatchesTheRustTwin()
     {
@@ -355,6 +366,65 @@ public sealed class RandomSourceParityTests
             {
                 Assert.That(textKeys.IndexOf(helper.GetWeightedValue(text)), Is.EqualTo(_katWeightedGenericIndices[i]), $"text draw #{i}");
             }
+        }
+        finally
+        {
+            randomUtil.RandomSource = original;
+        }
+    }
+
+    [Test]
+    public void GetBiasedRandomNumberMatchesTheRustKat()
+    {
+        var randomUtil = DI.GetInstance().GetService<RandomUtil>();
+        var original = randomUtil.RandomSource;
+        try
+        {
+            randomUtil.RandomSource = new SeededRandomSource(KatSeed);
+
+            var values = Enumerable.Range(0, 5).Select(_ => randomUtil.GetBiasedRandomNumber(80d, 120d, 2d, 2d)).ToArray();
+
+            Assert.That(values, Is.EqualTo(_katBiased80To120Shift2N2));
+        }
+        finally
+        {
+            randomUtil.RandomSource = original;
+        }
+    }
+
+    [Test]
+    public void GetBoolMatchesTheRustKat()
+    {
+        var randomUtil = DI.GetInstance().GetService<RandomUtil>();
+        var original = randomUtil.RandomSource;
+        try
+        {
+            randomUtil.RandomSource = new SeededRandomSource(KatSeed);
+
+            var values = Enumerable.Range(0, 8).Select(_ => randomUtil.GetBool()).ToArray();
+
+            Assert.That(values, Is.EqualTo(_katGetBool));
+        }
+        finally
+        {
+            randomUtil.RandomSource = original;
+        }
+    }
+
+    [Test]
+    public void GenerateAccountIdMatchesTheRustKat()
+    {
+        var randomUtil = DI.GetInstance().GetService<RandomUtil>();
+        var hashUtil = new HashUtil(randomUtil);
+
+        var original = randomUtil.RandomSource;
+        try
+        {
+            randomUtil.RandomSource = new SeededRandomSource(KatSeed);
+
+            var values = Enumerable.Range(0, 4).Select(_ => hashUtil.GenerateAccountId()).ToArray();
+
+            Assert.That(values, Is.EqualTo(_katAccountIds));
         }
         finally
         {
