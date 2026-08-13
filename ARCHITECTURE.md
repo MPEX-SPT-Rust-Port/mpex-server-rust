@@ -363,9 +363,8 @@ location generator uses, and the items-view projection is shared between both ge
   12th-parameter overload adding `LocationConfig` is what the container selects (proven by the
   dispatch test, which resolves the class and asserts the flag is honoured). A mod that constructs
   the class manually through the 11-parameter constructor still gets Harmony hook detection, it just
-  has no config to read, so the flag check is skipped. Additive-only, so it is expected to be
-  apicompat-neutral — but that gate has not been run for this port (the `mpex-api-compat` repo is
-  absent from the dev machine) and must be run before this merges to `main`.
+  has no config to read, so the flag check is skipped. Additive-only and apicompat-verified: the
+  `mpex-api-compat` gate passed on all six contract assemblies for this port (2026-08-13).
 - **The blacklist crosses as two collections, not one.** `configBlacklist`
   (`ItemFilterService.GetBlacklistedItems()`) is what the reward-pool union reads; `globalBlacklist`
   (`GetItemBlacklistCache()`, the mod-extensible cache behind `IsItemBlacklisted`) is what the sealed

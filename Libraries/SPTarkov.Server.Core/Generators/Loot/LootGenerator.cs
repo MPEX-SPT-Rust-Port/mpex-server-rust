@@ -57,8 +57,8 @@ public class LootGenerator(
 
     /// <summary>
     ///     The constructor the container uses: the frozen 4.1.2 one plus the config that carries the
-    ///     legacy path flag. Additive, so expected apicompat-neutral - gate pending, it has not been
-    ///     run for this change.
+    ///     legacy path flag. Additive and apicompat-verified: the gate passed on all six contract
+    ///     assemblies for this change.
     /// </summary>
     public LootGenerator(
         ISptLogger<LootGenerator> logger,
