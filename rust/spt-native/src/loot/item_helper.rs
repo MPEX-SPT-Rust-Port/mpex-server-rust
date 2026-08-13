@@ -61,6 +61,33 @@ pub const COMPACT_COLLIMATOR: &str = "55818acf4bdc2dde698b456b";
 pub const PORTABLE_RANGE_FINDER: &str = "61605ddea09d851a0a0c1bbc";
 /// `BaseClasses.BUILT_IN_INSERTS`
 pub const BUILT_IN_INSERTS: &str = "65649eb40bf0ed77b8044453";
+/// `BaseClasses.LOOT_CONTAINER`
+pub const LOOT_CONTAINER: &str = "566965d44bdc2d814c8b4571";
+/// `BaseClasses.MOB_CONTAINER`
+pub const MOB_CONTAINER: &str = "5448bf274bdc2dfc2f8b456a";
+/// `BaseClasses.STASH`
+pub const STASH: &str = "566abbb64bdc2d144c8b457d";
+/// `BaseClasses.SORTING_TABLE`
+pub const SORTING_TABLE: &str = "6050cac987d3f925bf016837";
+/// `BaseClasses.INVENTORY`
+pub const INVENTORY: &str = "55d720f24bdc2d88028b456d";
+/// `BaseClasses.STATIONARY_CONTAINER`
+pub const STATIONARY_CONTAINER: &str = "567583764bdc2d98058b456e";
+/// `BaseClasses.POCKETS`
+pub const POCKETS: &str = "557596e64bdc2dc2118b4571";
+
+/// `ItemHelper._defaultInvalidBaseTypes` (`ItemHelper.cs:35-44`) — what [`is_valid_item`] falls back
+/// to when its C# caller passes no list of its own, as `RagfairServerHelper.IsItemValidRagfairItem`
+/// (`:47`) does.
+pub const DEFAULT_INVALID_BASE_TYPES: [&str; 7] = [
+    LOOT_CONTAINER,
+    MOB_CONTAINER,
+    STASH,
+    SORTING_TABLE,
+    INVENTORY,
+    STATIONARY_CONTAINER,
+    POCKETS,
+];
 
 /// `ItemHelper.GetItem` (`ItemHelper.cs:491-501`) — a plain lookup, absent tpl included.
 pub fn get_item<'a>(items_view: &'a IndexMap<String, ItemView>, tpl: &str) -> Option<&'a ItemView> {
