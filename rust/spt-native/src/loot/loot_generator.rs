@@ -81,6 +81,7 @@ fn new_loot_item(tpl: &str, stack_objects_count: f64) -> Item {
             extra: [("SpawnedInSession".to_owned(), serde_json::Value::Bool(true))]
                 .into_iter()
                 .collect(),
+            ..Default::default()
         }),
         ..Default::default()
     }

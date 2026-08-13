@@ -100,8 +100,70 @@ pub struct Upd {
         skip_serializing_if = "Option::is_none"
     )]
     pub stack_objects_count: Option<f64>,
+    #[serde(rename = "Repairable", skip_serializing_if = "Option::is_none")]
+    pub repairable: Option<UpdRepairable>,
+    #[serde(rename = "Buff", skip_serializing_if = "Option::is_none")]
+    pub buff: Option<UpdBuff>,
     #[serde(flatten)]
     pub extra: Extra,
+}
+
+/// `Models/Eft/Common/Tables/Item.cs` — written by the bot generator's durability rolls and read
+/// by `repair_service::add_buff`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UpdRepairable {
+    #[serde(rename = "Durability", skip_serializing_if = "Option::is_none")]
+    pub durability: Option<f64>,
+    #[serde(rename = "MaxDurability", skip_serializing_if = "Option::is_none")]
+    pub max_durability: Option<f64>,
+    #[serde(flatten)]
+    pub extra: Extra,
+}
+
+/// `Models/Eft/Common/Tables/Item.cs` — written by `repair_service::add_buff`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UpdBuff {
+    #[serde(rename = "Rarity", skip_serializing_if = "Option::is_none")]
+    pub rarity: Option<String>,
+    #[serde(rename = "BuffType", skip_serializing_if = "Option::is_none")]
+    pub buff_type: Option<RepairBuffType>,
+    #[serde(rename = "Value", skip_serializing_if = "Option::is_none")]
+    pub value: Option<f64>,
+    #[serde(
+        rename = "ThresholdDurability",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub threshold_durability: Option<f64>,
+    #[serde(flatten)]
+    pub extra: Extra,
+}
+
+/// `Models/Enums/RepairBuffType.cs`. `UpdBuff.BuffType` carries a `[JsonStringEnumConverter]`, so
+/// the wire form is the variant name verbatim — which is also what serde emits by default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RepairBuffType {
+    WeaponSpread,
+    DamageReduction,
+    MalfunctionProtections,
+    WeaponDamage,
+    ArmorEfficiency,
+    DurabilityImprovement,
+}
+
+impl RepairBuffType {
+    /// `Enum.Parse<RepairBuffType>(name)` — case-sensitive, as the C# overload without an
+    /// `ignoreCase` argument is. `None` where the C# throws `ArgumentException`.
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "WeaponSpread" => Some(Self::WeaponSpread),
+            "DamageReduction" => Some(Self::DamageReduction),
+            "MalfunctionProtections" => Some(Self::MalfunctionProtections),
+            "WeaponDamage" => Some(Self::WeaponDamage),
+            "ArmorEfficiency" => Some(Self::ArmorEfficiency),
+            "DurabilityImprovement" => Some(Self::DurabilityImprovement),
+            _ => None,
+        }
+    }
 }
 
 /// Mirrors the `[JsonConverter(typeof(StringToNumberFactoryConverter))]` on C#'s
