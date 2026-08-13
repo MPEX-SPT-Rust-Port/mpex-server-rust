@@ -564,7 +564,7 @@ pub struct DynamicLootResult {
 /// The database slice every reward-loot entry point needs, flattened into each request the way
 /// [`LootCommon`] is.
 ///
-/// The five blacklists/whitelists are `HashSet` because every use is a membership test — none of
+/// The six blacklists/whitelists are `HashSet` because every use is a membership test — none of
 /// them is ever iterated to make a draw, so a randomised order cannot reach the RNG.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -586,8 +586,17 @@ pub struct RewardLootDb {
     /// `GetDefaultPresetsByTplKey` map on [`CreateForcedLootRequest`], the `GetDefaultPresetByTpl`
     /// map on [`SealedWeaponCaseRequest`] and [`RandomLootContainerRequest`].
     pub default_presets_by_tpl: IndexMap<String, PresetView>,
-    /// `itemFilterService.GetBlacklistedItems()` (`LootGenerator.cs:217`).
+    /// The blacklist the sealed-container filters test against: `itemFilterService.IsItemBlacklisted`
+    /// (`LootGenerator.cs:822,880`), which reads `ItemBlacklistCache` — a *copy* of
+    /// `itemConfig.Blacklist` that `AddItemToBlacklistCache` extends at runtime
+    /// (`ItemFilterService.cs:13,94-102`). Filled from `GetItemBlacklistCache()`.
     pub global_blacklist: HashSet<String>,
+    /// The blacklist [`get_item_reward_pool`](crate::loot::loot_generator) unions in:
+    /// `itemFilterService.GetBlacklistedItems()` (`LootGenerator.cs:425`), which hands back
+    /// `itemConfig.Blacklist` itself (`ItemFilterService.cs:38-41`). A different object from
+    /// [`Self::global_blacklist`]'s cache, so a mod's runtime additions reach the sealed filters and
+    /// not this one — the two are equal on an unmodded server.
+    pub config_blacklist: HashSet<String>,
     /// `itemFilterService.GetItemRewardBlacklist()` (`LootGenerator.cs:221`).
     pub reward_item_blacklist: HashSet<String>,
     /// `itemFilterService.GetItemRewardBaseTypeBlacklist()` (`LootGenerator.cs:224`).
@@ -923,6 +932,7 @@ mod tests {
         "defaultPresetsByTpl":{"bbbbbbbbbbbbbbbbbbbbbbbb":{"id":"p1","name":"ak_default",
             "encyclopedia":"bbbbbbbbbbbbbbbbbbbbbbbb","items":[]}},
         "globalBlacklist":["cccccccccccccccccccccccc"],
+        "configBlacklist":["cccccccccccccccccccccccc"],
         "rewardItemBlacklist":["dddddddddddddddddddddddd"],
         "rewardBaseTypeBlacklist":["eeeeeeeeeeeeeeeeeeeeeeee"],
         "bossItems":["ffffffffffffffffffffffff"],

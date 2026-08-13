@@ -151,8 +151,11 @@ public class LootGenerator(
             ItemsView = PayloadProjection.BuildItemsView(templateTable.Items),
             DefaultPresets = defaultPresets,
             DefaultPresetsByTpl = defaultPresetsByTpl,
-            // The cache, not the config list: it also holds anything a mod blacklisted at runtime
+            // Two different collections, mirroring the two C# call sites: the sealed container
+            // filters read the cache a mod can add to at runtime, the reward pool reads the config
+            // list. Equal until a mod calls AddItemToBlacklistCache
             GlobalBlacklist = itemFilterService.GetItemBlacklistCache(),
+            ConfigBlacklist = itemFilterService.GetBlacklistedItems(),
             RewardItemBlacklist = itemFilterService.GetItemRewardBlacklist(),
             RewardBaseTypeBlacklist = itemFilterService.GetItemRewardBaseTypeBlacklist(),
             BossItems = itemFilterService.GetBossItems(),
@@ -202,6 +205,7 @@ public class LootGenerator(
                 DefaultPresets = db.DefaultPresets,
                 DefaultPresetsByTpl = db.DefaultPresetsByTpl,
                 GlobalBlacklist = db.GlobalBlacklist,
+                ConfigBlacklist = db.ConfigBlacklist,
                 RewardItemBlacklist = db.RewardItemBlacklist,
                 RewardBaseTypeBlacklist = db.RewardBaseTypeBlacklist,
                 BossItems = db.BossItems,
@@ -341,6 +345,7 @@ public class LootGenerator(
                 DefaultPresets = db.DefaultPresets,
                 DefaultPresetsByTpl = db.DefaultPresetsByTpl,
                 GlobalBlacklist = db.GlobalBlacklist,
+                ConfigBlacklist = db.ConfigBlacklist,
                 RewardItemBlacklist = db.RewardItemBlacklist,
                 RewardBaseTypeBlacklist = db.RewardBaseTypeBlacklist,
                 BossItems = db.BossItems,
@@ -696,6 +701,7 @@ public class LootGenerator(
                 DefaultPresets = db.DefaultPresets,
                 DefaultPresetsByTpl = db.DefaultPresetsByTpl,
                 GlobalBlacklist = db.GlobalBlacklist,
+                ConfigBlacklist = db.ConfigBlacklist,
                 RewardItemBlacklist = db.RewardItemBlacklist,
                 RewardBaseTypeBlacklist = db.RewardBaseTypeBlacklist,
                 BossItems = db.BossItems,
@@ -930,6 +936,7 @@ public class LootGenerator(
                 DefaultPresets = db.DefaultPresets,
                 DefaultPresetsByTpl = db.DefaultPresetsByTpl,
                 GlobalBlacklist = db.GlobalBlacklist,
+                ConfigBlacklist = db.ConfigBlacklist,
                 RewardItemBlacklist = db.RewardItemBlacklist,
                 RewardBaseTypeBlacklist = db.RewardBaseTypeBlacklist,
                 BossItems = db.BossItems,

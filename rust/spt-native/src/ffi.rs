@@ -424,7 +424,8 @@ mod tests {
     /// The weapon tpl in `weaponRewardWeight` below is deliberately absent from `itemsView`.
     const REWARD_DB_JSON: &str = r#"
         "itemsView":{},"defaultPresets":[],"defaultPresetsByTpl":{},
-        "globalBlacklist":[],"rewardItemBlacklist":[],"rewardBaseTypeBlacklist":[],
+        "globalBlacklist":[],"configBlacklist":[],
+        "rewardItemBlacklist":[],"rewardBaseTypeBlacklist":[],
         "bossItems":[],"inactiveSeasonalItems":[]
     "#;
 

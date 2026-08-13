@@ -354,7 +354,8 @@ fn get_item_reward_pool<'a>(
     allow_boss_items: bool,
     block_seasonal_items_out_of_season: bool,
 ) -> ItemRewardPoolResults<'a> {
-    let mut item_blacklist: HashSet<String> = db.global_blacklist.clone();
+    // `GetBlacklistedItems()` (`:425`) — the config list, not the cache the sealed filters read
+    let mut item_blacklist: HashSet<String> = db.config_blacklist.clone();
     item_blacklist.extend(item_tpl_blacklist.iter().cloned());
 
     if use_reward_item_blacklist {
@@ -877,9 +878,8 @@ fn get_sealed_container_non_weapon_mod_rewards(
         // `QuestItem is null` (`:571`) rejects an explicit `false` as well as a `true`. With real
         // configs the three together leave this pool empty and the branch just logs the skip.
         //
-        // Deviation: the blacklist is [`RewardLootDb::global_blacklist`], which the C# caller fills
-        // from `GetBlacklistedItems()` (`config/item.json`), while `IsItemBlacklisted` reads the
-        // cache that mods can add to at runtime. The two agree on an unmodded server.
+        // The blacklist is [`RewardLootDb::global_blacklist`] - the cache `IsItemBlacklisted` reads,
+        // not the config list [`RewardLootDb::config_blacklist`] the reward pool unions in.
         let reward_item_pool: Vec<&str> = db
             .items_view
             .iter()
@@ -1142,6 +1142,7 @@ mod tests {
             "defaultPresets": [weapon_preset_json(), vest_preset_json()],
             "defaultPresetsByTpl": { WEAPON_TPL: weapon_preset_json() },
             "globalBlacklist": [],
+            "configBlacklist": [],
             "rewardItemBlacklist": [],
             "rewardBaseTypeBlacklist": [],
             "bossItems": [BOSS_ITEM_TPL],
@@ -1348,6 +1349,29 @@ mod tests {
             }
             serde_json::to_value(&result).unwrap();
         }
+    }
+
+    /// The reward pool unions in `GetBlacklistedItems()` (`config_blacklist`), while the sealed
+    /// filters test `IsItemBlacklisted`'s cache (`global_blacklist`). Two different C# sources, so a
+    /// tpl blacklisted only in the cache still reaches the pool.
+    #[test]
+    fn the_reward_pool_reads_the_config_blacklist_and_not_the_cache() {
+        let mut options = options_json();
+        options["itemCount"] = json!({ "min": 3, "max": 3 });
+        options["weaponPresetCount"] = json!({ "min": 0, "max": 0 });
+        options["armorPresetCount"] = json!({ "min": 0, "max": 0 });
+        options["weaponCrateCount"] = json!({ "min": 0, "max": 0 });
+
+        let mut cache_only = db_json();
+        cache_only["globalBlacklist"] = json!([PLAIN_ITEM_TPL]);
+        let unfiltered =
+            create_random_loot(request_from(cache_only, 12345, options.clone())).unwrap();
+        assert!(tpls(&unfiltered).contains(&PLAIN_ITEM_TPL));
+
+        let mut config = db_json();
+        config["configBlacklist"] = json!([PLAIN_ITEM_TPL]);
+        let filtered = create_random_loot(request_from(config, 12345, options)).unwrap();
+        assert!(!tpls(&filtered).contains(&PLAIN_ITEM_TPL));
     }
 
     #[test]

@@ -42,10 +42,19 @@ public record RewardLootDb
     public required Dictionary<MongoId, PresetView> DefaultPresetsByTpl { get; set; }
 
     /// <summary>
-    /// <c>ItemFilterService.GetBlacklistedItems()</c>.
+    /// The blacklist the sealed container filters test: <c>ItemFilterService.IsItemBlacklisted</c>'s
+    /// backing cache, which mods extend at runtime through <c>AddItemToBlacklistCache</c>.
     /// </summary>
     [JsonPropertyName("globalBlacklist")]
     public required HashSet<MongoId> GlobalBlacklist { get; set; }
+
+    /// <summary>
+    /// The blacklist the reward pool unions in: <c>ItemFilterService.GetBlacklistedItems()</c>, which
+    /// is <c>config/item.json</c>'s list itself and not the cache <see cref="GlobalBlacklist"/> holds.
+    /// The two are equal until a mod adds to the cache.
+    /// </summary>
+    [JsonPropertyName("configBlacklist")]
+    public required HashSet<MongoId> ConfigBlacklist { get; set; }
 
     /// <summary>
     /// <c>ItemFilterService.GetItemRewardBlacklist()</c>.
