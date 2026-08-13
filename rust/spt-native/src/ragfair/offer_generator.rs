@@ -1,8 +1,25 @@
-//! `Generators/Ragfair/RagfairOfferGenerator.cs` — the condition randomisation and armor-plate
-//! removal a dynamic offer's items go through.
+//! `Generators/Ragfair/RagfairOfferGenerator.cs` — the barter schemes an offer is priced with, the
+//! offer object itself, and the condition randomisation and armor-plate removal its items go
+//! through.
 //!
-//! **The draw table.** One `randomise_offer_item_upd_properties` call per item class, in call
-//! order. `add_missing_conditions` runs first and always, and never draws.
+//! **The offer-object draws**, in the order [`create_offer`] spends them:
+//!
+//! | step | draws |
+//! |---|---|
+//! | the requirement mapping and the ammo-box hydration | **0** |
+//! | [`create_user_data_for_flea_offer`], trader | **0** |
+//! | [`create_user_data_for_flea_offer`], fake player | **5** — faction, nickname, rating, rating growth, account id |
+//! | [`get_offer_end_time`], fake player | **1** |
+//!
+//! The id is a [`mongo_id`], which is drawn outside the seeded stream in both languages.
+//!
+//! **The barter-scheme draws.** [`create_currency_barter_scheme`] costs one weighted currency draw
+//! plus one biased price draw. [`create_barter_barter_scheme`] costs a price draw of its own, and
+//! then either an item-count draw plus one index draw, or a **whole second currency scheme** —
+//! both of its fall-throughs re-price the offer rather than reusing the price they already have.
+//!
+//! **The condition draw table.** One `randomise_offer_item_upd_properties` call per item class, in
+//! call order. `add_missing_conditions` runs first and always, and never draws.
 //!
 //! | item class | draws |
 //! |---|---|
@@ -41,15 +58,27 @@ use serde_json::json;
 
 use super::RagfairContext;
 use crate::loot::item_helper::{
-    ARMOR_PLATE, ARMORED_EQUIPMENT, FUEL, LootError, WEAPON, armor_item_can_hold_mods,
-    armor_item_has_removable_plate_slots, get_item, get_removable_plate_slot_ids, is_of_baseclass,
-    is_of_baseclasses,
+    AMMO_BOX, ARMOR_PLATE, ARMORED_EQUIPMENT, FUEL, LootError, WEAPON, add_cartridges_to_ammo_box,
+    armor_item_can_hold_mods, armor_item_has_removable_plate_slots, get_item,
+    get_removable_plate_slot_ids, is_of_baseclass, is_of_baseclasses,
 };
 use crate::loot::models::{
     Item, UpdFoodDrink, UpdKey, UpdMedKit, UpdRepairKit, UpdRepairable, UpdResource,
 };
-use crate::loot::random_util::{get_chance_100, get_double, get_int, round_half_even};
-use crate::ragfair::models::ArmorPlateBlacklistSettingsWire;
+use crate::loot::mongo_id;
+use crate::loot::random_util::{
+    generate_account_id, get_array_value, get_bool, get_chance_100, get_double, get_int,
+    round_half_even, round_to_digits,
+};
+use crate::ragfair::models::{
+    ArmorPlateBlacklistSettingsWire, BarterDetailsWire, OfferRequirementWire, RagfairOfferUserWire,
+    RagfairOfferWire,
+};
+use crate::ragfair::price_service::{
+    DOLLARS, EUROS, GP, ROUBLES, get_dynamic_offer_price_for_offer, get_flea_price_for_item,
+    get_static_price_for_item,
+};
+use crate::ragfair::server_helper::get_dynamic_offer_currency;
 
 /// `Models/Enums/OfferCreator.cs` — the wire never carries it; it is a call-site constant on the
 /// C# side too.
@@ -58,6 +87,273 @@ pub enum OfferCreator {
     Player,
     Trader,
     FakePlayer,
+}
+
+/// `Models/Spt/Ragfair/CreateFleaOfferDetails.cs`, whole.
+pub struct CreateFleaOfferDetails {
+    pub user_id: String,
+    pub time: i64,
+    pub items: Vec<Item>,
+    pub barter_scheme: Vec<BarterScheme>,
+    pub loyal_level: i32,
+    pub quantity: i32,
+    pub creator: OfferCreator,
+    pub sell_in_one_piece: bool,
+}
+
+/// `Models/Eft/Common/Tables/Trader.cs:254-276` `BarterScheme`, minus `sptQuestLocked`, which
+/// nothing on this path reads or writes.
+#[derive(Debug, Default)]
+pub struct BarterScheme {
+    pub count: f64,
+    pub template: String,
+    pub only_functional: Option<bool>,
+    pub level: Option<i32>,
+    pub side: Option<i32>,
+}
+
+/// `Models/Spt/Ragfair/TplWithFleaPrice.cs`. The tpl is borrowed straight out of the flea price
+/// map, which outlives every offer built from it.
+pub struct TplWithFleaPrice<'a> {
+    pub tpl: &'a str,
+    pub price: f64,
+}
+
+/// `PaymentHelper.IsMoneyTpl` (`PaymentHelper.cs:19-32`) over the four `Money` constants.
+///
+/// `inventoryConfig.CustomMoneyTpls` is not on the wire, so a mod-added currency prices through
+/// the item arm of [`convert_offer_requirements_into_roubles`] here instead of the money arm. No
+/// stock configuration carries one.
+fn is_money_tpl(tpl: &str) -> bool {
+    [ROUBLES, EUROS, DOLLARS, GP].contains(&tpl)
+}
+
+/// `RagfairOfferGenerator.CreateOffer` (`:85-143`). `CreateAndAddFleaOffer` (`:66-77`) is not
+/// ported: its two extra statements set `CreatedBy` (which the wire type does not carry — the C#
+/// caller stamps it) and push the offer into `RagfairOfferService`.
+///
+/// The C# hydrates `details.Items` in place, so its caller's list grows too; here the items are
+/// cloned into the offer and only the copy is hydrated. Nothing reads the list after the call
+/// (`:487-499`), so the two are equivalent.
+///
+/// `CreatePlayerUserDataForFleaOffer` (`:177-191`) is not ported — it reads a profile that does
+/// not cross the FFI boundary — so a `Player` offer is an error rather than a wrong user block.
+/// `GenerateDynamicOffers` only ever asks for `FakePlayer` offers.
+///
+/// # Errors
+///
+/// An empty item list (`rootItem.Id` is an unguarded deref in the C#), a `Player` creator, and
+/// whatever [`create_user_data_for_flea_offer`] and [`get_offer_end_time`] propagate.
+pub fn create_offer(
+    ctx: &mut RagfairContext,
+    details: &CreateFleaOfferDetails,
+    offer_counter: &mut i32,
+) -> Result<RagfairOfferWire, LootError> {
+    let offer_requirements: Vec<OfferRequirementWire> = details
+        .barter_scheme
+        .iter()
+        .map(|barter| {
+            let mut offer_requirement = OfferRequirementWire {
+                template_id: barter.template.clone(),
+                count: round_to_digits(barter.count, 2),
+                only_functional: barter.only_functional.unwrap_or(false),
+                level: None,
+                side: None,
+            };
+
+            // Dogtags define level and side
+            if barter.level.is_some() {
+                offer_requirement.level = barter.level;
+                offer_requirement.side = barter.side;
+            }
+
+            offer_requirement
+        })
+        .collect();
+
+    let mut items = details.items.clone();
+
+    // Hydrate ammo boxes with cartridges + ensure only 1 item is present (ammo box)
+    // On offer refresh don't re-add cartridges to ammo box that already has cartridges
+    if items.len() == 1 && is_of_baseclass(ctx.items, &items[0].template, AMMO_BOX) {
+        let ammo_box_tpl = items[0].template.clone();
+        if let Err(diagnostic) = add_cartridges_to_ammo_box(ctx.items, &mut items, &ammo_box_tpl) {
+            ctx.diagnostics.push(diagnostic);
+        }
+    }
+
+    let rouble_listing_price = round_half_even(convert_offer_requirements_into_roubles(
+        ctx,
+        &offer_requirements,
+    ));
+    let single_item_listing_price = if details.sell_in_one_piece {
+        rouble_listing_price / f64::from(details.quantity)
+    } else {
+        rouble_listing_price
+    };
+
+    let user = match details.creator {
+        OfferCreator::Player => {
+            return Err(LootError::new(
+                "A player offer needs the seller's profile, which is not on the wire",
+            ));
+        }
+        creator => {
+            create_user_data_for_flea_offer(ctx, &details.user_id, creator == OfferCreator::Trader)?
+        }
+    };
+    let root_item = items
+        .first()
+        .ok_or_else(|| LootError::new("Object reference not set to an instance of an object."))?;
+
+    let offer = RagfairOfferWire {
+        id: mongo_id::generate(),
+        internal_id: *offer_counter,
+        user,
+        root: root_item.id.clone(),
+        // Handbook price
+        items_cost: round_half_even(get_static_price_for_item(ctx, &root_item.template)),
+        requirements: offer_requirements,
+        requirements_cost: round_half_even(single_item_listing_price),
+        summary_cost: rouble_listing_price,
+        start_time: details.time,
+        end_time: get_offer_end_time(ctx, details.creator, &details.user_id, details.time)?,
+        loyalty_level: details.loyal_level,
+        sell_in_one_piece: details.sell_in_one_piece,
+        locked: false,
+        quantity: details.quantity,
+        items,
+    };
+
+    *offer_counter += 1;
+
+    Ok(offer)
+}
+
+/// `RagfairOfferGenerator.CreateUserDataForFleaOffer` (`:151-170`), with
+/// `BotHelper.GetPmcNicknameOfMaxLength` (`BotHelper.cs:136-142`) folded in: the name pools reach
+/// this port already gathered and length-filtered, so only its faction draw is left.
+///
+/// Five draws for a fake player, in source order: faction, nickname, rating, rating growth,
+/// account id. A trader draws nothing.
+///
+/// The trader arm leaves `rating`, `isRatingGrowing` and `aid` at `0`/`false` where the C# record
+/// leaves them null. Unreachable from `GenerateDynamicOffers`, which only builds fake-player
+/// offers.
+///
+/// # Errors
+///
+/// Where `RandomUtil.GetRandomElement` throws: the drawn faction's name pool is empty.
+pub fn create_user_data_for_flea_offer(
+    ctx: &RagfairContext,
+    user_id: &str,
+    is_trader: bool,
+) -> Result<RagfairOfferUserWire, LootError> {
+    // Trader offer
+    if is_trader {
+        return Ok(RagfairOfferUserWire {
+            id: user_id.to_owned(),
+            nickname: None,
+            rating: 0.0,
+            // MemberCategory.Trader
+            member_type: 4,
+            avatar: None,
+            is_rating_growing: false,
+            aid: 0,
+        });
+    }
+
+    // 'Fake' pmc offer
+    let names = if get_int(0, 1) == 0 {
+        ctx.pmc_names_usec
+    } else {
+        ctx.pmc_names_bear
+    };
+    if names.is_empty() {
+        return Err(LootError::new(
+            "The collection is empty, unable to get a random element",
+        ));
+    }
+
+    Ok(RagfairOfferUserWire {
+        id: user_id.to_owned(),
+        nickname: Some(get_array_value(names).clone()),
+        rating: get_double(ctx.dynamic.rating.min, ctx.dynamic.rating.max),
+        // MemberCategory.Default
+        member_type: 0,
+        is_rating_growing: get_bool(),
+        avatar: None,
+        aid: generate_account_id(),
+    })
+}
+
+/// `RagfairOfferGenerator.ConvertOfferRequirementsIntoRoubles` (`:198-205`). The money arm rounds
+/// and the item arm does not — that asymmetry is the C#'s.
+pub fn convert_offer_requirements_into_roubles(
+    ctx: &RagfairContext,
+    offer_requirements: &[OfferRequirementWire],
+) -> f64 {
+    offer_requirements
+        .iter()
+        .map(|requirement| {
+            if is_money_tpl(&requirement.template_id) {
+                round_half_even(calculate_rouble_price(
+                    ctx,
+                    requirement.count,
+                    &requirement.template_id,
+                ))
+            } else {
+                get_flea_price_for_item(ctx, &requirement.template_id) * requirement.count
+            }
+        })
+        .sum()
+}
+
+/// `RagfairOfferGenerator.CalculateRoublePrice` (`:229-237`), i.e. `HandbookHelper.InRoubles`
+/// (`HandbookHelper.cs:202-207`).
+pub fn calculate_rouble_price(
+    ctx: &RagfairContext,
+    currency_count: f64,
+    currency_type: &str,
+) -> f64 {
+    if currency_type == ROUBLES {
+        return currency_count;
+    }
+
+    round_half_even(currency_count * get_static_price_for_item(ctx, currency_type))
+}
+
+/// `RagfairOfferGenerator.GetOfferEndTime` (`:269-287`). Only the fake-player arm is reachable
+/// from `GenerateDynamicOffers`; the other two are ported for shape and error out on the inputs
+/// that never cross the FFI boundary — the globals' `offerDurationTimeInHour` for a player offer,
+/// the trader table's `nextResupply` for a trader one.
+///
+/// # Errors
+///
+/// A `Player` or `Trader` creator, per above.
+pub fn get_offer_end_time(
+    ctx: &RagfairContext,
+    creator_type: OfferCreator,
+    _user_id: &str,
+    time: i64,
+) -> Result<i64, LootError> {
+    match creator_type {
+        OfferCreator::Player => Err(LootError::new(
+            "A player offer's end time needs globals' ragFair.offerDurationTimeInHour, which is not on the wire",
+        )),
+        OfferCreator::Trader => Err(LootError::new(
+            "A trader offer's end time needs the trader's nextResupply, which is not on the wire",
+        )),
+        OfferCreator::FakePlayer => {
+            let random_spread = get_double(
+                f64::from(ctx.dynamic.end_time_seconds.min),
+                f64::from(ctx.dynamic.end_time_seconds.max),
+            );
+
+            // Fake-player offer
+            Ok(round_half_even(time as f64 + random_spread) as i64)
+        }
+    }
 }
 
 /// `RagfairOfferGenerator.RandomiseOfferItemUpdProperties` (`:641-666`). The C# `userId` parameter
@@ -482,6 +778,129 @@ pub fn remove_armor_plates(ctx: &RagfairContext, item_with_children: &mut Vec<It
     }
 }
 
+/// `RagfairOfferGenerator.CreateBarterBarterScheme` (`:885-927`).
+///
+/// Both fall-throughs re-enter [`create_currency_barter_scheme`], which draws its own price — so
+/// the below-threshold path spends **two** price draws and the no-candidates path **three**. That
+/// is legacy behaviour, transcribed rather than fixed.
+///
+/// # Errors
+///
+/// An empty item list (`rootOfferItem.Template` is an unguarded deref in the C#), plus whatever
+/// the price and currency lookups propagate.
+pub fn create_barter_barter_scheme(
+    ctx: &mut RagfairContext,
+    offer_items: &[Item],
+    barter_config: &BarterDetailsWire,
+) -> Result<Vec<BarterScheme>, LootError> {
+    // Get flea price of item being sold
+    let price_of_offer_item = get_dynamic_offer_price_for_offer(ctx, offer_items, ROUBLES, false)?;
+
+    // Don't make items under a designated rouble value into barter offers
+    if price_of_offer_item < barter_config.min_rouble_cost_to_become_barter {
+        return create_currency_barter_scheme(ctx, offer_items, false, 1.0);
+    }
+
+    // Get a randomised number of barter items to list offer for
+    let barter_item_count = get_int(barter_config.item_count_min, barter_config.item_count_max);
+
+    // Get desired cost of individual item offer will be listed for e.g. offer = 15k, item count =
+    // 3, desired item cost = 5k
+    let desired_item_cost_rouble =
+        round_half_even(price_of_offer_item / f64::from(barter_item_count));
+
+    // Rouble amount to go above/below when looking for an item (Wiggle cost of item a little)
+    let offer_cost_variance_roubles =
+        desired_item_cost_rouble * barter_config.price_range_variance_percent / 100.0;
+
+    // List of items and their flea price
+    let item_flea_prices = get_flea_prices_as_array(ctx);
+
+    // Filter possible barters to items that match the price range + not itself
+    let min = desired_item_cost_rouble - offer_cost_variance_roubles;
+    let max = desired_item_cost_rouble + offer_cost_variance_roubles;
+    let root_offer_item_tpl = offer_items
+        .first()
+        .map(|item| item.template.as_str())
+        .ok_or_else(|| LootError::new("Object reference not set to an instance of an object."))?;
+
+    let items_inside_price_bounds: Vec<&TplWithFleaPrice> = item_flea_prices
+        .iter()
+        .filter(|item_and_price| {
+            item_and_price.price >= min
+                && item_and_price.price <= max
+                // Don't allow the item being sold to be chosen
+                && item_and_price.tpl != root_offer_item_tpl
+        })
+        .collect();
+
+    // No items on flea have a matching price, fall back to currency
+    if items_inside_price_bounds.is_empty() {
+        return create_currency_barter_scheme(ctx, offer_items, false, 1.0);
+    }
+
+    // Choose random item from price-filtered flea items
+    let random_item = get_array_value(&items_inside_price_bounds);
+
+    Ok(vec![BarterScheme {
+        count: f64::from(barter_item_count),
+        template: random_item.tpl.to_owned(),
+        ..BarterScheme::default()
+    }])
+}
+
+/// `RagfairOfferGenerator.GetFleaPricesAsArray` (`:933-954`), minus its cache.
+///
+/// Legacy stores this list in `AllowedFleaPriceItemsForBarter` (`:56`) on first use and **never
+/// invalidates it**, so a mod that edits prices or the barter blacklists after the first barter
+/// offer of a server's life keeps getting the stale list. This port re-derives per call: same
+/// content on stock data, fresher after such an edit. Documented divergence.
+fn get_flea_prices_as_array<'a>(ctx: &RagfairContext<'a>) -> Vec<TplWithFleaPrice<'a>> {
+    let barter_config = &ctx.dynamic.barter;
+    let item_type_blacklist: Vec<&str> = barter_config
+        .item_type_blacklist
+        .iter()
+        .map(String::as_str)
+        .collect();
+
+    ctx.flea_prices
+        .iter()
+        // Only get prices for items that also exist in items.json
+        .filter(|(tpl, _)| get_item(ctx.items, tpl).is_some())
+        .filter(|(tpl, _)| !is_of_baseclasses(ctx.items, tpl, &item_type_blacklist))
+        .filter(|(tpl, _)| !barter_config.item_tpl_blacklist.contains(*tpl))
+        .map(|(tpl, price)| TplWithFleaPrice {
+            tpl: tpl.as_str(),
+            price: *price,
+        })
+        .collect()
+}
+
+/// `RagfairOfferGenerator.CreateCurrencyBarterScheme` (`:963-969`) — the currency is drawn first,
+/// then the price in that currency. The C# `multiplier` defaults to `1`; Rust has no default
+/// arguments, so every call site passes it.
+///
+/// # Errors
+///
+/// Propagates [`get_dynamic_offer_currency`]'s and [`get_dynamic_offer_price_for_offer`]'s.
+pub fn create_currency_barter_scheme(
+    ctx: &mut RagfairContext,
+    offer_with_children: &[Item],
+    is_pack_offer: bool,
+    multiplier: f64,
+) -> Result<Vec<BarterScheme>, LootError> {
+    let currency = get_dynamic_offer_currency(ctx)?;
+    let price =
+        get_dynamic_offer_price_for_offer(ctx, offer_with_children, &currency, is_pack_offer)?
+            * multiplier;
+
+    Ok(vec![BarterScheme {
+        count: price,
+        template: currency,
+        ..BarterScheme::default()
+    }])
+}
+
 /// `item.SlotId?.ToLowerInvariant()`, with the null case folded to the empty string — no slot id
 /// is ever a member of the sets it is tested against.
 fn lowercased_slot_id(item: &Item) -> String {
@@ -505,7 +924,7 @@ mod tests {
     use crate::loot::models::{ItemView, PresetView, Upd};
     use crate::loot::random_util::TestSeedGuard;
     use crate::ragfair::models::DynamicConfigWire;
-    use crate::ragfair::{NO_BLACKLIST, NO_DEFAULT_PRESETS, NO_NAMES};
+    use crate::ragfair::{NO_BLACKLIST, NO_DEFAULT_PRESETS};
 
     const SEED: u64 = 20260813;
 
@@ -522,6 +941,30 @@ mod tests {
     const FUEL_TPL: &str = "fuel_can";
     const PLAIN_TPL: &str = "item_without_a_condition_entry";
     const REPAIRABLE_MEDKIT_TPL: &str = "repairable_and_medkit";
+    const AMMO_BOX_TPL: &str = "ammo_box";
+    const CARTRIDGE_TPL: &str = "cartridge";
+
+    /// Offer roots, priced so each one lands on a different arm of the barter scheme.
+    const BARTER_ROOT_TPL: &str = "barter_worthy_root";
+    const CHEAP_ROOT_TPL: &str = "too_cheap_to_barter_root";
+    const EXPENSIVE_ROOT_TPL: &str = "too_expensive_to_match_root";
+
+    /// Barter candidates. Only the two `IN_RANGE` tpls can ever be picked for a
+    /// [`BARTER_ROOT_TPL`] offer.
+    const IN_RANGE_A_TPL: &str = "in_range_barter_item_a";
+    const IN_RANGE_B_TPL: &str = "in_range_barter_item_b";
+    const TOO_CHEAP_TPL: &str = "out_of_range_cheap_barter_item";
+    const TOO_PRICEY_TPL: &str = "out_of_range_pricey_barter_item";
+    const TPL_BLACKLISTED_TPL: &str = "in_range_but_tpl_blacklisted";
+    const TYPE_BLACKLISTED_TPL: &str = "in_range_but_type_blacklisted";
+    const BLACKLISTED_TYPE: &str = "blacklisted_base_class";
+    /// Priced, in range, and absent from the items view — the `GetItem(...).Key` filter.
+    const NOT_IN_ITEMS_VIEW_TPL: &str = "in_range_but_unknown_to_items_json";
+
+    const USER_ID: &str = "offer_owner_id";
+    const OFFER_TIME: i64 = 1_700_000_000;
+    const END_TIME_MIN: f64 = 3600.0;
+    const END_TIME_MAX: f64 = 7200.0;
 
     /// The condition entry every direct `randomise_item_condition` call uses: `max` is a non-empty
     /// range, so the `Max.Min` double-read is observable.
@@ -538,6 +981,8 @@ mod tests {
         blacklist: HashSet<String>,
         presets: IndexMap<String, PresetView>,
         preset_lists: IndexMap<String, Vec<PresetView>>,
+        names_usec: Vec<String>,
+        names_bear: Vec<String>,
     }
 
     impl Fixture {
@@ -573,6 +1018,21 @@ mod tests {
                     PLAIN_TPL: {"name": "plain", "type": "Item"},
                     REPAIRABLE_MEDKIT_TPL: {"name": "two arms", "type": "Item",
                         "durability": 50.0, "maxHpResource": 400},
+                    AMMO_BOX_TPL: {"name": "ammo box", "type": "Item", "parent": AMMO_BOX,
+                        "stackSlotMaxCount": 30.0, "stackSlotFirstFilterFirst": CARTRIDGE_TPL},
+                    CARTRIDGE_TPL: {"name": "cartridge", "type": "Item", "stackMaxSize": 30},
+                    BARTER_ROOT_TPL: {"name": "barter root", "type": "Item"},
+                    CHEAP_ROOT_TPL: {"name": "cheap root", "type": "Item"},
+                    EXPENSIVE_ROOT_TPL: {"name": "expensive root", "type": "Item"},
+                    IN_RANGE_A_TPL: {"name": "in range a", "type": "Item"},
+                    IN_RANGE_B_TPL: {"name": "in range b", "type": "Item"},
+                    TOO_CHEAP_TPL: {"name": "too cheap", "type": "Item"},
+                    TOO_PRICEY_TPL: {"name": "too pricey", "type": "Item"},
+                    TPL_BLACKLISTED_TPL: {"name": "tpl blacklisted", "type": "Item"},
+                    TYPE_BLACKLISTED_TPL: {"name": "type blacklisted", "type": "Item",
+                        "parent": BLACKLISTED_TYPE},
+                    BLACKLISTED_TYPE: {"name": "blacklisted type base", "type": "Node"},
+                    AMMO_BOX: {"name": "ammo box base", "type": "Node"},
                     // The base classes themselves, so the parent walk has somewhere to land.
                     WEAPON: {"name": "weapon base", "type": "Node"},
                     ARMOR: {"name": "armor base", "type": "Node"},
@@ -584,10 +1044,30 @@ mod tests {
                 }))
                 .expect("items view parses"),
                 dynamic: dynamic_config(condition_chance),
-                prices: IndexMap::new(),
+                // One map behind `flea_prices`, `handbook_prices` and `highest_trader_prices`, the
+                // way the other ragfair fixtures wire it. Insertion order is the order
+                // `get_flea_prices_as_array` hands its candidates to the index draw.
+                prices: serde_json::from_value(json!({
+                    BARTER_ROOT_TPL: 30_000.0,
+                    CHEAP_ROOT_TPL: 100.0,
+                    EXPENSIVE_ROOT_TPL: 1_000_000.0,
+                    TOO_CHEAP_TPL: 100.0,
+                    IN_RANGE_A_TPL: 15_000.5,
+                    TPL_BLACKLISTED_TPL: 15_100.0,
+                    TYPE_BLACKLISTED_TPL: 15_200.0,
+                    NOT_IN_ITEMS_VIEW_TPL: 15_300.0,
+                    IN_RANGE_B_TPL: 16_000.0,
+                    TOO_PRICEY_TPL: 90_000.0,
+                    AMMO_BOX_TPL: 5_000.4,
+                    EUROS: 120.5,
+                    DOLLARS: 130.0,
+                }))
+                .expect("price map parses"),
                 blacklist: HashSet::new(),
                 presets: IndexMap::new(),
                 preset_lists: IndexMap::new(),
+                names_usec: vec!["usec_alpha".to_owned(), "usec_beta".to_owned()],
+                names_bear: vec!["bear_gamma".to_owned(), "bear_delta".to_owned()],
             }
         }
 
@@ -604,9 +1084,9 @@ mod tests {
                 highest_trader_prices: &self.prices,
                 config_blacklist: &self.blacklist,
                 seasonal_item_tpl_blacklist: &NO_BLACKLIST,
-                pmc_names_usec: &NO_NAMES,
-                pmc_names_bear: &NO_NAMES,
-                timestamp: 1_700_000_000,
+                pmc_names_usec: &self.names_usec,
+                pmc_names_bear: &self.names_bear,
+                timestamp: OFFER_TIME,
                 seasonal_event_active: false,
                 diagnostics: Vec::new(),
             }
@@ -615,23 +1095,29 @@ mod tests {
 
     /// `armorPlate` blacklist: class 5+ banned, `back_plate` exempt.
     /// `armor`: plates always removed, and only `front_plate`/`left_side_plate` are in the pool.
+    ///
+    /// `barter` lists two items per offer at a 20% variance, so a [`BARTER_ROOT_TPL`] offer looks
+    /// for candidates around half its price. `priceRanges` is deliberately *not* degenerate: a
+    /// `min == max` range short-circuits [`get_biased_random_number`] without drawing, which would
+    /// hide every price draw the barter arms are supposed to spend.
     fn dynamic_config(condition_chance: f64) -> DynamicConfigWire {
         serde_json::from_value(json!({
             "useTraderPriceForOffersIfHigher": false,
-            "barter": {"chancePercent": 0.0, "itemCountMin": 1, "itemCountMax": 1,
-                "priceRangeVariancePercent": 0.0, "minRoubleCostToBecomeBarter": 0.0,
-                "makeSingleStackOnly": false, "itemTplBlacklist": [], "itemTypeBlacklist": []},
+            "barter": {"chancePercent": 0.0, "itemCountMin": 2, "itemCountMax": 2,
+                "priceRangeVariancePercent": 20.0, "minRoubleCostToBecomeBarter": 15_000.0,
+                "makeSingleStackOnly": false, "itemTplBlacklist": [TPL_BLACKLISTED_TPL],
+                "itemTypeBlacklist": [BLACKLISTED_TYPE]},
             "pack": {"chancePercent": 0.0, "itemCountMin": 1, "itemCountMax": 1,
                 "itemTypeWhitelist": []},
             "offerAdjustment": {"adjustPriceWhenBelowHandbookPrice": false,
                 "maxPriceDifferenceBelowHandbookPercent": 40.0, "handbookPriceMultiplier": 1.5,
                 "priceThresholdRub": 6000.0},
             "offerItemCount": {"default": {"min": 1, "max": 1}},
-            "priceRanges": {"default": {"min": 1.0, "max": 1.0},
-                "preset": {"min": 1.0, "max": 1.0}, "pack": {"min": 1.0, "max": 1.0}},
+            "priceRanges": {"default": {"min": 1.0, "max": 1.2},
+                "preset": {"min": 1.0, "max": 1.2}, "pack": {"min": 1.0, "max": 1.2}},
             "showDefaultPresetsOnly": false,
             "ignoreQualityPriceVarianceBlacklist": [],
-            "endTimeSeconds": {"min": 1, "max": 2},
+            "endTimeSeconds": {"min": 3600, "max": 7200},
             // Insertion order is the match order: ARMORED_EQUIPMENT is a *grandparent* of a plate
             // and still wins over the plate's direct parent because it is listed first.
             "condition": {
@@ -655,7 +1141,9 @@ mod tests {
             "armor": {"removeRemovablePlateChance": 100,
                 "plateSlotIdToRemovePool": ["front_plate", "left_side_plate"]},
             "itemPriceMultiplier": {},
-            "offerCurrencyChancePercent": {"5449016a4bdc2d6f028b456f": 100.0},
+            // Three currencies whose weights do not sum to the entry count, so the weighted draw
+            // takes its `get_double` arm rather than either free shortcut.
+            "offerCurrencyChancePercent": {ROUBLES: 60.0, EUROS: 25.0, DOLLARS: 15.0},
             "showAsSingleStack": [],
             "removeSeasonalItemsWhenNotInEvent": false,
             "blacklist": {"damagedAmmoPacks": true, "custom": [], "enableBsgList": true,
@@ -1530,5 +2018,522 @@ mod tests {
         dynamic.armor.remove_removable_plate_chance = chance;
 
         dynamic
+    }
+
+    // -----------------------------------------------------------------------
+    // create_user_data_for_flea_offer
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn the_fake_player_user_block_draws_faction_nickname_rating_growth_and_aid_in_that_order() {
+        let fixture = Fixture::new();
+
+        let (faction, nickname, rating, is_rating_growing, aid) = seeded(|| {
+            let faction = get_int(0, 1);
+            let pool = if faction == 0 {
+                &fixture.names_usec
+            } else {
+                &fixture.names_bear
+            };
+            let nickname = get_array_value(pool).clone();
+
+            (
+                faction,
+                nickname,
+                get_double(0.0, 1.0),
+                get_bool(),
+                generate_account_id(),
+            )
+        });
+
+        let user = seeded(|| create_user_data_for_flea_offer(&fixture.ctx(), USER_ID, false))
+            .expect("both name pools are populated");
+
+        assert_eq!(user.id, USER_ID);
+        assert_eq!(user.member_type, 0);
+        assert_eq!(user.nickname.as_deref(), Some(nickname.as_str()));
+        // The nickname came out of the faction the *first* draw selected, so the two draws cannot
+        // be swapped without breaking this.
+        let drew_a_usec_name = fixture
+            .names_usec
+            .iter()
+            .any(|name| Some(name.as_str()) == user.nickname.as_deref());
+        assert_eq!(drew_a_usec_name, faction == 0);
+        assert_eq!(user.rating, rating);
+        assert_eq!(user.is_rating_growing, is_rating_growing);
+        assert_eq!(user.aid, aid);
+        assert!(user.avatar.is_none());
+    }
+
+    #[test]
+    fn a_trader_offer_user_is_an_id_and_a_member_type_and_costs_no_draw() {
+        let fixture = Fixture::new();
+
+        let user = create_user_data_for_flea_offer(&fixture.ctx(), "trader_id", true)
+            .expect("the trader arm cannot fail");
+
+        assert_eq!(user.id, "trader_id");
+        // MemberCategory.Trader
+        assert_eq!(user.member_type, 4);
+        assert_eq!(user.nickname, None);
+
+        let after = stream_position_after(|| {
+            create_user_data_for_flea_offer(&fixture.ctx(), "trader_id", true).unwrap();
+        });
+        assert_eq!(after, untouched_stream());
+    }
+
+    #[test]
+    fn an_empty_name_pool_errors_after_the_faction_draw_is_already_spent() {
+        let fixture = Fixture {
+            names_usec: Vec::new(),
+            names_bear: Vec::new(),
+            ..Fixture::new()
+        };
+
+        let error = seeded(|| create_user_data_for_flea_offer(&fixture.ctx(), USER_ID, false))
+            .expect_err("an empty name pool is a C# throw");
+
+        assert!(error.message.contains("empty"), "{}", error.message);
+        let after = stream_position_after(|| {
+            create_user_data_for_flea_offer(&fixture.ctx(), USER_ID, false).unwrap_err();
+        });
+        assert_eq!(
+            after,
+            stream_position_after(|| {
+                get_int(0, 1);
+            })
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // get_flea_prices_as_array
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn the_barter_candidate_list_keeps_flea_price_order_minus_both_blacklists() {
+        let fixture = Fixture::new();
+
+        let candidates = get_flea_prices_as_array(&fixture.ctx());
+
+        let tpls: Vec<&str> = candidates.iter().map(|entry| entry.tpl).collect();
+        assert_eq!(
+            tpls,
+            [
+                BARTER_ROOT_TPL,
+                CHEAP_ROOT_TPL,
+                EXPENSIVE_ROOT_TPL,
+                TOO_CHEAP_TPL,
+                IN_RANGE_A_TPL,
+                IN_RANGE_B_TPL,
+                TOO_PRICEY_TPL,
+                AMMO_BOX_TPL,
+            ]
+        );
+        assert_eq!(candidates[4].price, 15_000.5);
+
+        let after = stream_position_after(|| {
+            get_flea_prices_as_array(&fixture.ctx());
+        });
+        assert_eq!(after, untouched_stream());
+    }
+
+    // -----------------------------------------------------------------------
+    // create_currency_barter_scheme
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn a_currency_scheme_draws_the_currency_before_the_price_and_applies_the_multiplier() {
+        let fixture = Fixture::new();
+        let items = vec![item("root", BARTER_ROOT_TPL)];
+
+        let (currency, price) = seeded(|| {
+            let currency = get_dynamic_offer_currency(&fixture.ctx()).unwrap();
+            let price =
+                get_dynamic_offer_price_for_offer(&mut fixture.ctx(), &items, &currency, true)
+                    .unwrap();
+
+            (currency, price)
+        });
+        let scheme =
+            seeded(|| create_currency_barter_scheme(&mut fixture.ctx(), &items, true, 3.0))
+                .expect("the currency map is populated");
+
+        assert_eq!(scheme.len(), 1);
+        assert_eq!(scheme[0].template, currency);
+        assert_eq!(scheme[0].count, price * 3.0);
+        assert!(scheme[0].only_functional.is_none());
+        assert!(scheme[0].level.is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // create_barter_barter_scheme
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn a_barter_scheme_above_the_threshold_lists_an_in_range_flea_item() {
+        let fixture = Fixture::new();
+        let items = vec![item("root", BARTER_ROOT_TPL)];
+
+        let scheme = seeded(|| {
+            create_barter_barter_scheme(&mut fixture.ctx(), &items, &fixture.dynamic.barter)
+        })
+        .expect("the barter root is priced above the threshold");
+
+        assert_eq!(scheme.len(), 1);
+        // `itemCountMin` == `itemCountMax` == 2.
+        assert_eq!(scheme[0].count, 2.0);
+        // A 30k offer at two items is 15k each ± 20%, which only these two candidates fit; the
+        // exact one is pinned to the seed.
+        assert!(
+            [IN_RANGE_A_TPL, IN_RANGE_B_TPL].contains(&scheme[0].template.as_str()),
+            "picked {}",
+            scheme[0].template
+        );
+        assert_eq!(scheme[0].template, IN_RANGE_A_TPL);
+    }
+
+    #[test]
+    fn a_barter_scheme_below_the_threshold_falls_through_after_paying_for_a_price_draw() {
+        let fixture = Fixture::new();
+        let items = vec![item("root", CHEAP_ROOT_TPL)];
+
+        let scheme = seeded(|| {
+            create_barter_barter_scheme(&mut fixture.ctx(), &items, &fixture.dynamic.barter)
+        })
+        .expect("the currency fall-through cannot fail here");
+
+        assert!(is_money_tpl(&scheme[0].template));
+
+        let after = stream_position_after(|| {
+            create_barter_barter_scheme(&mut fixture.ctx(), &items, &fixture.dynamic.barter)
+                .unwrap();
+        });
+        // The rouble price draw the barter arm spends and throws away, then the currency scheme's
+        // own two draws - the legacy double-draw.
+        assert_eq!(
+            after,
+            stream_position_after(|| {
+                get_dynamic_offer_price_for_offer(&mut fixture.ctx(), &items, ROUBLES, false)
+                    .unwrap();
+                create_currency_barter_scheme(&mut fixture.ctx(), &items, false, 1.0).unwrap();
+            })
+        );
+        // ...and that discarded draw is exactly what a plain currency scheme does not spend.
+        assert_ne!(
+            after,
+            stream_position_after(|| {
+                create_currency_barter_scheme(&mut fixture.ctx(), &items, false, 1.0).unwrap();
+            })
+        );
+    }
+
+    #[test]
+    fn an_empty_in_range_candidate_list_falls_through_to_a_third_price_draw() {
+        let fixture = Fixture::new();
+        // 1m roubles over two items wants 500k ± 20% candidates; the priciest on the flea is 90k.
+        let items = vec![item("root", EXPENSIVE_ROOT_TPL)];
+
+        let scheme = seeded(|| {
+            create_barter_barter_scheme(&mut fixture.ctx(), &items, &fixture.dynamic.barter)
+        })
+        .expect("the currency fall-through cannot fail here");
+
+        assert!(is_money_tpl(&scheme[0].template));
+
+        let after = stream_position_after(|| {
+            create_barter_barter_scheme(&mut fixture.ctx(), &items, &fixture.dynamic.barter)
+                .unwrap();
+        });
+        assert_eq!(
+            after,
+            stream_position_after(|| {
+                get_dynamic_offer_price_for_offer(&mut fixture.ctx(), &items, ROUBLES, false)
+                    .unwrap();
+                // The item count draw is degenerate here (2..=2) and costs nothing, but it is
+                // still the second thing the arm does.
+                get_int(2, 2);
+                create_currency_barter_scheme(&mut fixture.ctx(), &items, false, 1.0).unwrap();
+            })
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // convert_offer_requirements_into_roubles / calculate_rouble_price
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn money_requirements_are_rounded_and_item_requirements_are_not() {
+        let fixture = Fixture::new();
+        let requirements = vec![requirement(EUROS, 1.5), requirement(IN_RANGE_A_TPL, 0.5)];
+
+        let roubles = convert_offer_requirements_into_roubles(&fixture.ctx(), &requirements);
+
+        // 1.5 euros at 120.5 roubles each is 180.75, rounded to 181; half of a 15000.5 rouble item
+        // keeps its quarter.
+        assert_eq!(roubles, 181.0 + 7500.25);
+    }
+
+    #[test]
+    fn roubles_pass_through_and_other_currencies_go_via_the_handbook() {
+        let fixture = Fixture::new();
+
+        assert_eq!(
+            calculate_rouble_price(&fixture.ctx(), 1.5, ROUBLES),
+            1.5,
+            "roubles are not converted, let alone rounded"
+        );
+        assert_eq!(calculate_rouble_price(&fixture.ctx(), 1.5, EUROS), 181.0);
+        // A currency with no handbook entry prices at zero, the way GetTemplatePrice answers.
+        assert_eq!(calculate_rouble_price(&fixture.ctx(), 1.5, GP), 0.0);
+    }
+
+    // -----------------------------------------------------------------------
+    // get_offer_end_time
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn a_fake_player_offer_ends_one_random_spread_after_its_start_time() {
+        let fixture = Fixture::new();
+
+        let expected =
+            seeded(|| round_half_even(OFFER_TIME as f64 + get_double(END_TIME_MIN, END_TIME_MAX)));
+        let end_time = seeded(|| {
+            get_offer_end_time(
+                &fixture.ctx(),
+                OfferCreator::FakePlayer,
+                USER_ID,
+                OFFER_TIME,
+            )
+        })
+        .expect("the fake-player arm cannot fail");
+
+        assert_eq!(end_time, expected as i64);
+        assert!(end_time > OFFER_TIME);
+    }
+
+    #[test]
+    fn the_player_and_trader_arms_error_on_inputs_the_wire_does_not_carry() {
+        let fixture = Fixture::new();
+
+        for creator in [OfferCreator::Player, OfferCreator::Trader] {
+            let error = get_offer_end_time(&fixture.ctx(), creator, USER_ID, OFFER_TIME)
+                .expect_err("neither input crosses the FFI boundary");
+
+            assert!(!error.message.is_empty());
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // create_offer
+    // -----------------------------------------------------------------------
+
+    fn requirement(tpl: &str, count: f64) -> OfferRequirementWire {
+        OfferRequirementWire {
+            template_id: tpl.to_owned(),
+            count,
+            only_functional: false,
+            level: None,
+            side: None,
+        }
+    }
+
+    fn rouble_scheme(count: f64) -> Vec<BarterScheme> {
+        vec![BarterScheme {
+            count,
+            template: ROUBLES.to_owned(),
+            ..BarterScheme::default()
+        }]
+    }
+
+    fn offer_details(items: Vec<Item>, barter_scheme: Vec<BarterScheme>) -> CreateFleaOfferDetails {
+        CreateFleaOfferDetails {
+            user_id: USER_ID.to_owned(),
+            time: OFFER_TIME,
+            items,
+            barter_scheme,
+            loyal_level: 1,
+            quantity: 1,
+            creator: OfferCreator::FakePlayer,
+            sell_in_one_piece: false,
+        }
+    }
+
+    #[test]
+    fn a_lone_ammo_box_is_hydrated_with_cartridges() {
+        let fixture = Fixture::new();
+        let details = offer_details(vec![item("box", AMMO_BOX_TPL)], rouble_scheme(5_000.0));
+        let mut offer_counter = 0;
+
+        let offer = seeded(|| create_offer(&mut fixture.ctx(), &details, &mut offer_counter))
+            .expect("the ammo box template is complete");
+
+        assert_eq!(offer.items.len(), 2);
+        assert_eq!(offer.items[1].template, CARTRIDGE_TPL);
+        // The caller's list is untouched; the offer carries the hydrated copy.
+        assert_eq!(details.items.len(), 1);
+    }
+
+    #[test]
+    fn an_ammo_box_with_a_child_already_present_is_left_alone() {
+        let fixture = Fixture::new();
+        let details = offer_details(
+            vec![
+                item("box", AMMO_BOX_TPL),
+                child("loose", PLAIN_TPL, "box", "cartridges"),
+            ],
+            rouble_scheme(5_000.0),
+        );
+        let mut offer_counter = 0;
+
+        let offer = seeded(|| create_offer(&mut fixture.ctx(), &details, &mut offer_counter))
+            .expect("the ammo box template is complete");
+
+        // The hydration gate is `Count == 1`, not "is an ammo box".
+        assert_eq!(offer.items.len(), 2);
+    }
+
+    #[test]
+    fn each_offer_takes_the_next_internal_id_and_bumps_the_counter() {
+        let fixture = Fixture::new();
+        let details = offer_details(vec![item("root", BARTER_ROOT_TPL)], rouble_scheme(5_000.0));
+        let mut offer_counter = 7;
+
+        let (first, second) = seeded(|| {
+            (
+                create_offer(&mut fixture.ctx(), &details, &mut offer_counter).unwrap(),
+                create_offer(&mut fixture.ctx(), &details, &mut offer_counter).unwrap(),
+            )
+        });
+
+        assert_eq!((first.internal_id, second.internal_id), (7, 8));
+        assert_eq!(offer_counter, 9);
+        assert_ne!(first.id, second.id);
+    }
+
+    #[test]
+    fn a_pack_offer_divides_its_listing_price_by_the_quantity() {
+        let fixture = Fixture::new();
+        let details = CreateFleaOfferDetails {
+            quantity: 3,
+            sell_in_one_piece: true,
+            ..offer_details(vec![item("box", AMMO_BOX_TPL)], rouble_scheme(100.0))
+        };
+        let mut offer_counter = 0;
+
+        let offer = seeded(|| create_offer(&mut fixture.ctx(), &details, &mut offer_counter))
+            .expect("the ammo box template is complete");
+
+        assert_eq!(offer.summary_cost, 100.0);
+        // round(100 / 3)
+        assert_eq!(offer.requirements_cost, 33.0);
+        assert_eq!(offer.requirements[0].count, 100.0);
+        // The handbook price of the root, rounded.
+        assert_eq!(offer.items_cost, 5_000.0);
+        assert_eq!(offer.root, "box");
+        assert_eq!(offer.start_time, OFFER_TIME);
+        assert_eq!(offer.loyalty_level, 1);
+        assert!(offer.sell_in_one_piece);
+        assert!(!offer.locked);
+        assert_eq!(offer.quantity, 3);
+    }
+
+    #[test]
+    fn requirement_counts_round_half_to_even_at_two_decimals() {
+        let fixture = Fixture::new();
+        let details = offer_details(vec![item("root", BARTER_ROOT_TPL)], rouble_scheme(0.125));
+        let mut offer_counter = 0;
+
+        let offer = seeded(|| create_offer(&mut fixture.ctx(), &details, &mut offer_counter))
+            .expect("the barter root is in the view");
+
+        // Banker's rounding: 0.125 goes down to 0.12, not up to 0.13.
+        assert_eq!(offer.requirements[0].count, 0.12);
+        assert!(!offer.requirements[0].only_functional);
+    }
+
+    #[test]
+    fn level_and_side_only_ride_along_when_the_barter_sets_a_level() {
+        let fixture = Fixture::new();
+        let details = offer_details(
+            vec![item("root", BARTER_ROOT_TPL)],
+            vec![
+                BarterScheme {
+                    count: 1.0,
+                    template: "dogtag".to_owned(),
+                    only_functional: Some(true),
+                    level: Some(5),
+                    side: Some(1),
+                },
+                BarterScheme {
+                    count: 1.0,
+                    template: "dogtag".to_owned(),
+                    only_functional: None,
+                    level: None,
+                    // Dropped: the C# only copies `Side` inside the `Level != null` branch.
+                    side: Some(1),
+                },
+            ],
+        );
+        let mut offer_counter = 0;
+
+        let offer = seeded(|| create_offer(&mut fixture.ctx(), &details, &mut offer_counter))
+            .expect("the barter root is in the view");
+
+        assert_eq!(offer.requirements[0].level, Some(5));
+        assert_eq!(offer.requirements[0].side, Some(1));
+        assert!(offer.requirements[0].only_functional);
+        assert_eq!(offer.requirements[1].level, None);
+        assert_eq!(offer.requirements[1].side, None);
+        assert!(!offer.requirements[1].only_functional);
+    }
+
+    #[test]
+    fn an_offer_spends_the_five_user_draws_then_the_end_time_draw() {
+        let fixture = Fixture::new();
+        let details = offer_details(vec![item("root", BARTER_ROOT_TPL)], rouble_scheme(5_000.0));
+        let mut offer_counter = 0;
+
+        let after = stream_position_after(|| {
+            let mut counter = 0;
+            create_offer(&mut fixture.ctx(), &details, &mut counter).unwrap();
+        });
+
+        assert_eq!(
+            after,
+            stream_position_after(|| {
+                create_user_data_for_flea_offer(&fixture.ctx(), USER_ID, false).unwrap();
+                get_offer_end_time(
+                    &fixture.ctx(),
+                    OfferCreator::FakePlayer,
+                    USER_ID,
+                    OFFER_TIME,
+                )
+                .unwrap();
+            })
+        );
+
+        let offer = seeded(|| create_offer(&mut fixture.ctx(), &details, &mut offer_counter))
+            .expect("the barter root is in the view");
+        assert_eq!(offer.summary_cost, 5_000.0);
+        assert_eq!(offer.requirements_cost, 5_000.0);
+        assert_eq!(offer.items_cost, 30_000.0);
+    }
+
+    #[test]
+    fn an_offer_with_no_items_is_an_error() {
+        let fixture = Fixture::new();
+        let details = offer_details(Vec::new(), rouble_scheme(5_000.0));
+        let mut offer_counter = 0;
+
+        let error = seeded(|| create_offer(&mut fixture.ctx(), &details, &mut offer_counter))
+            .expect_err("the C# dereferences a null root item");
+
+        assert_eq!(
+            error.message,
+            "Object reference not set to an instance of an object."
+        );
+        // The throw happens before the counter is bumped.
+        assert_eq!(offer_counter, 0);
     }
 }

@@ -33,8 +33,12 @@ use crate::loot::item_helper::{
 use crate::loot::models::{DEBUG, Item, PresetView};
 use crate::loot::random_util::{get_biased_random_number, round_half_even};
 
-/// `Money.ROUBLES`.
+/// `Models/Enums/Money.cs` — the four currency tpls, kept here because this is the module that
+/// already converts between them.
 pub(crate) const ROUBLES: &str = "5449016a4bdc2d6f028b456f";
+pub(crate) const EUROS: &str = "569668774bdc2da2298b4568";
+pub(crate) const DOLLARS: &str = "5696686a4bdc2da3298b456a";
+pub(crate) const GP: &str = "5d235b4d86f7742e017bc88a";
 
 /// `RagfairPriceService.GetFleaPriceForItem` (`:171-193`).
 ///
