@@ -1,3 +1,4 @@
+using System.Globalization;
 using NUnit.Framework;
 using SPTarkov.Server.Core.Helpers;
 using SPTarkov.Server.Core.Models.Common;
@@ -69,6 +70,59 @@ public sealed class RandomSourceParityTests
         "cccccccccccccccccccccccc",
         "dddddddddddddddddddddddd",
     ];
+
+    /// <summary>
+    ///     Three RollChance draws each at 0%, 50% and 100%, on one uninterrupted stream. RollChance
+    ///     rolls an inclusive 1-100, unlike GetChance100's exclusive 1-99, and always consumes a draw.
+    /// </summary>
+    private static readonly bool[] _katRollChance0To50To100 = [false, false, false, false, false, true, true, true, true];
+
+    /// <summary>
+    ///     (percent, number, toFixed) — no RNG, so these pin the arithmetic and Math.Round's
+    ///     half-to-even rounding rather than a stream.
+    /// </summary>
+    private static readonly (double Percent, double Number, int ToFixed)[] _katPercentOfValueInputs =
+    [
+        (15, 200, 2),
+        (33.333, 99, 2),
+        (1.25, 100, 1),
+        (250, 7.5, 0),
+        (-15, 200, 2),
+    ];
+
+    private static readonly ulong[] _katPercentOfValueBits =
+    [
+        0x403E000000000000UL,
+        0x4040800000000000UL,
+        0x3FF3333333333333UL,
+        0x4033000000000000UL,
+        0xC03E000000000000UL,
+    ];
+
+    /// <summary>
+    ///     (number, percentage).
+    /// </summary>
+    private static readonly (double Number, double Percentage)[] _katReduceByPercentInputs =
+    [
+        (200, 15),
+        (100, 33.333),
+        (100, 150),
+        (0, 50),
+    ];
+
+    private static readonly ulong[] _katReduceByPercentBits =
+    [
+        0x4065400000000000UL,
+        0x4050AAB020C49BA6UL,
+        0xC049000000000000UL,
+        0x0000000000000000UL,
+    ];
+
+    /// <summary>
+    ///     Positions drawn from the mixed weights {5, 0, 1, 1} — identical whatever the key type. The
+    ///     rust twin draws the same sequence over an IndexMap&lt;i64, f64&gt; and an IndexMap&lt;String, f64&gt;.
+    /// </summary>
+    private static readonly int[] _katWeightedGenericIndices = [0, 2, 0, 0, 3];
 
     [Test]
     public void RawXoshiroSequenceMatchesTheRustTwin()
@@ -212,6 +266,94 @@ public sealed class RandomSourceParityTests
             for (var i = 0; i < _katWeightedUniform3.Length; i++)
             {
                 Assert.That(helper.GetWeightedValue(uniform).ToString(), Is.EqualTo(_katWeightedUniform3[i]), $"uniform draw #{i}");
+            }
+        }
+        finally
+        {
+            randomUtil.RandomSource = original;
+        }
+    }
+
+    [Test]
+    public void SeededRollChanceMatchesTheRustTwin()
+    {
+        var randomUtil = DI.GetInstance().GetService<RandomUtil>();
+        var original = randomUtil.RandomSource;
+        try
+        {
+            randomUtil.RandomSource = new SeededRandomSource(KatSeed);
+
+            var rolls = new List<bool>();
+            foreach (var chance in new double[] { 0, 50, 100 })
+            {
+                for (var i = 0; i < 3; i++)
+                {
+                    rolls.Add(randomUtil.RollChance(chance));
+                }
+            }
+
+            Assert.That(rolls, Is.EqualTo(_katRollChance0To50To100));
+        }
+        finally
+        {
+            randomUtil.RandomSource = original;
+        }
+    }
+
+    [Test]
+    public void PercentArithmeticMatchesTheRustTwin()
+    {
+        var randomUtil = DI.GetInstance().GetService<RandomUtil>();
+
+        for (var i = 0; i < _katPercentOfValueInputs.Length; i++)
+        {
+            var (percent, number, toFixed) = _katPercentOfValueInputs[i];
+            var bits = BitConverter.DoubleToUInt64Bits(randomUtil.GetPercentOfValue(percent, number, toFixed));
+            Assert.That(bits, Is.EqualTo(_katPercentOfValueBits[i]), $"GetPercentOfValue #{i}");
+        }
+
+        for (var i = 0; i < _katReduceByPercentInputs.Length; i++)
+        {
+            var (number, percentage) = _katReduceByPercentInputs[i];
+            var bits = BitConverter.DoubleToUInt64Bits(randomUtil.ReduceValueByPercent(number, percentage));
+            Assert.That(bits, Is.EqualTo(_katReduceByPercentBits[i]), $"ReduceValueByPercent #{i}");
+        }
+    }
+
+    [Test]
+    public void SeededWeightedRandomHelperDrawsTheSameSequenceForEitherKeyType()
+    {
+        var helper = DI.GetInstance().GetService<WeightedRandomHelper>();
+        var randomUtil = DI.GetInstance().GetService<RandomUtil>();
+
+        var numeric = new Dictionary<double, double>
+        {
+            { 10, 5 },
+            { 20, 0 },
+            { 30, 1 },
+            { 40, 1 },
+        };
+        var text = numeric.ToDictionary(entry => entry.Key.ToString(CultureInfo.InvariantCulture), entry => entry.Value);
+
+        var original = randomUtil.RandomSource;
+        try
+        {
+            randomUtil.RandomSource = new SeededRandomSource(KatSeed);
+            var numericKeys = numeric.Keys.ToList();
+            for (var i = 0; i < _katWeightedGenericIndices.Length; i++)
+            {
+                Assert.That(
+                    numericKeys.IndexOf(helper.GetWeightedValue(numeric)),
+                    Is.EqualTo(_katWeightedGenericIndices[i]),
+                    $"numeric draw #{i}"
+                );
+            }
+
+            randomUtil.RandomSource = new SeededRandomSource(KatSeed);
+            var textKeys = text.Keys.ToList();
+            for (var i = 0; i < _katWeightedGenericIndices.Length; i++)
+            {
+                Assert.That(textKeys.IndexOf(helper.GetWeightedValue(text)), Is.EqualTo(_katWeightedGenericIndices[i]), $"text draw #{i}");
             }
         }
         finally

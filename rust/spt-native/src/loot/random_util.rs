@@ -188,6 +188,48 @@ pub fn get_chance_100(chance_percent: f64) -> bool {
     f64::from(get_int(1, 99)) <= chance_percent
 }
 
+/// Whether an event with `chance` (0-100) fires, matching `RandomUtil.RollChance`
+/// (`RandomUtil.cs:498-501`).
+///
+/// The C# rolls `GetInt(1, (int)(100 * scale)) / (1 * scale)` — an *inclusive* 1-100 integer at the
+/// default `scale` of 1, where the division is exact and drops out. Deliberately not
+/// [`get_chance_100`], whose roll is the exclusive 1-99 one: here 0% never fires, 100% always does,
+/// and either way a draw is consumed. No ported call site passes a `scale`, so it is not a
+/// parameter here.
+pub fn roll_chance(chance: f64) -> bool {
+    f64::from(get_int(1, 100)) <= chance
+}
+
+/// `Math.Round(value, digits)` with the default `MidpointRounding.ToEven`: .NET scales by a power
+/// of ten, rounds half to even, and scales back, leaving anything at or past its `1e16` round limit
+/// untouched.
+fn round_to_digits(value: f64, digits: i32) -> f64 {
+    if value.abs() >= 1e16 {
+        return value;
+    }
+
+    // Exact for the 0-15 digits `Math.Round` accepts, so this matches .NET's literal table.
+    let power10 = 10f64.powi(digits);
+
+    round_half_even(value * power10) / power10
+}
+
+/// `percent` percent of `value`, rounded to `to_fixed` decimal places, matching
+/// `RandomUtil.GetPercentOfValue` (`RandomUtil.cs:104-109`) — including its `number / 100` first,
+/// which is not the same double as `percent * number / 100`.
+///
+/// The C# `ArgumentOutOfRangeException` for `to_fixed` outside 0-15 is not ported; no call site
+/// passes anything but a small literal.
+pub fn get_percent_of_value(percent: f64, value: f64, to_fixed: i32) -> f64 {
+    round_to_digits(percent * (value / 100.0), to_fixed)
+}
+
+/// `value` reduced by `percent` percent, matching `RandomUtil.ReduceValueByPercent`
+/// (`RandomUtil.cs:131-136`). Unrounded, unlike [`get_percent_of_value`].
+pub fn reduce_value_by_percent(value: f64, percent: f64) -> f64 {
+    value - value * percent / 100.0
+}
+
 /// A normally distributed draw via the Box-Muller transform, matching
 /// `RandomUtil.GetNormallyDistributedRandomNumber` (`RandomUtil.cs:215-246`).
 ///
@@ -254,7 +296,9 @@ pub fn get_array_value<T>(list: &[T]) -> &T {
 ///
 /// Where the C# throws: an empty map (its uniform shortcut indexes out of bounds), or a scan that
 /// falls off the end ("No item was picked.").
-pub fn get_weighted_value(values: &IndexMap<String, f64>) -> Result<String, LootError> {
+pub fn get_weighted_value<K: Clone + Eq + std::hash::Hash>(
+    values: &IndexMap<K, f64>,
+) -> Result<K, LootError> {
     if values.len() == 1
         && let Some(key) = values.keys().next()
     {
@@ -576,10 +620,33 @@ mod tests {
             )
         };
 
+        let rolls: Vec<bool> = {
+            let _g = TestSeedGuard::install(42);
+            kat_roll_chance_sequence()
+        };
+        let percents: Vec<u64> = KAT_PERCENT_OF_VALUE_INPUTS
+            .iter()
+            .map(|(percent, value, to_fixed)| {
+                get_percent_of_value(*percent, *value, *to_fixed).to_bits()
+            })
+            .collect();
+        let reductions: Vec<u64> = KAT_REDUCE_BY_PERCENT_INPUTS
+            .iter()
+            .map(|(value, percent)| reduce_value_by_percent(*value, *percent).to_bits())
+            .collect();
+        let generic_indices = {
+            let _g = TestSeedGuard::install(42);
+            draw_indices(&kat_int_map(), 5)
+        };
+
         println!("GET_CHANCE100_50: {chances:?}");
         println!("WEIGHTED_MIXED_5: {:?}", weighted.0);
         println!("WEIGHTED_SINGLE: {:?}", weighted.1);
         println!("WEIGHTED_UNIFORM_3: {:?}", weighted.2);
+        println!("ROLL_CHANCE_0_50_100: {rolls:?}");
+        println!("PERCENT_OF_VALUE_BITS: [{}]", hex(&percents));
+        println!("REDUCE_BY_PERCENT_BITS: [{}]", hex(&reductions));
+        println!("WEIGHTED_GENERIC_INDICES: {generic_indices:?}");
     }
 
     /// The KAT map keys, shared with the C# twin where they have to parse as `MongoId`s — hence
@@ -618,6 +685,41 @@ mod tests {
     fn draw(map: &IndexMap<String, f64>, count: usize) -> Vec<String> {
         (0..count)
             .map(|_| get_weighted_value(map).expect("a key is always picked"))
+            .collect()
+    }
+
+    /// Positions rather than keys, so an `i64`-keyed and a `String`-keyed map of the same weights
+    /// are directly comparable.
+    fn draw_indices<K: Clone + Eq + std::hash::Hash>(
+        map: &IndexMap<K, f64>,
+        count: usize,
+    ) -> Vec<usize> {
+        (0..count)
+            .map(|_| {
+                let key = get_weighted_value(map).expect("a key is always picked");
+                map.get_index_of(&key).expect("the key came from the map")
+            })
+            .collect()
+    }
+
+    /// `{10:5, 20:0, 30:1, 40:1}` — the mixed weights again, on integer keys.
+    fn kat_int_map() -> IndexMap<i64, f64> {
+        IndexMap::from([(10, 5.0), (20, 0.0), (30, 1.0), (40, 1.0)])
+    }
+
+    /// The same weights and order as [`kat_int_map`], keyed by the decimal spellings.
+    fn kat_numeric_string_map() -> IndexMap<String, f64> {
+        kat_int_map()
+            .into_iter()
+            .map(|(key, weight)| (key.to_string(), weight))
+            .collect()
+    }
+
+    /// Three rolls each at 0%, 50% and 100%, on one uninterrupted stream.
+    fn kat_roll_chance_sequence() -> Vec<bool> {
+        [0.0, 50.0, 100.0]
+            .into_iter()
+            .flat_map(|chance| (0..3).map(move |_| roll_chance(chance)))
             .collect()
     }
 
@@ -665,6 +767,103 @@ mod tests {
         "cccccccccccccccccccccccc",
         "dddddddddddddddddddddddd",
     ];
+
+    const KAT_ROLL_CHANCE_0_50_100: [bool; 9] =
+        [false, false, false, false, false, true, true, true, true];
+    /// `(percent, value, to_fixed)` — no RNG, so these pin the arithmetic and the `Math.Round`
+    /// half-to-even rounding rather than a stream.
+    const KAT_PERCENT_OF_VALUE_INPUTS: [(f64, f64, i32); 5] = [
+        (15.0, 200.0, 2),
+        (33.333, 99.0, 2),
+        (1.25, 100.0, 1),
+        (250.0, 7.5, 0),
+        (-15.0, 200.0, 2),
+    ];
+    const KAT_PERCENT_OF_VALUE_BITS: [u64; 5] = [
+        0x403E_0000_0000_0000,
+        0x4040_8000_0000_0000,
+        0x3FF3_3333_3333_3333,
+        0x4033_0000_0000_0000,
+        0xC03E_0000_0000_0000,
+    ];
+    /// `(value, percent)`.
+    const KAT_REDUCE_BY_PERCENT_INPUTS: [(f64, f64); 4] =
+        [(200.0, 15.0), (100.0, 33.333), (100.0, 150.0), (0.0, 50.0)];
+    const KAT_REDUCE_BY_PERCENT_BITS: [u64; 4] = [
+        0x4065_4000_0000_0000,
+        0x4050_AAB0_20C4_9BA6,
+        0xC049_0000_0000_0000,
+        0x0000_0000_0000_0000,
+    ];
+    /// Positions drawn from the mixed weights `{5, 0, 1, 1}` — identical whatever the key type.
+    const KAT_WEIGHTED_GENERIC_INDICES: [usize; 5] = [0, 2, 0, 0, 3];
+
+    #[test]
+    fn kat_roll_chance_is_pinned() {
+        let _g = TestSeedGuard::install(KAT_SEED);
+        assert_eq!(kat_roll_chance_sequence(), KAT_ROLL_CHANCE_0_50_100);
+    }
+
+    #[test]
+    fn kat_percent_arithmetic_is_pinned() {
+        let percents: Vec<u64> = KAT_PERCENT_OF_VALUE_INPUTS
+            .iter()
+            .map(|(percent, value, to_fixed)| {
+                get_percent_of_value(*percent, *value, *to_fixed).to_bits()
+            })
+            .collect();
+        let reductions: Vec<u64> = KAT_REDUCE_BY_PERCENT_INPUTS
+            .iter()
+            .map(|(value, percent)| reduce_value_by_percent(*value, *percent).to_bits())
+            .collect();
+
+        assert_eq!(percents, KAT_PERCENT_OF_VALUE_BITS);
+        assert_eq!(reductions, KAT_REDUCE_BY_PERCENT_BITS);
+    }
+
+    #[test]
+    fn kat_generic_weighted_draws_are_pinned_and_key_type_agnostic() {
+        let ints = {
+            let _g = TestSeedGuard::install(KAT_SEED);
+            draw_indices(&kat_int_map(), 5)
+        };
+        let strings = {
+            let _g = TestSeedGuard::install(KAT_SEED);
+            draw_indices(&kat_numeric_string_map(), 5)
+        };
+
+        assert_eq!(ints, KAT_WEIGHTED_GENERIC_INDICES);
+        assert_eq!(strings, KAT_WEIGHTED_GENERIC_INDICES);
+    }
+
+    #[test]
+    fn roll_chance_at_one_hundred_percent_still_consumes_a_draw() {
+        // Parity depends on it: the C# rolls before comparing, so a certain roll still advances
+        // the stream for whatever draws next.
+        let baseline: Vec<i32> = {
+            let _g = TestSeedGuard::install(KAT_SEED);
+            (0..3).map(|_| get_int(1, 10)).collect()
+        };
+
+        let _g = TestSeedGuard::install(KAT_SEED);
+        for _ in 0..3 {
+            assert!(roll_chance(100.0));
+        }
+        let after: Vec<i32> = (0..3).map(|_| get_int(1, 10)).collect();
+
+        assert_ne!(after, baseline, "the certain rolls consumed nothing");
+    }
+
+    #[test]
+    fn roll_chance_can_fail_at_ninety_nine_percent() {
+        // The roll reaches 100, so 99% is not a certainty — unlike `get_chance_100`, whose 1-99
+        // roll always fires at 99. This is the assertion that tells the two apart.
+        assert!((0..10_000).any(|_| !roll_chance(99.0)));
+        for _ in 0..1000 {
+            assert!(!roll_chance(0.0));
+            assert!(roll_chance(100.0));
+        }
+    }
 
     #[test]
     fn kat_raw_u64_sequence_is_pinned() {
