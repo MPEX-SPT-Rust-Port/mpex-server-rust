@@ -39,6 +39,18 @@ pub const ARMOR: &str = "5448e54d4bdc2dcc718b4568";
 pub const ARMORED_EQUIPMENT: &str = "57bef4c42459772e8d35a53b";
 /// `BaseClasses.MOD`
 pub const MOD: &str = "5448fe124bdc2da5018b4567";
+/// `BaseClasses.MOUNT`
+pub const MOUNT: &str = "55818b224bdc2dde698b456f";
+/// `BaseClasses.IRON_SIGHT`
+pub const IRON_SIGHT: &str = "55818ac54bdc2d5b648b456e";
+/// `BaseClasses.SIGHTS`
+pub const SIGHTS: &str = "5448fe7a4bdc2d6f028b456b";
+/// `BaseClasses.ASSAULT_SCOPE`
+pub const ASSAULT_SCOPE: &str = "55818add4bdc2d5b648b456f";
+/// `BaseClasses.OPTIC_SCOPE`
+pub const OPTIC_SCOPE: &str = "55818ae44bdc2dde698b456c";
+/// `BaseClasses.SPECIAL_SCOPE`
+pub const SPECIAL_SCOPE: &str = "55818aeb4bdc2ddc698b456a";
 
 /// `ItemHelper.GetItem` (`ItemHelper.cs:491-501`) — a plain lookup, absent tpl included.
 pub fn get_item<'a>(items_view: &'a IndexMap<String, ItemView>, tpl: &str) -> Option<&'a ItemView> {

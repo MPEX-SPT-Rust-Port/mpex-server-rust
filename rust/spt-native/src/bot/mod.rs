@@ -10,7 +10,7 @@ pub(crate) mod repair_service;
 use indexmap::IndexMap;
 
 use crate::bot::durability_limits_helper::BotDurability;
-use crate::bot::models::{EquipmentFilters, RandomisedResourceDetails};
+use crate::bot::models::{EquipmentFilterDetails, EquipmentFilters, RandomisedResourceDetails};
 use crate::loot::models::{Diagnostic, ItemView, PresetView};
 
 use std::collections::HashSet;
@@ -47,13 +47,25 @@ pub struct BotContext<'a> {
     /// `PresetHelper.GetDefaultPresetByTpl()`, keyed by the tpl the preset is the default for — the
     /// projection `GetDefaultPresetArmorSlot` reads.
     pub default_presets_by_tpl: &'a IndexMap<String, PresetView>,
+    /// `PresetHelper.GetPreset(id)`, keyed by preset `_id`. Only `GetMatchingPreset`'s two hardcoded
+    /// edge cases (the MP5SD receiver and the suppressed DVL barrel) look a preset up by id.
+    pub presets_by_id: &'a IndexMap<String, PresetView>,
+    /// `GetBotEquipmentBlacklist(equipmentRole, playerLevel)`, resolved by the C# caller. The
+    /// equipment path takes its blacklist as a parameter because the C# does; the weapon path
+    /// resolves it internally (`:528`), so it rides here.
+    pub equipment_blacklist: &'a EquipmentFilterDetails,
+    /// `BotConfig.LowProfileGasBlockTpls` — membership tests only (`:1063`, `:1072`).
+    pub low_profile_gas_block_tpls: &'a HashSet<String>,
     pub diagnostics: Vec<Diagnostic>,
 }
 
-/// Empty stand-ins for the two views a fixture that exercises neither still has to supply.
+/// Empty stand-ins for the views a fixture that exercises none of them still has to supply.
 #[cfg(test)]
 pub(crate) static NO_BLACKLIST: std::sync::LazyLock<HashSet<String>> =
     std::sync::LazyLock::new(HashSet::new);
 #[cfg(test)]
 pub(crate) static NO_PRESETS: std::sync::LazyLock<IndexMap<String, PresetView>> =
     std::sync::LazyLock::new(IndexMap::new);
+#[cfg(test)]
+pub(crate) static NO_EQUIP_BLACKLIST: std::sync::LazyLock<EquipmentFilterDetails> =
+    std::sync::LazyLock::new(EquipmentFilterDetails::default);

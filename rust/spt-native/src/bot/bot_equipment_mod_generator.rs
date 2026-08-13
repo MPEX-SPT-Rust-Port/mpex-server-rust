@@ -1,9 +1,12 @@
-//! `Generators/Bot/BotEquipmentModGenerator.cs:97-502` — the equipment half of the mod generator.
+//! `Generators/Bot/BotEquipmentModGenerator.cs` — both halves of the mod generator:
+//! [`generate_mods_for_equipment`] (`:97-502`) and [`generate_mods_for_weapon`] (`:503-1916`), plus
+//! the one method of `Services/Bot/BotWeaponModLimitService.cs` the latter calls
+//! ([`weapon_mod_has_reached_limit`], ported inline because its whole state is the
+//! [`BotModLimitsWire`] counters the request already carries).
 //!
-//! The weapon half (`:503-...`) is a separate task; the helpers both halves share
-//! ([`should_mod_be_spawned`], [`get_mod_item_slot_from_db_template`], [`filter_mods_by_blacklist`],
-//! [`get_random_mod_tpl_from_item_db`], [`is_mod_valid_for_slot`], [`create_mod_item`]) are ported
-//! here because the equipment path is the first to reach them.
+//! The helpers both halves share ([`should_mod_be_spawned`], [`get_mod_item_slot_from_db_template`],
+//! [`filter_mods_by_blacklist`], [`get_random_mod_tpl_from_item_db`], [`is_mod_valid_for_slot`],
+//! [`create_mod_item`]) sit between the two.
 //!
 //! # RNG calls, in C# source order — the parity contract
 //!
@@ -23,6 +26,27 @@
 //! 5. `CreateModItem` (`:289`) → `GenerateExtraPropertiesForItem`, whose draws are listed in
 //!    [`crate::bot::bot_generator_helper`].
 //! 6. The recursion at `:300` repeats all of the above for the added mod's own pool.
+//!
+//! Per mod slot of [`generate_mods_for_weapon`], in this order:
+//!
+//! 1. `ShouldModBeSpawned` (`:566`) — the same **1 `RollChance`**, ammo containers excepted.
+//! 2. `ChooseModToPutIntoSlot` (`:589`, `:1021-1142`):
+//!    - an ammo container other than `mod_magazine` returns `request.AmmoTpl` at `:1030` **without
+//!      drawing**;
+//!    - every pool filter it applies first — the default-preset lookup, the sight whitelist, the
+//!      gas-block split, the magazine-capacity filter and the conflict/parent-filter passes — is a
+//!      pure read;
+//!    - `GetCompatibleModFromPool` (`:1244-1305`) — one `ExhaustableArray` draw (`GetInt`) per
+//!      candidate until one is compatible, the pool empties, or the blocked-attempt ceiling
+//!      (`round(count * 0.75)`, half to even, and the count must get **past** it) is passed;
+//!    - `GetRandomModTplFromItemDb` (`:1119`), only for a required slot nothing was found for — one
+//!      draw per candidate over the slot's own filter.
+//! 3. `CreateModItem` (`:688`) → `GenerateExtraPropertiesForItem`. The `new MongoId()` one line
+//!    above it is not off this stream.
+//! 4. `FillCamora` (`:705`, `:1735-1814`), for a cylinder magazine only — one draw per candidate
+//!    ammo tpl until a compatible one is found. The clones it then makes draw nothing, and it is an
+//!    alternative to step 5, not an addition.
+//! 5. The recursion at `:761` repeats all of the above for the added mod's own pool.
 #![allow(
     dead_code,
     reason = "consumed by the bot inventory generator in the tasks that follow"
@@ -34,14 +58,26 @@ use crate::bot::BotContext;
 use crate::bot::bot_generator_helper::{
     generate_extra_properties_for_item, is_item_incompatible_with_current_items,
 };
+use crate::bot::bot_weapon_generator_helper::magazine_is_cylinder_related;
 use crate::bot::exhaustable_array::ExhaustableArray;
-use crate::bot::models::{
-    EquipmentFilterDetails, EquipmentFilters, GenerateEquipmentPropertiesWire,
+use crate::bot::mod_pool_service::{
+    get_compatible_mods_for_weapon_slot, get_mods_for_weapon_slot,
+    get_required_mods_for_weapon_slot,
 };
-use crate::loot::item_helper::{LootError, get_item};
-use crate::loot::models::{DEBUG, Diagnostic, ERROR, Item, ItemView, SlotView, WARNING};
+use crate::bot::models::{
+    BotDataWire, BotModLimitsWire, ChooseRandomCompatibleModResult, EquipmentFilterDetails,
+    EquipmentFilters, GenerateEquipmentPropertiesWire, GenerateWeaponRequestWire, ItemCountWire,
+    RandomisationDetails, WeaponStatsWire,
+};
+use crate::loot::item_helper::{
+    ASSAULT_SCOPE, IRON_SIGHT, LAUNCHER, LootError, MOUNT, OPTIC_SCOPE, SIGHTS, SPECIAL_SCOPE,
+    get_item, is_of_baseclass, is_of_baseclasses,
+};
+use crate::loot::models::{
+    DEBUG, Diagnostic, ERROR, Item, ItemView, PresetView, SlotView, WARNING,
+};
 use crate::loot::mongo_id;
-use crate::loot::random_util::{get_weighted_value, roll_chance};
+use crate::loot::random_util::{get_weighted_value, roll_chance, round_half_even};
 
 /// `BotEquipmentModGenerator._cartridgeHolderSlots` (`:67-74`), returned by `GetAmmoContainers`
 /// (`:1527-1530`).
@@ -52,6 +88,75 @@ const CARTRIDGE_HOLDER_SLOTS: [&str; 5] = [
     "patron_in_weapon_001",
     "cartridges",
 ];
+
+/// `BotEquipmentModGenerator._modSightIds` (`:46`).
+const MOD_SIGHT_IDS: [&str; 2] = ["mod_sight_front", "mod_sight_rear"];
+
+/// `BotEquipmentModGenerator._scopeIds` (`:49-58`) — slots that hold scopes.
+const SCOPE_IDS: [&str; 7] = [
+    "mod_scope",
+    "mod_mount",
+    "mod_mount_000",
+    "mod_scope_000",
+    "mod_scope_001",
+    "mod_scope_002",
+    "mod_scope_003",
+];
+
+/// The scope slots `:621` forces to 100% — a different list from [`SCOPE_IDS`].
+const SCOPE_SLOTS_TO_FORCE: [&str; 5] = [
+    "mod_scope",
+    "mod_scope_000",
+    "mod_scope_001",
+    "mod_scope_002",
+    "mod_scope_003",
+];
+
+/// `BotEquipmentModGenerator._muzzleIds` (`:61`) — slots that hold muzzles, and the list `:635`
+/// forces to 95%.
+const MUZZLE_IDS: [&str; 3] = ["mod_muzzle", "mod_muzzle_000", "mod_muzzle_001"];
+
+/// `BotEquipmentModGenerator._stockSlots` (`:64`) — slots a weapon can store its stock in, and the
+/// list `:665` forces to 100%.
+const STOCK_SLOTS: [&str; 4] = [
+    "mod_stock",
+    "mod_stock_000",
+    "mod_stock_001",
+    "mod_stock_akms",
+];
+
+// The `SortModKeys` slot-name constants (`:76-85`).
+const MOD_RECIEVER_KEY: &str = "mod_reciever";
+const MOD_MOUNT_001_KEY: &str = "mod_mount_001";
+const MOD_GAS_BLOCK_KEY: &str = "mod_gas_block";
+const MOD_PISTOL_GRIP: &str = "mod_pistol_grip";
+const MOD_STOCK_KEY: &str = "mod_stock";
+const MOD_BARREL_KEY: &str = "mod_barrel";
+const MOD_HANDGUARD_KEY: &str = "mod_handguard";
+const MOD_MOUNT_KEY: &str = "mod_mount";
+const MOD_SCOPE_KEY: &str = "mod_scope";
+const MOD_SCOPE_000_KEY: &str = "mod_scope_000";
+
+// The `ItemTpl` members this path names, copied verbatim from `Models/Enums/ItemTpl.cs`.
+/// The M4A1 front sight with gas block (`:793`), which has no `ItemTpl` member in the C# either.
+const GASBLOCK_M4A1_FRONT_SIGHT: &str = "5ae30e795acfc408fb139a0b";
+/// `ItemTpl.MOUNT_NCSTAR_MPR45_BACKUP`
+const MOUNT_NCSTAR_MPR45_BACKUP: &str = "5649a2464bdc2d91118b45a8";
+/// `ItemTpl.RECEIVER_HK_MP5SD_9X19_UPPER`
+const RECEIVER_HK_MP5SD_9X19_UPPER: &str = "5926f2e086f7745aae644231";
+/// `ItemTpl.BARREL_DVL10_762X51_500MM_SUPPRESSED`
+const BARREL_DVL10_762X51_500MM_SUPPRESSED: &str = "5888945a2459774bf43ba385";
+/// `ItemTpl.SMG_SOYUZTM_STM9_GEN2_9X19_CARBINE`
+const SMG_SOYUZTM_STM9_GEN2_9X19_CARBINE: &str = "60339954d62c9b14ed777c06";
+/// `ItemTpl.HANDGUARD_AR15_LONE_STAR_ION_LITE`
+const HANDGUARD_AR15_LONE_STAR_ION_LITE: &str = "5d4405f0a4b9361e6a4e6bd9";
+/// The MP5 preset `GetMatchingPreset` swaps in for an MP5SD receiver (`:1469`).
+const MP5SD_PRESET_ID: &str = "59411abb86f77478f702b5d2";
+/// The DVL preset `GetMatchingPreset` swaps in for the suppressed barrel (`:1477`).
+const DVL_SILENCED_PRESET_ID: &str = "59e8d2b386f77445830dd299";
+
+/// `MongoId.Empty()`, the fallback `:1119` hands `GetRandomModTplFromItemDb`.
+const MONGO_ID_EMPTY: &str = "000000000000000000000000";
 
 /// `ItemHelper._removablePlateSlotIds` (`Helpers/Items/ItemHelper.cs:100`).
 const REMOVABLE_PLATE_SLOT_IDS: [&str; 4] = [
@@ -67,6 +172,17 @@ pub enum ModSpawn {
     DefaultMod,
     Spawn,
     Skip,
+}
+
+impl ModSpawn {
+    /// The C# member name, which is what `ToString()` interpolates into the `:1199` reason string.
+    fn name(self) -> &'static str {
+        match self {
+            Self::DefaultMod => "DEFAULT_MOD",
+            Self::Spawn => "SPAWN",
+            Self::Skip => "SKIP",
+        }
+    }
 }
 
 /// `Models/Spt/Bots/FilterPlateModsForSlotByLevelResult.cs:15-22`. The C# enum is named `Result`,
@@ -615,6 +731,1504 @@ fn get_default_preset_armor_slot<'a>(
         })
 }
 
+// ---------------------------------------------------------------------------
+// Weapon path (`:503-1916`)
+// ---------------------------------------------------------------------------
+
+/// `BotEquipmentModGenerator.GenerateModsForWeapon` (`:503-767`).
+///
+/// Signature deviations, all of them the ones the equipment half already made:
+/// - `request.parent_template` is the parent's **tpl**, not a `TemplateItem`;
+/// - the mutated `request.weapon` is the C# return value, so `Ok(())` carries no payload;
+/// - `ctx` is `&mut` for the diagnostics buffer.
+///
+/// The per-run views the C# resolves out of its services at `:522-533` — the equipment config for
+/// the bot's equipment role, the equipment blacklist, the sight whitelist and the low-profile
+/// gas-block list — ride on [`BotContext`] instead of being re-resolved per recursion; they are
+/// constant for a run, exactly as the C# ones are.
+///
+/// # Errors
+///
+/// Where the C# throws: a weapon tpl with no entry in the mod pool (`:536` dereferences it), an
+/// equipment role missing from `botConfig.Equipment` (`:533` dereferences it, ahead of the `:781`
+/// `ForceStock` deref that would otherwise be the first), a mod slot in the pool that the parent's
+/// `Properties.Slots` does not carry once a mod has been picked for it (`:1204`), plus anything
+/// `GenerateExtraPropertiesForItem` throws.
+pub fn generate_mods_for_weapon(
+    ctx: &mut BotContext,
+    request: &mut GenerateWeaponRequestWire,
+) -> Result<(), LootError> {
+    // Copied out so the views stay readable while `ctx` is borrowed mutably for diagnostics.
+    let items = ctx.items;
+    let equipment = ctx.equipment;
+    let bot_equip_blacklist = ctx.equipment_blacklist;
+
+    let parent_template = get_item(items, &request.parent_template);
+    let parent_name = parent_template
+        .and_then(|template| template.name.clone())
+        .unwrap_or_default();
+
+    if has_no_slots_cartridges_or_chambers(parent_template) {
+        ctx.diagnostics.push(localised(
+            ERROR,
+            "bot-unable_to_add_mods_to_weapon_missing_ammo_slot",
+            serde_json::json!({
+                "weaponName": parent_name,
+                "weaponId": request.parent_template,
+                "botRole": request.bot_data.role,
+            }),
+        ));
+
+        return Ok(());
+    }
+
+    // Get pool of mods that fit weapon. `:536` reads `.Keys` off it unguarded.
+    let Some(compatible_mods_pool) = request.mod_pool.get(&request.parent_template).cloned() else {
+        return Err(LootError::new(format!(
+            "Object reference not set to an instance of an object: no mod pool for item: {} on bot: {}",
+            request.parent_template, request.bot_data.role
+        )));
+    };
+
+    // `:533` hands this to `GetBotRandomizationDetails`, which dereferences it.
+    let Some(bot_equip_config) = equipment.get(&request.bot_data.equipment_role) else {
+        return Err(LootError::new(format!(
+            "Object reference not set to an instance of an object: no equipment config for role: {}",
+            request.bot_data.equipment_role
+        )));
+    };
+    let bot_weapon_sight_whitelist = bot_equip_config.weapon_sight_whitelist.as_ref();
+    let randomisation_settings =
+        get_bot_randomization_details(request.bot_data.level, bot_equip_config);
+
+    // Iterate over mod pool and choose mods to attach
+    let sorted_mod_keys = sort_mod_keys(items, &compatible_mods_pool, &request.parent_template);
+    for mod_slot in sorted_mod_keys {
+        // Check weapon has slot for mod to fit in
+        let Some(mods_parent_slot) = get_mod_item_slot_from_db_template(&mod_slot, parent_template)
+        else {
+            ctx.diagnostics.push(localised(
+                ERROR,
+                "bot-weapon_missing_mod_slot",
+                serde_json::json!({
+                    "modSlot": mod_slot,
+                    "weaponId": request.parent_template,
+                    "weaponName": parent_name,
+                    "botRole": request.bot_data.role,
+                }),
+            ));
+
+            continue;
+        };
+
+        // If the parent is a UBGL, the patron_in_weapon will be generated later - so skip it for now
+        if mod_slot == "patron_in_weapon"
+            && is_of_baseclass(items, &request.parent_template, LAUNCHER)
+        {
+            continue;
+        }
+
+        // Check spawn chance of mod
+        let mod_spawn_result = should_mod_be_spawned(
+            mods_parent_slot,
+            &mod_slot,
+            &request.mod_spawn_chances,
+            bot_equip_config,
+        );
+        if mod_spawn_result == ModSpawn::Skip {
+            continue;
+        }
+
+        let is_randomisable_slot = randomisation_settings.is_some_and(|settings| {
+            settings
+                .randomised_weapon_mod_slots
+                .as_ref()
+                .is_some_and(|slots| slots.contains(&mod_slot))
+        });
+
+        let mod_to_add = choose_mod_to_put_into_slot(
+            ctx,
+            &ModToSpawnRequest {
+                mod_slot: &mod_slot,
+                is_randomisable_slot,
+                randomisation_settings,
+                bot_weapon_sight_whitelist,
+                bot_equip_blacklist,
+                item_mod_pool: &compatible_mods_pool,
+                weapon: &request.weapon,
+                ammo_tpl: &request.ammo_tpl,
+                parent_template: &request.parent_template,
+                mod_spawn_result,
+                weapon_stats: &request.weapon_stats,
+                conflicting_item_tpls: &request.conflicting_item_tpls,
+                bot_data: &request.bot_data,
+            },
+        )?;
+
+        // Compatible mod not found
+        let Some(mod_to_add_tpl) = mod_to_add else {
+            continue;
+        };
+
+        let mod_to_add_template = get_item(items, &mod_to_add_tpl);
+        if !is_mod_valid_for_slot(
+            ctx,
+            mod_to_add_template.is_some(),
+            &mod_to_add_tpl,
+            &mod_slot,
+            &request.parent_template,
+        ) {
+            continue;
+        }
+        let Some(mod_to_add_template) = mod_to_add_template else {
+            continue;
+        };
+        let mod_to_add_parent = mod_to_add_template.parent.clone().unwrap_or_default();
+
+        // Skip adding mod to weapon if type limit reached
+        if weapon_mod_has_reached_limit(
+            ctx,
+            &request.bot_data.equipment_role,
+            &mod_to_add_tpl,
+            mod_to_add_template,
+            &mut request.mod_limits,
+            &request.parent_template,
+            &request.weapon,
+        ) {
+            continue;
+        }
+
+        // If item is a mount for scopes, set scope chance to 100%, this helps fix empty mounts
+        // appearing on weapons
+        if mod_slot_can_hold_scope(&mod_slot, &mod_to_add_parent) {
+            // mod_mount was picked to be added to weapon, force scope chance to ensure its filled
+            adjust_slot_spawn_chances(&mut request.mod_spawn_chances, &SCOPE_SLOTS_TO_FORCE, 100.0);
+
+            // Hydrate pool of mods that fit into mount as its a randomisable slot
+            if is_randomisable_slot
+            // Add scope mods to modPool dictionary to ensure the mount has a scope in the pool to pick
+            {
+                add_compatible_mods_for_provided_mod(
+                    ctx,
+                    "mod_scope",
+                    &mod_to_add_tpl,
+                    mod_to_add_template,
+                    &mut request.mod_pool,
+                    bot_equip_blacklist,
+                );
+            }
+        }
+
+        // If picked item is muzzle adapter that can hold a child, adjust spawn chance
+        if mod_slot_can_hold_muzzle_devices(&mod_slot, Some(&mod_to_add_parent)) {
+            // Make chance of muzzle devices 95%, nearly certain but not guaranteed
+            adjust_slot_spawn_chances(&mut request.mod_spawn_chances, &MUZZLE_IDS, 95.0);
+        }
+
+        // If front/rear sight are to be added, set opposite to 100% chance
+        if mod_is_front_or_rear_sight(&mod_slot, &mod_to_add_tpl) {
+            request
+                .mod_spawn_chances
+                .insert("mod_sight_front".to_owned(), 100.0);
+            request
+                .mod_spawn_chances
+                .insert("mod_sight_rear".to_owned(), 100.0);
+        }
+
+        // Handguard mod can take a sub handguard mod + weapon has no UBGL (takes same slot)
+        // Force spawn chance to be 100% to ensure it gets added
+        if mod_slot == "mod_handguard"
+            && has_slot_named(mod_to_add_template, "mod_handguard")
+            && !request
+                .weapon
+                .iter()
+                .any(|item| item.slot_id.as_deref() == Some("mod_launcher"))
+        // Needed for handguards with lower
+        {
+            request
+                .mod_spawn_chances
+                .insert("mod_handguard".to_owned(), 100.0);
+        }
+
+        // If stock mod can take a sub stock mod, force spawn chance to be 100% to ensure sub-stock
+        // gets added. Or if bot has stock force enabled
+        if should_force_sub_stock_slots(&mod_slot, bot_equip_config, mod_to_add_template) {
+            // Stock mod can take additional stocks, could be a locking device, force 100% chance
+            adjust_slot_spawn_chances(&mut request.mod_spawn_chances, &STOCK_SLOTS, 100.0);
+        }
+
+        // Gather stats on mods being added to weapon
+        if is_of_baseclass(items, &mod_to_add_tpl, IRON_SIGHT) {
+            if mod_slot == "mod_sight_front" {
+                request.weapon_stats.has_front_iron_sight = Some(true);
+            } else if mod_slot == "mod_sight_rear" {
+                request.weapon_stats.has_rear_iron_sight = Some(true);
+            }
+        } else if !request.weapon_stats.has_optic.unwrap_or(false)
+            && is_of_baseclass(items, &mod_to_add_tpl, SIGHTS)
+        {
+            request.weapon_stats.has_optic = Some(true);
+        }
+
+        let mod_id = mongo_id::generate();
+        let mod_item = create_mod_item(
+            ctx,
+            &mod_id,
+            &mod_to_add_tpl,
+            &request.weapon_id,
+            &mod_slot,
+            &request.bot_data.role,
+        )?;
+        request.weapon.push(mod_item);
+
+        // Update conflicting item list now item has been chosen
+        for conflicting_item in mod_to_add_template.conflicting_items.iter().flatten() {
+            request
+                .conflicting_item_tpls
+                .insert(conflicting_item.clone());
+        }
+
+        // I first thought we could use the recursive generateModsForItems as previously for cylinder
+        // magazines. However, the recursion doesn't go over the slots of the parent mod but over the
+        // modPool which is given by the bot config where we decided to keep cartridges instead of
+        // camoras. And since a CylinderMagazine only has one cartridge entry and this entry is not
+        // to be filled, we need a special handling for the CylinderMagazine
+        let mod_parent_name = get_item(items, &mod_to_add_parent)
+            .and_then(|parent| parent.name.as_deref())
+            .unwrap_or_default();
+        if magazine_is_cylinder_related(mod_parent_name) {
+            // We don't have child mods, we need to create the camoras for the magazines instead
+            fill_camora(
+                ctx,
+                &mut request.weapon,
+                &mut request.mod_pool,
+                &mod_id,
+                &mod_to_add_tpl,
+                mod_to_add_template,
+            );
+
+            continue;
+        }
+
+        let mut contains_mod_in_pool = request.mod_pool.contains_key(&mod_to_add_tpl);
+
+        // Sometimes randomised slots are missing sub-mods, if so, get values from mod pool service
+        // Check for a randomisable slot + without data in modPool + item being added as additional
+        // slots
+        if is_randomisable_slot
+            && !contains_mod_in_pool
+            && mod_to_add_template
+                .slots
+                .as_ref()
+                .is_some_and(|slots| !slots.is_empty())
+        {
+            let mod_from_service = get_mods_for_weapon_slot(ctx, &mod_to_add_tpl);
+            if !mod_from_service.is_empty() {
+                request
+                    .mod_pool
+                    .insert(mod_to_add_tpl.clone(), mod_from_service);
+                contains_mod_in_pool = true;
+            }
+        }
+
+        // Fallback when mods with REQUIRED children are not in the pool, add them and process
+        if !contains_mod_in_pool && !is_randomisable_slot {
+            // Check for required mods the item we've added needs to be classified as 'valid'
+            let mod_from_service = get_required_mods_for_weapon_slot(ctx, &mod_to_add_tpl);
+            if !mod_from_service.is_empty() {
+                request
+                    .mod_pool
+                    .insert(mod_to_add_tpl.clone(), mod_from_service);
+                contains_mod_in_pool = true;
+            }
+        }
+
+        if contains_mod_in_pool {
+            // Call self recursively to add mods to this mod. C# builds a fresh request around the
+            // same shared `Weapon`/`ModPool`/`ModSpawnChances`/`ModLimits`/`WeaponStats`/
+            // `ConflictingItemTpls` objects and swaps only these two members.
+            let outer_weapon_id = std::mem::replace(&mut request.weapon_id, mod_id);
+            let outer_parent_template =
+                std::mem::replace(&mut request.parent_template, mod_to_add_tpl);
+
+            let outcome = generate_mods_for_weapon(ctx, request);
+
+            request.weapon_id = outer_weapon_id;
+            request.parent_template = outer_parent_template;
+            outcome?;
+        }
+    }
+
+    Ok(())
+}
+
+/// `BotEquipmentModGenerator.ShouldForceSubStockSlots` (`:776-782`).
+///
+/// The C# `botEquipConfig.ForceStock` deref is unguarded, but a null config throws two hundred lines
+/// earlier at `:533`, so the config is never null by the time this is reached.
+fn should_force_sub_stock_slots(
+    mod_slot: &str,
+    bot_equip_config: &EquipmentFilters,
+    mod_to_add_template: &ItemView,
+) -> bool {
+    // Can the stock hold child items
+    let has_sub_slots = mod_to_add_template
+        .slots
+        .as_ref()
+        .is_some_and(|slots| !slots.is_empty());
+
+    (STOCK_SLOTS.contains(&mod_slot) && has_sub_slots)
+        || bot_equip_config.force_stock.unwrap_or(false)
+}
+
+/// `BotEquipmentModGenerator.ModIsFrontOrRearSight` (`:790-800`).
+fn mod_is_front_or_rear_sight(mod_slot: &str, tpl: &str) -> bool {
+    // Gas block /w front sight is special case, deem it a 'front sight' too
+    if mod_slot == "mod_gas_block" && tpl == GASBLOCK_M4A1_FRONT_SIGHT
+    // M4A1 front sight with gas block
+    {
+        return true;
+    }
+
+    MOD_SIGHT_IDS.contains(&mod_slot)
+}
+
+/// `BotEquipmentModGenerator.ModSlotCanHoldScope` (`:808-811`).
+fn mod_slot_can_hold_scope(mod_slot: &str, mods_parent_id: &str) -> bool {
+    SCOPE_IDS.contains(&mod_slot.to_lowercase().as_str()) && mods_parent_id == MOUNT
+}
+
+/// `BotEquipmentModGenerator.AdjustSlotSpawnChances` (`:819-839`). The two null guards it logs for
+/// are not expressible here — neither argument is an `Option` at either call site.
+fn adjust_slot_spawn_chances(
+    mod_spawn_chances: &mut IndexMap<String, f64>,
+    mod_slots_to_adjust: &[&str],
+    new_chance_percent: f64,
+) {
+    for mod_name in mod_slots_to_adjust {
+        mod_spawn_chances.insert((*mod_name).to_owned(), new_chance_percent);
+    }
+}
+
+/// `BotEquipmentModGenerator.ModSlotCanHoldMuzzleDevices` (`:847-850`).
+fn mod_slot_can_hold_muzzle_devices(mod_slot: &str, mods_parent_id: Option<&str>) -> bool {
+    // parity: parameter unused in C#
+    let _ = mods_parent_id;
+
+    MUZZLE_IDS.contains(&mod_slot.to_lowercase().as_str())
+}
+
+/// `BotEquipmentModGenerator.SortModKeys` (`:858-951`).
+///
+/// The C# takes and returns a `HashSet<string>`; a `Vec` here, since the keys are unique and only
+/// their order matters. The residual keeps the pool's own order, as removing from a `HashSet`
+/// without re-adding does.
+fn sort_mod_keys(
+    items: &IndexMap<String, ItemView>,
+    unsorted_slot_keys: &IndexMap<String, IndexSet<String>>,
+    item_tpl_with_keys_to_sort: &str,
+) -> Vec<String> {
+    // No need to sort with only 1 item in array
+    if unsorted_slot_keys.len() <= 1 {
+        return unsorted_slot_keys.keys().cloned().collect();
+    }
+
+    let is_mount = is_of_baseclass(items, item_tpl_with_keys_to_sort, MOUNT);
+
+    // Mounts are a special case, they need scopes first before more mounts
+    let leading: &[&str] = if is_mount {
+        &[MOD_SCOPE_000_KEY, MOD_SCOPE_KEY, MOD_MOUNT_KEY]
+    } else {
+        &[
+            MOD_HANDGUARD_KEY,
+            MOD_BARREL_KEY,
+            MOD_MOUNT_001_KEY,
+            MOD_RECIEVER_KEY,
+            MOD_PISTOL_GRIP,
+            MOD_GAS_BLOCK_KEY,
+            MOD_STOCK_KEY,
+            MOD_MOUNT_KEY,
+            MOD_SCOPE_KEY,
+        ]
+    };
+
+    let mut sorted_keys: Vec<String> = leading
+        .iter()
+        .filter(|key| unsorted_slot_keys.contains_key(**key))
+        .map(|key| (*key).to_owned())
+        .collect();
+
+    sorted_keys.extend(
+        unsorted_slot_keys
+            .keys()
+            .filter(|key| !leading.contains(&key.as_str()))
+            .cloned(),
+    );
+
+    sorted_keys
+}
+
+/// The pieces of `Models/Spt/Bots/ModToSpawnRequest.cs` the weapon path fills in. Every member is a
+/// borrow: the C# record holds references to the very objects `GenerateModsForWeapon` goes on to
+/// mutate, and nothing here writes through them.
+struct ModToSpawnRequest<'a> {
+    /// Slot mod will fit into.
+    mod_slot: &'a str,
+    /// Will generate a randomised mod pool if true.
+    is_randomisable_slot: bool,
+    randomisation_settings: Option<&'a RandomisationDetails>,
+    bot_weapon_sight_whitelist: Option<&'a IndexMap<String, Vec<String>>>,
+    /// Blacklist to prevent mods from being picked.
+    bot_equip_blacklist: &'a EquipmentFilterDetails,
+    /// Pool of items to pick from.
+    item_mod_pool: &'a IndexMap<String, IndexSet<String>>,
+    /// The weapon as it stands, ready for mods to be added.
+    weapon: &'a [Item],
+    /// Ammo tpl to use if slot requires a cartridge to be added (e.g. mod_magazine).
+    ammo_tpl: &'a str,
+    /// Tpl of the parent item the mod will go into.
+    parent_template: &'a str,
+    /// Should mod be spawned/skipped/use default.
+    mod_spawn_result: ModSpawn,
+    weapon_stats: &'a WeaponStatsWire,
+    conflicting_item_tpls: &'a IndexSet<String>,
+    bot_data: &'a BotDataWire,
+}
+
+/// `BotEquipmentModGenerator.ChooseModToPutIntoSlot` (`:1021-1142`). `None` is the C# `null` return;
+/// the tpl it hands back can still be one the items view does not hold, which is the C#
+/// `GetItem` miss the caller reports through [`is_mod_valid_for_slot`].
+///
+/// # Errors
+///
+/// Where the C# throws: an empty weapon list (`:1025` `First()`), and a mod slot the parent template
+/// does not carry once the pool for it is non-empty (`:1099`/`:1204` dereference `parentSlot`).
+fn choose_mod_to_put_into_slot(
+    ctx: &mut BotContext,
+    request: &ModToSpawnRequest,
+) -> Result<Option<String>, LootError> {
+    let items = ctx.items;
+
+    // Slot mod will fill
+    let parent_slot = get_item(items, request.parent_template)
+        .and_then(|template| template.slots.as_deref())
+        .unwrap_or_default()
+        .iter()
+        .find(|slot| slot.name.as_deref() == Some(request.mod_slot));
+    let Some(weapon_root) = request.weapon.first() else {
+        return Err(LootError::new(
+            "Sequence contains no elements: the weapon has no root item",
+        ));
+    };
+    let weapon_tpl = weapon_root.template.clone();
+
+    // It's ammo, use predefined ammo parameter
+    if CARTRIDGE_HOLDER_SLOTS.contains(&request.mod_slot) && request.mod_slot != "mod_magazine" {
+        return Ok(Some(request.ammo_tpl.to_owned()));
+    }
+
+    // Ensure there's a pool of mods to pick from. A `null` pool for a *required* slot survives the
+    // guard below and is dereferenced at `:1052`/`:1060`/`:1204`; it is an empty pool here instead.
+    // Only `ItemModPool.GetValueOrDefault` can return null and the slot keys come from that very
+    // map, so no live pool reaches it.
+    let mut mod_pool = get_mod_pool_for_slot(ctx, request, &weapon_tpl)?.unwrap_or_default();
+    if mod_pool.is_empty() && !parent_slot.is_some_and(|slot| slot.required.unwrap_or(false)) {
+        // Nothing in mod pool + item not required
+        let parent_name = get_item(items, request.parent_template)
+            .and_then(|template| template.name.clone())
+            .unwrap_or_default();
+        let mod_slot = request.mod_slot;
+        ctx.diagnostics.push(diagnostic(
+            DEBUG,
+            format!(
+                "Mod pool for optional slot: {mod_slot} on item: {parent_name} was empty, skipping mod"
+            ),
+        ));
+
+        return Ok(None);
+    }
+
+    // Filter out non-whitelisted scopes, use the full mod pool if filtered pool would have no
+    // elements
+    if request.mod_slot.contains("mod_scope")
+        && let Some(whitelist) = request.bot_weapon_sight_whitelist
+        // scope pool has more than one scope
+        && mod_pool.len() > 1
+    {
+        mod_pool = filter_sights_by_weapon_type(ctx, weapon_root, &mod_pool, whitelist);
+    }
+
+    if request.mod_slot == "mod_gas_block" {
+        let low_profile = ctx.low_profile_gas_block_tpls;
+        if request.weapon_stats.has_optic.unwrap_or(false) && mod_pool.len() > 1 {
+            // Attempt to limit modpool to low profile gas blocks when weapon has an optic
+            let only_low_profile: IndexSet<String> = mod_pool
+                .iter()
+                .filter(|tpl| low_profile.contains(*tpl))
+                .cloned()
+                .collect();
+            if !only_low_profile.is_empty() {
+                mod_pool = only_low_profile;
+            }
+        } else if request.weapon_stats.has_rear_iron_sight.unwrap_or(false) && mod_pool.len() > 1 {
+            // Attempt to limit modpool to high profile gas blocks when weapon has rear iron sight +
+            // no front iron sight
+            let only_high_profile: IndexSet<String> = mod_pool
+                .iter()
+                .filter(|tpl| !low_profile.contains(*tpl))
+                .cloned()
+                .collect();
+            if !only_high_profile.is_empty() {
+                mod_pool = only_high_profile;
+            }
+        }
+    }
+
+    // Check if weapon has min magazine size limit
+    if request.mod_slot == "mod_magazine"
+        && request.is_randomisable_slot
+        && request
+            .randomisation_settings
+            .is_some_and(|settings| settings.minimum_magazine_size.is_some())
+    {
+        mod_pool = get_filtered_magazine_pool_by_capacity(ctx, request, &weapon_tpl, &mod_pool);
+    }
+
+    // Pick random mod that's compatible
+    let Some(parent_slot) = parent_slot else {
+        return Err(LootError::new(format!(
+            "Object reference not set to an instance of an object: slot: {} is not on item: {}",
+            request.mod_slot, request.parent_template
+        )));
+    };
+    let mut chosen_mod_result = get_compatible_weapon_mod_tpl_for_slot_from_pool(
+        ctx,
+        request,
+        &mod_pool,
+        parent_slot,
+        request.mod_spawn_result,
+        request.weapon,
+        request.mod_slot,
+    );
+    let parent_slot_required = parent_slot.required.unwrap_or(false);
+    if chosen_mod_result.slot_blocked.unwrap_or(false) && !parent_slot_required
+    // Don't bother trying to fit mod, slot is completely blocked
+    {
+        return Ok(None);
+    }
+
+    // Log if mod chosen was incompatible
+    if chosen_mod_result.incompatible.unwrap_or(false) && !parent_slot_required {
+        let parent_slot_name = parent_slot.name.clone().unwrap_or_default();
+        let mod_slot = request.mod_slot;
+        let reason = chosen_mod_result.reason.clone().unwrap_or_default();
+        ctx.diagnostics.push(diagnostic(
+            DEBUG,
+            format!(
+                "Unable to find compatible mod of type: {parent_slot_name}, in slot: {mod_slot} reason: {reason}"
+            ),
+        ));
+    }
+
+    // Get random mod to attach from items db for required slots if none found above
+    if !chosen_mod_result.found.unwrap_or(false) && parent_slot_required {
+        chosen_mod_result.chosen_template = get_random_mod_tpl_from_item_db(
+            ctx,
+            MONGO_ID_EMPTY,
+            parent_slot.filter.as_deref().unwrap_or_default(),
+            request.mod_slot,
+            request.weapon,
+        );
+        chosen_mod_result.found = Some(true);
+    }
+
+    // Compatible item not found + not required
+    if !chosen_mod_result.found.unwrap_or(false) && !parent_slot_required {
+        return Ok(None);
+    }
+
+    if !chosen_mod_result.found.unwrap_or(false) {
+        if parent_slot_required {
+            let mod_slot = request.mod_slot;
+            let parent_name = get_item(items, request.parent_template)
+                .and_then(|template| template.name.clone())
+                .unwrap_or_default();
+            let parent_tpl = request.parent_template;
+            ctx.diagnostics.push(diagnostic(
+                WARNING,
+                format!(
+                    "Required slot unable to be filled, {mod_slot} on {parent_name} {parent_tpl} for weapon: {weapon_tpl}"
+                ),
+            ));
+        }
+
+        return Ok(None);
+    }
+
+    Ok(chosen_mod_result.chosen_template)
+}
+
+/// `BotEquipmentModGenerator.GetFilteredMagazinePoolByCapacity` (`:1150-1169`).
+fn get_filtered_magazine_pool_by_capacity(
+    ctx: &mut BotContext,
+    request: &ModToSpawnRequest,
+    weapon_tpl: &str,
+    mod_pool: &IndexSet<String>,
+) -> IndexSet<String> {
+    let items = ctx.items;
+
+    // A weapon with no entry takes C#'s `TryGetValue` default of 0, which no magazine is under.
+    let min_mag_size_from_settings = request
+        .randomisation_settings
+        .and_then(|settings| settings.minimum_magazine_size.as_ref())
+        .and_then(|sizes| sizes.get(weapon_tpl))
+        .copied()
+        .unwrap_or(0.0);
+
+    let desired_magazine_tpls: IndexSet<String> = mod_pool
+        .iter()
+        .filter(|mag_tpl| {
+            get_item(items, mag_tpl)
+                .and_then(|magazine| magazine.cartridges_max_count)
+                .is_some_and(|max_count| max_count >= min_mag_size_from_settings)
+        })
+        .cloned()
+        .collect();
+
+    if desired_magazine_tpls.is_empty() {
+        ctx.diagnostics.push(diagnostic(
+            WARNING,
+            format!("Magazine size filter for: {weapon_tpl} was too strict, ignoring filter"),
+        ));
+
+        return mod_pool.clone();
+    }
+
+    desired_magazine_tpls
+}
+
+/// `BotEquipmentModGenerator.GetCompatibleWeaponModTplForSlotFromPool` (`:1182-1216`).
+fn get_compatible_weapon_mod_tpl_for_slot_from_pool(
+    ctx: &mut BotContext,
+    request: &ModToSpawnRequest,
+    mod_pool: &IndexSet<String>,
+    parent_slot: &SlotView,
+    choice_type_enum: ModSpawn,
+    weapon: &[Item],
+    mod_slot_name: &str,
+) -> ChooseRandomCompatibleModResult {
+    // Filter out incompatible mods from pool
+    let mut pre_filtered_mod_pool = get_filtered_mod_pool(mod_pool, request.conflicting_item_tpls);
+    if pre_filtered_mod_pool.is_empty() {
+        let choice = choice_type_enum.name();
+        let pool_size = mod_pool.len();
+
+        return ChooseRandomCompatibleModResult {
+            incompatible: Some(true),
+            found: Some(false),
+            reason: Some(format!(
+                "Unable to add mod to {choice} slot: {mod_slot_name}. All: {pool_size} had conflicts"
+            )),
+            ..Default::default()
+        };
+    }
+
+    // Filter modpool to only items that appear in parents allowed list
+    let parent_filter = parent_slot.filter.as_deref().unwrap_or_default();
+    pre_filtered_mod_pool.retain(|tpl| parent_filter.contains(tpl));
+    if pre_filtered_mod_pool.is_empty() {
+        return ChooseRandomCompatibleModResult {
+            incompatible: Some(true),
+            found: Some(false),
+            reason: Some("No mods found in parents allowed list".to_owned()),
+            ..Default::default()
+        };
+    }
+
+    get_compatible_mod_from_pool(ctx, &pre_filtered_mod_pool, choice_type_enum, weapon)
+}
+
+/// `BotEquipmentModGenerator.GetCompatibleModFromPool` (`:1224-1308`).
+///
+/// `:1281`'s `SlotBlocked = true` is commented out in the C# on purpose ("Later in code we try to
+/// find replacement, but only when slotBlocked is not true"), so nothing here ever sets it either —
+/// only `IsItemIncompatibleWithCurrentItems` does.
+fn get_compatible_mod_from_pool(
+    ctx: &mut BotContext,
+    mod_pool: &IndexSet<String>,
+    mod_spawn_type: ModSpawn,
+    weapon: &[Item],
+) -> ChooseRandomCompatibleModResult {
+    let items = ctx.items;
+
+    // Create exhaustable pool to pick mod item from
+    let mut exhaustable_mod_pool = ExhaustableArray::new(mod_pool.iter().cloned().collect());
+
+    // Create default response if no compatible item is found below
+    let mut chosen_mod_result = ChooseRandomCompatibleModResult {
+        incompatible: Some(true),
+        found: Some(false),
+        reason: Some("unknown".to_owned()),
+        ..Default::default()
+    };
+
+    // Limit how many attempts to find a compatible mod can occur before giving up
+    // 75% of pool size, rounded the way `Math.Round(double)` rounds: half to even
+    let max_blocked_attempts = round_half_even(mod_pool.len() as f64 * 0.75);
+    let mut blocked_attempt_count = 0.0;
+    while let Some(chosen_tpl) = exhaustable_mod_pool.get_random_value() {
+        // Not valid item, try again
+        let Some(picked_item_details) = get_item(items, &chosen_tpl) else {
+            continue;
+        };
+
+        // Success - Default wanted + only 1 item in pool
+        if mod_spawn_type == ModSpawn::DefaultMod && mod_pool.len() == 1 {
+            chosen_mod_result.found = Some(true);
+            chosen_mod_result.incompatible = Some(false);
+            chosen_mod_result.chosen_template = Some(chosen_tpl);
+
+            break;
+        }
+
+        // Check if existing weapon mods are incompatible with chosen item
+        let existing_item_blocking_choice = weapon.iter().any(|item| {
+            picked_item_details
+                .conflicting_items
+                .as_ref()
+                .is_some_and(|conflicting| conflicting.contains(&item.template))
+        });
+        if existing_item_blocking_choice {
+            // Give max of x attempts of picking a mod if blocked by another
+            // OR Blocked and mod pool only had 1 item
+            if blocked_attempt_count > max_blocked_attempts || mod_pool.len() == 1 {
+                #[allow(
+                    unused_assignments,
+                    reason = "`:1280` resets the counter on the way out of the loop; dead in both languages, kept line for line"
+                )]
+                {
+                    blocked_attempt_count = 0.0; // reset
+                }
+                //chosen_mod_result.slot_blocked = Some(true); // see the doc comment
+                chosen_mod_result.reason = Some("Blocked".to_owned());
+
+                break;
+            }
+
+            blocked_attempt_count += 1.0;
+            // Not compatible - Try again
+            continue;
+        }
+
+        // Edge case - Some mod combos will never work, make sure this isn't the case
+        if weapon_mod_combo_is_incompatible(weapon, &chosen_tpl) {
+            chosen_mod_result.reason = Some(format!(
+                "Chosen weapon mod: {chosen_tpl} can never be compatible with existing weapon mods"
+            ));
+
+            break;
+        }
+
+        // Success
+        chosen_mod_result.found = Some(true);
+        chosen_mod_result.incompatible = Some(false);
+        chosen_mod_result.chosen_template = Some(chosen_tpl);
+
+        break;
+    }
+
+    chosen_mod_result
+}
+
+/// `BotEquipmentModGenerator.GetFilteredModPool` (`:1321-1324`).
+fn get_filtered_mod_pool(
+    mod_pool: &IndexSet<String>,
+    tpl_blacklist: &IndexSet<String>,
+) -> IndexSet<String> {
+    mod_pool
+        .iter()
+        .filter(|tpl| !tpl_blacklist.contains(*tpl))
+        .cloned()
+        .collect()
+}
+
+/// `BotEquipmentModGenerator.GetModPoolForSlot` (`:1335-1350`). `None` is the C# `null` an item mod
+/// pool without the slot returns.
+///
+/// # Errors
+///
+/// From [`get_mod_pool_for_default_slot`].
+fn get_mod_pool_for_slot(
+    ctx: &mut BotContext,
+    request: &ModToSpawnRequest,
+    weapon_tpl: &str,
+) -> Result<Option<IndexSet<String>>, LootError> {
+    // Mod is flagged as being default only, try and find it in globals
+    if request.mod_spawn_result == ModSpawn::DefaultMod {
+        return get_mod_pool_for_default_slot(ctx, request, weapon_tpl).map(Some);
+    }
+
+    if request.is_randomisable_slot {
+        return Ok(Some(get_dynamic_mod_pool(
+            ctx,
+            request.parent_template,
+            request.mod_slot,
+            request.bot_equip_blacklist,
+        )));
+    }
+
+    // Required mod is not default or randomisable, use existing pool
+    Ok(request.item_mod_pool.get(request.mod_slot).cloned())
+}
+
+/// `BotEquipmentModGenerator.GetModPoolForDefaultSlot` (`:1358-1441`).
+///
+/// # Errors
+///
+/// Where the C# throws: the four `request.ItemModPool[request.ModSlot]` indexer reads, for a slot
+/// the pool does not hold.
+fn get_mod_pool_for_default_slot(
+    ctx: &mut BotContext,
+    request: &ModToSpawnRequest,
+    weapon_tpl: &str,
+) -> Result<IndexSet<String>, LootError> {
+    let items = ctx.items;
+    let weapon_name = get_item(items, weapon_tpl)
+        .and_then(|weapon| weapon.name.clone())
+        .unwrap_or_default();
+    let existing_pool = || {
+        request
+            .item_mod_pool
+            .get(request.mod_slot)
+            .cloned()
+            .ok_or_else(|| {
+                LootError::new(format!(
+                    "The given key was not present in the dictionary: {} in the item mod pool",
+                    request.mod_slot
+                ))
+            })
+    };
+
+    let Some(matching_mod_from_preset) = get_matching_mod_from_preset(ctx, request, weapon_tpl)
+    else {
+        let pool = existing_pool()?;
+        if pool.len() > 1 {
+            let role = &request.bot_data.role;
+            let mod_slot = request.mod_slot;
+            ctx.diagnostics.push(diagnostic(
+                DEBUG,
+                format!(
+                    "{role} No default: {mod_slot} mod found for: {weapon_name}, using existing pool"
+                ),
+            ));
+        }
+
+        // Couldn't find default in globals, use existing mod pool data
+        return Ok(pool);
+    };
+    let matching_mod_from_preset = matching_mod_from_preset.template.clone();
+
+    // Only filter mods down to single default item if it already exists in existing itemModPool, OR
+    // the default item has no children
+    // Filtering mod pool to item that wasn't already there can have problems;
+    // You'd have a mod being picked without any sub-mods in its chain, possibly resulting in missing
+    // required mods not being added
+    // Mod is in existing mod pool
+    if request
+        .item_mod_pool
+        .get(request.mod_slot)
+        .is_some_and(|ids| ids.contains(&matching_mod_from_preset))
+    // Found mod on preset + it already exists in mod pool
+    {
+        return Ok(IndexSet::from([matching_mod_from_preset]));
+    }
+
+    // Get an array of items that are allowed in slot from parent item
+    // Check the filter of the slot to ensure a chosen mod fits
+    let parent_slot_compatible_items = get_item(items, request.parent_template)
+        .and_then(|template| template.slots.as_deref())
+        .unwrap_or_default()
+        .iter()
+        .find(|slot| {
+            slot.name
+                .as_deref()
+                .is_some_and(|name| name.to_lowercase() == request.mod_slot.to_lowercase())
+        })
+        .and_then(|slot| slot.filter.as_deref());
+
+    // Mod isn't in existing pool, only add if it has no children and exists inside parent filter
+    if parent_slot_compatible_items.is_some_and(|filter| filter.contains(&matching_mod_from_preset))
+        && !get_item(items, &matching_mod_from_preset)
+            .and_then(|template| template.slots.as_ref())
+            .is_some_and(|slots| !slots.is_empty())
+    {
+        // Chosen mod has no conflicts + no children + is in parent compat list
+        if !request
+            .conflicting_item_tpls
+            .contains(&matching_mod_from_preset)
+        {
+            return Ok(IndexSet::from([matching_mod_from_preset]));
+        }
+
+        // Above chosen mod had conflicts with existing weapon mods
+        let role = &request.bot_data.role;
+        let mod_slot = request.mod_slot;
+        ctx.diagnostics.push(diagnostic(
+            DEBUG,
+            format!(
+                "{role} Chosen default: {mod_slot} mod found for: {weapon_name} weapon conflicts with item on weapon, cannot use default"
+            ),
+        ));
+
+        let existing_mod_pool = existing_pool()?;
+        if existing_mod_pool.len() == 1 {
+            // The only item in pool isn't compatible
+            ctx.diagnostics.push(diagnostic(
+                DEBUG,
+                format!(
+                    "{role} {mod_slot} Mod pool for: {weapon_name} weapon has only incompatible items, using parent list instead"
+                ),
+            ));
+
+            // Last ditch, use full pool of items minus conflicts
+            let new_list_of_mods_for_slot: IndexSet<String> = parent_slot_compatible_items
+                .unwrap_or_default()
+                .iter()
+                .filter(|tpl| !request.conflicting_item_tpls.contains(*tpl))
+                .cloned()
+                .collect();
+            if !new_list_of_mods_for_slot.is_empty() {
+                return Ok(new_list_of_mods_for_slot);
+            }
+        }
+
+        // Return full mod pool
+        return Ok(existing_mod_pool);
+    }
+
+    // Tried everything, return mod pool
+    existing_pool()
+}
+
+/// `BotEquipmentModGenerator.GetMatchingModFromPreset` (`:1449-1455`).
+fn get_matching_mod_from_preset<'a>(
+    ctx: &'a BotContext,
+    request: &ModToSpawnRequest,
+    weapon_tpl: &str,
+) -> Option<&'a Item> {
+    get_matching_preset(ctx, weapon_tpl, request.parent_template)?
+        .items
+        .iter()
+        .find(|item| {
+            item.slot_id
+                .as_deref()
+                .is_some_and(|slot_id| slot_id.eq_ignore_ascii_case(request.mod_slot))
+        })
+}
+
+/// `BotEquipmentModGenerator.GetMatchingPreset` (`:1463-1481`), against the two preset projections
+/// [`BotContext`] carries: `presets_by_id` for the two edge cases, `default_presets_by_tpl` for
+/// everything else.
+fn get_matching_preset<'a>(
+    ctx: &'a BotContext,
+    weapon_tpl: &str,
+    parent_item_tpl: &str,
+) -> Option<&'a PresetView> {
+    // Edge case - using MP5SD receiver means default mp5 handguard doesn't fit
+    if parent_item_tpl == RECEIVER_HK_MP5SD_9X19_UPPER {
+        return ctx.presets_by_id.get(MP5SD_PRESET_ID);
+    }
+
+    // Edge case - dvl 500mm is the silenced barrel and has specific muzzle mods
+    if parent_item_tpl == BARREL_DVL10_762X51_500MM_SUPPRESSED {
+        return ctx.presets_by_id.get(DVL_SILENCED_PRESET_ID);
+    }
+
+    ctx.default_presets_by_tpl.get(weapon_tpl)
+}
+
+/// `BotEquipmentModGenerator.WeaponModComboIsIncompatible` (`:1489-1498`).
+fn weapon_mod_combo_is_incompatible(weapon: &[Item], mod_tpl: &str) -> bool {
+    // STM-9 + AR-15 Lone Star Ion Lite handguard
+    weapon
+        .first()
+        .is_some_and(|root| root.template == SMG_SOYUZTM_STM9_GEN2_9X19_CARBINE)
+        && mod_tpl == HANDGUARD_AR15_LONE_STAR_ION_LITE
+}
+
+/// `BotEquipmentModGenerator.AddCompatibleModsForProvidedMod` (`:1631-1663`).
+fn add_compatible_mods_for_provided_mod(
+    ctx: &mut BotContext,
+    desired_slot_name: &str,
+    mod_tpl: &str,
+    mod_template: &ItemView,
+    mod_pool: &mut IndexMap<String, IndexMap<String, IndexSet<String>>>,
+    bot_equip_blacklist: &EquipmentFilterDetails,
+) {
+    let desired_slot_object = mod_template
+        .slots
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .find(|slot| {
+            slot.name
+                .as_deref()
+                .is_some_and(|name| name.contains(desired_slot_name))
+        });
+
+    let Some(supported_sub_mods) = desired_slot_object.and_then(|slot| slot.filter.as_deref())
+    else {
+        return;
+    };
+    let supported_sub_mods_set: IndexSet<String> = supported_sub_mods.iter().cloned().collect();
+
+    // Filter mods
+    let filtered_mods = filter_mods_by_blacklist(
+        ctx,
+        &supported_sub_mods_set,
+        bot_equip_blacklist,
+        desired_slot_name,
+    );
+    let slot_name = desired_slot_object
+        .and_then(|slot| slot.name.clone())
+        .unwrap_or_default();
+    if filtered_mods.is_empty() {
+        ctx.diagnostics.push(localised(
+            WARNING,
+            "bot-unable_to_filter_mods_all_blacklisted",
+            serde_json::json!({
+                "slotName": slot_name,
+                "itemName": mod_template.name.clone().unwrap_or_default(),
+            }),
+        ));
+    }
+
+    mod_pool
+        .entry(mod_tpl.to_owned())
+        .or_default()
+        .insert(slot_name, filtered_mods);
+}
+
+/// `BotEquipmentModGenerator.GetDynamicModPool` (`:1672-1692`).
+fn get_dynamic_mod_pool(
+    ctx: &mut BotContext,
+    parent_item_id: &str,
+    mod_slot: &str,
+    bot_equip_blacklist: &EquipmentFilterDetails,
+) -> IndexSet<String> {
+    let mods_from_dynamic_pool = get_compatible_mods_for_weapon_slot(ctx, parent_item_id, mod_slot);
+
+    if mods_from_dynamic_pool.is_empty() {
+        // Mod pool has no items, don't bother doing any filtering below
+        return mods_from_dynamic_pool;
+    }
+
+    let filtered_mods =
+        filter_mods_by_blacklist(ctx, &mods_from_dynamic_pool, bot_equip_blacklist, mod_slot);
+    if !filtered_mods.is_empty() {
+        // Filtering left at least 1 item, return it
+        return filtered_mods;
+    }
+
+    ctx.diagnostics.push(localised(
+        WARNING,
+        "bot-unable_to_filter_mod_slot_all_blacklisted",
+        serde_json::json!(mod_slot),
+    ));
+
+    mods_from_dynamic_pool
+}
+
+/// `BotEquipmentModGenerator.FillCamora` (`:1735-1814`).
+///
+/// Two quirks of the C# are load-bearing and ported as they are: **one** ammo tpl is drawn and
+/// cloned into **every** `Properties.Slots` entry of the cylinder — non-camora slots included
+/// (`:1800`) — and each of those clones gets a fresh id (`:1803`).
+fn fill_camora(
+    ctx: &mut BotContext,
+    items: &mut Vec<Item>,
+    mod_pool: &mut IndexMap<String, IndexMap<String, IndexSet<String>>>,
+    cylinder_mag_parent_id: &str,
+    cylinder_mag_tpl: &str,
+    cylinder_mag_template: &ItemView,
+) {
+    let template_slots = cylinder_mag_template.slots.as_deref().unwrap_or_default();
+
+    let item_mod_pool = match mod_pool.get(cylinder_mag_tpl) {
+        Some(pool) => pool.clone(),
+        None => {
+            ctx.diagnostics.push(localised(
+                WARNING,
+                "bot-unable_to_fill_camora_slot_mod_pool_empty",
+                serde_json::json!({
+                    "weaponId": cylinder_mag_tpl,
+                    "weaponName": cylinder_mag_template.name.clone().unwrap_or_default(),
+                }),
+            ));
+
+            // Attempt to generate camora slots for item
+            let generated: IndexMap<String, IndexSet<String>> = template_slots
+                .iter()
+                .filter(|slot| {
+                    slot.name
+                        .as_deref()
+                        .is_some_and(|name| name.starts_with("camora"))
+                })
+                .map(|camora| {
+                    (
+                        camora.name.clone().unwrap_or_default(),
+                        camora.filter.iter().flatten().cloned().collect(),
+                    )
+                })
+                .collect();
+            mod_pool.insert(cylinder_mag_tpl.to_owned(), generated.clone());
+
+            generated
+        }
+    };
+
+    let mut mod_slot = "cartridges";
+    const CAMORA_FIRST_SLOT: &str = "camora_000";
+    let mut exhaustible_mod_pool = if let Some(cartridges) = item_mod_pool.get(mod_slot) {
+        ExhaustableArray::new(cartridges.iter().cloned().collect())
+    } else if item_mod_pool.contains_key(CAMORA_FIRST_SLOT) {
+        mod_slot = CAMORA_FIRST_SLOT;
+        ExhaustableArray::new(merge_camora_pools(&item_mod_pool).into_iter().collect())
+    } else {
+        ctx.diagnostics.push(localised(
+            ERROR,
+            "bot-missing_cartridge_slot",
+            serde_json::json!(cylinder_mag_tpl),
+        ));
+
+        return;
+    };
+
+    let mut found = None;
+    while let Some(mod_tpl) = exhaustible_mod_pool.get_random_value() {
+        if !is_item_incompatible_with_current_items(ctx, items, &mod_tpl, mod_slot)
+            .incompatible
+            .unwrap_or(false)
+        {
+            found = Some(mod_tpl);
+            break;
+        }
+    }
+
+    let Some(mod_tpl) = found else {
+        ctx.diagnostics.push(localised(
+            ERROR,
+            "bot-no_compatible_camora_ammo_found",
+            serde_json::json!(mod_slot),
+        ));
+
+        return;
+    };
+
+    for slot in template_slots {
+        items.push(Item {
+            id: mongo_id::generate(),
+            template: mod_tpl.clone(),
+            parent_id: Some(cylinder_mag_parent_id.to_owned()),
+            slot_id: Some(slot.name.clone().unwrap_or_default()),
+            ..Default::default()
+        });
+    }
+}
+
+/// `BotEquipmentModGenerator.MergeCamoraPools` (`:1821-1824`).
+fn merge_camora_pools(
+    camoras_with_shells: &IndexMap<String, IndexSet<String>>,
+) -> IndexSet<String> {
+    camoras_with_shells
+        .values()
+        .flatten()
+        .cloned()
+        .collect::<IndexSet<String>>()
+}
+
+/// `BotEquipmentModGenerator.FilterSightsByWeaponType` (`:1835-1915`).
+///
+/// **Deviation:** a mount's scope slot with no filter is an empty allowed list here, whose `All` is
+/// vacuously true — the C# `Filters.FirstOrDefault().Filter` throws on it. No live template hits it.
+fn filter_sights_by_weapon_type(
+    ctx: &mut BotContext,
+    weapon: &Item,
+    scopes: &IndexSet<String>,
+    bot_weapon_sight_whitelist: &IndexMap<String, Vec<String>>,
+) -> IndexSet<String> {
+    let items = ctx.items;
+    let weapon_details = get_item(items, &weapon.template);
+    let weapon_parent = weapon_details
+        .and_then(|details| details.parent.clone())
+        .unwrap_or_default();
+    let weapon_name = weapon_details
+        .and_then(|details| details.name.clone())
+        .unwrap_or_default();
+
+    // Return original scopes array if whitelist not found
+    let Some(whitelisted_sight_types) = bot_weapon_sight_whitelist.get(&weapon_parent) else {
+        ctx.diagnostics.push(diagnostic(
+            DEBUG,
+            format!(
+                "Unable to find whitelist for weapon type: {weapon_parent} {weapon_name}, skipping sight filtering"
+            ),
+        ));
+
+        return scopes.clone();
+    };
+    let whitelisted_sight_types: Vec<&str> =
+        whitelisted_sight_types.iter().map(String::as_str).collect();
+
+    // Filter items that are not directly scopes OR mounts that do not hold the type of scope we
+    // allow for this weapon type
+    let mut filtered_scopes_and_mods: IndexSet<String> = IndexSet::new();
+    for scope_tpl in scopes {
+        // Mods is a scope, check base class is allowed
+        if is_of_baseclasses(items, scope_tpl, &whitelisted_sight_types) {
+            // Add mod to allowed list
+            filtered_scopes_and_mods.insert(scope_tpl.clone());
+
+            continue;
+        }
+
+        // Edge case, what if item is a mount for a scope and not directly a scope?
+        // Check item is mount + has child items
+        let item_details = get_item(items, scope_tpl);
+        let slots = item_details
+            .and_then(|details| details.slots.as_deref())
+            .unwrap_or_default();
+        if !slots.is_empty() && is_of_baseclass(items, scope_tpl, MOUNT) {
+            // Check to see if mount has a scope slot (only include primary slot, ignore the rest
+            // like the backup sight slots)
+            // Should only find 1 as there's currently no items with a mod_scope AND a mod_scope_000
+            let scope_slots = slots.iter().filter(|slot| {
+                slot.name
+                    .as_deref()
+                    .is_some_and(|name| name == "mod_scope" || name == "mod_scope_000")
+            });
+
+            // Mods scope slot found must allow ALL whitelisted scope types OR be a mount
+            if scope_slots.into_iter().all(|slot| {
+                slot.filter.iter().flatten().all(|tpl| {
+                    get_item(items, tpl).is_some()
+                        && (is_of_baseclasses(items, tpl, &whitelisted_sight_types)
+                            || is_of_baseclass(items, tpl, MOUNT))
+                })
+            })
+            // Add mod to allowed list
+            {
+                filtered_scopes_and_mods.insert(scope_tpl.clone());
+            }
+        }
+    }
+
+    // No mods added to return list after filtering has occurred, send back the original mod list
+    if filtered_scopes_and_mods.is_empty() {
+        let weapon_tpl = &weapon.template;
+        ctx.diagnostics.push(diagnostic(
+            DEBUG,
+            format!(
+                "Scope whitelist too restrictive for: {weapon_tpl} {weapon_name}, skipping filter"
+            ),
+        ));
+
+        return scopes.clone();
+    }
+
+    filtered_scopes_and_mods
+}
+
+/// `BotWeaponModLimitService.WeaponModHasReachedLimit`
+/// (`Services/Bot/BotWeaponModLimitService.cs:55-136`), ported inline: it is the only method of that
+/// service the weapon path calls, and its state is the [`BotModLimitsWire`] counters the request
+/// already carries.
+fn weapon_mod_has_reached_limit(
+    ctx: &mut BotContext,
+    bot_role: &str,
+    mod_tpl: &str,
+    mod_template: &ItemView,
+    mod_limits: &mut BotModLimitsWire,
+    mods_parent_tpl: &str,
+    weapon: &[Item],
+) -> bool {
+    let items = ctx.items;
+
+    // If mod or mods parent is the NcSTAR MPR45 Backup mount, allow it as it looks cool
+    if mods_parent_tpl == MOUNT_NCSTAR_MPR45_BACKUP || mod_tpl == MOUNT_NCSTAR_MPR45_BACKUP {
+        // If weapon already has a longer ranged scope on it, allow ncstar to be spawned
+        return !weapon.iter().any(|item| {
+            is_of_baseclasses(
+                items,
+                &item.template,
+                &[ASSAULT_SCOPE, OPTIC_SCOPE, SPECIAL_SCOPE],
+            )
+        });
+    }
+
+    let scope_base_types: Vec<&str> = mod_limits
+        .scope_base_types
+        .iter()
+        .map(String::as_str)
+        .collect();
+
+    // Mods parent is scope and mod is scope, allow it (adds those mini-sights to the tops of sights)
+    let mod_is_scope = is_of_baseclasses(items, mod_tpl, &scope_base_types);
+    if is_of_baseclasses(items, mods_parent_tpl, &scope_base_types) && mod_is_scope {
+        return false;
+    }
+
+    // If mod is a scope, Exit early
+    if mod_is_scope {
+        let scope_max = mod_limits.scope_max;
+
+        return weapon_mod_limit_reached(
+            ctx,
+            mod_tpl,
+            &mut mod_limits.scope,
+            scope_max,
+            bot_role,
+            "scope",
+        );
+    }
+
+    // Don't allow multiple mounts on a weapon (except when mount is on another mount)
+    // Fail when:
+    // Over or at scope limit on weapon
+    // Item being added is a mount but the parent item is NOT a mount (Allows red dot sub-mounts on
+    // mounts)
+    // Mount has one slot and it is for a mod_scope
+    if scope_limit_reached(mod_limits)
+        && has_exactly_one_slot(mod_template)
+        && is_of_baseclass(items, mod_tpl, MOUNT)
+        && !is_of_baseclass(items, mods_parent_tpl, MOUNT)
+        && has_slot_named(mod_template, "mod_scope")
+    {
+        return true;
+    }
+
+    // If mod is a light/laser, return if limit reached
+    let flashlight_laser_base_types: Vec<&str> = mod_limits
+        .flashlight_laser_base_types
+        .iter()
+        .map(String::as_str)
+        .collect();
+    if is_of_baseclasses(items, mod_tpl, &flashlight_laser_base_types) {
+        let flashlight_laser_max = mod_limits.flashlight_laser_max;
+
+        return weapon_mod_limit_reached(
+            ctx,
+            mod_tpl,
+            &mut mod_limits.flashlight_laser,
+            flashlight_laser_max,
+            bot_role,
+            "light/laser",
+        );
+    }
+
+    // Mod is a mount that can hold only flashlights ad limit is reached (don't want to add empty
+    // mounts if limit is reached)
+    scope_limit_reached(mod_limits)
+        && has_exactly_one_slot(mod_template)
+        && is_of_baseclass(items, mod_tpl, MOUNT)
+        && has_slot_named(mod_template, "mod_flashlight")
+}
+
+/// `BotWeaponModLimitService.WeaponModLimitReached` (`:147-170`).
+///
+/// The C# `currentCount.Count++` is a lifted `int?` increment: a null count stays null, and a null
+/// count also fails the `>=` test, so it is never limited and never counted. `Option::map` is that
+/// same lift.
+fn weapon_mod_limit_reached(
+    ctx: &mut BotContext,
+    mod_tpl: &str,
+    current_count: &mut ItemCountWire,
+    max_limit: Option<i32>,
+    bot_role: &str,
+    mod_type: &str,
+) -> bool {
+    // No limit, ignore
+    if max_limit.is_none_or(|limit| limit == 0) {
+        return false;
+    }
+
+    // Has mod limit for bot type been reached
+    if let (Some(count), Some(limit)) = (current_count.count, max_limit)
+        && count >= limit
+    {
+        ctx.diagnostics.push(diagnostic(
+            DEBUG,
+            format!(
+                "[{bot_role}] {mod_type} limit reached! tried to add: {mod_tpl} but {mod_type} count is: {count}"
+            ),
+        ));
+
+        return true;
+    }
+
+    // Increment mod count limit
+    current_count.count = current_count.count.map(|count| count + 1);
+
+    false
+}
+
+/// `modLimits.Scope.Count >= modLimits.ScopeMax` on two `int?`s: false unless both are set.
+fn scope_limit_reached(mod_limits: &BotModLimitsWire) -> bool {
+    matches!(
+        (mod_limits.scope.count, mod_limits.scope_max),
+        (Some(count), Some(max)) if count >= max
+    )
+}
+
+/// `modTemplate.Properties?.Slots?.Count() == 1` — false when either is null.
+fn has_exactly_one_slot(template: &ItemView) -> bool {
+    template
+        .slots
+        .as_ref()
+        .is_some_and(|slots| slots.len() == 1)
+}
+
+/// `template.Properties.Slots.Any(slot => slot.Name == name)`.
+fn has_slot_named(template: &ItemView, name: &str) -> bool {
+    template
+        .slots
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .any(|slot| slot.name.as_deref() == Some(name))
+}
+
+/// `TemplateItemExtensions.HasNoSlotsCartridgesOrChambers` (`:67-78`). A tpl the items view does not
+/// hold takes the `Properties is null` arm, where the C# would have thrown one line earlier.
+fn has_no_slots_cartridges_or_chambers(template: Option<&ItemView>) -> bool {
+    let Some(template) = template else {
+        return true;
+    };
+
+    // The C# precedence is `Slots is null || (Slots empty && Cartridges empty && Chambers empty)`.
+    let is_empty =
+        |slots: &Option<Vec<SlotView>>| slots.as_ref().is_none_or(|slots| slots.is_empty());
+
+    template.slots.is_none()
+        || (is_empty(&template.slots)
+            && is_empty(&template.cartridges)
+            && is_empty(&template.chambers))
+}
+
+/// `BotHelper.GetBotRandomizationDetails` (`Helpers/Bot/BotHelper.cs:74-81`).
+fn get_bot_randomization_details(
+    bot_level: i32,
+    bot_equip_config: &EquipmentFilters,
+) -> Option<&RandomisationDetails> {
+    bot_equip_config
+        .randomisation
+        .iter()
+        .flatten()
+        .find(|details| {
+            bot_level >= details.level_range.min && bot_level <= details.level_range.max
+        })
+}
+
 /// `BotEquipmentModGenerator.ShouldModBeSpawned` (`:989-1014`).
 fn should_mod_be_spawned(
     item_slot: &SlotView,
@@ -655,21 +2269,36 @@ fn should_mod_be_spawned(
 
 /// `BotEquipmentModGenerator.GetModItemSlotFromDbTemplate` (`:959-979`).
 ///
-/// **Deviation:** only the `default:` arm is ported. The `patron_in_weapon*` and `cartridges` arms
-/// read `Properties.Chambers`/`Properties.Cartridges`, which the flattened [`ItemView`] does not
-/// carry as slot objects; no equipment mod pool holds those slot names, since its keys come from
-/// `Properties.Slots`. The weapon path grows them.
+/// The `patron_in_weapon*` and `cartridges` arms read `Properties.Chambers`/`Properties.Cartridges`,
+/// which [`ItemView`] carries as slot lists for this method's sake — note the chamber arm matches by
+/// `Contains`, not equality, so `patron_in_weapon` also finds `patron_in_weapon_000`.
 fn get_mod_item_slot_from_db_template<'a>(
     mod_slot: &str,
     parent_template: Option<&'a ItemView>,
 ) -> Option<&'a SlotView> {
     let mod_slot_lower = mod_slot.to_lowercase();
+    let parent_template = parent_template?;
 
-    parent_template?.slots.as_ref()?.iter().find(|slot| {
-        slot.name
-            .as_deref()
-            .is_some_and(|name| name.eq_ignore_ascii_case(&mod_slot_lower))
-    })
+    match mod_slot_lower.as_str() {
+        "patron_in_weapon" | "patron_in_weapon_000" | "patron_in_weapon_001" => {
+            parent_template.chambers.as_ref()?.iter().find(|chamber| {
+                chamber
+                    .name
+                    .as_deref()
+                    .is_some_and(|name| name.to_lowercase().contains(&mod_slot_lower))
+            })
+        }
+        "cartridges" => parent_template.cartridges.as_ref()?.iter().find(|slot| {
+            slot.name
+                .as_deref()
+                .is_some_and(|name| name.eq_ignore_ascii_case(&mod_slot_lower))
+        }),
+        _ => parent_template.slots.as_ref()?.iter().find(|slot| {
+            slot.name
+                .as_deref()
+                .is_some_and(|name| name.eq_ignore_ascii_case(&mod_slot_lower))
+        }),
+    }
 }
 
 /// `BotEquipmentModGenerator.FilterModsByBlacklist` (`:1701-1723`).
@@ -845,6 +2474,18 @@ fn diagnostic(level: &str, message: String) -> Diagnostic {
     }
 }
 
+/// A `ServerLocalisationService.GetText` line: the key plus the arguments the C# passes with it (a
+/// bare value for the `%s` keys, an object whose members match the C# anonymous type otherwise) —
+/// the same shape `loot::location_loot_generator` uses.
+fn localised(level: &str, locale_key: &str, args: serde_json::Value) -> Diagnostic {
+    Diagnostic {
+        level: level.to_owned(),
+        locale_key: Some(locale_key.to_owned()),
+        args: Some(args),
+        message: None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
@@ -877,6 +2518,25 @@ mod tests {
     const NVG: &str = "ccccccccccccccccccccccc2";
     const NVG_MOUNT: &str = "ccccccccccccccccccccccc3";
     const ROOT_ID: &str = "ffffffffffffffffffffffff";
+
+    /// Unread by either fixture — no template here has a durability — but `BotContext` carries it.
+    fn durability_config() -> BotDurability {
+        serde_json::from_value(json!({
+            "default": {
+                "armor": {"maxDelta": 0, "minDelta": 0, "minLimitPercent": 0},
+                "weapon": {"lowestMax": 0, "highestMax": 0, "maxDelta": 0,
+                           "minDelta": 0, "minLimitPercent": 0}
+            },
+            "botDurabilities": {},
+            "pmc": {
+                "armor": {"lowestMaxPercent": 0, "highestMaxPercent": 0, "maxDelta": 0,
+                          "minDelta": 0, "minLimitPercent": 0},
+                "weapon": {"lowestMax": 0, "highestMax": 0, "maxDelta": 0,
+                           "minDelta": 0, "minLimitPercent": 0}
+            }
+        }))
+        .unwrap()
+    }
 
     struct Fixture {
         items: IndexMap<String, ItemView>,
@@ -926,22 +2586,7 @@ mod tests {
                 }))
                 .unwrap(),
                 bosses: Vec::new(),
-                // Unread here — no fixture template has a durability — but `BotContext` carries it.
-                durability: serde_json::from_value(json!({
-                    "default": {
-                        "armor": {"maxDelta": 0, "minDelta": 0, "minLimitPercent": 0},
-                        "weapon": {"lowestMax": 0, "highestMax": 0, "maxDelta": 0,
-                                   "minDelta": 0, "minLimitPercent": 0}
-                    },
-                    "botDurabilities": {},
-                    "pmc": {
-                        "armor": {"lowestMaxPercent": 0, "highestMaxPercent": 0, "maxDelta": 0,
-                                  "minDelta": 0, "minLimitPercent": 0},
-                        "weapon": {"lowestMax": 0, "highestMax": 0, "maxDelta": 0,
-                                   "minDelta": 0, "minLimitPercent": 0}
-                    }
-                }))
-                .unwrap(),
+                durability: durability_config(),
                 equipment: IndexMap::new(),
                 randomization: IndexMap::new(),
                 item_blacklist: HashSet::new(),
@@ -966,6 +2611,9 @@ mod tests {
                 is_night_time: false,
                 item_blacklist: &self.item_blacklist,
                 default_presets_by_tpl: &self.default_presets_by_tpl,
+                presets_by_id: &crate::bot::NO_PRESETS,
+                equipment_blacklist: &crate::bot::NO_EQUIP_BLACKLIST,
+                low_profile_gas_block_tpls: &crate::bot::NO_BLACKLIST,
                 diagnostics: Vec::new(),
             }
         }
@@ -1593,6 +3241,904 @@ mod tests {
             ModSpawn::Spawn
         );
         assert_eq!(get_int(1, 1000), baseline, "the ammo slot consumed a draw");
+    }
+
+    /// The weapon half (`:503-1916`). Its own fixture: an M4-shaped weapon with a receiver → mount →
+    /// scope chain, a stock that takes a sub-stock, a barrel with a muzzle slot, two magazines, a
+    /// chamber, plus a triple-scope rail for the mod limits and a revolver for the camora path.
+    mod weapon {
+        use super::*;
+
+        use crate::bot::models::GenerateWeaponRequestWire;
+        use crate::loot::item_helper::{ASSAULT_SCOPE, IRON_SIGHT, MOD, MOUNT, SIGHTS, WEAPON};
+
+        /// `BaseClasses.ASSAULT_RIFLE`, the base class the sight whitelist is keyed by.
+        const RIFLE_CLASS: &str = "5447b5f14bdc2d61278b4567";
+
+        const M4: &str = "aaaaaaaaaaaaaaaaaaaaaaa1";
+        const RECEIVER: &str = "aaaaaaaaaaaaaaaaaaaaaaa2";
+        const SCOPE_MOUNT: &str = "aaaaaaaaaaaaaaaaaaaaaaa3";
+        const SCOPE: &str = "aaaaaaaaaaaaaaaaaaaaaaa4";
+        /// A sight that is not an assault scope, so the whitelist filters it out.
+        const SCOPE_ALT: &str = "aaaaaaaaaaaaaaaaaaaaaaa5";
+        const FRONT_SIGHT: &str = "aaaaaaaaaaaaaaaaaaaaaaa6";
+        const REAR_SIGHT: &str = "aaaaaaaaaaaaaaaaaaaaaaa7";
+        const STOCK: &str = "aaaaaaaaaaaaaaaaaaaaaaa8";
+        const STOCK_SUB: &str = "aaaaaaaaaaaaaaaaaaaaaaa9";
+        const GRIP: &str = "aaaaaaaaaaaaaaaaaaaaaab1";
+        const BARREL: &str = "aaaaaaaaaaaaaaaaaaaaaab2";
+        const MUZZLE: &str = "aaaaaaaaaaaaaaaaaaaaaab3";
+        const MAGAZINE: &str = "aaaaaaaaaaaaaaaaaaaaaab4";
+        const MAGAZINE_SMALL: &str = "aaaaaaaaaaaaaaaaaaaaaab5";
+        const AMMO: &str = "aaaaaaaaaaaaaaaaaaaaaab6";
+        const REVOLVER: &str = "aaaaaaaaaaaaaaaaaaaaaab7";
+        const CYLINDER_CLASS: &str = "aaaaaaaaaaaaaaaaaaaaaab8";
+        const CYLINDER: &str = "aaaaaaaaaaaaaaaaaaaaaab9";
+        const SHELL: &str = "aaaaaaaaaaaaaaaaaaaaaac1";
+        const RAIL_WEAPON: &str = "aaaaaaaaaaaaaaaaaaaaaac2";
+        const SCOPE_B: &str = "aaaaaaaaaaaaaaaaaaaaaac3";
+        const SCOPE_C: &str = "aaaaaaaaaaaaaaaaaaaaaac4";
+        const WEAPON_ROOT_ID: &str = "dddddddddddddddddddddddd";
+
+        struct WeaponFixture {
+            items: IndexMap<String, ItemView>,
+            bosses: Vec<String>,
+            durability: BotDurability,
+            equipment: IndexMap<String, EquipmentFilters>,
+            randomization: IndexMap<String, RandomisedResourceDetails>,
+            item_blacklist: HashSet<String>,
+            default_presets_by_tpl: IndexMap<String, PresetView>,
+            presets_by_id: IndexMap<String, PresetView>,
+            equipment_blacklist: EquipmentFilterDetails,
+            low_profile_gas_block_tpls: HashSet<String>,
+        }
+
+        impl WeaponFixture {
+            fn new() -> Self {
+                Self {
+                    items: serde_json::from_value(json!({
+                        WEAPON: {"type": "Node"},
+                        MOD: {"type": "Node"},
+                        MOUNT: {"parent": MOD, "type": "Node"},
+                        SIGHTS: {"parent": MOD, "type": "Node"},
+                        IRON_SIGHT: {"parent": SIGHTS, "type": "Node"},
+                        ASSAULT_SCOPE: {"parent": SIGHTS, "type": "Node"},
+                        RIFLE_CLASS: {"parent": WEAPON, "type": "Node"},
+                        M4: {"parent": RIFLE_CLASS, "type": "Item", "name": "m4a1", "slots": [
+                            {"name": "mod_reciever", "required": true, "filter": [RECEIVER]},
+                            {"name": "mod_magazine", "filter": [MAGAZINE, MAGAZINE_SMALL]},
+                            {"name": "mod_pistol_grip", "filter": [GRIP]},
+                            {"name": "mod_stock", "filter": [STOCK]},
+                        ], "chambers": [
+                            {"name": "patron_in_weapon", "required": true, "filter": [AMMO]},
+                        ]},
+                        RECEIVER: {"parent": MOD, "type": "Item", "name": "receiver", "slots": [
+                            {"name": "mod_scope", "filter": [SCOPE_MOUNT, SCOPE]},
+                            {"name": "mod_barrel", "filter": [BARREL]},
+                            {"name": "mod_sight_front", "filter": [FRONT_SIGHT]},
+                            {"name": "mod_sight_rear", "filter": [REAR_SIGHT]},
+                        ]},
+                        SCOPE_MOUNT: {"parent": MOUNT, "type": "Item", "name": "scope_mount",
+                                      "slots": [{"name": "mod_scope", "filter": [SCOPE]}]},
+                        SCOPE: {"parent": ASSAULT_SCOPE, "type": "Item", "name": "scope"},
+                        SCOPE_ALT: {"parent": SIGHTS, "type": "Item", "name": "scope_alt"},
+                        FRONT_SIGHT: {"parent": IRON_SIGHT, "type": "Item", "name": "front_sight"},
+                        REAR_SIGHT: {"parent": IRON_SIGHT, "type": "Item", "name": "rear_sight"},
+                        STOCK: {"parent": MOD, "type": "Item", "name": "stock", "slots": [
+                            {"name": "mod_stock_000", "filter": [STOCK_SUB]},
+                        ]},
+                        STOCK_SUB: {"parent": MOD, "type": "Item", "name": "stock_sub"},
+                        GRIP: {"parent": MOD, "type": "Item", "name": "grip"},
+                        BARREL: {"parent": MOD, "type": "Item", "name": "barrel", "slots": [
+                            {"name": "mod_muzzle", "filter": [MUZZLE]},
+                        ]},
+                        MUZZLE: {"parent": MOD, "type": "Item", "name": "muzzle"},
+                        MAGAZINE: {"parent": MOD, "type": "Item", "name": "magazine",
+                                   "cartridgesMaxCount": 30},
+                        MAGAZINE_SMALL: {"parent": MOD, "type": "Item", "name": "magazine_small",
+                                         "cartridgesMaxCount": 10},
+                        AMMO: {"parent": MOD, "type": "Item", "name": "ammo"},
+                        REVOLVER: {"parent": RIFLE_CLASS, "type": "Item", "name": "revolver",
+                                   "slots": [
+                            {"name": "mod_magazine", "required": true, "filter": [CYLINDER]},
+                        ]},
+                        // Only its `_name` is read, by `MagazineIsCylinderRelated`.
+                        CYLINDER_CLASS: {"parent": MOD, "type": "Node", "name": "CylinderMagazine"},
+                        CYLINDER: {"parent": CYLINDER_CLASS, "type": "Item", "name": "cylinder",
+                                   "slots": [
+                            {"name": "camora_000", "filter": [SHELL]},
+                            {"name": "camora_001", "filter": [SHELL]},
+                            // Not a camora: `:1800` clones the chosen shell into it anyway.
+                            {"name": "mod_sight_rear", "filter": [REAR_SIGHT]},
+                        ]},
+                        SHELL: {"parent": MOD, "type": "Item", "name": "shell"},
+                        RAIL_WEAPON: {"parent": RIFLE_CLASS, "type": "Item", "name": "rail_weapon",
+                                      "slots": [
+                            {"name": "mod_scope", "filter": [SCOPE]},
+                            {"name": "mod_scope_000", "filter": [SCOPE_B]},
+                            {"name": "mod_scope_001", "filter": [SCOPE_C]},
+                        ]},
+                        SCOPE_B: {"parent": ASSAULT_SCOPE, "type": "Item", "name": "scope_b"},
+                        SCOPE_C: {"parent": ASSAULT_SCOPE, "type": "Item", "name": "scope_c"},
+                    }))
+                    .unwrap(),
+                    bosses: Vec::new(),
+                    durability: durability_config(),
+                    equipment: IndexMap::from([(
+                        "assault".to_owned(),
+                        EquipmentFilters::default(),
+                    )]),
+                    randomization: IndexMap::new(),
+                    item_blacklist: HashSet::new(),
+                    default_presets_by_tpl: IndexMap::new(),
+                    presets_by_id: IndexMap::new(),
+                    equipment_blacklist: EquipmentFilterDetails::default(),
+                    low_profile_gas_block_tpls: HashSet::new(),
+                }
+            }
+
+            fn ctx(&self) -> BotContext<'_> {
+                BotContext {
+                    items: &self.items,
+                    bosses: &self.bosses,
+                    durability: &self.durability,
+                    equipment: &self.equipment,
+                    loot_item_resource_randomization: &self.randomization,
+                    is_night_time: false,
+                    item_blacklist: &self.item_blacklist,
+                    default_presets_by_tpl: &self.default_presets_by_tpl,
+                    presets_by_id: &self.presets_by_id,
+                    equipment_blacklist: &self.equipment_blacklist,
+                    low_profile_gas_block_tpls: &self.low_profile_gas_block_tpls,
+                    diagnostics: Vec::new(),
+                }
+            }
+        }
+
+        fn request(
+            weapon_tpl: &str,
+            mod_pool: serde_json::Value,
+            chances: serde_json::Value,
+        ) -> GenerateWeaponRequestWire {
+            serde_json::from_value(json!({
+                "weapon": [{"_id": WEAPON_ROOT_ID, "_tpl": weapon_tpl, "slotId": "FirstPrimaryWeapon"}],
+                "modPool": mod_pool,
+                "weaponId": WEAPON_ROOT_ID,
+                "parentTemplate": weapon_tpl,
+                "modSpawnChances": chances,
+                "ammoTpl": AMMO,
+                "botData": {"role": "assault", "level": 20, "equipmentRole": "assault"},
+                "modLimits": {
+                    "scope": {"count": 0},
+                    "scopeMax": 2,
+                    "scopeBaseTypes": [ASSAULT_SCOPE],
+                    "flashlightLaser": {"count": 0},
+                    "flashlightLaserMax": 1,
+                    "flashlightLaserBaseTypes": [],
+                },
+                "weaponStats": {},
+                "conflictingItemTpls": [],
+            }))
+            .unwrap()
+        }
+
+        /// Every slot the M4 tree can fill, at a chance of 100.
+        fn m4_request() -> GenerateWeaponRequestWire {
+            request(
+                M4,
+                json!({
+                    M4: {
+                        "mod_reciever": [RECEIVER],
+                        "mod_magazine": [MAGAZINE, MAGAZINE_SMALL],
+                        "mod_pistol_grip": [GRIP],
+                        "mod_stock": [STOCK],
+                        "patron_in_weapon": [AMMO],
+                    },
+                    RECEIVER: {
+                        "mod_scope": [SCOPE_MOUNT, SCOPE],
+                        "mod_barrel": [BARREL],
+                        "mod_sight_front": [FRONT_SIGHT],
+                        "mod_sight_rear": [REAR_SIGHT],
+                    },
+                    SCOPE_MOUNT: {"mod_scope": [SCOPE]},
+                    STOCK: {"mod_stock_000": [STOCK_SUB]},
+                    BARREL: {"mod_muzzle": [MUZZLE]},
+                }),
+                json!({
+                    "mod_reciever": 100.0, "mod_magazine": 100.0, "mod_pistol_grip": 100.0,
+                    "mod_stock": 100.0, "mod_stock_000": 100.0, "mod_scope": 100.0,
+                    "mod_barrel": 100.0, "mod_muzzle": 100.0, "mod_sight_front": 100.0,
+                    "mod_sight_rear": 100.0,
+                }),
+            )
+        }
+
+        /// `(slotId, tpl, parent)` with generated ids replaced by their index, as the equipment
+        /// tests do.
+        fn normalized(weapon: &[Item]) -> Vec<(String, String, String)> {
+            let ids: IndexMap<&str, String> = weapon
+                .iter()
+                .enumerate()
+                .map(|(index, item)| (item.id.as_str(), format!("#{index}")))
+                .collect();
+
+            weapon
+                .iter()
+                .map(|item| {
+                    (
+                        item.slot_id.clone().unwrap_or_default(),
+                        item.template.clone(),
+                        item.parent_id
+                            .as_deref()
+                            .and_then(|parent| ids.get(parent).cloned())
+                            .unwrap_or_default(),
+                    )
+                })
+                .collect()
+        }
+
+        #[test]
+        fn seeded_m4_run_is_pinned() {
+            let fixture = WeaponFixture::new();
+            let mut ctx = fixture.ctx();
+            let mut request = m4_request();
+
+            let _guard = TestSeedGuard::install(SEED);
+            generate_mods_for_weapon(&mut ctx, &mut request).unwrap();
+
+            // `SortModKeys` puts the receiver, grip and stock ahead of the pool's own order, and the
+            // receiver's own keys put the barrel and scope ahead of the two sights.
+            assert_eq!(
+                normalized(&request.weapon),
+                vec![
+                    (
+                        "FirstPrimaryWeapon".to_owned(),
+                        M4.to_owned(),
+                        String::new()
+                    ),
+                    (
+                        "mod_reciever".to_owned(),
+                        RECEIVER.to_owned(),
+                        "#0".to_owned()
+                    ),
+                    ("mod_barrel".to_owned(), BARREL.to_owned(), "#1".to_owned()),
+                    ("mod_muzzle".to_owned(), MUZZLE.to_owned(), "#2".to_owned()),
+                    (
+                        "mod_scope".to_owned(),
+                        SCOPE_MOUNT.to_owned(),
+                        "#1".to_owned()
+                    ),
+                    ("mod_scope".to_owned(), SCOPE.to_owned(), "#4".to_owned()),
+                    (
+                        "mod_sight_front".to_owned(),
+                        FRONT_SIGHT.to_owned(),
+                        "#1".to_owned()
+                    ),
+                    (
+                        "mod_sight_rear".to_owned(),
+                        REAR_SIGHT.to_owned(),
+                        "#1".to_owned()
+                    ),
+                    (
+                        "mod_pistol_grip".to_owned(),
+                        GRIP.to_owned(),
+                        "#0".to_owned()
+                    ),
+                    ("mod_stock".to_owned(), STOCK.to_owned(), "#0".to_owned()),
+                    (
+                        "mod_stock_000".to_owned(),
+                        STOCK_SUB.to_owned(),
+                        "#9".to_owned()
+                    ),
+                    (
+                        "mod_magazine".to_owned(),
+                        MAGAZINE.to_owned(),
+                        "#0".to_owned()
+                    ),
+                    (
+                        "patron_in_weapon".to_owned(),
+                        AMMO.to_owned(),
+                        "#0".to_owned()
+                    ),
+                ]
+            );
+            // Every mod has its own fresh id.
+            let ids: HashSet<&str> = request.weapon.iter().map(|item| item.id.as_str()).collect();
+            assert_eq!(ids.len(), request.weapon.len());
+            // An iron sight in each sight slot, and the scope is the optic.
+            assert_eq!(request.weapon_stats.has_front_iron_sight, Some(true));
+            assert_eq!(request.weapon_stats.has_rear_iron_sight, Some(true));
+            assert_eq!(request.weapon_stats.has_optic, Some(true));
+        }
+
+        /// `:618-630`: a mount picked for a scope slot forces every scope slot to 100%, and `:641`
+        /// forces the opposite sight. Both are visible on the request the caller keeps.
+        #[test]
+        fn picking_a_mount_and_a_sight_forces_their_sibling_slots_to_full_chance() {
+            let fixture = WeaponFixture::new();
+            let mut ctx = fixture.ctx();
+            let mut request = m4_request();
+            // Only the front sight is allowed to roll; the rear one is forced by `:643-644`.
+            request
+                .mod_spawn_chances
+                .insert("mod_sight_rear".to_owned(), 0.0);
+            request
+                .mod_spawn_chances
+                .insert("mod_scope".to_owned(), 0.0);
+
+            let _guard = TestSeedGuard::install(SEED);
+            generate_mods_for_weapon(&mut ctx, &mut request).unwrap();
+
+            assert_eq!(request.mod_spawn_chances["mod_sight_front"], 100.0);
+            assert_eq!(request.mod_spawn_chances["mod_sight_rear"], 100.0);
+            // The mount was skipped, so the scope slots were never forced.
+            assert_eq!(request.mod_spawn_chances["mod_scope"], 0.0);
+            assert!(
+                request
+                    .weapon
+                    .iter()
+                    .any(|item| item.template == REAR_SIGHT),
+                "the forced rear sight should have spawned"
+            );
+
+            // With the scope slot allowed to roll, the mount lands and forces all five scope slots.
+            let mut ctx = fixture.ctx();
+            let mut request = m4_request();
+            let _guard = TestSeedGuard::install(SEED);
+            generate_mods_for_weapon(&mut ctx, &mut request).unwrap();
+
+            for slot in SCOPE_SLOTS_TO_FORCE {
+                assert_eq!(request.mod_spawn_chances[slot], 100.0, "{slot}");
+            }
+            // The barrel's muzzle slot took the 95% of `:637`.
+            assert_eq!(request.mod_spawn_chances["mod_muzzle"], 95.0);
+            assert_eq!(request.mod_spawn_chances["mod_muzzle_000"], 95.0);
+            // The stock takes a sub-stock, so `:666` forced its slots too.
+            assert_eq!(request.mod_spawn_chances["mod_stock_akms"], 100.0);
+        }
+
+        /// `:847` never reads `modsParentId`, so a wrong one changes nothing.
+        #[test]
+        fn muzzle_slots_ignore_the_parent_id() {
+            assert!(mod_slot_can_hold_muzzle_devices("mod_muzzle", None));
+            assert!(mod_slot_can_hold_muzzle_devices(
+                "mod_muzzle",
+                Some("not-a-parent-id-at-all")
+            ));
+            assert!(mod_slot_can_hold_muzzle_devices(
+                "MOD_MUZZLE_001",
+                Some(MOD)
+            ));
+            assert!(!mod_slot_can_hold_muzzle_devices("mod_scope", Some(MOUNT)));
+
+            // The scope test, by contrast, does read it.
+            assert!(mod_slot_can_hold_scope("mod_scope", MOUNT));
+            assert!(!mod_slot_can_hold_scope("mod_scope", MOD));
+        }
+
+        /// `BotWeaponModLimitService`: the third scope is refused and the counter stops at the max.
+        #[test]
+        fn the_scope_limit_stops_the_third_scope() {
+            let fixture = WeaponFixture::new();
+            let mut ctx = fixture.ctx();
+            let mut request = request(
+                RAIL_WEAPON,
+                json!({RAIL_WEAPON: {
+                    "mod_scope": [SCOPE],
+                    "mod_scope_000": [SCOPE_B],
+                    "mod_scope_001": [SCOPE_C],
+                }}),
+                json!({"mod_scope": 100.0, "mod_scope_000": 100.0, "mod_scope_001": 100.0}),
+            );
+
+            let _guard = TestSeedGuard::install(SEED);
+            generate_mods_for_weapon(&mut ctx, &mut request).unwrap();
+
+            assert_eq!(
+                normalized(&request.weapon),
+                vec![
+                    (
+                        "FirstPrimaryWeapon".to_owned(),
+                        RAIL_WEAPON.to_owned(),
+                        String::new()
+                    ),
+                    ("mod_scope".to_owned(), SCOPE.to_owned(), "#0".to_owned()),
+                    (
+                        "mod_scope_000".to_owned(),
+                        SCOPE_B.to_owned(),
+                        "#0".to_owned()
+                    ),
+                ]
+            );
+            assert_eq!(request.mod_limits.scope.count, Some(2));
+            let reported = ctx
+                .diagnostics
+                .last()
+                .expect("the refused scope is reported");
+            assert_eq!(reported.level, DEBUG);
+            assert_eq!(
+                reported.message.as_deref(),
+                Some(
+                    format!(
+                        "[assault] scope limit reached! tried to add: {SCOPE_C} but scope count is: 2"
+                    )
+                    .as_str()
+                )
+            );
+        }
+
+        /// A null `ItemCount.Count` is a lifted `int?`: never limited, never incremented.
+        #[test]
+        fn a_null_mod_count_is_never_limited_and_never_incremented() {
+            let fixture = WeaponFixture::new();
+            let mut ctx = fixture.ctx();
+            let mut count = ItemCountWire { count: None };
+
+            assert!(!weapon_mod_limit_reached(
+                &mut ctx,
+                SCOPE,
+                &mut count,
+                Some(1),
+                "assault",
+                "scope"
+            ));
+            assert_eq!(count.count, None);
+
+            // No limit set at all is an early false that does not count either.
+            let mut count = ItemCountWire { count: Some(5) };
+            assert!(!weapon_mod_limit_reached(
+                &mut ctx, SCOPE, &mut count, None, "assault", "scope"
+            ));
+            assert!(!weapon_mod_limit_reached(
+                &mut ctx,
+                SCOPE,
+                &mut count,
+                Some(0),
+                "assault",
+                "scope"
+            ));
+            assert_eq!(count.count, Some(5));
+            assert!(ctx.diagnostics.is_empty());
+        }
+
+        /// `:1800-1813`: one ammo tpl, cloned into **every** slot of the cylinder — the non-camora
+        /// slot included — each clone with a fresh id.
+        #[test]
+        fn the_camora_path_clones_one_shell_into_every_slot() {
+            let fixture = WeaponFixture::new();
+            let mut ctx = fixture.ctx();
+            let mut request = request(
+                REVOLVER,
+                json!({REVOLVER: {"mod_magazine": [CYLINDER]}}),
+                json!({"mod_magazine": 100.0}),
+            );
+
+            let _guard = TestSeedGuard::install(SEED);
+            generate_mods_for_weapon(&mut ctx, &mut request).unwrap();
+
+            assert_eq!(
+                normalized(&request.weapon),
+                vec![
+                    (
+                        "FirstPrimaryWeapon".to_owned(),
+                        REVOLVER.to_owned(),
+                        String::new()
+                    ),
+                    (
+                        "mod_magazine".to_owned(),
+                        CYLINDER.to_owned(),
+                        "#0".to_owned()
+                    ),
+                    ("camora_000".to_owned(), SHELL.to_owned(), "#1".to_owned()),
+                    ("camora_001".to_owned(), SHELL.to_owned(), "#1".to_owned()),
+                    // Not a camora, and filled with a shell all the same.
+                    (
+                        "mod_sight_rear".to_owned(),
+                        SHELL.to_owned(),
+                        "#1".to_owned()
+                    ),
+                ]
+            );
+            let ids: HashSet<&str> = request.weapon.iter().map(|item| item.id.as_str()).collect();
+            assert_eq!(ids.len(), request.weapon.len(), "a clone reused an id");
+            // The cylinder had no pool entry, so one was generated from its camora slots.
+            assert_eq!(
+                request.mod_pool[CYLINDER].keys().collect::<Vec<_>>(),
+                vec!["camora_000", "camora_001"]
+            );
+            let reported = ctx
+                .diagnostics
+                .iter()
+                .find(|entry| {
+                    entry.locale_key.as_deref()
+                        == Some("bot-unable_to_fill_camora_slot_mod_pool_empty")
+                })
+                .expect("the empty camora pool is reported");
+            assert_eq!(reported.level, WARNING);
+            assert_eq!(reported.args.as_ref().unwrap()["weaponId"], CYLINDER);
+        }
+
+        /// The `cartridges` entry wins over the camora pools when the mod pool carries one.
+        #[test]
+        fn the_camora_path_prefers_a_cartridges_pool() {
+            let fixture = WeaponFixture::new();
+            let mut ctx = fixture.ctx();
+            let mut weapon = vec![Item {
+                id: WEAPON_ROOT_ID.to_owned(),
+                template: REVOLVER.to_owned(),
+                ..Default::default()
+            }];
+            let mut mod_pool: IndexMap<String, IndexMap<String, IndexSet<String>>> =
+                serde_json::from_value(json!({CYLINDER: {"cartridges": [SHELL]}})).unwrap();
+
+            let _guard = TestSeedGuard::install(SEED);
+            fill_camora(
+                &mut ctx,
+                &mut weapon,
+                &mut mod_pool,
+                WEAPON_ROOT_ID,
+                CYLINDER,
+                &fixture.items[CYLINDER],
+            );
+
+            assert_eq!(weapon.len(), 4);
+            assert!(weapon[1..].iter().all(|item| item.template == SHELL));
+            assert!(ctx.diagnostics.is_empty());
+        }
+
+        /// A cylinder whose pool holds neither `cartridges` nor `camora_000` is reported and skipped.
+        #[test]
+        fn a_cylinder_without_a_cartridge_pool_is_reported() {
+            let fixture = WeaponFixture::new();
+            let mut ctx = fixture.ctx();
+            let mut weapon = Vec::new();
+            let mut mod_pool: IndexMap<String, IndexMap<String, IndexSet<String>>> =
+                serde_json::from_value(json!({CYLINDER: {"mod_sight_rear": [REAR_SIGHT]}}))
+                    .unwrap();
+
+            fill_camora(
+                &mut ctx,
+                &mut weapon,
+                &mut mod_pool,
+                WEAPON_ROOT_ID,
+                CYLINDER,
+                &fixture.items[CYLINDER],
+            );
+
+            assert!(weapon.is_empty());
+            assert_eq!(ctx.diagnostics.len(), 1);
+            assert_eq!(ctx.diagnostics[0].level, ERROR);
+            assert_eq!(
+                ctx.diagnostics[0].locale_key.as_deref(),
+                Some("bot-missing_cartridge_slot")
+            );
+            assert_eq!(ctx.diagnostics[0].args, Some(json!(CYLINDER)));
+        }
+
+        /// The whitelist keeps whitelisted sight base classes and mounts that hold only those.
+        #[test]
+        fn the_sight_whitelist_filters_by_weapon_base_class() {
+            let fixture = WeaponFixture::new();
+            let mut ctx = fixture.ctx();
+            let weapon = Item {
+                id: WEAPON_ROOT_ID.to_owned(),
+                template: M4.to_owned(),
+                ..Default::default()
+            };
+            let scopes: IndexSet<String> = [SCOPE, SCOPE_ALT, SCOPE_MOUNT, GRIP]
+                .iter()
+                .map(|tpl| (*tpl).to_owned())
+                .collect();
+            let whitelist: IndexMap<String, Vec<String>> =
+                IndexMap::from([(RIFLE_CLASS.to_owned(), vec![ASSAULT_SCOPE.to_owned()])]);
+
+            assert_eq!(
+                filter_sights_by_weapon_type(&mut ctx, &weapon, &scopes, &whitelist),
+                IndexSet::from([SCOPE.to_owned(), SCOPE_MOUNT.to_owned()])
+            );
+            assert!(ctx.diagnostics.is_empty());
+
+            // A weapon type with no whitelist entry keeps the whole pool, and says so.
+            let unlisted: IndexMap<String, Vec<String>> =
+                IndexMap::from([("999999999999999999999999".to_owned(), Vec::new())]);
+            assert_eq!(
+                filter_sights_by_weapon_type(&mut ctx, &weapon, &scopes, &unlisted),
+                scopes
+            );
+            assert_eq!(ctx.diagnostics.len(), 1);
+            assert_eq!(ctx.diagnostics[0].level, DEBUG);
+            assert_eq!(
+                ctx.diagnostics[0].message.as_deref(),
+                Some(
+                    format!(
+                        "Unable to find whitelist for weapon type: {RIFLE_CLASS} m4a1, skipping sight filtering"
+                    )
+                    .as_str()
+                )
+            );
+
+            // A whitelist that leaves nothing behind is ignored.
+            let empty: IndexMap<String, Vec<String>> =
+                IndexMap::from([(RIFLE_CLASS.to_owned(), vec![IRON_SIGHT.to_owned()])]);
+            let only_grip: IndexSet<String> = IndexSet::from([GRIP.to_owned()]);
+            assert_eq!(
+                filter_sights_by_weapon_type(&mut ctx, &weapon, &only_grip, &empty),
+                only_grip
+            );
+        }
+
+        /// `:858-951`'s ordering table, both arms.
+        #[test]
+        fn sort_mod_keys_follows_the_ordering_table() {
+            let fixture = WeaponFixture::new();
+            let pool = |keys: &[&str]| -> IndexMap<String, IndexSet<String>> {
+                keys.iter()
+                    .map(|key| ((*key).to_owned(), IndexSet::new()))
+                    .collect()
+            };
+
+            // Not a mount: handguard, barrel, mount_001, reciever, pistol grip, gas block, stock,
+            // mount, scope — then everything else in the pool's own order.
+            assert_eq!(
+                sort_mod_keys(
+                    &fixture.items,
+                    &pool(&[
+                        "mod_muzzle",
+                        "mod_scope",
+                        "mod_stock",
+                        "mod_gas_block",
+                        "mod_reciever",
+                        "mod_barrel",
+                        "mod_handguard",
+                        "mod_magazine",
+                        "mod_pistol_grip",
+                        "mod_mount",
+                        "mod_mount_001",
+                    ]),
+                    M4
+                ),
+                vec![
+                    "mod_handguard",
+                    "mod_barrel",
+                    "mod_mount_001",
+                    "mod_reciever",
+                    "mod_pistol_grip",
+                    "mod_gas_block",
+                    "mod_stock",
+                    "mod_mount",
+                    "mod_scope",
+                    "mod_muzzle",
+                    "mod_magazine",
+                ]
+            );
+
+            // A mount wants scopes before more mounts.
+            assert_eq!(
+                sort_mod_keys(
+                    &fixture.items,
+                    &pool(&["mod_mount", "mod_scope", "mod_tactical", "mod_scope_000"]),
+                    SCOPE_MOUNT
+                ),
+                vec!["mod_scope_000", "mod_scope", "mod_mount", "mod_tactical"]
+            );
+
+            // One key sorts to itself.
+            assert_eq!(
+                sort_mod_keys(&fixture.items, &pool(&["mod_scope"]), M4),
+                vec!["mod_scope"]
+            );
+        }
+
+        /// The chamber and cartridge arms `:959-979` grew for this path.
+        #[test]
+        fn slot_lookup_reads_chambers_and_cartridges() {
+            let fixture = WeaponFixture::new();
+            let m4 = Some(&fixture.items[M4]);
+
+            // The chamber arm matches by `Contains`, so the bare name finds a numbered chamber too.
+            assert_eq!(
+                get_mod_item_slot_from_db_template("patron_in_weapon", m4)
+                    .and_then(|slot| slot.name.as_deref()),
+                Some("patron_in_weapon")
+            );
+            assert!(get_mod_item_slot_from_db_template("cartridges", m4).is_none());
+            assert_eq!(
+                get_mod_item_slot_from_db_template("MOD_MAGAZINE", m4)
+                    .and_then(|slot| slot.name.as_deref()),
+                Some("mod_magazine")
+            );
+            assert!(get_mod_item_slot_from_db_template("mod_scope", m4).is_none());
+
+            let magazine: ItemView = serde_json::from_value(json!({
+                "cartridges": [{"name": "cartridges", "filter": [AMMO]}],
+            }))
+            .unwrap();
+            assert_eq!(
+                get_mod_item_slot_from_db_template("cartridges", Some(&magazine))
+                    .and_then(|slot| slot.filter.clone()),
+                Some(vec![AMMO.to_owned()])
+            );
+        }
+
+        /// `:505-520`: a weapon with no slots, cartridges or chambers is reported and left alone.
+        #[test]
+        fn a_weapon_without_slots_is_reported_and_untouched() {
+            let fixture = WeaponFixture::new();
+            let mut ctx = fixture.ctx();
+            let mut request = request(SHELL, json!({SHELL: {}}), json!({}));
+
+            generate_mods_for_weapon(&mut ctx, &mut request).unwrap();
+
+            assert_eq!(request.weapon.len(), 1);
+            assert_eq!(ctx.diagnostics.len(), 1);
+            assert_eq!(ctx.diagnostics[0].level, ERROR);
+            assert_eq!(
+                ctx.diagnostics[0].locale_key.as_deref(),
+                Some("bot-unable_to_add_mods_to_weapon_missing_ammo_slot")
+            );
+            assert_eq!(
+                ctx.diagnostics[0].args.as_ref().unwrap()["weaponName"],
+                "shell"
+            );
+        }
+
+        /// A pool key with no matching slot on the weapon is an error and a skip (`:541-557`).
+        #[test]
+        fn a_pool_key_with_no_slot_on_the_weapon_is_reported() {
+            let fixture = WeaponFixture::new();
+            let mut ctx = fixture.ctx();
+            let mut request = request(
+                M4,
+                json!({M4: {"mod_launcher": [MUZZLE]}}),
+                json!({"mod_launcher": 100.0}),
+            );
+
+            let _guard = TestSeedGuard::install(SEED);
+            generate_mods_for_weapon(&mut ctx, &mut request).unwrap();
+
+            assert_eq!(request.weapon.len(), 1);
+            assert_eq!(ctx.diagnostics.len(), 1);
+            assert_eq!(
+                ctx.diagnostics[0].locale_key.as_deref(),
+                Some("bot-weapon_missing_mod_slot")
+            );
+            assert_eq!(
+                ctx.diagnostics[0].args.as_ref().unwrap()["modSlot"],
+                "mod_launcher"
+            );
+        }
+
+        /// `:536` and `:533` both dereference something a missing key leaves null.
+        #[test]
+        fn a_missing_pool_or_equipment_role_is_the_null_deref() {
+            let fixture = WeaponFixture::new();
+
+            let mut ctx = fixture.ctx();
+            let mut request = request(M4, json!({}), json!({}));
+            let error = generate_mods_for_weapon(&mut ctx, &mut request).unwrap_err();
+            assert!(
+                error.message.contains("no mod pool for item"),
+                "{}",
+                error.message
+            );
+
+            let mut ctx = fixture.ctx();
+            let mut request = m4_request();
+            request.bot_data.equipment_role = "pmc".to_owned();
+            let error = generate_mods_for_weapon(&mut ctx, &mut request).unwrap_err();
+            assert!(
+                error.message.contains("no equipment config for role: pmc"),
+                "{}",
+                error.message
+            );
+        }
+
+        /// `forceStock` makes a stock slot forced even when the stock takes no sub-stock.
+        #[test]
+        fn force_stock_forces_slots_a_childless_stock_would_not() {
+            let stock: ItemView = serde_json::from_value(json!({})).unwrap();
+            let with_children: ItemView =
+                serde_json::from_value(json!({"slots": [{"name": "mod_stock_000"}]})).unwrap();
+            let forced: EquipmentFilters =
+                serde_json::from_value(json!({"forceStock": true})).unwrap();
+            let plain = EquipmentFilters::default();
+
+            assert!(!should_force_sub_stock_slots("mod_stock", &plain, &stock));
+            assert!(should_force_sub_stock_slots(
+                "mod_stock",
+                &plain,
+                &with_children
+            ));
+            assert!(should_force_sub_stock_slots(
+                "mod_pistol_grip",
+                &forced,
+                &stock
+            ));
+        }
+
+        /// `:1242-1290`: 75% of the pool size, rounded half to even, and the counter reset that
+        /// `:1280` performs on the way out of the loop.
+        #[test]
+        fn a_pool_of_conflicting_mods_gives_up_after_the_blocked_ceiling() {
+            let mut items: IndexMap<String, ItemView> = serde_json::from_value(json!({
+                M4: {"parent": RIFLE_CLASS, "type": "Item", "name": "m4a1"},
+            }))
+            .unwrap();
+            // Six mods, every one of them conflicting with the weapon already on the gun.
+            let conflicting: Vec<String> = (0..6)
+                .map(|index| format!("bbbbbbbbbbbbbbbbbbbbbbb{index}"))
+                .collect();
+            for tpl in &conflicting {
+                items.insert(
+                    tpl.clone(),
+                    serde_json::from_value(json!({"parent": MOD, "conflictingItems": [M4]}))
+                        .unwrap(),
+                );
+            }
+            let fixture = WeaponFixture {
+                items,
+                ..WeaponFixture::new()
+            };
+            let mut ctx = fixture.ctx();
+            let weapon = vec![Item {
+                id: WEAPON_ROOT_ID.to_owned(),
+                template: M4.to_owned(),
+                ..Default::default()
+            }];
+            let pool: IndexSet<String> = conflicting.iter().cloned().collect();
+
+            let _guard = TestSeedGuard::install(SEED);
+            let outcome = get_compatible_mod_from_pool(&mut ctx, &pool, ModSpawn::Spawn, &weapon);
+
+            // Math.Round(6 * 0.75) = 4.5 -> 4 (half to even), and the count has to get *past* it.
+            assert_eq!(outcome.found, Some(false));
+            assert_eq!(outcome.reason.as_deref(), Some("Blocked"));
+            assert_eq!(outcome.chosen_template, None);
+            // `:1281` is commented out on purpose: nothing here sets it.
+            assert_eq!(outcome.slot_blocked, None);
+        }
+
+        /// An empty pool after the conflict filter names the pool size it started with.
+        #[test]
+        fn a_fully_conflicting_pool_reports_its_size() {
+            let fixture = WeaponFixture::new();
+            let mut ctx = fixture.ctx();
+            let request = m4_request();
+            let conflicting: IndexSet<String> =
+                IndexSet::from([SCOPE.to_owned(), SCOPE_MOUNT.to_owned()]);
+            let slot: SlotView =
+                serde_json::from_value(json!({"name": "mod_scope", "filter": [SCOPE]})).unwrap();
+
+            let outcome = get_compatible_weapon_mod_tpl_for_slot_from_pool(
+                &mut ctx,
+                &ModToSpawnRequest {
+                    mod_slot: "mod_scope",
+                    is_randomisable_slot: false,
+                    randomisation_settings: None,
+                    bot_weapon_sight_whitelist: None,
+                    bot_equip_blacklist: &fixture.equipment_blacklist,
+                    item_mod_pool: &IndexMap::new(),
+                    weapon: &request.weapon,
+                    ammo_tpl: AMMO,
+                    parent_template: M4,
+                    mod_spawn_result: ModSpawn::DefaultMod,
+                    weapon_stats: &request.weapon_stats,
+                    conflicting_item_tpls: &conflicting,
+                    bot_data: &request.bot_data,
+                },
+                &conflicting,
+                &slot,
+                ModSpawn::DefaultMod,
+                &request.weapon,
+                "mod_scope",
+            );
+
+            assert_eq!(outcome.found, Some(false));
+            assert_eq!(
+                outcome.reason.as_deref(),
+                Some("Unable to add mod to DEFAULT_MOD slot: mod_scope. All: 2 had conflicts")
+            );
+        }
     }
 
     /// A required slot whose roll failed asks for the default mod instead of skipping — and the roll

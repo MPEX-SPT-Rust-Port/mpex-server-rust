@@ -533,6 +533,15 @@ pub struct ItemView {
     pub cartridges_first_filter: Option<Vec<String>>,
     pub chambers_first_filter: Option<Vec<String>>,
     pub slots: Option<Vec<SlotView>>,
+    /// `TemplateItem.Properties.Chambers` (`TemplateItem.cs:794-795`) as slot objects.
+    /// [`ItemView::chambers_first_filter`] flattens the first chamber's filter, which is all the loot
+    /// port needs; `GetModItemSlotFromDbTemplate`'s `patron_in_weapon*` arm needs the slots
+    /// themselves.
+    pub chambers: Option<Vec<SlotView>>,
+    /// `TemplateItem.Properties.Cartridges` as slot objects — the `cartridges` arm of the same
+    /// method. [`ItemView::cartridges_max_count`] / [`ItemView::cartridges_first_filter`] stay: they
+    /// flatten the *first* cartridge, and nothing reads a `MaxCount` off this list.
+    pub cartridges: Option<Vec<SlotView>>,
     pub conflicting_items: Option<Vec<String>>,
     pub caliber: Option<String>,
     pub ammo_caliber: Option<String>,

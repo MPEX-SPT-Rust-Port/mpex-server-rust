@@ -1218,6 +1218,9 @@ mod tests {
                 loot_item_resource_randomization: &self.randomization,
                 item_blacklist: &crate::bot::NO_BLACKLIST,
                 default_presets_by_tpl: &crate::bot::NO_PRESETS,
+                presets_by_id: &crate::bot::NO_PRESETS,
+                equipment_blacklist: &crate::bot::NO_EQUIP_BLACKLIST,
+                low_profile_gas_block_tpls: &crate::bot::NO_BLACKLIST,
                 is_night_time,
                 diagnostics: Vec::new(),
             }

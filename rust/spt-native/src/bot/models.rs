@@ -13,7 +13,7 @@ use indexmap::{IndexMap, IndexSet};
 use serde::{Deserialize, Serialize};
 
 use crate::bot::repair_service::MinMax;
-use crate::loot::models::{Diagnostic, ItemView};
+use crate::loot::models::{Diagnostic, Item, ItemView};
 
 /// Mod-added fields captured on the way in and replayed on the way out.
 type Extra = serde_json::Map<String, serde_json::Value>;
@@ -130,6 +130,33 @@ pub struct EquipmentFilters {
     pub weapon_slot_ids_to_make_required: Option<IndexSet<String>>,
     #[serde(rename = "armorPlateWeighting")]
     pub armor_plate_weighting: Option<Vec<ArmorPlateWeights>>,
+
+    // -- Read by the weapon half of `bot::bot_equipment_mod_generator` (`BotConfig.cs:221-281`).
+    /// Force the stock slot chances to 100% (`ShouldForceSubStockSlots`, `:781`).
+    #[serde(rename = "forceStock")]
+    pub force_stock: Option<bool>,
+    /// The level-banded randomisation blocks `BotHelper.GetBotRandomizationDetails` picks from.
+    #[serde(rename = "randomisation")]
+    pub randomisation: Option<Vec<RandomisationDetails>>,
+    /// Weapon base-class tpl → the sight base-class tpls allowed on it
+    /// (`BotEquipmentFilterService.GetBotWeaponSightWhitelist`, `:124-129`). A `Vec` because
+    /// `is_of_baseclasses` takes a slice; the C# `HashSet` is only ever membership-tested through it.
+    #[serde(rename = "weaponSightWhitelist")]
+    pub weapon_sight_whitelist: Option<IndexMap<String, Vec<String>>>,
+}
+
+/// `Models/Spt/Config/BotConfig.cs:339-388`, narrowed to the two members the weapon-mod path reads.
+/// `LevelRange` is `required` in C#; the rest of the record belongs to tasks that read it.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RandomisationDetails {
+    #[serde(rename = "levelRange")]
+    pub level_range: MinMax<i32>,
+    /// Slots whose pool is rebuilt from `items.json` instead of the bot's own mod pool.
+    #[serde(rename = "randomisedWeaponModSlots")]
+    pub randomised_weapon_mod_slots: Option<IndexSet<String>>,
+    /// Weapon tpl → smallest magazine capacity allowed on it.
+    #[serde(rename = "minimumMagazineSize")]
+    pub minimum_magazine_size: Option<IndexMap<String, f64>>,
 }
 
 /// `Models/Spt/Config/BotConfig.cs:456-463`. `MinMax` is reused from
@@ -191,6 +218,80 @@ pub struct BotDataWire {
     pub level: i32,
     #[serde(rename = "equipmentRole", default)]
     pub equipment_role: String,
+}
+
+/// `Models/Spt/Bots/GenerateWeaponRequest.cs:7-67`, the request
+/// [`generate_mods_for_weapon`](crate::bot::bot_equipment_mod_generator::generate_mods_for_weapon)
+/// mutates in place.
+///
+/// **Deviation:** `ParentTemplate` is a `TemplateItem` in C# and rides as its **tpl** here, the same
+/// swap the equipment path made — a flattened [`ItemView`] row carries no id of its own, and the tpl
+/// is what the mod-pool lookups and half the log arguments want. Every C# member is nullable and
+/// every one of them is dereferenced unguarded on this path, so none of them is an `Option` here.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct GenerateWeaponRequestWire {
+    /// Weapon to add mods to / result that is returned.
+    #[serde(rename = "weapon", default)]
+    pub weapon: Vec<Item>,
+    /// `GlobalMods` — item tpl → mod slot name → compatible tpls.
+    #[serde(rename = "modPool", default)]
+    pub mod_pool: IndexMap<String, IndexMap<String, IndexSet<String>>>,
+    /// `_id` of the item mods are being added to (not its tpl).
+    #[serde(rename = "weaponId", default)]
+    pub weapon_id: String,
+    /// Tpl of the item mods are being added to.
+    #[serde(rename = "parentTemplate", default)]
+    pub parent_template: String,
+    #[serde(rename = "modSpawnChances", default)]
+    pub mod_spawn_chances: IndexMap<String, f64>,
+    #[serde(rename = "ammoTpl", default)]
+    pub ammo_tpl: String,
+    #[serde(rename = "botData", default)]
+    pub bot_data: BotDataWire,
+    #[serde(rename = "modLimits", default)]
+    pub mod_limits: BotModLimitsWire,
+    #[serde(rename = "weaponStats", default)]
+    pub weapon_stats: WeaponStatsWire,
+    #[serde(rename = "conflictingItemTpls", default)]
+    pub conflicting_item_tpls: IndexSet<String>,
+}
+
+/// `Models/Spt/Bots/GenerateWeaponRequest.cs:91-100`.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct WeaponStatsWire {
+    #[serde(rename = "hasOptic")]
+    pub has_optic: Option<bool>,
+    #[serde(rename = "hasFrontIronSight")]
+    pub has_front_iron_sight: Option<bool>,
+    #[serde(rename = "hasRearIronSight")]
+    pub has_rear_iron_sight: Option<bool>,
+}
+
+/// `Models/Spt/Bots/GenerateWeaponRequest.cs:102-121`, built by
+/// `BotWeaponModLimitService.GetWeaponModLimits`. The two counters are mutated as mods are added —
+/// C# does it through a shared `ItemCount` object, which is why they are a nested struct there and
+/// here.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct BotModLimitsWire {
+    #[serde(rename = "scope", default)]
+    pub scope: ItemCountWire,
+    #[serde(rename = "scopeMax")]
+    pub scope_max: Option<i32>,
+    #[serde(rename = "scopeBaseTypes", default)]
+    pub scope_base_types: Vec<String>,
+    #[serde(rename = "flashlightLaser", default)]
+    pub flashlight_laser: ItemCountWire,
+    #[serde(rename = "flashlightLaserMax")]
+    pub flashlight_laser_max: Option<i32>,
+    #[serde(rename = "flashlightLaserBaseTypes", default)]
+    pub flashlight_laser_base_types: Vec<String>,
+}
+
+/// `Models/Spt/Bots/GenerateWeaponRequest.cs:123-127`.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ItemCountWire {
+    #[serde(rename = "count")]
+    pub count: Option<i32>,
 }
 
 /// `Models/Spt/Bots/ChooseRandomCompatibleModResult.cs`. Every member is nullable there and the

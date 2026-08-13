@@ -1,9 +1,7 @@
 //! Draw-without-replacement over a pool, ported from `Utils/Collections/ExhaustableArray.cs`.
 //!
-//! The equipment-mod path consumes the random draws, so the blanket module allow is gone; only
-//! [`ExhaustableArray::get_first_value`] is still waiting on the weapon-mod path. Not an `expect`:
-//! the lint is per-target and the tests below already call it, so an `expect` would go unfulfilled
-//! under `cfg(test)` and fail `clippy --all-targets`.
+//! `GetFirstValue` is not ported: it has no call site anywhere in the C# server, so the weapon-mod
+//! path the last `allow(dead_code)` here was waiting on never consumes it either.
 use crate::loot::random_util::get_int;
 
 /// A pool each draw permanently removes from, mirroring `ExhaustableArray<T>`.
@@ -40,16 +38,6 @@ impl<T> ExhaustableArray<T> {
         let index = get_int(0, self.pool.len() as i32 - 1) as usize;
 
         Some(self.pool.remove(index))
-    }
-
-    /// The head of the pool, removed from it; `None` once exhausted. Consumes no draw either way.
-    #[allow(dead_code, reason = "consumed by the weapon-mod path")]
-    pub fn get_first_value(&mut self) -> Option<T> {
-        if self.pool.is_empty() {
-            return None;
-        }
-
-        Some(self.pool.remove(0))
     }
 
     pub fn has_values(&self) -> bool {
@@ -124,28 +112,11 @@ mod tests {
         let mut empty: ExhaustableArray<i32> = ExhaustableArray::new(Vec::new());
         for _ in 0..3 {
             assert_eq!(empty.get_random_value(), None);
-            assert_eq!(empty.get_first_value(), None);
         }
         let after: Vec<i32> = (0..3).map(|_| get_int(1, 10)).collect();
 
         assert_eq!(after, baseline);
         assert!(!empty.has_values());
-    }
-
-    #[test]
-    fn get_first_value_walks_the_pool_in_order_without_drawing() {
-        let baseline: Vec<i32> = {
-            let _guard = TestSeedGuard::install(SEED);
-            (0..3).map(|_| get_int(1, 10)).collect()
-        };
-
-        let _guard = TestSeedGuard::install(SEED);
-        let mut array = pool();
-        let taken: Vec<i32> = std::iter::from_fn(|| array.get_first_value()).collect();
-        let after: Vec<i32> = (0..3).map(|_| get_int(1, 10)).collect();
-
-        assert_eq!(taken, POOL);
-        assert_eq!(after, baseline, "`GetFirstValue` consumed a draw");
     }
 
     #[test]
