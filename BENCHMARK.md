@@ -7,10 +7,8 @@ plain `dotnet test` never runs them:
 | Fixture | Measures |
 |---|---|
 | `LootBenchmarkTests.cs` | location loot — wall clock, allocation, peak RSS |
+| `RewardLootBenchmarkTests.cs` | airdrop loot — wall clock; numbers recorded in the reward-loot section of [ARCHITECTURE.md](ARCHITECTURE.md), not here |
 | `BotBenchmarkTests.cs` | one bot's inventory — wall clock, with the payload projection timed separately |
-
-Reward loot (`RewardLootBenchmarkTests.cs`) has the same shape; its numbers are recorded in the
-reward-loot section of [ARCHITECTURE.md](ARCHITECTURE.md) rather than here.
 
 There are no `cargo bench` targets. `Containerfile.dev` mentions `cargo bench` as a toolchain
 capability, not as a suite that exists.
@@ -128,8 +126,9 @@ legacy path's falls by ~240 MB. This is the shape the design predicts, not a reg
 
 ## Results — bot generation
 
-Recorded 2026-08-13 on `fba1733`. **Different machine from the location-loot figures above — the two
-result sets are not comparable to each other.**
+Recorded 2026-08-13 on `94fe128` plus the working-tree fix to the projection phase's timed region.
+**Different machine from the location-loot figures above — the two result sets are not comparable to
+each other.**
 
 | | |
 |---|---|
@@ -144,28 +143,29 @@ result sets are not comparable to each other.**
 and loot — on the live shipped database, for `assault` and for a level-1 `pmcUSEC`. The template
 clone and `BotEquipmentFilterService.FilterBotEquipment` are rebuilt outside the stopwatch for every
 run, because the legacy path mutates the template it is handed. `BotPayloadProjection.BuildRequest`
-is timed on its own in a third phase: it is the fixed per-call payload cost, and its share is what an
-items-view cache would be buying back.
+is timed on its own in a third phase — with the same hoisting, so the clone is not counted twice: it
+is the fixed per-call payload cost, and its share is what an items-view cache would be buying back.
 
 | Role | Path | median | mean | min | max |
 |---|---|---|---|---|---|
-| assault | native (rust) | **94.07 ms** | 89.94 ms | 52.44 ms | 116.94 ms |
-| assault | legacy (C# 4.1.2) | 1.41 ms | 3.31 ms | 0.57 ms | 17.75 ms |
-| assault | `BuildRequest` only | 12.79 ms | 12.50 ms | 6.04 ms | 25.45 ms |
-| usec | native (rust) | **56.05 ms** | 56.46 ms | 48.41 ms | 69.24 ms |
-| usec | legacy (C# 4.1.2) | 1.16 ms | 1.91 ms | 0.83 ms | 11.27 ms |
-| usec | `BuildRequest` only | 18.82 ms | 20.53 ms | 8.96 ms | 30.71 ms |
+| assault | native (rust) | **88.04 ms** | 84.06 ms | 48.62 ms | 119.37 ms |
+| assault | legacy (C# 4.1.2) | 1.36 ms | 2.18 ms | 0.59 ms | 12.99 ms |
+| assault | `BuildRequest` only | 9.89 ms | 9.88 ms | 5.20 ms | 25.14 ms |
+| usec | native (rust) | **54.43 ms** | 55.47 ms | 47.49 ms | 71.12 ms |
+| usec | legacy (C# 4.1.2) | 1.20 ms | 1.59 ms | 0.82 ms | 5.22 ms |
+| usec | `BuildRequest` only | 5.09 ms | 5.41 ms | 4.83 ms | 8.14 ms |
 
-Speedup on median wall clock: **0.01x** for `assault`, **0.02x** for `usec` — the native path is
-roughly 40-80x slower per bot. Projection share of the native median: **13.6%** (assault), **33.6%**
-(usec).
+Speedup on median wall clock: **0.02x** for both roles — the native path is roughly **45-65x slower**
+per bot. Projection share of the native median: **11.2%** (assault), **9.4%** (usec).
 
 The shape is the reward-loot result made worse. A 4.1.2 bot is one or two milliseconds of work, and
-the native path pays a fixed cost per bot to hand the whole items table (~30k `ItemView`s) and every
-global preset across the boundary. `BuildRequest` is only the *building* of that payload; most of the
-remaining ~66-86% is serialising it to JSON, crossing the FFI, and deserialising it on the Rust side.
-Generation itself is not the cost. See the bot-generation section of [ARCHITECTURE.md](ARCHITECTURE.md)
-for why the projection is not cached today and what the sanctioned fix is.
+the native path pays a fixed cost per bot to hand the whole items table across the boundary: 4,673
+`ItemView`s plus ~5,000 nested slot/grid/cartridge/chamber views (~9.7k objects), and every global
+preset. `BuildRequest` is only the *building* of that payload, and at ~10% it is not where the time
+goes; the other ~90% is serialising it to JSON, crossing the FFI, and deserialising it on the Rust
+side. Generation itself is not the cost. See the bot-generation section of
+[ARCHITECTURE.md](ARCHITECTURE.md) for why the projection is not cached today and what the sanctioned
+fix is.
 
 Bot-specific caveats, on top of the general ones below:
 
@@ -173,7 +173,7 @@ Bot-specific caveats, on top of the general ones below:
   game version. Bots differ enormously in how much they generate; a boss or a high-level PMC is not
   measured. The absolute native cost is dominated by the fixed payload, so it should move less
   between roles than the legacy figure does.
-- **No allocation or RSS figures.** Only wall clock. The native path allocates ~30k view objects per
+- **No allocation or RSS figures.** Only wall clock. The native path allocates ~9.7k view objects per
   bot on the managed heap before serialising them, so its GC pressure is by construction far worse
   than the legacy path's — unmeasured here.
 - **The legacy figures include a warm `BotLootCacheService`.** Hydration happens during the warmup

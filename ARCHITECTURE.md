@@ -440,7 +440,8 @@ complete 4.1.2 surface; the algorithms live in `rust/spt-native/src/bot/` and th
   prefix/postfix on the dispatcher wraps the native body and observes the same arguments and result
   it always did (`BotHookLivenessTests` asserts exactly this).
 - **The escape hatch needed no constructor change.** `BotConfig.ForceLegacyBotGeneration` is a new
-  bool on a config `BotInventoryGenerator` already took as its last constructor parameter, so unlike
+  bool on a config `BotInventoryGenerator` already took as a constructor parameter (`botConfig`, the
+  second-to-last — `pmcConfig` is last), so unlike
   the reward-loot port there is no overload and no new parameter — the frozen 4.1.2 constructor is
   untouched. It is the bot family's own flag, separate from `LocationConfig.ForceLegacyLootGeneration`
   (the split the reward-loot section said to revisit here).
@@ -478,24 +479,30 @@ complete 4.1.2 surface; the algorithms live in `rust/spt-native/src/bot/` and th
   `BotEquipmentModPoolService.GetModsForGearSlot`, whose per-item entry is a
   `ConcurrentDictionary<string, HashSet<MongoId>>` — enumerated in hash-bucket order, not database
   slot order. The Rust `mod_pool_service` derives the same pool in database slot order, so the slots
-  are filled in a different order and every draw after the first diverges. It is deterministic on
-  both sides, just not the *same* order; matching it means reimplementing .NET's non-randomized
-  string hash and `ConcurrentDictionary` bucket layout in Rust. This bites PMCs from level 15 up
-  (`configs/bot.json`, `pmc` randomisation buckets 1-3) among others, and it is why
-  `BotParityTests`' nighttime clamp case asserts the config write only and not the inventory. The
-  eight seeded role×seed parity cases all run at level 1, where the branch is not taken, and are
-  byte-equal. Tracked in `todo/TODO.md`; `ForceLegacyBotGeneration` is the workaround.
+  are filled in a different order and every draw after the first diverges. The legacy order is
+  process-stable in practice — .NET gives `ConcurrentDictionary<string, …>` an internal
+  non-randomized string comparer — but that comparer and the bucket layout are **unspecified runtime
+  implementation details**, so a Rust emulation of them would be correct only until a runtime patch
+  silently changed one, and it would fail quietly rather than loudly. If parity at PMC level 15+ is
+  ever required, the cheaper and stabler fix shape is to **project the C# enumeration order across
+  the FFI per item** — the order is already in hand on the managed side — rather than reproduce the
+  hash. In shipped config only `pmc` sets `randomisedArmorSlots` (`configs/bot.json`, randomisation
+  buckets 1-3, level 15 and up), plus any mod-added bucket that sets it. This is why `BotParityTests`'
+  nighttime clamp case asserts the config write only and not the inventory; the eight seeded
+  role×seed parity cases all run at level 1, where the branch is not taken, and are byte-equal.
+  Tracked in `todo/TODO.md`; `ForceLegacyBotGeneration` is the workaround.
 - **The ported retry loops can spin exactly as 4.1.2 does**, but on the native path the hang sits
   inside an FFI call with no managed stack trace to dump — `ForceLegacyBotGeneration` restores the
   C# diagnosability.
 
 **Performance: this port is a large loss.** Measured head to head per bot (n=20 per path per role,
-Release; see [BENCHMARK.md](BENCHMARK.md)): native ~94 ms median against ~1.4 ms legacy for `assault`,
-~56 ms against ~1.2 ms for `usec` — roughly 40-80x slower. Bot generation is a small amount of work
+Release; see [BENCHMARK.md](BENCHMARK.md)): native ~88 ms median against ~1.4 ms legacy for `assault`,
+~54 ms against ~1.2 ms for `usec` — roughly 45-65x slower. Bot generation is a small amount of work
 per call (a 4.1.2 bot costs one or two milliseconds) sitting behind a fixed per-call payload cost that
-dwarfs it: the whole items table as ~30k `ItemView`s plus every global preset, rebuilt and serialised
-for every single bot. `BuildRequest` alone is 13-34% of the native median; most of the rest is
-serialising what it built. The projection is rebuilt per call on purpose — that is what makes runtime
+dwarfs it: the whole items table as 4,673 `ItemView`s plus ~5,000 nested slot/grid/cartridge views
+(~9.7k objects) and every global preset, rebuilt and serialised for every single bot. Building that
+payload is only ~10% of the native median; the other ~90% is serialising it, crossing the FFI and
+deserialising it. The projection is rebuilt per call on purpose — that is what makes runtime
 table and config mutations by mods always visible (Porting playbook, rule 2) — so it is not cached
 today. **Sanctioned follow-up if bot spawn latency matters: an invalidation-aware items-view cache**
 shared by the loot and bot projections, not a snapshot taken at startup. Until then

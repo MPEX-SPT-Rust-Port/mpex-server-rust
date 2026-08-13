@@ -160,7 +160,8 @@ public class BotBenchmarkTests
 
         for (var run = 0; run < WarmupRuns; run++)
         {
-            _ = BuildRequest(role);
+            var (warmupTemplate, warmupDetails) = BuildCase(role);
+            _ = BuildRequest(warmupTemplate, warmupDetails);
         }
 
         GC.Collect();
@@ -169,8 +170,12 @@ public class BotBenchmarkTests
 
         for (var run = 0; run < TimedRuns; run++)
         {
+            // Hoisted out of the timed region for the same reason Measure hoists it: the deep clone
+            // and FilterBotEquipment are the caller's cost, not the projection's
+            var (template, details) = BuildCase(role);
+
             var stopwatch = Stopwatch.StartNew();
-            _ = BuildRequest(role);
+            _ = BuildRequest(template, details);
             stopwatch.Stop();
 
             timings.Add(stopwatch.Elapsed.TotalMilliseconds);
@@ -179,10 +184,8 @@ public class BotBenchmarkTests
         return timings;
     }
 
-    private GenerateBotInventoryRequest BuildRequest(string role)
+    private GenerateBotInventoryRequest BuildRequest(BotType template, BotGenerationDetails details)
     {
-        var (template, details) = BuildCase(role);
-
         return BotPayloadProjection.BuildRequest(
             new MongoId(),
             _sessionId,
