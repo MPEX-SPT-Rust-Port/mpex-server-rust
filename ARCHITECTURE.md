@@ -182,9 +182,10 @@ Two non-obvious steps run during build, both in `SPTarkov.Server.Core.csproj`:
 hashing `SPT_Data` with XXH3-128 and comparing it against `checks.dat`, in parallel on a
 process-wide tokio runtime (`runtime.rs`), replacing the per-file MD5 loop that used to run inside
 the import; and generating both loot families in `src/loot/` — a location's static and loose loot, and
-reward loot (airdrop, sealed weapon cases, reward containers).
+reward loot (airdrop, sealed weapon cases, reward containers) — plus one bot's whole inventory in
+`src/bot/` (equipment, mods, weapons and loot).
 
-Nine C-ABI exports (`src/ffi.rs`), consumed by `Libraries/SPTarkov.Server.Core/Native/`:
+Ten C-ABI exports (`src/ffi.rs`), consumed by `Libraries/SPTarkov.Server.Core/Native/`:
 
 | Export | Purpose |
 |---|---|
@@ -196,9 +197,10 @@ Nine C-ABI exports (`src/ffi.rs`), consumed by `Libraries/SPTarkov.Server.Core/N
 | `spt_create_forced_loot` | The forced-item half of airdrop loot |
 | `spt_get_sealed_weapon_case_loot` | A sealed weapon case's weapon, its mods and the extra rewards |
 | `spt_get_random_loot_container_loot` | A reward container's rolled contents |
+| `spt_generate_bot_inventory` | One bot's whole inventory: equipment, mods, weapons and loot |
 | `spt_buf_free` | Releases those buffers |
 
-The six generation exports take the request as UTF-8 JSON and write a buffer on failure as well as
+The seven generation exports take the request as UTF-8 JSON and write a buffer on failure as well as
 on success — the error message — so `SptNative.Generate` decides ownership by the out-pointer, never
 by the status code. `SptNative.VerifyDatabase`'s free-on-success-only shape must not be copied into
 them.
@@ -206,8 +208,8 @@ them.
 `unsafe` is confined to `ffi.rs` (raw pointer in/out) on the Rust side and, on the C# side, to the
 `[LibraryImport]` declarations in `NativeMethods.cs` plus the two `unsafe` methods in `SptNative.cs`
 that pin the input, pass the out-params, and read the returned buffer as a span; `verify.rs`,
-`loot/`, `runtime.rs` and the rest of `SptNative` are safe code. The seven exports that run fallible
-work — verification and the six generators — wrap it in `catch_unwind` and map a panic to a status
+`loot/`, `bot/`, `runtime.rs` and the rest of `SptNative` are safe code. The eight exports that run
+fallible work — verification and the seven generators — wrap it in `catch_unwind` and map a panic to a status
 code; the other two cannot panic, and `extern "C"` aborts rather than unwinding regardless, so a
 Rust panic can never unwind into the CLR.
 `DatabaseImporter.LoadDatabaseAsync` calls `SptNative.EnsureLoadable()` on every startup — including
@@ -402,6 +404,103 @@ config mutations by mods always visible (Porting playbook, rule 2), so it is not
 future optimization if reward-loot latency ever matters: raw-JSON passthrough of the items table, or
 an invalidation-aware view cache — not a snapshot taken at startup.
 
+### Bot generation
+
+`Generators/Bot/BotInventoryGenerator` and the three generators below it —
+`BotEquipmentModGenerator`, `Generators/Weapons/BotWeaponGenerator` and
+`Generators/Loot/BotLootGenerator` — run native behind the same dual path. All four keep their
+complete 4.1.2 surface; the algorithms live in `rust/spt-native/src/bot/` and the envelopes in
+`Native/Bot/BotPayloads.cs`, assembled by `Native/Bot/BotPayloadProjection.cs`.
+
+- **One FFI call per bot, and the boundary is `BotInventoryGenerator.GenerateInventory`.** That one
+  method is the whole native entry point: it projects the live database, services and config into a
+  `GenerateBotInventoryRequest`, calls `spt_generate_bot_inventory` once, and gets the finished
+  `BotBaseInventory` back. The three sibling generators have no native entry point of their own —
+  Rust reimplements them internally, so `GenerateAndAddEquipmentToBot`, `GenerateWeaponByTpl`,
+  `GenerateLoot` and the rest never run on the native path even though every one of them is still
+  there, still public, and still called by the legacy path.
+- **Four dispatch conditions** (`UseLegacyPath`, cheapest first): `botConfig.ForceLegacyBotGeneration`
+  is set; a live Harmony patch sits on any hookable member; the container handed us a *subclass* of
+  `BotEquipmentModGenerator`, `BotWeaponGenerator` or `BotLootGenerator` (a `TypePriority`
+  replacement); or `BotWeaponGenerator.InventoryMagGenComponents` is not exactly the four built-ins
+  (`BarrelInventoryMagGen`, `ExternalInventoryMagGen`, `InternalMagazineInventoryMagGen`,
+  `UbglExternalMagGen`). A foreign `IInventoryMagGen` therefore routes to legacy automatically, with
+  no config change — the native side has no way to call a managed component. If the reflected
+  `InventoryMagGenComponents` field ever moves or is renamed, the check fails closed to legacy.
+- **The hookable set is wider here than in the loot ports.** The loot generators flip to legacy only
+  on a patch of a *protected* member; a patch on a public entry point wraps whichever path runs.
+  Bot generation freezes **every public, protected and protected-internal method declared on all four
+  classes**, minus `GenerateInventory` itself. The reason is the boundary above: for the loot
+  generators the public surface *is* the set of dispatchers, so a patch on one of them still sees
+  real arguments and a real result. Here only `GenerateInventory` is a dispatcher — the other public
+  members are ordinary helpers in the middle of the algorithm, and on the native path they are simply
+  never called, so a patch on one would silently do nothing. Treating them as legacy triggers is what
+  keeps a mod that patches, say, `BotEquipmentModGenerator.SortModKeys` or
+  `BotLootGenerator.RandomiseMoneyStackSize` working. `GenerateInventory` stays excluded on purpose: a
+  prefix/postfix on the dispatcher wraps the native body and observes the same arguments and result
+  it always did (`BotHookLivenessTests` asserts exactly this).
+- **The escape hatch needed no constructor change.** `BotConfig.ForceLegacyBotGeneration` is a new
+  bool on a config `BotInventoryGenerator` already took as its last constructor parameter, so unlike
+  the reward-loot port there is no overload and no new parameter — the frozen 4.1.2 constructor is
+  untouched. It is the bot family's own flag, separate from `LocationConfig.ForceLegacyLootGeneration`
+  (the split the reward-loot section said to revisit here).
+- **Two pieces of state are replayed after the call**, because the native side keeps them to itself:
+  - `RestoreContainerGrids` writes the container grid occupancy back into
+    `BotInventoryContainerService` when `ClearBotContainerCacheAfterGeneration` is false. Only player
+    scavs ask for that, and only so `PlayerScavGenerator.AddAdditionalLootToPlayerScavContainers` can
+    see which cells are already taken. Legacy *clears* the cache in the same branch; there is nothing
+    to clear on the native path, which never wrote to the service.
+  - `ReplayRandomisationClamps` writes the nighttime mod-chance clamps back into the shared
+    `botConfig.Equipment[role].Randomisation` bucket that legacy mutates in place. Nothing reads it
+    during this call — it is a **cross-bot feedback loop**: `BotEquipmentFilterService.AdjustChances`
+    (`:63`) copies those numbers into the *next* bot's template when `FilterBotEquipment` runs, so
+    skipping the replay would diverge that bot, not this one. The native side reports clamps only
+    under the same condition legacy applies them (nighttime, with `NighttimeChanges` configured), so
+    the collection is empty otherwise.
+
+**Still limited for mods.**
+
+- **A Harmony patch on a collaborator does not flip to legacy, and does not run.** The four ported
+  classes are detected; the helpers and services they used to call are not. On the native path these
+  are reimplemented in Rust and never invoked: `BotGeneratorHelper`, `DurabilityLimitsHelper`,
+  `RepairService.AddBuff`, `BotWeaponGeneratorHelper`, `BotEquipmentModPoolService` (including
+  `ResetWeaponPool`, which is a no-op for native generation — Rust derives its pools per call, so
+  there is no cached state for a mod to invalidate), `BotLootCacheService`, `WeightedRandomHelper`,
+  the `ItemHelper` twins, and `ICloner`. Patching any of them leaves native generation unchanged. The
+  escape hatch is `ForceLegacyBotGeneration`, or a patch on one of the four classes' own members —
+  either routes the call to the legacy path where all of them run again.
+- **Templates without `_props` are absent from `itemsView`**, so on the native path such a template
+  reads as "not in the db" wherever bot generation looks an id up. Vanilla data always carries
+  `_props`; this is a documented limitation for mod-added props-less templates, shared with the loot
+  ports.
+- **Bots whose role and level select a `randomisedArmorSlots` bucket do not match the legacy path.**
+  When that bucket applies, `GenerateEquipment` replaces the equipment mod pool with
+  `BotEquipmentModPoolService.GetModsForGearSlot`, whose per-item entry is a
+  `ConcurrentDictionary<string, HashSet<MongoId>>` — enumerated in hash-bucket order, not database
+  slot order. The Rust `mod_pool_service` derives the same pool in database slot order, so the slots
+  are filled in a different order and every draw after the first diverges. It is deterministic on
+  both sides, just not the *same* order; matching it means reimplementing .NET's non-randomized
+  string hash and `ConcurrentDictionary` bucket layout in Rust. This bites PMCs from level 15 up
+  (`configs/bot.json`, `pmc` randomisation buckets 1-3) among others, and it is why
+  `BotParityTests`' nighttime clamp case asserts the config write only and not the inventory. The
+  eight seeded role×seed parity cases all run at level 1, where the branch is not taken, and are
+  byte-equal. Tracked in `todo/TODO.md`; `ForceLegacyBotGeneration` is the workaround.
+- **The ported retry loops can spin exactly as 4.1.2 does**, but on the native path the hang sits
+  inside an FFI call with no managed stack trace to dump — `ForceLegacyBotGeneration` restores the
+  C# diagnosability.
+
+**Performance: this port is a large loss.** Measured head to head per bot (n=20 per path per role,
+Release; see [BENCHMARK.md](BENCHMARK.md)): native ~94 ms median against ~1.4 ms legacy for `assault`,
+~56 ms against ~1.2 ms for `usec` — roughly 40-80x slower. Bot generation is a small amount of work
+per call (a 4.1.2 bot costs one or two milliseconds) sitting behind a fixed per-call payload cost that
+dwarfs it: the whole items table as ~30k `ItemView`s plus every global preset, rebuilt and serialised
+for every single bot. `BuildRequest` alone is 13-34% of the native median; most of the rest is
+serialising what it built. The projection is rebuilt per call on purpose — that is what makes runtime
+table and config mutations by mods always visible (Porting playbook, rule 2) — so it is not cached
+today. **Sanctioned follow-up if bot spawn latency matters: an invalidation-aware items-view cache**
+shared by the loot and bot projections, not a snapshot taken at startup. Until then
+`ForceLegacyBotGeneration` is both the mod-compat escape hatch and the fast path.
+
 ### Porting playbook
 
 The rules every Rust cutover follows, learned from the loot port. The contract they protect:
@@ -444,6 +543,9 @@ binary compatibility with mods compiled against the frozen 4.1.2 assemblies, enf
    six assemblies clean) → `dotnet test` → `csharpier format .` before merge.
 
 The loot family is complete — `LocationLootGenerator` and `LootGenerator` both run native behind the
-dual path. Remaining agreed order: mod-compat test gaps (`todo/TODO-TESTING.md`), RNG parity, then
-the bot family and ragfair per `todo/TODO.md`. The checks.dat generate path (`todo/TODO.md` #12) is a
-detached quick win.
+dual path — and so is the bot family: `BotInventoryGenerator` and the three generators below it run
+native behind one call per bot. Remaining agreed order: mod-compat test gaps
+(`todo/TODO-TESTING.md`), then ragfair (`todo/TODO.md` #4). The checks.dat generate path
+(`todo/TODO.md` #12) is a detached quick win. Two named follow-ups are outstanding on the bot port:
+the shared items-view cache the benchmark argues for, and the `ConcurrentDictionary` mod-pool
+ordering divergence above.

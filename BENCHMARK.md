@@ -1,9 +1,16 @@
 # Benchmarks
 
-The only benchmark in this repo measures what the Rust port was written for: location loot
-generation, native against the retained 4.1.2 C# implementation. It lives in
-`Testing/UnitTests/Tests/Generators/LootBenchmarkTests.cs` as an `[Explicit]` NUnit fixture, so a
-plain `dotnet test` never runs it.
+Every benchmark in this repo measures a Rust port against the retained 4.1.2 C# implementation it
+replaced. They live in `Testing/UnitTests/Tests/Generators/` as `[Explicit]` NUnit fixtures, so a
+plain `dotnet test` never runs them:
+
+| Fixture | Measures |
+|---|---|
+| `LootBenchmarkTests.cs` | location loot — wall clock, allocation, peak RSS |
+| `BotBenchmarkTests.cs` | one bot's inventory — wall clock, with the payload projection timed separately |
+
+Reward loot (`RewardLootBenchmarkTests.cs`) has the same shape; its numbers are recorded in the
+reward-loot section of [ARCHITECTURE.md](ARCHITECTURE.md) rather than here.
 
 There are no `cargo bench` targets. `Containerfile.dev` mentions `cargo bench` as a toolchain
 capability, not as a suite that exists.
@@ -23,6 +30,10 @@ dotnet test -c Release --filter "FullyQualifiedName~LootBenchmarkTests.NativeVer
 dotnet test -c Release --filter "FullyQualifiedName~LootBenchmarkTests.NativePeakWorkingSet" \
   --logger "console;verbosity=detailed"
 dotnet test -c Release --filter "FullyQualifiedName~LootBenchmarkTests.LegacyPeakWorkingSet" \
+  --logger "console;verbosity=detailed"
+
+# one bot per call, both paths, plus the payload projection on its own
+dotnet test -c Release --filter "FullyQualifiedName~BotBenchmarkTests" \
   --logger "console;verbosity=detailed"
 ```
 
@@ -70,7 +81,7 @@ compared only against each other. Inside the head-to-head test the comparable fi
 The legacy C# path still ships inside `SPTarkov.Server.Core.dll` — it is the frozen mod contract —
 so the native library is additive on disk today, not a saving.
 
-## Results
+## Results — location loot
 
 Recorded 2026-08-12 on `e7cb120` plus the working-tree bump of `rand` 0.9 → 0.10.2 and
 `rand_xoshiro` 0.7 → 0.8.1.
@@ -114,6 +125,59 @@ legacy path's falls by ~240 MB. This is the shape the design predicts, not a reg
 |---|---|
 | `libspt_native.so` | 1.95 MB |
 | `SPTarkov.Server.Core.dll` | 5.43 MB |
+
+## Results — bot generation
+
+Recorded 2026-08-13 on `fba1733`. **Different machine from the location-loot figures above — the two
+result sets are not comparable to each other.**
+
+| | |
+|---|---|
+| CPU | AMD Ryzen 5 5600H (6C/12T) |
+| RAM | 23 GB |
+| OS | Linux 7.1.8-200.fc44.x86_64 |
+| .NET SDK | 10.0.110 |
+| rustc | 1.97.1 |
+| Configuration | Release, n=20 after 2 warmups, per path per role |
+
+**Workload.** One `BotInventoryGenerator.GenerateInventory` call — one bot, equipment, mods, weapons
+and loot — on the live shipped database, for `assault` and for a level-1 `pmcUSEC`. The template
+clone and `BotEquipmentFilterService.FilterBotEquipment` are rebuilt outside the stopwatch for every
+run, because the legacy path mutates the template it is handed. `BotPayloadProjection.BuildRequest`
+is timed on its own in a third phase: it is the fixed per-call payload cost, and its share is what an
+items-view cache would be buying back.
+
+| Role | Path | median | mean | min | max |
+|---|---|---|---|---|---|
+| assault | native (rust) | **94.07 ms** | 89.94 ms | 52.44 ms | 116.94 ms |
+| assault | legacy (C# 4.1.2) | 1.41 ms | 3.31 ms | 0.57 ms | 17.75 ms |
+| assault | `BuildRequest` only | 12.79 ms | 12.50 ms | 6.04 ms | 25.45 ms |
+| usec | native (rust) | **56.05 ms** | 56.46 ms | 48.41 ms | 69.24 ms |
+| usec | legacy (C# 4.1.2) | 1.16 ms | 1.91 ms | 0.83 ms | 11.27 ms |
+| usec | `BuildRequest` only | 18.82 ms | 20.53 ms | 8.96 ms | 30.71 ms |
+
+Speedup on median wall clock: **0.01x** for `assault`, **0.02x** for `usec` — the native path is
+roughly 40-80x slower per bot. Projection share of the native median: **13.6%** (assault), **33.6%**
+(usec).
+
+The shape is the reward-loot result made worse. A 4.1.2 bot is one or two milliseconds of work, and
+the native path pays a fixed cost per bot to hand the whole items table (~30k `ItemView`s) and every
+global preset across the boundary. `BuildRequest` is only the *building* of that payload; most of the
+remaining ~66-86% is serialising it to JSON, crossing the FFI, and deserialising it on the Rust side.
+Generation itself is not the cost. See the bot-generation section of [ARCHITECTURE.md](ARCHITECTURE.md)
+for why the projection is not cached today and what the sanctioned fix is.
+
+Bot-specific caveats, on top of the general ones below:
+
+- **Two roles, one level, one difficulty.** `assault` and level-1 `pmcUSEC`, `normal`, `standard`
+  game version. Bots differ enormously in how much they generate; a boss or a high-level PMC is not
+  measured. The absolute native cost is dominated by the fixed payload, so it should move less
+  between roles than the legacy figure does.
+- **No allocation or RSS figures.** Only wall clock. The native path allocates ~30k view objects per
+  bot on the managed heap before serialising them, so its GC pressure is by construction far worse
+  than the legacy path's — unmeasured here.
+- **The legacy figures include a warm `BotLootCacheService`.** Hydration happens during the warmup
+  runs. A cold first bot of a role costs more on both paths.
 
 ## Caveats
 
