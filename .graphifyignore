@@ -1,5 +1,15 @@
 # .graphifyignore
 
+# only index Libraries, rust, and SPTarkov.Server, ignore everything else
+*
+!Libraries/
+!Libraries/**
+!rust/
+!rust/**
+!SPTarkov.Server/
+!SPTarkov.Server/**
+
+
 graphify-out/
 .claude/
 .git/
