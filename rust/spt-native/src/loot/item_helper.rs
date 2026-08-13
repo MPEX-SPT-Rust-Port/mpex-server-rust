@@ -37,6 +37,10 @@ pub const VEST: &str = "5448e5284bdc2dcb718b4567";
 pub const ARMOR: &str = "5448e54d4bdc2dcc718b4568";
 /// `BaseClasses.ARMORED_EQUIPMENT`
 pub const ARMORED_EQUIPMENT: &str = "57bef4c42459772e8d35a53b";
+/// `BaseClasses.ARMOR_PLATE`
+pub const ARMOR_PLATE: &str = "644120aa86ffbe10ee032b6f";
+/// `BaseClasses.FUEL`
+pub const FUEL: &str = "5d650c3e815116009f6201d2";
 /// `BaseClasses.MOD`
 pub const MOD: &str = "5448fe124bdc2da5018b4567";
 /// `BaseClasses.MOUNT`
