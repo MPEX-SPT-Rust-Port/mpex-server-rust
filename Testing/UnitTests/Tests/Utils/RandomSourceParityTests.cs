@@ -1,4 +1,6 @@
 using NUnit.Framework;
+using SPTarkov.Server.Core.Helpers;
+using SPTarkov.Server.Core.Models.Common;
 using SPTarkov.Server.Core.Utils;
 using SPTarkov.Server.Core.Utils.Cloners;
 using SPTarkov.Server.Core.Utils.Collections;
@@ -37,6 +39,36 @@ public sealed class RandomSourceParityTests
     private static readonly string[] _katPoolDraw5 = ["a", "a", "a", "c", "c"];
 
     private static readonly string[] _katPoolDrawAndRemove3 = ["a", "b", "c"];
+
+    /// <summary>
+    ///     The weighted-draw keys. 24 hex characters because they are MongoIds here; the rust twin
+    ///     uses the same literals.
+    /// </summary>
+    private static readonly string[] _katWeightedKeys =
+    [
+        "aaaaaaaaaaaaaaaaaaaaaaaa",
+        "bbbbbbbbbbbbbbbbbbbbbbbb",
+        "cccccccccccccccccccccccc",
+        "dddddddddddddddddddddddd",
+    ];
+
+    private static readonly string[] _katWeightedMixed5 =
+    [
+        "aaaaaaaaaaaaaaaaaaaaaaaa",
+        "cccccccccccccccccccccccc",
+        "aaaaaaaaaaaaaaaaaaaaaaaa",
+        "aaaaaaaaaaaaaaaaaaaaaaaa",
+        "dddddddddddddddddddddddd",
+    ];
+
+    private const string KatWeightedSingle = "bbbbbbbbbbbbbbbbbbbbbbbb";
+
+    private static readonly string[] _katWeightedUniform3 =
+    [
+        "aaaaaaaaaaaaaaaaaaaaaaaa",
+        "cccccccccccccccccccccccc",
+        "dddddddddddddddddddddddd",
+    ];
 
     [Test]
     public void RawXoshiroSequenceMatchesTheRustTwin()
@@ -148,5 +180,54 @@ public sealed class RandomSourceParityTests
         {
             ProbabilityRandomSource.Current = original;
         }
+    }
+
+    [Test]
+    public void SeededWeightedRandomHelperMatchesTheRustWeightedDraws()
+    {
+        var helper = DI.GetInstance().GetService<WeightedRandomHelper>();
+        var randomUtil = DI.GetInstance().GetService<RandomUtil>();
+
+        // Sum 7 against 4 entries: the general cumulative-scan path.
+        var mixed = BuildWeights(5, 0, 1, 1);
+
+        // Sum equals the entry count: the uniform GetInt shortcut.
+        var uniform = BuildWeights(1, 1, 1, 1);
+
+        // One entry: returned without drawing at all, so it leaves the stream untouched.
+        var single = new Dictionary<MongoId, double> { { _katWeightedKeys[1], 3 } };
+
+        var original = randomUtil.RandomSource;
+        try
+        {
+            randomUtil.RandomSource = new SeededRandomSource(KatSeed);
+
+            for (var i = 0; i < _katWeightedMixed5.Length; i++)
+            {
+                Assert.That(helper.GetWeightedValue(mixed).ToString(), Is.EqualTo(_katWeightedMixed5[i]), $"mixed draw #{i}");
+            }
+
+            Assert.That(helper.GetWeightedValue(single).ToString(), Is.EqualTo(KatWeightedSingle));
+
+            for (var i = 0; i < _katWeightedUniform3.Length; i++)
+            {
+                Assert.That(helper.GetWeightedValue(uniform).ToString(), Is.EqualTo(_katWeightedUniform3[i]), $"uniform draw #{i}");
+            }
+        }
+        finally
+        {
+            randomUtil.RandomSource = original;
+        }
+    }
+
+    private static Dictionary<MongoId, double> BuildWeights(params double[] weights)
+    {
+        var values = new Dictionary<MongoId, double>();
+        for (var i = 0; i < weights.Length; i++)
+        {
+            values[_katWeightedKeys[i]] = weights[i];
+        }
+
+        return values;
     }
 }

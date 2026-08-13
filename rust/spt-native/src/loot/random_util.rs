@@ -8,8 +8,11 @@
 
 use std::cell::RefCell;
 
+use indexmap::IndexMap;
 use rand::{Rng, SeedableRng};
 use rand_xoshiro::Xoshiro256StarStar;
+
+use super::item_helper::LootError;
 
 thread_local! {
     /// The test-only seeded generator; `None` means production entropy.
@@ -231,6 +234,68 @@ pub fn get_normally_distributed_random_number(mean: f64, sigma: f64) -> f64 {
 /// If `list` is empty, as the C# throws on an empty collection.
 pub fn get_array_value<T>(list: &[T]) -> &T {
     &list[get_int(0, list.len() as i32 - 1) as usize]
+}
+
+/// A key drawn in proportion to its weight, matching `WeightedRandomHelper.GetWeightedValue`
+/// through `WeightedRandom` (`WeightedRandomHelper.cs:23-108`). Insertion order is the C#
+/// `Dictionary` enumeration order the original scans, so the map has to stay ordered.
+///
+/// Three paths, each consuming different RNG — call-site parity depends on which one runs:
+/// a single entry returns without drawing at all, weights summing to the entry count take one
+/// `get_int`, and everything else takes one `get_double`.
+///
+/// The C#'s `logger.Error` calls for empty or mismatched inputs are not ported: keys and weights
+/// come from one map here so they cannot disagree, and no ported call site passes an empty one.
+///
+/// # Errors
+///
+/// Where the C# throws: an empty map (its uniform shortcut indexes out of bounds), or a scan that
+/// falls off the end ("No item was picked.").
+pub fn get_weighted_value(values: &IndexMap<String, f64>) -> Result<String, LootError> {
+    if values.len() == 1
+        && let Some(key) = values.keys().next()
+    {
+        return Ok(key.clone());
+    }
+
+    let mut cumulative_weights = vec![0.0; values.len()];
+    let mut sum_of_weights = 0.0;
+    for (index, weight) in values.values().enumerate() {
+        // Bug-for-bug: a skipped weight leaves its slot at 0 rather than at the running sum, so a
+        // zeroed slot can still win the `>= random_number` scan below when the sum is 0.
+        if *weight < 0.0 {
+            continue;
+        }
+
+        sum_of_weights += weight;
+        cumulative_weights[index] = sum_of_weights;
+    }
+
+    #[expect(
+        clippy::float_cmp,
+        reason = "the C# compares exactly; weights averaging 1.0 is the intended trigger"
+    )]
+    if sum_of_weights == values.len() as f64 {
+        // Weights are all the same, early exit
+        let random_index = get_int(0, values.len() as i32 - 1);
+        return values
+            .keys()
+            .nth(random_index as usize)
+            .cloned()
+            .ok_or_else(|| LootError::new("No item was picked."));
+    }
+
+    // Getting the random number in a range of [0...sum(weights)]
+    let random_number = sum_of_weights * get_double(0.0, 1.0);
+
+    // Picking the random item based on its weight.
+    for (index, key) in values.keys().enumerate() {
+        if cumulative_weights[index] >= random_number {
+            return Ok(key.clone());
+        }
+    }
+
+    Err(LootError::new("No item was picked."))
 }
 
 /// Rounds half to even, matching the default C# `Math.Round(double)`. Ported call sites must use
@@ -499,7 +564,58 @@ mod tests {
         println!("FILL5: {fill5:#04X?}");
         println!("GET_INT_1_10: {ints:?}");
         println!("GET_DOUBLE_0_100_BITS: [{}]", hex(&doubles));
+        let weighted: (Vec<String>, Vec<String>, Vec<String>) = {
+            let _g = TestSeedGuard::install(42);
+            (
+                draw(&kat_mixed_map(), 5),
+                draw(&kat_single_map(), 1),
+                draw(&kat_uniform_map(), 3),
+            )
+        };
+
         println!("GET_CHANCE100_50: {chances:?}");
+        println!("WEIGHTED_MIXED_5: {:?}", weighted.0);
+        println!("WEIGHTED_SINGLE: {:?}", weighted.1);
+        println!("WEIGHTED_UNIFORM_3: {:?}", weighted.2);
+    }
+
+    /// The KAT map keys, shared with the C# twin where they have to parse as `MongoId`s — hence
+    /// 24 hex characters rather than "a"/"b"/"c"/"d".
+    fn kat_keys() -> [&'static str; 4] {
+        [
+            "aaaaaaaaaaaaaaaaaaaaaaaa",
+            "bbbbbbbbbbbbbbbbbbbbbbbb",
+            "cccccccccccccccccccccccc",
+            "dddddddddddddddddddddddd",
+        ]
+    }
+
+    /// `{a:5, b:0, c:1, d:1}` — sum 7 against 4 entries, so the general cumulative-scan path.
+    fn kat_mixed_map() -> IndexMap<String, f64> {
+        kat_keys()
+            .into_iter()
+            .map(str::to_owned)
+            .zip([5.0, 0.0, 1.0, 1.0])
+            .collect()
+    }
+
+    /// All 1.0 — sum equals the entry count, so the uniform `get_int` shortcut.
+    fn kat_uniform_map() -> IndexMap<String, f64> {
+        kat_keys()
+            .into_iter()
+            .map(str::to_owned)
+            .zip([1.0; 4])
+            .collect()
+    }
+
+    fn kat_single_map() -> IndexMap<String, f64> {
+        IndexMap::from([(kat_keys()[1].to_owned(), 3.0)])
+    }
+
+    fn draw(map: &IndexMap<String, f64>, count: usize) -> Vec<String> {
+        (0..count)
+            .map(|_| get_weighted_value(map).expect("a key is always picked"))
+            .collect()
     }
 
     // ---- Cross-language KAT pins. Twin fixture: RandomSourceParityTests.cs (C#). ----
@@ -531,6 +647,21 @@ mod tests {
         0x4040_3FCF_4EA6_0172,
     ];
     const KAT_GET_CHANCE100_50: [bool; 5] = [true, true, true, false, false];
+    /// Five general-path draws from `kat_mixed_map`, then the single-entry map (no draw), then
+    /// three uniform-shortcut draws from `kat_uniform_map` — one continuous stream.
+    const KAT_WEIGHTED_MIXED_5: [&str; 5] = [
+        "aaaaaaaaaaaaaaaaaaaaaaaa",
+        "cccccccccccccccccccccccc",
+        "aaaaaaaaaaaaaaaaaaaaaaaa",
+        "aaaaaaaaaaaaaaaaaaaaaaaa",
+        "dddddddddddddddddddddddd",
+    ];
+    const KAT_WEIGHTED_SINGLE: &str = "bbbbbbbbbbbbbbbbbbbbbbbb";
+    const KAT_WEIGHTED_UNIFORM_3: [&str; 3] = [
+        "aaaaaaaaaaaaaaaaaaaaaaaa",
+        "cccccccccccccccccccccccc",
+        "dddddddddddddddddddddddd",
+    ];
 
     #[test]
     fn kat_raw_u64_sequence_is_pinned() {
@@ -572,5 +703,45 @@ mod tests {
         let _g = TestSeedGuard::install(KAT_SEED);
         let chances: Vec<bool> = (0..5).map(|_| get_chance_100(50.0)).collect();
         assert_eq!(chances, KAT_GET_CHANCE100_50);
+    }
+
+    #[test]
+    fn kat_weighted_values_are_pinned() {
+        let _g = TestSeedGuard::install(KAT_SEED);
+        let mixed = draw(&kat_mixed_map(), 5);
+        let single = draw(&kat_single_map(), 1);
+        let uniform = draw(&kat_uniform_map(), 3);
+
+        assert_eq!(mixed, KAT_WEIGHTED_MIXED_5);
+        assert_eq!(single, [KAT_WEIGHTED_SINGLE]);
+        assert_eq!(uniform, KAT_WEIGHTED_UNIFORM_3);
+    }
+
+    #[test]
+    fn a_single_entry_map_consumes_no_draw() {
+        // The C# returns the lone key before touching the RNG (`WeightedRandomHelper.cs:26-29`),
+        // so the draws either side of it are one uninterrupted stream. Parity depends on it.
+        let _g = TestSeedGuard::install(KAT_SEED);
+        let without = draw(&kat_uniform_map(), 3);
+
+        let _g = TestSeedGuard::install(KAT_SEED);
+        draw(&kat_single_map(), 1);
+        let with = draw(&kat_uniform_map(), 3);
+
+        assert_eq!(with, without);
+    }
+
+    #[test]
+    fn negative_weights_leave_a_zeroed_slot_that_can_still_win() {
+        // Bug-for-bug: every weight skipped leaves `sum_of_weights` at 0, so `random_number` is 0
+        // and the first zeroed cumulative slot satisfies `>= 0`. Seed-independent.
+        let map: IndexMap<String, f64> = kat_keys()
+            .into_iter()
+            .map(str::to_owned)
+            .zip([-1.0, -2.0, -3.0, -4.0])
+            .collect();
+
+        let _g = TestSeedGuard::install(KAT_SEED);
+        assert_eq!(get_weighted_value(&map).unwrap(), kat_keys()[0]);
     }
 }
