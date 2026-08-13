@@ -7,7 +7,8 @@
 # Inside the container (first run only): scripts/decompress-assets.sh
 #   C# tests:    dotnet test
 #   Rust checks: cd rust && cargo test && cargo fmt --check && cargo clippy --all-targets -- -D warnings
-#   Benchmarks:  cd rust && cargo bench   (no bench targets exist yet; toolchain supports them)
+#   Benchmarks:  see BENCHMARK.md - the loot benchmark is an [Explicit] NUnit fixture run through
+#                dotnet test -c Release, not cargo bench (no bench targets exist)
 FROM quay.io/fedora/fedora-minimal:44-x86_64
 
 RUN dnf5 -y install dotnet-sdk-10.0 gcc git 7zip shadow-utils \

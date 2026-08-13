@@ -236,6 +236,7 @@ live database, config and services into a JSON payload and hands it to the nativ
 4.1.2 implementation is retained in the class as the **legacy path**, taken when HarmonyX reports
 a patch on any of the protected members or when `location.json`'s `forceLegacyLootGeneration` is
 set — a mod hook on loot internals then fires with genuine baseline semantics at baseline speed.
+The two paths are benchmarked head to head against each other; see [BENCHMARK.md](BENCHMARK.md).
 On the native path, that payload is handed to `spt_generate_static_containers` or
 `spt_generate_dynamic_loot`, which replays the log lines the native side collected instead of
 writing itself — `ReplayDiagnostics` resolves a
