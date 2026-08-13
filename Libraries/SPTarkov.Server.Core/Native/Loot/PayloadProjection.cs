@@ -116,6 +116,10 @@ internal static class PayloadProjection
                             .ToList(),
                     })
                     .ToList(),
+                Durability = props.Durability,
+                MaximumNumberOfUsage = props.MaximumNumberOfUsage,
+                MaxRepairResource = props.MaxRepairResource,
+                CanSellOnRagfair = props.CanSellOnRagfair,
             };
         }
 

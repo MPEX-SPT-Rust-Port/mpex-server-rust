@@ -618,6 +618,19 @@ pub struct ItemView {
     /// / [`ItemView::grid_cells_v`] flatten the *first* grid only, which is all the loot port needs;
     /// a bot container is walked grid by grid, so it needs every one of them.
     pub grids: Option<Vec<GridView>>,
+
+    // -- Added for the ragfair port (`ragfair::offer_generator`, `ragfair::server_helper`).
+    /// `TemplateItem.Properties.Durability` — `AddMissingConditions` (`RagfairOfferGenerator.cs:838`)
+    /// decides "is repairable" on its presence and "> 0" on its value.
+    pub durability: Option<f64>,
+    /// `TemplateItem.Properties.MaximumNumberOfUsage` — key uses (`:740/:743`).
+    pub maximum_number_of_usage: Option<i32>,
+    /// `TemplateItem.Properties.MaxRepairResource` — repair kit uses (`:759/:842`).
+    pub max_repair_resource: Option<f64>,
+    /// `TemplateItem.Properties.CanSellOnRagfair` — the BSG flea blacklist
+    /// (`RagfairServerHelper.cs:53`). The custom-blacklist arm at `:61` writes it back to `false`;
+    /// that write leaves Rust as `rejectedCanSellTemplates` for the C# side to replay.
+    pub can_sell_on_ragfair: Option<bool>,
 }
 
 /// `Models/Eft/Common/Tables/TemplateItem.cs:1641-1681` — `Grid` plus its `_props`, flattened.

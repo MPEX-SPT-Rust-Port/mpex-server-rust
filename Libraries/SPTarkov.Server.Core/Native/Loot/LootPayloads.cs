@@ -291,6 +291,28 @@ public record ItemView
     /// </summary>
     [JsonPropertyName("grids")]
     public List<GridView>? Grids { get; set; }
+
+    // Added for the ragfair port. Nullable like the bot additions, so the loot and bot payloads that
+    // never read them stay absent from the wire.
+
+    /// <summary>
+    /// <c>Durability</c> - the ragfair condition path reads "is repairable" off its presence.
+    /// </summary>
+    [JsonPropertyName("durability")]
+    public double? Durability { get; set; }
+
+    [JsonPropertyName("maximumNumberOfUsage")]
+    public int? MaximumNumberOfUsage { get; set; }
+
+    [JsonPropertyName("maxRepairResource")]
+    public int? MaxRepairResource { get; set; }
+
+    /// <summary>
+    /// <c>CanSellOnRagfair</c> - the BSG flea blacklist. The native side never writes it back; the
+    /// templates it would have flipped come home as <c>rejectedCanSellTemplates</c>.
+    /// </summary>
+    [JsonPropertyName("canSellOnRagfair")]
+    public bool? CanSellOnRagfair { get; set; }
 }
 
 /// <summary>
