@@ -1303,7 +1303,7 @@ fn create_dynamic_loot_item(
 
         // Both failures are C# crashes inside `AddCartridgesToAmmoBox`; unlike the static path,
         // there is no null to return here, so the run stops with them.
-        item_helper::add_cartridges_to_ammo_box(ctx, &mut ammo_box_item, chosen_tpl)
+        item_helper::add_cartridges_to_ammo_box(ctx.items_view, &mut ammo_box_item, chosen_tpl)
             .map_err(|failure| LootError::new(failure.message.unwrap_or_default()))?;
 
         item_with_mods.extend(ammo_box_item);
@@ -1421,7 +1421,9 @@ fn create_static_loot_item(
         height = size.map(|(_, height)| height);
     } else if item_helper::is_of_baseclass(items_view, chosen_tpl, item_helper::AMMO_BOX) {
         // No spawnPoint to fall back on, generate manually
-        if let Err(failure) = item_helper::add_cartridges_to_ammo_box(ctx, &mut items, chosen_tpl) {
+        if let Err(failure) =
+            item_helper::add_cartridges_to_ammo_box(ctx.items_view, &mut items, chosen_tpl)
+        {
             // The C# equivalents are crashes; reported and the box skipped instead.
             ctx.diagnostics.push(failure);
 

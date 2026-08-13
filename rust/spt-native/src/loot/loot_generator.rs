@@ -14,7 +14,9 @@ use serde_json::json;
 use super::item_helper::{self, LootError};
 use super::models::{
     CreateForcedLootRequest, CreateRandomLootRequest, DEBUG, Diagnostic, ERROR, Item, ItemView,
-    LootRequestView, MinMaxI32, PresetView, RewardLootDb, RewardLootResult, Upd, WARNING,
+    LootRequestView, MinMaxI32, PresetView, RandomLootContainerRequest, RewardDetailsView,
+    RewardLootDb, RewardLootResult, SealedContainerSettingsView, SealedWeaponCaseRequest, Upd,
+    WARNING,
 };
 use super::{mongo_id, random_util};
 
@@ -658,12 +660,399 @@ fn find_and_add_random_preset_to_loot(
     Ok(true)
 }
 
+/// `randomUtil.GetArrayValue` over a pool the C# builds inline. An empty one is the
+/// `ArgumentOutOfRangeException` path described at the top of [`create_random_loot`]: `ToList()`,
+/// a `GetInt(0, -1)` that short-circuits to 0 without consuming randomness, then an index into an
+/// empty list.
+fn get_array_value_of<'a, T>(pool: &'a [T], description: &str) -> Result<&'a T, LootError> {
+    if pool.is_empty() {
+        return Err(LootError::new(format!("{description} is empty")));
+    }
+
+    Ok(random_util::get_array_value(pool))
+}
+
+/// `randomUtil.GetInt(settings.Min, settings.Max)` over a non-nullable `MinMax<int>` dictionary
+/// value (`:522,617`): only the members can be absent, and those default to 0.
+fn get_int_of_minmax(min_max: &MinMaxI32) -> i32 {
+    random_util::get_int(min_max.min.unwrap_or(0), min_max.max.unwrap_or(0))
+}
+
+/// The `new List<Item> { new() { Id = new MongoId(), Template = tpl } }` literal the sealed-container
+/// and reward-container add-sites share (`:554-557,588-591,643-646,683`) — no `Upd` on any of them.
+fn new_reward_item(tpl: &str) -> Item {
+    Item {
+        id: mongo_id::generate(),
+        template: tpl.to_owned(),
+        ..Default::default()
+    }
+}
+
+/// `LootGenerator.GetSealedWeaponCaseLoot` (`:462-505`) — a weapon preset, the mods that fit it,
+/// then the non-weapon-mod reward types.
+///
+/// Nothing here is marked found-in-raid: `SealedAirdropContainerSettings.FoundInRaid` is applied by
+/// the C# caller after the call, not by this method.
+pub fn get_sealed_weapon_case_loot(
+    request: SealedWeaponCaseRequest,
+) -> Result<RewardLootResult, LootError> {
+    let _seed_guard = request
+        .db
+        .test_seed
+        .map(random_util::TestSeedGuard::install);
+
+    let db = &request.db;
+    let settings = &request.container_settings;
+    let mut items_to_return: Vec<Vec<Item>> = Vec::new();
+    let mut diagnostics: Vec<Diagnostic> = Vec::new();
+
+    // Choose a weapon to give to the player (weighted)
+    let chosen_weapon_tpl = random_util::get_weighted_value(&settings.weapon_reward_weight)?;
+
+    // Get itemDb details of weapon
+    let Some(weapon_details_db) = item_helper::get_item(&db.items_view, &chosen_weapon_tpl) else {
+        diagnostics.push(localised(
+            ERROR,
+            "loot-non_item_picked_as_sealed_weapon_crate_reward",
+            Some(json!(chosen_weapon_tpl)),
+        ));
+
+        return Ok(RewardLootResult {
+            items: items_to_return,
+            diagnostics,
+        });
+    };
+
+    // `presetHelper.GetPresets(tpl)` returns an empty list for a tpl with no presets
+    // (`PresetHelper.cs:182-186`), which is what an absent key is here.
+    let presets_for_weapon: &[PresetView] = request
+        .presets_by_tpl
+        .get(&chosen_weapon_tpl)
+        .map_or(&[], Vec::as_slice);
+
+    // Get weapon preset - default or choose a random one from globals.json preset pool
+    let chosen_weapon_preset = if settings.default_presets_only {
+        db.default_presets_by_tpl.get(&chosen_weapon_tpl)
+    } else {
+        Some(get_array_value_of(
+            presets_for_weapon,
+            &format!("Preset pool for weapon: {chosen_weapon_tpl}"),
+        )?)
+    };
+
+    // No default preset found for weapon, choose a random one. Only reachable from the branch
+    // above: `GetArrayValue` never hands back a null.
+    let chosen_weapon_preset = match chosen_weapon_preset {
+        Some(preset) => preset,
+        None => {
+            diagnostics.push(localised(
+                WARNING,
+                "loot-default_preset_not_found_using_random",
+                Some(json!(chosen_weapon_tpl)),
+            ));
+
+            get_array_value_of(
+                presets_for_weapon,
+                &format!("Preset pool for weapon: {chosen_weapon_tpl}"),
+            )?
+        }
+    };
+
+    // Clean up Ids to ensure they're all unique and prevent collisions
+    let mut preset_and_mods_clone = chosen_weapon_preset.items.clone();
+    item_helper::replace_ids(&mut preset_and_mods_clone);
+    item_helper::remap_root_item_id(&mut preset_and_mods_clone);
+
+    // Add preset to return object
+    items_to_return.push(preset_and_mods_clone);
+
+    // Get a random collection of weapon mods related to chosen weapon and add them to result array.
+    // An absent key is the empty list `GetLinkedDbItems` returns for an unlinked tpl, which lands on
+    // the same skip branch the C# null check does.
+    let linked_items_to_weapon: &[String] = request
+        .linked_items
+        .get(&chosen_weapon_tpl)
+        .map_or(&[], Vec::as_slice);
+    items_to_return.extend(get_sealed_container_weapon_mod_rewards(
+        db,
+        settings,
+        linked_items_to_weapon,
+        chosen_weapon_preset,
+        &mut diagnostics,
+    ));
+
+    // Handle non-weapon mod reward types
+    items_to_return.extend(get_sealed_container_non_weapon_mod_rewards(
+        db,
+        settings,
+        weapon_details_db,
+        &mut diagnostics,
+    )?);
+
+    Ok(RewardLootResult {
+        items: items_to_return,
+        diagnostics,
+    })
+}
+
+/// `LootGenerator.GetSealedContainerNonWeaponModRewards` (`:513-598`).
+fn get_sealed_container_non_weapon_mod_rewards(
+    db: &RewardLootDb,
+    settings: &SealedContainerSettingsView,
+    weapon_details_db: &ItemView,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Result<Vec<Vec<Item>>, LootError> {
+    let mut rewards: Vec<Vec<Item>> = Vec::new();
+
+    for (reward_key, limits) in &settings.reward_type_limits {
+        let reward_count = get_int_of_minmax(limits);
+        if reward_count == 0 {
+            continue;
+        }
+
+        // Edge case - ammo boxes
+        if reward_key == item_helper::AMMO_BOX {
+            // Need to find boxes that matches weapons caliber
+            let weapon_caliber = weapon_details_db.ammo_caliber.as_deref();
+            let mut ammo_boxes_matching_caliber: Vec<&str> = Vec::new();
+            for tpl in &settings.ammo_box_whitelist {
+                // A whitelisted tpl the db has no item for leaves a null in the C# list, and the
+                // caliber filter dereferences `.Properties` on it (`:540`). Deviation: C# only
+                // reaches that null when the lazy chain is enumerated past it, so a match earlier in
+                // the whitelist can defer the crash to the `GetArrayValue` that follows — and a
+                // negative reward count would skip it entirely. Filtering eagerly here reports it up
+                // front; no draw separates the two points, so nothing else shifts.
+                let details = item_helper::get_item(&db.items_view, tpl).ok_or_else(|| {
+                    LootError::new(format!(
+                        "Whitelisted ammo box: {tpl} is missing from the item db"
+                    ))
+                })?;
+
+                if details.ammo_caliber.as_deref() == weapon_caliber {
+                    ammo_boxes_matching_caliber.push(tpl.as_str());
+                }
+            }
+
+            if ammo_boxes_matching_caliber.is_empty() {
+                diagnostics.push(diagnostic(
+                    DEBUG,
+                    format!(
+                        "No ammo box with caliber {} found, skipping",
+                        weapon_caliber.unwrap_or_default()
+                    ),
+                ));
+
+                continue;
+            }
+
+            for _ in 0..reward_count {
+                let chosen_ammo_box = *random_util::get_array_value(&ammo_boxes_matching_caliber);
+                let mut ammo_box_reward = vec![new_reward_item(chosen_ammo_box)];
+                // The three failure cases are all C# crash paths (a box naming no cartridge
+                // dereferences `cartridgeTpl!`, an empty box list indexes `ammoBox[0]`, a cartridge
+                // without a stack size loops forever), so they end the call rather than log.
+                item_helper::add_cartridges_to_ammo_box(
+                    &db.items_view,
+                    &mut ammo_box_reward,
+                    chosen_ammo_box,
+                )
+                .map_err(|failure| {
+                    LootError::new(failure.message.unwrap_or_else(|| {
+                        format!("Unable to add cartridges to ammo box: {chosen_ammo_box}")
+                    }))
+                })?;
+
+                rewards.push(ammo_box_reward);
+            }
+
+            continue;
+        }
+
+        // Get all items of the desired type + not quest items + not globally blacklisted.
+        //
+        // **Bug-for-bug, three of them.** The comment is the C#'s; the code is not what it says.
+        // `IsItemBlacklisted` is not negated (`:569`), so the pool is the blacklisted items and
+        // nothing else. `!(AllowBossItems || IsBossItem(id))` (`:570`) is false for every item once
+        // `AllowBossItems` is set, emptying the pool outright rather than admitting boss items. And
+        // `QuestItem is null` (`:571`) rejects an explicit `false` as well as a `true`. With real
+        // configs the three together leave this pool empty and the branch just logs the skip.
+        //
+        // Deviation: the blacklist is [`RewardLootDb::global_blacklist`], which the C# caller fills
+        // from `GetBlacklistedItems()` (`config/item.json`), while `IsItemBlacklisted` reads the
+        // cache that mods can add to at runtime. The two agree on an unmodded server.
+        let reward_item_pool: Vec<&str> = db
+            .items_view
+            .iter()
+            .filter(|(tpl, item)| {
+                // `TemplateItem.Parent` is a non-nullable `MongoId`, so a missing one is the empty
+                // id and only matches an empty reward key.
+                item.parent.as_deref().unwrap_or_default() == reward_key
+                    && item
+                        .item_type
+                        .as_deref()
+                        .is_some_and(|item_type| item_type.eq_ignore_ascii_case("item"))
+                    && db.global_blacklist.contains(tpl.as_str())
+                    && !(settings.allow_boss_items || db.boss_items.contains(tpl.as_str()))
+                    && item.quest_item.is_none()
+            })
+            .map(|(tpl, _)| tpl.as_str())
+            .collect();
+
+        if reward_item_pool.is_empty() {
+            diagnostics.push(diagnostic(
+                DEBUG,
+                format!("No items with base type of {reward_key} found, skipping"),
+            ));
+
+            continue;
+        }
+
+        for _ in 0..reward_count {
+            // Choose a random item from pool
+            let chosen_reward_item = *random_util::get_array_value(&reward_item_pool);
+
+            rewards.push(vec![new_reward_item(chosen_reward_item)]);
+        }
+    }
+
+    Ok(rewards)
+}
+
+/// `LootGenerator.GetSealedContainerWeaponModRewards` (`:607-653`).
+fn get_sealed_container_weapon_mod_rewards(
+    db: &RewardLootDb,
+    settings: &SealedContainerSettingsView,
+    linked_items_to_weapon: &[String],
+    chosen_weapon_preset: &PresetView,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Vec<Vec<Item>> {
+    let mut mod_rewards: Vec<Vec<Item>> = Vec::new();
+
+    for (reward_key, limits) in &settings.weapon_mod_reward_limits {
+        // Drawn before the pool is built, so it is consumed even when the type is then skipped.
+        let reward_count = get_int_of_minmax(limits);
+
+        // Nothing to add, skip reward type
+        if reward_count == 0 {
+            continue;
+        }
+
+        // Get items that fulfil reward type criteria from items that fit on gun. A linked tpl the db
+        // has no item for stands in for the null element C#'s `item?.Parent` filters out.
+        let related_items: Vec<&str> = linked_items_to_weapon
+            .iter()
+            .filter(|tpl| {
+                item_helper::get_item(&db.items_view, tpl)
+                    .is_some_and(|item| item.parent.as_deref().unwrap_or_default() == reward_key)
+                    && !db.global_blacklist.contains(tpl.as_str())
+            })
+            .map(String::as_str)
+            .collect();
+
+        if related_items.is_empty() {
+            diagnostics.push(diagnostic(
+                DEBUG,
+                format!(
+                    "No items found to fulfil reward type: {reward_key} for weapon: {}, skipping type",
+                    chosen_weapon_preset.name.as_deref().unwrap_or_default()
+                ),
+            ));
+
+            continue;
+        }
+
+        // Find a random item of the desired type and add as reward
+        for _ in 0..reward_count {
+            let chosen_item = *random_util::get_array_value(&related_items);
+
+            mod_rewards.push(vec![new_reward_item(chosen_item)]);
+        }
+    }
+
+    mod_rewards
+}
+
+/// `LootGenerator.GetRandomLootContainerLoot` (`:660-688`) — the halloween pumpkins and friends.
+pub fn get_random_loot_container_loot(
+    request: RandomLootContainerRequest,
+) -> Result<RewardLootResult, LootError> {
+    let _seed_guard = request
+        .db
+        .test_seed
+        .map(random_util::TestSeedGuard::install);
+
+    let db = &request.db;
+    let reward_container_details = &request.reward_details;
+    let mut items_to_return: Vec<Vec<Item>> = Vec::new();
+
+    // Get random items and add to newItemRequest
+    for _ in 0..reward_container_details.reward_count {
+        // Pick random reward from pool, add to request object
+        let chosen_reward_item_tpl = pick_reward_item(db, reward_container_details)?;
+
+        if request.preset_tpls.contains(&chosen_reward_item_tpl) {
+            // `HasPreset` is true for every tpl with a preset, `GetDefaultPreset` only returns one
+            // for those with a default, and `:675` dereferences the difference.
+            let preset = db
+                .default_presets_by_tpl
+                .get(&chosen_reward_item_tpl)
+                .ok_or_else(|| {
+                    LootError::new(format!(
+                        "Tpl: {chosen_reward_item_tpl} has presets but no default preset"
+                    ))
+                })?;
+
+            // Ensure preset has unique ids and is cloned so we don't alter the preset data stored in
+            // memory. C# skips the clone here (`:675` calls `ReplaceIDs()` straight on the cached
+            // `preset.Items`, mutating it) — this port owns its deserialized copy, so the cache
+            // corruption cannot happen and the items handed back are the same either way.
+            let mut preset_and_mods = preset.items.clone();
+            item_helper::replace_ids(&mut preset_and_mods);
+            item_helper::remap_root_item_id(&mut preset_and_mods);
+            items_to_return.push(preset_and_mods);
+
+            continue;
+        }
+
+        items_to_return.push(vec![new_reward_item(&chosen_reward_item_tpl)]);
+    }
+
+    Ok(RewardLootResult {
+        items: items_to_return,
+        diagnostics: Vec::new(),
+    })
+}
+
+/// `LootGenerator.PickRewardItem` (`:695-705`).
+fn pick_reward_item(
+    db: &RewardLootDb,
+    reward_container_details: &RewardDetailsView,
+) -> Result<String, LootError> {
+    if let Some(reward_tpl_pool) = &reward_container_details.reward_tpl_pool
+        && !reward_tpl_pool.is_empty()
+    {
+        return random_util::get_weighted_value(reward_tpl_pool);
+    }
+
+    let reward_type_pool = reward_container_details
+        .reward_type_pool
+        .as_ref()
+        // `itemTypeWhitelist.Contains(...)` inside the pool filter is the C# throw path (`:247`).
+        .ok_or_else(|| LootError::new("RewardDetails.RewardTypePool is null"))?;
+
+    let reward_pool =
+        get_item_reward_pool(db, &HashSet::new(), reward_type_pool, true, true, false);
+    let reward_pool_tpls: Vec<&str> = reward_pool.item_pool.iter().map(|(tpl, _)| *tpl).collect();
+
+    get_array_value_of(&reward_pool_tpls, "Reward item pool").map(|tpl| (*tpl).to_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::Value;
 
     use super::*;
-    use crate::loot::item_helper::{AMMO, ARMOR, WEAPON};
+    use crate::loot::item_helper::{AMMO, AMMO_BOX, ARMOR, WEAPON};
     use crate::loot::mongo_id;
 
     /// Parentless root, as `_parent: ""` items are in the db.
@@ -686,12 +1075,22 @@ mod tests {
 
     const WEAPON_TPL: &str = "a1a1a1a1a1a1a1a1a1a1a1a1";
     const WEAPON_MOD_TPL: &str = "b2b2b2b2b2b2b2b2b2b2b2b2";
+    /// Second linked mod, same parent as [`WEAPON_MOD_TPL`]. Like it, `_type` is absent, so neither
+    /// mod joins the plain-item reward pool and the `create_random_loot` fixtures are unaffected.
+    const WEAPON_MOD_B_TPL: &str = "b2b2b2b2b2b2b2b2b2b2b2b3";
     const VEST_TPL: &str = "c3c3c3c3c3c3c3c3c3c3c3c3";
     /// `front_plate` of the vest preset, armor class 4.
     const PLATE_TPL: &str = "d4d4d4d4d4d4d4d4d4d4d4d4";
 
+    /// Same `_ammoCaliber` as [`WEAPON_TPL`]; holds 5 rounds of [`AMMO_ITEM_TPL`] (stack max 3).
+    const AMMO_BOX_MATCH_TPL: &str = "e5e5e5e5e5e5e5e5e5e5e5e5";
+    /// A whitelisted box of the wrong caliber.
+    const AMMO_BOX_OTHER_TPL: &str = "e5e5e5e5e5e5e5e5e5e5e5e6";
+    const WEAPON_CALIBER: &str = "Caliber545x39";
+
     const WEAPON_PRESET_ROOT_ID: &str = "1a1a1a1a1a1a1a1a1a1a1a1a";
     const WEAPON_PRESET_MOD_ID: &str = "2b2b2b2b2b2b2b2b2b2b2b2b";
+    const WEAPON_PRESET_B_ROOT_ID: &str = "1a1a1a1a1a1a1a1a1a1a1a1b";
     const VEST_PRESET_ROOT_ID: &str = "3c3c3c3c3c3c3c3c3c3c3c3c";
     const VEST_PRESET_PLATE_ID: &str = "4d4d4d4d4d4d4d4d4d4d4d4d";
 
@@ -718,10 +1117,27 @@ mod tests {
                 QUEST_ITEM_TPL: { "parent": MISC_NODE, "type": "item", "name": "quest_thing", "questItem": true },
                 BOSS_ITEM_TPL: { "parent": MISC_NODE, "type": "item", "name": "boss_thing" },
                 STACK_ITEM_TPL: { "parent": MISC_NODE, "type": "item", "name": "screws", "stackMaxSize": 50 },
-                WEAPON_TPL: { "parent": WEAPON, "type": "item", "name": "weapon" },
+                WEAPON_TPL: {
+                    "parent": WEAPON, "type": "item", "name": "weapon",
+                    "ammoCaliber": WEAPON_CALIBER
+                },
                 WEAPON_MOD_TPL: { "parent": MISC_NODE, "name": "weapon_mod" },
+                WEAPON_MOD_B_TPL: { "parent": MISC_NODE, "name": "weapon_mod_b" },
                 VEST_TPL: { "parent": ARMOR, "type": "item", "name": "vest" },
-                PLATE_TPL: { "parent": MISC_NODE, "name": "plate", "armorClass": 4 }
+                PLATE_TPL: { "parent": MISC_NODE, "name": "plate", "armorClass": 4 },
+                // Parented under the ammo box base class, which is in no whitelist, so the boxes
+                // stay out of every `create_random_loot` pool.
+                AMMO_BOX: { "parent": ITEM_NODE, "name": "AmmoBox" },
+                AMMO_BOX_MATCH_TPL: {
+                    "parent": AMMO_BOX, "type": "item", "name": "ammo_box_545",
+                    "ammoCaliber": WEAPON_CALIBER,
+                    "stackSlotMaxCount": 5, "stackSlotFirstFilterFirst": AMMO_ITEM_TPL
+                },
+                AMMO_BOX_OTHER_TPL: {
+                    "parent": AMMO_BOX, "type": "item", "name": "ammo_box_762",
+                    "ammoCaliber": "Caliber762x39",
+                    "stackSlotMaxCount": 5, "stackSlotFirstFilterFirst": AMMO_ITEM_TPL
+                }
             },
             "defaultPresets": [weapon_preset_json(), vest_preset_json()],
             "defaultPresetsByTpl": { WEAPON_TPL: weapon_preset_json() },
@@ -745,6 +1161,16 @@ mod tests {
                     "parentId": WEAPON_PRESET_ROOT_ID, "slotId": "mod_stock"
                 }
             ]
+        })
+    }
+
+    /// The weapon's non-default preset: one item, so a group's length says which preset was drawn.
+    fn weapon_preset_b_json() -> Value {
+        json!({
+            "id": "7b7b7b7b7b7b7b7b7b7b7b7b",
+            "name": "weapon_alt",
+            "encyclopedia": WEAPON_TPL,
+            "items": [{ "_id": WEAPON_PRESET_B_ROOT_ID, "_tpl": WEAPON_TPL }]
         })
     }
 
@@ -1132,5 +1558,512 @@ mod tests {
         let error = create_forced_loot(request).unwrap_err();
 
         assert!(error.message.contains("StackMaxSize"), "{error:?}");
+    }
+
+    // -----------------------------------------------------------------------
+    // Sealed weapon case
+    // -----------------------------------------------------------------------
+
+    /// A weapon (single weight entry, so the weighted pick returns without drawing), two mod
+    /// rewards off the linked list, and one caliber-matched ammo box.
+    fn sealed_settings_json() -> Value {
+        json!({
+            "weaponRewardWeight": { WEAPON_TPL: 1 },
+            "defaultPresetsOnly": false,
+            "weaponModRewardLimits": { MISC_NODE: { "min": 2, "max": 2 } },
+            "rewardTypeLimits": { AMMO_BOX: { "min": 1, "max": 1 } },
+            "ammoBoxWhitelist": [AMMO_BOX_MATCH_TPL, AMMO_BOX_OTHER_TPL],
+            "allowBossItems": false
+        })
+    }
+
+    fn sealed_request(seed: u64, settings: Value) -> SealedWeaponCaseRequest {
+        sealed_request_from(db_json(), seed, settings)
+    }
+
+    fn sealed_request_from(
+        mut envelope: Value,
+        seed: u64,
+        settings: Value,
+    ) -> SealedWeaponCaseRequest {
+        envelope["testSeed"] = json!(seed);
+        let object = envelope.as_object_mut().unwrap();
+        object.insert("containerSettings".to_owned(), settings);
+        object.insert(
+            "presetsByTpl".to_owned(),
+            json!({ WEAPON_TPL: [weapon_preset_json(), weapon_preset_b_json()] }),
+        );
+        object.insert(
+            "linkedItems".to_owned(),
+            // Two mods parented under the reward key, plus one item that is not.
+            json!({ WEAPON_TPL: [WEAPON_MOD_TPL, WEAPON_MOD_B_TPL, AMMO_ITEM_TPL] }),
+        );
+
+        serde_json::from_value(envelope).unwrap()
+    }
+
+    /// Only the mod-reward phase runs.
+    fn mods_only_settings() -> Value {
+        let mut settings = sealed_settings_json();
+        settings["rewardTypeLimits"] = json!({});
+
+        settings
+    }
+
+    #[test]
+    fn a_test_seed_makes_the_sealed_case_deterministic() {
+        for seed in 0..25 {
+            let a =
+                get_sealed_weapon_case_loot(sealed_request(seed, sealed_settings_json())).unwrap();
+            let b =
+                get_sealed_weapon_case_loot(sealed_request(seed, sealed_settings_json())).unwrap();
+
+            assert_eq!(shape(&a), shape(&b), "seed {seed}");
+        }
+    }
+
+    /// Golden: preset first, then the mod rewards, then the ammo box with its cartridges — the
+    /// order `:495-502` builds them in, at a pinned seed so a draw-count regression shows up.
+    #[test]
+    fn a_pinned_seed_draws_a_known_sealed_case() {
+        let result =
+            get_sealed_weapon_case_loot(sealed_request(12345, sealed_settings_json())).unwrap();
+
+        assert_eq!(
+            shape(&result),
+            vec![
+                // Preset draw: the alt preset (one item) out of the tpl's two.
+                vec![(WEAPON_TPL.to_owned(), None)],
+                // The mod count is a fixed 2 (no draw), then one draw per reward.
+                vec![(WEAPON_MOD_TPL.to_owned(), None)],
+                vec![(WEAPON_MOD_TPL.to_owned(), None)],
+                // Ammo box: 5 rounds of a stack-3 cartridge is 3 + 2.
+                vec![
+                    (AMMO_BOX_MATCH_TPL.to_owned(), None),
+                    (AMMO_ITEM_TPL.to_owned(), Some(3.0)),
+                    (AMMO_ITEM_TPL.to_owned(), Some(2.0)),
+                ],
+            ]
+        );
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+
+        // The cartridge that lands on location 0 goes out without one, as live does it.
+        let ammo_box = result.items.last().unwrap();
+        assert_eq!(ammo_box[1].location, Some(json!(1)));
+        assert!(ammo_box[2].location.is_none());
+        for item in result.items.iter().flatten() {
+            assert!(mongo_id::is_valid(&item.id), "{} is not a MongoId", item.id);
+        }
+        serde_json::to_value(&result).unwrap();
+    }
+
+    /// `defaultPresetsOnly` takes `GetDefaultPreset` instead of drawing from the tpl's presets.
+    #[test]
+    fn default_presets_only_takes_the_default_preset() {
+        let mut settings = mods_only_settings();
+        settings["defaultPresetsOnly"] = json!(true);
+        settings["weaponModRewardLimits"] = json!({});
+
+        for seed in 0..10 {
+            let result =
+                get_sealed_weapon_case_loot(sealed_request(seed, settings.clone())).unwrap();
+
+            assert_eq!(
+                shape(&result),
+                vec![vec![
+                    (WEAPON_TPL.to_owned(), None),
+                    (WEAPON_MOD_TPL.to_owned(), None)
+                ]],
+                "seed {seed}"
+            );
+        }
+    }
+
+    /// Ids are replaced and the mod still hangs off the remapped root (`:491-492`), and — unlike
+    /// `create_random_loot`'s presets — nothing is marked found-in-raid here; the C# caller does it.
+    #[test]
+    fn sealed_case_presets_get_fresh_ids_and_no_found_in_raid() {
+        let mut settings = mods_only_settings();
+        settings["defaultPresetsOnly"] = json!(true);
+        settings["weaponModRewardLimits"] = json!({});
+
+        let result = get_sealed_weapon_case_loot(sealed_request(4, settings)).unwrap();
+        let preset = &result.items[0];
+
+        assert!(
+            preset
+                .iter()
+                .all(|item| item.id != WEAPON_PRESET_ROOT_ID && item.id != WEAPON_PRESET_MOD_ID)
+        );
+        assert_eq!(preset[1].parent_id.as_deref(), Some(preset[0].id.as_str()));
+        assert!(preset.iter().all(|item| item.upd.is_none()));
+    }
+
+    /// No default for the tpl (`:484-488`) — warn, then draw from its presets anyway.
+    #[test]
+    fn a_missing_default_preset_warns_and_draws_a_random_one() {
+        let mut envelope = db_json();
+        envelope["defaultPresetsByTpl"] = json!({});
+        let mut settings = mods_only_settings();
+        settings["defaultPresetsOnly"] = json!(true);
+        settings["weaponModRewardLimits"] = json!({});
+
+        let result =
+            get_sealed_weapon_case_loot(sealed_request_from(envelope, 6, settings)).unwrap();
+
+        assert_eq!(result.items.len(), 1);
+        assert_eq!(
+            result.diagnostics[0].locale_key.as_deref(),
+            Some("loot-default_preset_not_found_using_random")
+        );
+        assert_eq!(result.diagnostics[0].args, Some(json!(WEAPON_TPL)));
+    }
+
+    /// The weighted pick landed on a tpl the db has no item for (`:470-476`).
+    #[test]
+    fn a_weapon_tpl_missing_from_the_db_ends_the_sealed_case() {
+        let mut settings = sealed_settings_json();
+        settings["weaponRewardWeight"] = json!({ "aaaaaaaaaaaaaaaaaaaaaaa9": 1 });
+
+        let result = get_sealed_weapon_case_loot(sealed_request(1, settings)).unwrap();
+
+        assert!(result.items.is_empty());
+        assert_eq!(
+            result.diagnostics[0].locale_key.as_deref(),
+            Some("loot-non_item_picked_as_sealed_weapon_crate_reward")
+        );
+        assert_eq!(result.diagnostics[0].level, ERROR);
+    }
+
+    /// A tpl with no presets at all: `GetArrayValue` on the empty list is C#'s
+    /// `ArgumentOutOfRangeException`.
+    #[test]
+    fn a_weapon_without_presets_is_the_c_sharp_empty_draw() {
+        let mut envelope = db_json();
+        envelope["defaultPresetsByTpl"] = json!({});
+        let mut settings = mods_only_settings();
+        settings["weaponRewardWeight"] = json!({ VEST_TPL: 1 });
+
+        let error =
+            get_sealed_weapon_case_loot(sealed_request_from(envelope, 1, settings)).unwrap_err();
+
+        assert!(error.message.contains("Preset pool"), "{error:?}");
+    }
+
+    /// The mod pool is the linked list filtered to the reward key and past the blacklist
+    /// (`:626-628`) — order preserved, so the draw indexes the same slots the C# does.
+    #[test]
+    fn weapon_mod_rewards_skip_blacklisted_and_unrelated_items() {
+        let mut envelope = db_json();
+        envelope["globalBlacklist"] = json!([WEAPON_MOD_B_TPL]);
+        let mut settings = mods_only_settings();
+        settings["weaponModRewardLimits"] = json!({ MISC_NODE: { "min": 3, "max": 3 } });
+
+        let result =
+            get_sealed_weapon_case_loot(sealed_request_from(envelope, 8, settings)).unwrap();
+
+        // The preset group plus three mod rewards, all of the one mod that survived the filter —
+        // the blacklisted mod and the one parented outside the reward key are both gone.
+        assert_eq!(result.items.len(), 4);
+        for reward in &result.items[1..] {
+            assert_eq!(reward.len(), 1);
+            assert_eq!(reward[0].template, WEAPON_MOD_TPL);
+        }
+    }
+
+    /// Nothing linked to the weapon fulfils the reward type (`:629-637`).
+    #[test]
+    fn an_empty_mod_pool_logs_a_debug_line_naming_the_preset() {
+        let mut settings = mods_only_settings();
+        settings["defaultPresetsOnly"] = json!(true);
+        settings["weaponModRewardLimits"] = json!({ ARMOR: { "min": 1, "max": 1 } });
+
+        let result = get_sealed_weapon_case_loot(sealed_request(2, settings)).unwrap();
+
+        assert_eq!(result.items.len(), 1);
+        assert_eq!(result.diagnostics[0].level, DEBUG);
+        assert_eq!(
+            result.diagnostics[0].message.as_deref(),
+            Some(
+                format!(
+                    "No items found to fulfil reward type: {ARMOR} for weapon: weapon_default, skipping type"
+                )
+                .as_str()
+            )
+        );
+    }
+
+    /// The count is drawn before the pool is built (`:617` ahead of `:626`), so a reward type that
+    /// is then skipped for want of items has still moved the stream on.
+    ///
+    /// (A `min == max` count draws nothing at all — `RandomUtil.GetInt` short-circuits when
+    /// `max <= min` — so the skipped type here needs a real range to be observable.)
+    #[test]
+    fn a_skipped_reward_type_has_still_drawn_its_count() {
+        let mut with_skip_settings = mods_only_settings();
+        with_skip_settings["defaultPresetsOnly"] = json!(true);
+        with_skip_settings["weaponModRewardLimits"] = json!({
+            // No linked item is parented under ARMOR, so this type only ever logs the skip.
+            ARMOR: { "min": 1, "max": 2 },
+            MISC_NODE: { "min": 1, "max": 1 }
+        });
+
+        let mut without_settings = mods_only_settings();
+        without_settings["defaultPresetsOnly"] = json!(true);
+        without_settings["weaponModRewardLimits"] = json!({ MISC_NODE: { "min": 1, "max": 1 } });
+
+        let mut seeds_that_disagree = 0;
+        for seed in 0..25 {
+            let with_skip =
+                get_sealed_weapon_case_loot(sealed_request(seed, with_skip_settings.clone()))
+                    .unwrap();
+            let without =
+                get_sealed_weapon_case_loot(sealed_request(seed, without_settings.clone()))
+                    .unwrap();
+
+            // Both hand back the preset and one mod; only which mod can differ.
+            assert_eq!(with_skip.items.len(), 2, "seed {seed}");
+            assert_eq!(without.items.len(), 2, "seed {seed}");
+            if with_skip.items[1][0].template != without.items[1][0].template {
+                seeds_that_disagree += 1;
+            }
+        }
+
+        // Had the skipped type not drawn, the two streams would line up at every seed.
+        assert!(seeds_that_disagree > 0);
+    }
+
+    /// Only boxes whose caliber matches the weapon's are eligible (`:539-540`).
+    #[test]
+    fn only_caliber_matching_ammo_boxes_are_drawn() {
+        let mut settings = mods_only_settings();
+        settings["defaultPresetsOnly"] = json!(true);
+        settings["weaponModRewardLimits"] = json!({});
+        settings["rewardTypeLimits"] = json!({ AMMO_BOX: { "min": 4, "max": 4 } });
+
+        for seed in 0..15 {
+            let result =
+                get_sealed_weapon_case_loot(sealed_request(seed, settings.clone())).unwrap();
+
+            assert_eq!(result.items.len(), 5, "seed {seed}");
+            for box_group in &result.items[1..] {
+                assert_eq!(box_group[0].template, AMMO_BOX_MATCH_TPL, "seed {seed}");
+                assert_eq!(box_group.len(), 3, "seed {seed}");
+            }
+        }
+    }
+
+    #[test]
+    fn no_matching_ammo_box_logs_a_debug_line() {
+        let mut envelope = db_json();
+        envelope["itemsView"][AMMO_BOX_MATCH_TPL]["ammoCaliber"] = json!("Caliber762x39");
+        let mut settings = mods_only_settings();
+        settings["defaultPresetsOnly"] = json!(true);
+        settings["weaponModRewardLimits"] = json!({});
+        settings["rewardTypeLimits"] = json!({ AMMO_BOX: { "min": 1, "max": 1 } });
+
+        let result =
+            get_sealed_weapon_case_loot(sealed_request_from(envelope, 1, settings)).unwrap();
+
+        assert_eq!(result.items.len(), 1);
+        assert_eq!(
+            result.diagnostics[0].message.as_deref(),
+            Some(format!("No ammo box with caliber {WEAPON_CALIBER} found, skipping").as_str())
+        );
+    }
+
+    /// A whitelisted box the db has no item for: C# puts a null in the list and dereferences
+    /// `.Properties` on it (`:540`).
+    #[test]
+    fn an_unknown_ammo_box_tpl_is_the_c_sharp_null_dereference() {
+        let mut settings = mods_only_settings();
+        settings["defaultPresetsOnly"] = json!(true);
+        settings["weaponModRewardLimits"] = json!({});
+        settings["rewardTypeLimits"] = json!({ AMMO_BOX: { "min": 1, "max": 1 } });
+        settings["ammoBoxWhitelist"] = json!(["aaaaaaaaaaaaaaaaaaaaaaa9"]);
+
+        let error = get_sealed_weapon_case_loot(sealed_request(1, settings)).unwrap_err();
+
+        assert!(
+            error.message.contains("aaaaaaaaaaaaaaaaaaaaaaa9"),
+            "{error:?}"
+        );
+    }
+
+    /// The two quirks at `:569-570`, asserted deliberately: the pool keeps only *blacklisted*
+    /// items, and `allowBossItems` being true empties it outright.
+    #[test]
+    fn the_non_weapon_mod_pool_is_blacklist_only_and_boss_items_empty_it() {
+        let mut envelope = db_json();
+        envelope["globalBlacklist"] = json!([PLAIN_ITEM_TPL]);
+        let mut settings = mods_only_settings();
+        settings["defaultPresetsOnly"] = json!(true);
+        settings["weaponModRewardLimits"] = json!({});
+        settings["rewardTypeLimits"] = json!({ MISC_NODE: { "min": 2, "max": 2 } });
+
+        let blacklist_only =
+            get_sealed_weapon_case_loot(sealed_request_from(envelope.clone(), 1, settings.clone()))
+                .unwrap();
+
+        // Only the blacklisted item is eligible — every other MISC item is filtered out.
+        assert_eq!(blacklist_only.items.len(), 3);
+        for reward in &blacklist_only.items[1..] {
+            assert_eq!(reward.len(), 1);
+            assert_eq!(reward[0].template, PLAIN_ITEM_TPL);
+        }
+
+        settings["allowBossItems"] = json!(true);
+        let boss_items_allowed =
+            get_sealed_weapon_case_loot(sealed_request_from(envelope, 1, settings)).unwrap();
+
+        // `!(true || IsBossItem(id))` is false for every item, so the pool is empty and the branch
+        // only logs.
+        assert_eq!(boss_items_allowed.items.len(), 1);
+        assert_eq!(
+            boss_items_allowed.diagnostics[0].message.as_deref(),
+            Some(format!("No items with base type of {MISC_NODE} found, skipping").as_str())
+        );
+    }
+
+    /// `QuestItem is null` (`:571`) — an explicit `false` is not the same as an absent value.
+    #[test]
+    fn an_explicit_quest_item_false_is_excluded_from_the_reward_pool() {
+        let mut envelope = db_json();
+        envelope["globalBlacklist"] = json!([PLAIN_ITEM_TPL]);
+        envelope["itemsView"][PLAIN_ITEM_TPL]["questItem"] = json!(false);
+        let mut settings = mods_only_settings();
+        settings["defaultPresetsOnly"] = json!(true);
+        settings["weaponModRewardLimits"] = json!({});
+        settings["rewardTypeLimits"] = json!({ MISC_NODE: { "min": 1, "max": 1 } });
+
+        let result =
+            get_sealed_weapon_case_loot(sealed_request_from(envelope, 1, settings)).unwrap();
+
+        assert_eq!(result.items.len(), 1);
+        assert_eq!(result.diagnostics[0].level, DEBUG);
+    }
+
+    // -----------------------------------------------------------------------
+    // Random loot container
+    // -----------------------------------------------------------------------
+
+    fn container_request(
+        seed: u64,
+        reward_details: Value,
+        preset_tpls: Value,
+    ) -> RandomLootContainerRequest {
+        let mut envelope = db_json();
+        envelope["testSeed"] = json!(seed);
+        let object = envelope.as_object_mut().unwrap();
+        object.insert("rewardDetails".to_owned(), reward_details);
+        object.insert("presetTpls".to_owned(), preset_tpls);
+
+        serde_json::from_value(envelope).unwrap()
+    }
+
+    /// The weighted pool path (`:697-700`), and the preset expansion at `:670-681`.
+    #[test]
+    fn a_container_draws_its_reward_tpl_pool_and_expands_presets() {
+        let details = json!({
+            "rewardCount": 6,
+            "rewardTplPool": { PLAIN_ITEM_TPL: 3, WEAPON_TPL: 1 }
+        });
+
+        let result =
+            get_random_loot_container_loot(container_request(9, details, json!([WEAPON_TPL])))
+                .unwrap();
+
+        assert_eq!(result.items.len(), 6);
+        for group in &result.items {
+            match group.len() {
+                // Non-preset reward: one item, no `Upd` (`:683`).
+                1 => {
+                    assert_eq!(group[0].template, PLAIN_ITEM_TPL);
+                    assert!(group[0].upd.is_none());
+                }
+                // Preset reward: the default preset's items under fresh ids.
+                2 => {
+                    assert_eq!(group[0].template, WEAPON_TPL);
+                    assert_eq!(group[1].template, WEAPON_MOD_TPL);
+                    assert_ne!(group[0].id, WEAPON_PRESET_ROOT_ID);
+                    assert_eq!(group[1].parent_id.as_deref(), Some(group[0].id.as_str()));
+                }
+                other => panic!("unexpected group size {other}"),
+            }
+        }
+        // Both branches were taken at this seed.
+        assert!(result.items.iter().any(|group| group.len() == 2));
+        assert!(result.items.iter().any(|group| group.len() == 1));
+        serde_json::to_value(&result).unwrap();
+    }
+
+    #[test]
+    fn a_test_seed_makes_the_container_deterministic() {
+        let details = json!({
+            "rewardCount": 4,
+            "rewardTplPool": { PLAIN_ITEM_TPL: 3, STACK_ITEM_TPL: 1 }
+        });
+
+        for seed in 0..25 {
+            let a =
+                get_random_loot_container_loot(container_request(seed, details.clone(), json!([])))
+                    .unwrap();
+            let b =
+                get_random_loot_container_loot(container_request(seed, details.clone(), json!([])))
+                    .unwrap();
+
+            assert_eq!(shape(&a), shape(&b), "seed {seed}");
+        }
+    }
+
+    /// No tpl pool: fall back to a reward pool built over the type pool (`:702-704`), with the
+    /// reward-item blacklist on and boss items allowed.
+    #[test]
+    fn an_empty_tpl_pool_falls_back_to_the_reward_type_pool() {
+        let details = json!({
+            "rewardCount": 8,
+            "rewardTplPool": {},
+            "rewardTypePool": [MISC_NODE]
+        });
+
+        let result =
+            get_random_loot_container_loot(container_request(5, details, json!([]))).unwrap();
+
+        assert_eq!(result.items.len(), 8);
+        for tpl in tpls(&result) {
+            // Quest items are filtered out of the pool; boss items are not, as `:703` passes
+            // `allowBossItems: true`.
+            assert!(
+                [PLAIN_ITEM_TPL, STACK_ITEM_TPL, BOSS_ITEM_TPL].contains(&tpl),
+                "{tpl} is not in the reward pool"
+            );
+        }
+        assert!(tpls(&result).contains(&BOSS_ITEM_TPL));
+    }
+
+    /// `HasPreset` is `PresetCache.ContainsKey` — true for tpls with presets but no *default*, and
+    /// `:675` then dereferences the null `GetDefaultPreset` returned.
+    #[test]
+    fn a_preset_tpl_without_a_default_is_the_c_sharp_null_dereference() {
+        let details = json!({ "rewardCount": 1, "rewardTplPool": { PLAIN_ITEM_TPL: 1 } });
+
+        let error =
+            get_random_loot_container_loot(container_request(1, details, json!([PLAIN_ITEM_TPL])))
+                .unwrap_err();
+
+        assert!(error.message.contains(PLAIN_ITEM_TPL), "{error:?}");
+    }
+
+    /// Neither pool set: the type pool is null and `GetItemRewardPool` probes it with `Contains`.
+    #[test]
+    fn a_container_without_any_pool_is_the_c_sharp_null_dereference() {
+        let error = get_random_loot_container_loot(container_request(
+            1,
+            json!({ "rewardCount": 1 }),
+            json!([]),
+        ))
+        .unwrap_err();
+
+        assert!(error.message.contains("RewardTypePool"), "{error:?}");
     }
 }

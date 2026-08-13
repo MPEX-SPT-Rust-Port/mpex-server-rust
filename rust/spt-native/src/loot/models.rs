@@ -575,7 +575,16 @@ pub struct RewardLootDb {
     /// `presetHelper.GetDefaultPresets().Values` (`LootGenerator.cs:97`) — order preserved, the
     /// weapon/armor preset draws index into the filtered result.
     pub default_presets: Vec<PresetView>,
-    /// `presetHelper.GetDefaultPresetsByTplKey()` (`LootGenerator.cs:154,480,672`).
+    /// The tpl → default-preset map the C# reads, which is **not the same method at every call
+    /// site**: `CreateForcedLoot` uses `presetHelper.GetDefaultPresetsByTplKey()` (`:154`), while
+    /// the sealed case (`:480`) and the reward container (`:672`) call
+    /// `presetHelper.GetDefaultPreset(tpl)`, whose whole-map equivalent is
+    /// `GetDefaultPresetByTpl()` (`PresetHelper.cs:60-88`, agreement covered by
+    /// `PresetHelperTests.GetDefaultPresetByTplAgreesWithGetDefaultPresetForEveryTpl`). The two
+    /// differ — the latter includes tpls whose default id resolves through the
+    /// first-preset-in-list fallback — so the C# caller fills this per envelope: the
+    /// `GetDefaultPresetsByTplKey` map on [`CreateForcedLootRequest`], the `GetDefaultPresetByTpl`
+    /// map on [`SealedWeaponCaseRequest`] and [`RandomLootContainerRequest`].
     pub default_presets_by_tpl: IndexMap<String, PresetView>,
     /// `itemFilterService.GetBlacklistedItems()` (`LootGenerator.cs:217`).
     pub global_blacklist: HashSet<String>,
@@ -684,6 +693,13 @@ pub struct RandomLootContainerRequest {
     #[serde(flatten)]
     pub db: RewardLootDb,
     pub reward_details: RewardDetailsView,
+    /// `presetHelper.HasPreset(tpl)` (`LootGenerator.cs:670`) as a set. `HasPreset` is
+    /// `PresetCache.ContainsKey` (`PresetHelper.cs:155-158`) and that cache holds **every** tpl with
+    /// any preset at all, keyed while building `PresetIds`; `DefaultId` is only stamped on when a
+    /// preset carries an `_encyclopedia` (`PresetController.cs:33-42`). So this is a superset of
+    /// [`RewardLootDb::default_presets_by_tpl`]'s keys, and a tpl in here but not in that map is the
+    /// C# `preset.Items` null dereference at `:675`.
+    pub preset_tpls: HashSet<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1071,11 +1087,13 @@ mod tests {
             "rewardDetails":{{"rewardCount":2,
                 "rewardTplPool":{{"aaaaaaaaaaaaaaaaaaaaaaa6":3.5,"aaaaaaaaaaaaaaaaaaaaaaa7":1}},
                 "rewardTypePool":["aaaaaaaaaaaaaaaaaaaaaaa8"]}},
+            "presetTpls":["bbbbbbbbbbbbbbbbbbbbbbbb"],
             "testSeed":42}}"#
         );
         let parsed: RandomLootContainerRequest = serde_json::from_str(&json).unwrap();
 
         assert_eq!(parsed.db.test_seed, Some(42));
+        assert!(parsed.preset_tpls.contains("bbbbbbbbbbbbbbbbbbbbbbbb"));
         assert_eq!(parsed.reward_details.reward_count, 2);
         let pool = parsed.reward_details.reward_tpl_pool.as_ref().unwrap();
         assert_eq!(
@@ -1093,7 +1111,8 @@ mod tests {
         );
 
         // Both pools are optional in C# (`InventoryConfig.cs:47,50`).
-        let json = format!(r#"{{{REWARD_DB_JSON},"rewardDetails":{{"rewardCount":0}}}}"#);
+        let json =
+            format!(r#"{{{REWARD_DB_JSON},"rewardDetails":{{"rewardCount":0}},"presetTpls":[]}}"#);
         let parsed: RandomLootContainerRequest = serde_json::from_str(&json).unwrap();
         assert!(parsed.reward_details.reward_tpl_pool.is_none());
         assert!(parsed.reward_details.reward_type_pool.is_none());

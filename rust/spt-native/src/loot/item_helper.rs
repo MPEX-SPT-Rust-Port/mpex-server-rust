@@ -481,11 +481,11 @@ pub fn create_cartridges(parent_id: &str, ammo_tpl: &str, stack_count: i32, loca
 // enough to trip the lint. It is a log line on a skip path, not something worth boxing.
 #[allow(clippy::result_large_err)]
 pub fn add_cartridges_to_ammo_box(
-    ctx: &LootContext,
+    items_view: &IndexMap<String, ItemView>,
     ammo_box: &mut Vec<Item>,
     ammo_box_tpl: &str,
 ) -> Result<(), Diagnostic> {
-    let ammo_box_details = get_item(ctx.items_view, ammo_box_tpl);
+    let ammo_box_details = get_item(items_view, ammo_box_tpl);
     let ammo_box_max_cartridge_count =
         ammo_box_details.and_then(|details| details.stack_slot_max_count);
     let Some(cartridge_tpl) =
@@ -499,7 +499,7 @@ pub fn add_cartridges_to_ammo_box(
         ));
     };
     let cartridge_max_stack_size =
-        get_item(ctx.items_view, cartridge_tpl).and_then(|details| details.stack_max_size);
+        get_item(items_view, cartridge_tpl).and_then(|details| details.stack_max_size);
 
     // Exit early if ammo already exists in box
     if ammo_box.iter().any(|item| item.template == cartridge_tpl) {
@@ -1617,7 +1617,7 @@ mod tests {
         let ctx = context(&view, &dist);
         let mut ammo_box = root(AMMO_BOX_TPL);
 
-        add_cartridges_to_ammo_box(&ctx, &mut ammo_box, AMMO_BOX_TPL).unwrap();
+        add_cartridges_to_ammo_box(ctx.items_view, &mut ammo_box, AMMO_BOX_TPL).unwrap();
 
         // 90 capacity / 30 per stack -> three stacks, locations 2, 1, then absent.
         assert_eq!(ammo_box.len(), 4);
@@ -1640,7 +1640,7 @@ mod tests {
         let ctx = context(&view, &dist);
         let mut ammo_box = root(AMMO_BOX_REMAINDER_TPL);
 
-        add_cartridges_to_ammo_box(&ctx, &mut ammo_box, AMMO_BOX_REMAINDER_TPL).unwrap();
+        add_cartridges_to_ammo_box(ctx.items_view, &mut ammo_box, AMMO_BOX_REMAINDER_TPL).unwrap();
 
         assert_eq!(ammo_box.len(), 3);
         assert_eq!(stack_count_of(&ammo_box[1]), Some(30.0));
@@ -1656,7 +1656,7 @@ mod tests {
         let ctx = context(&view, &dist);
         let mut ammo_box = root(AMMO_BOX_SINGLE_TPL);
 
-        add_cartridges_to_ammo_box(&ctx, &mut ammo_box, AMMO_BOX_SINGLE_TPL).unwrap();
+        add_cartridges_to_ammo_box(ctx.items_view, &mut ammo_box, AMMO_BOX_SINGLE_TPL).unwrap();
 
         assert_eq!(ammo_box.len(), 2);
         assert_eq!(stack_count_of(&ammo_box[1]), Some(30.0));
@@ -1675,7 +1675,7 @@ mod tests {
             ..Default::default()
         });
 
-        add_cartridges_to_ammo_box(&ctx, &mut ammo_box, AMMO_BOX_TPL).unwrap();
+        add_cartridges_to_ammo_box(ctx.items_view, &mut ammo_box, AMMO_BOX_TPL).unwrap();
 
         assert_eq!(ammo_box.len(), 2);
     }
@@ -1689,7 +1689,8 @@ mod tests {
 
         // C# dereferences `cartridgeTpl!.Value` here and throws.
         let error =
-            add_cartridges_to_ammo_box(&ctx, &mut ammo_box, AMMO_BOX_NO_FILTER_TPL).unwrap_err();
+            add_cartridges_to_ammo_box(ctx.items_view, &mut ammo_box, AMMO_BOX_NO_FILTER_TPL)
+                .unwrap_err();
 
         assert_eq!(error.level, ERROR);
         assert_eq!(ammo_box.len(), 1);
@@ -1703,8 +1704,9 @@ mod tests {
         let mut ammo_box = root(AMMO_BOX_NO_STACK_SIZE_TPL);
 
         // Deviation: `maxPerStack` of 0 makes the C# `while` loop add empty stacks forever.
-        let error = add_cartridges_to_ammo_box(&ctx, &mut ammo_box, AMMO_BOX_NO_STACK_SIZE_TPL)
-            .unwrap_err();
+        let error =
+            add_cartridges_to_ammo_box(ctx.items_view, &mut ammo_box, AMMO_BOX_NO_STACK_SIZE_TPL)
+                .unwrap_err();
 
         assert_eq!(error.level, ERROR);
         assert_eq!(ammo_box.len(), 1);
