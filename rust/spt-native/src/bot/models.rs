@@ -52,10 +52,12 @@ pub struct BotTypeInventoryWire {
     #[serde(rename = "items", default)]
     pub items: ItemPoolsWire,
     /// `GlobalMods` = `Dictionary<MongoId, Dictionary<string, HashSet<MongoId>>>`
-    /// (`GlobalTablesUsings.cs`). The inner set is a `Vec` here: it is drawn from by index, and a
-    /// `HashSet` deserialized from a JSON array keeps that array's order in C# too.
+    /// (`GlobalTablesUsings.cs`). An `IndexSet` because it is drawn from by index and a `HashSet`
+    /// deserialized from a JSON array keeps that array's order in C# too — and because
+    /// `bot_weapon_generator` hands this very map to
+    /// [`GenerateWeaponRequestWire::mod_pool`], which C# passes by reference.
     #[serde(rename = "mods", default)]
-    pub mods: IndexMap<String, IndexMap<String, Vec<String>>>,
+    pub mods: IndexMap<String, IndexMap<String, IndexSet<String>>>,
     #[serde(flatten)]
     pub extra: Extra,
 }
@@ -138,11 +140,23 @@ pub struct EquipmentFilters {
     /// The level-banded randomisation blocks `BotHelper.GetBotRandomizationDetails` picks from.
     #[serde(rename = "randomisation")]
     pub randomisation: Option<Vec<RandomisationDetails>>,
+    /// `BotConfig.cs:214-215` — the two caps `BotWeaponModLimitService.GetWeaponModLimits` reads.
+    #[serde(rename = "weaponModLimits")]
+    pub weapon_mod_limits: Option<ModLimitsWire>,
     /// Weapon base-class tpl → the sight base-class tpls allowed on it
     /// (`BotEquipmentFilterService.GetBotWeaponSightWhitelist`, `:124-129`). A `Vec` because
     /// `is_of_baseclasses` takes a slice; the C# `HashSet` is only ever membership-tested through it.
     #[serde(rename = "weaponSightWhitelist")]
     pub weapon_sight_whitelist: Option<IndexMap<String, Vec<String>>>,
+}
+
+/// `Models/Spt/Config/BotConfig.cs:320-337` (`ModLimits`).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ModLimitsWire {
+    #[serde(rename = "scopeLimit")]
+    pub scope_limit: Option<i32>,
+    #[serde(rename = "lightLaserLimit")]
+    pub light_laser_limit: Option<i32>,
 }
 
 /// `Models/Spt/Config/BotConfig.cs:339-388`, narrowed to the two members the weapon-mod path reads.
@@ -292,6 +306,39 @@ pub struct BotModLimitsWire {
 pub struct ItemCountWire {
     #[serde(rename = "count")]
     pub count: Option<i32>,
+}
+
+/// `Models/Eft/Common/Tables/BotType.cs:142-156` — one item-count weighting block.
+///
+/// `Weights` is a `Dictionary<double, double>` in C# and an `IndexMap<String, f64>` here: JSON
+/// object keys are strings and `f64` is not hashable. `bot_weapon_generator_helper` parses the
+/// drawn key back out.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct GenerationDataWire {
+    /// Key: number of items, value: weighting.
+    #[serde(rename = "weights", default)]
+    pub weights: IndexMap<String, f64>,
+    /// Item tpl → weight. Untouched by the magazine path; carried for the loot generator.
+    #[serde(rename = "whitelist", default)]
+    pub whitelist: IndexMap<String, f64>,
+}
+
+/// `Models/Spt/Bots/GenerateWeaponResult.cs`.
+///
+/// Two deviations:
+/// - `WeaponTemplate` is a `TemplateItem` in C# and rides as its **tpl** here, the same swap
+///   [`GenerateWeaponRequestWire::parent_template`] made.
+/// - `WeaponMods` is not carried. C# stores a reference to the bot template's own mod pool and no
+///   consumer ever reads it back off the result (`BotInventoryGenerator.cs:757-774` uses only
+///   `Weapon`); cloning the whole pool per weapon to preserve a dead field is not worth the copy.
+#[derive(Debug, Clone)]
+pub struct GenerateWeaponResultWire {
+    pub weapon: Vec<Item>,
+    pub chosen_ammo_template: String,
+    /// `null` only when the weapon has no UBGL — a UBGL whose ammo could not be resolved lands on
+    /// `MongoId.Empty`, i.e. the empty string, which is what `AddExtraMagazinesToInventory` tests.
+    pub chosen_ubgl_ammo_template: Option<String>,
+    pub weapon_template: String,
 }
 
 /// `Models/Spt/Bots/ChooseRandomCompatibleModResult.cs`. Every member is nullable there and the
@@ -493,7 +540,9 @@ mod tests {
         assert_eq!(inventory.items.backpack["aaaaaaaaaaaaaaaaaaaaaaa4"], 2.0);
         assert!(inventory.items.tactical_vest.is_empty());
         assert_eq!(
-            inventory.mods["aaaaaaaaaaaaaaaaaaaaaaa5"]["mod_magazine"],
+            inventory.mods["aaaaaaaaaaaaaaaaaaaaaaa5"]["mod_magazine"]
+                .iter()
+                .collect::<Vec<_>>(),
             vec!["aaaaaaaaaaaaaaaaaaaaaaa6"]
         );
         assert_eq!(parsed.template.chances["equipment"]["Headwear"], 75);

@@ -2626,6 +2626,10 @@ mod tests {
                 presets_by_id: &crate::bot::NO_PRESETS,
                 equipment_blacklist: &crate::bot::NO_EQUIP_BLACKLIST,
                 low_profile_gas_block_tpls: &crate::bot::NO_BLACKLIST,
+                item_presets: &crate::bot::NO_PRESETS,
+                weapon_has_enhancement_chance_percent: 0.0,
+                repair_kit_weapon: &crate::bot::NO_BUFFS,
+                secure_container_ammo_stack_count: 0,
                 diagnostics: Vec::new(),
             }
         }
@@ -3400,8 +3404,12 @@ mod tests {
                     item_blacklist: &self.item_blacklist,
                     default_presets_by_tpl: &self.default_presets_by_tpl,
                     presets_by_id: &self.presets_by_id,
+                    item_presets: &crate::bot::NO_PRESETS,
                     equipment_blacklist: &self.equipment_blacklist,
                     low_profile_gas_block_tpls: &self.low_profile_gas_block_tpls,
+                    weapon_has_enhancement_chance_percent: 0.0,
+                    repair_kit_weapon: &crate::bot::NO_BUFFS,
+                    secure_container_ammo_stack_count: 0,
                     diagnostics: Vec::new(),
                 }
             }

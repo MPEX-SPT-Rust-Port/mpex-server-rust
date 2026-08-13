@@ -1,9 +1,6 @@
 //! `Helpers/Bot/BotWeaponGeneratorHelper.cs` — magazine and bullet counts, and the magazine+ammo
 //! item pair a bot's weapon is handed.
 //!
-//! `AddAmmoIntoEquipmentSlots` (`:107-149`) is not here: it needs
-//! `BotGeneratorHelper.AddItemWithChildrenToEquipmentSlot`, which the inventory tasks port.
-//!
 //! # RNG calls, in C# source order — the parity contract
 //!
 //! - [`get_randomized_magazine_count`] — one `GetWeightedValue` (`:70`), which is itself 0 draws
@@ -12,7 +9,7 @@
 //! - [`get_randomized_bullet_count`] — that same draw and nothing else. It happens **first**
 //!   (`:28`), before the parent lookup, so the failure path below still consumes it.
 //! - [`create_magazine_with_ammo`] — one `GetInt`, inside `FillMagazineWithCartridge`.
-//! - [`magazine_is_cylinder_related`] draws nothing.
+//! - [`magazine_is_cylinder_related`] and [`add_ammo_into_equipment_slots`] draw nothing.
 #![allow(
     dead_code,
     reason = "consumed by the weapon and magazine generators in tasks 8 and 9"
@@ -21,12 +18,20 @@
 use indexmap::IndexMap;
 
 use crate::bot::BotContext;
-use crate::loot::item_helper::{LAUNCHER, LootError, fill_magazine_with_cartridge, get_item};
-use crate::loot::models::{Diagnostic, ERROR, Item};
+use crate::bot::bot_generator_helper::{ContainerGrids, ItemAddedResult};
+use crate::loot::item_helper::{
+    LAUNCHER, LootError, fill_magazine_with_cartridge, get_item, split_stack,
+};
+use crate::loot::models::{DEBUG, Diagnostic, ERROR, Item, Upd};
 use crate::loot::{mongo_id, random_util};
 
 /// `BotWeaponGeneratorHelper._magCheck` (`:18`).
 const MAG_CHECK: [&str; 2] = ["CylinderMagazine", "SpringDrivenCylinder"];
+
+/// The `AddAmmoIntoEquipmentSlots` default (`:116`), and the pair `UbglExternalMagGen` and
+/// `ExternalInventoryMagGen` pass explicitly. `EquipmentSlots` member names as strings, in the
+/// order the C# `HashSet` collection-expression preserves.
+pub const VEST_AND_POCKETS: [&str; 2] = ["TacticalVest", "Pockets"];
 
 /// `BotWeaponGeneratorHelper.MagazineIsCylinderRelated` (`:78-81`).
 pub fn magazine_is_cylinder_related(magazine_parent_name: &str) -> bool {
@@ -154,6 +159,88 @@ pub fn create_magazine_with_ammo(
     Ok(magazine)
 }
 
+/// `BotWeaponGeneratorHelper.AddAmmoIntoEquipmentSlots` (`:107-149`) — split the requested count
+/// into stacks and drop each into the first container that will take it.
+///
+/// `equipment_slots_to_add_to` is `None` for the C# default of tactical vest then pockets.
+///
+/// # Errors
+///
+/// From `split_stack`: the C# hang on a cartridge tpl with no usable `StackMaxSize`.
+pub fn add_ammo_into_equipment_slots(
+    ctx: &mut BotContext,
+    grids: &mut ContainerGrids,
+    ammo_tpl: &str,
+    cartridge_count: i32,
+    inventory: &mut Vec<Item>,
+    equipment_slots_to_add_to: Option<&[String]>,
+) -> Result<(), LootError> {
+    // null guard input param
+    let default_slots: [String; 2] = VEST_AND_POCKETS.map(str::to_owned);
+    let equipment_slots = equipment_slots_to_add_to.unwrap_or(&default_slots);
+
+    let ammo_items = split_stack(
+        ctx.items,
+        &Item {
+            id: mongo_id::generate(),
+            template: ammo_tpl.to_owned(),
+            upd: Some(Upd {
+                stack_objects_count: Some(f64::from(cartridge_count)),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+    )?;
+
+    for ammo_item in ammo_items {
+        let mut ammo_item = [ammo_item];
+        let result = grids.add_item_with_children_to_equipment_slot(
+            ctx,
+            equipment_slots,
+            &ammo_item[0].id.clone(),
+            &ammo_item[0].template.clone(),
+            &mut ammo_item,
+            inventory,
+        );
+
+        if result != ItemAddedResult::Success {
+            ctx.diagnostics.push(Diagnostic {
+                level: DEBUG.to_owned(),
+                locale_key: None,
+                args: None,
+                message: Some(format!(
+                    "Unable to add ammo: {} to bot inventory, {}",
+                    ammo_item[0].template,
+                    item_added_result_name(result)
+                )),
+            });
+
+            // If there's no space for 1 stack or no containers to hold item, there's no space for
+            // the others
+            if matches!(
+                result,
+                ItemAddedResult::NoSpace | ItemAddedResult::NoContainers
+            ) {
+                break;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// `ItemAddedResult.ToString()` — the C# member names, which are SCREAMING_CASE in
+/// `Models/Enums/ItemAddedResult.cs` and reach a log line verbatim.
+pub fn item_added_result_name(result: ItemAddedResult) -> &'static str {
+    match result {
+        ItemAddedResult::Unknown => "UNKNOWN",
+        ItemAddedResult::Success => "SUCCESS",
+        ItemAddedResult::NoSpace => "NO_SPACE",
+        ItemAddedResult::NoContainers => "NO_CONTAINERS",
+        ItemAddedResult::IncompatibleItem => "INCOMPATIBLE_ITEM",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -252,6 +339,10 @@ mod tests {
                 presets_by_id: &crate::bot::NO_PRESETS,
                 equipment_blacklist: &crate::bot::NO_EQUIP_BLACKLIST,
                 low_profile_gas_block_tpls: &crate::bot::NO_BLACKLIST,
+                item_presets: &crate::bot::NO_PRESETS,
+                weapon_has_enhancement_chance_percent: 0.0,
+                repair_kit_weapon: &crate::bot::NO_BUFFS,
+                secure_container_ammo_stack_count: 0,
                 is_night_time: false,
                 diagnostics: Vec::new(),
             }

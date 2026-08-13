@@ -1,8 +1,10 @@
 pub(crate) mod bot_equipment_mod_generator;
 pub(crate) mod bot_generator_helper;
+pub(crate) mod bot_weapon_generator;
 pub(crate) mod bot_weapon_generator_helper;
 pub(crate) mod durability_limits_helper;
 pub(crate) mod exhaustable_array;
+pub(crate) mod inventory_mag_gen;
 pub(crate) mod mod_pool_service;
 pub mod models;
 pub(crate) mod repair_service;
@@ -11,6 +13,7 @@ use indexmap::IndexMap;
 
 use crate::bot::durability_limits_helper::BotDurability;
 use crate::bot::models::{EquipmentFilterDetails, EquipmentFilters, RandomisedResourceDetails};
+use crate::bot::repair_service::BonusSettings;
 use crate::loot::models::{Diagnostic, ItemView, PresetView};
 
 use std::collections::HashSet;
@@ -50,12 +53,24 @@ pub struct BotContext<'a> {
     /// `PresetHelper.GetPreset(id)`, keyed by preset `_id`. Only `GetMatchingPreset`'s two hardcoded
     /// edge cases (the MP5SD receiver and the suppressed DVL barrel) look a preset up by id.
     pub presets_by_id: &'a IndexMap<String, PresetView>,
+    /// `GlobalTable.ItemPresets`, keyed by preset `_id` — scanned **in order** by
+    /// `BotWeaponGenerator.GetPresetWeaponMods` (`:337`), which takes the first preset whose root
+    /// item matches the weapon tpl, so the map has to stay ordered.
+    pub item_presets: &'a IndexMap<String, PresetView>,
     /// `GetBotEquipmentBlacklist(equipmentRole, playerLevel)`, resolved by the C# caller. The
     /// equipment path takes its blacklist as a parameter because the C# does; the weapon path
     /// resolves it internally (`:528`), so it rides here.
     pub equipment_blacklist: &'a EquipmentFilterDetails,
     /// `BotConfig.LowProfileGasBlockTpls` — membership tests only (`:1063`, `:1072`).
     pub low_profile_gas_block_tpls: &'a HashSet<String>,
+    /// `PmcConfig.WeaponHasEnhancementChancePercent` — the gate on `RepairService.AddBuff`
+    /// (`BotWeaponGenerator.cs:154`).
+    pub weapon_has_enhancement_chance_percent: f64,
+    /// `RepairConfig.RepairKit.Weapon` — the only `BonusSettings` bot generation passes to
+    /// [`crate::bot::repair_service::add_buff`].
+    pub repair_kit_weapon: &'a BonusSettings,
+    /// `BotConfig.SecureContainerAmmoStackCount` (`BotConfig.cs:85`).
+    pub secure_container_ammo_stack_count: i32,
     pub diagnostics: Vec<Diagnostic>,
 }
 
@@ -69,3 +84,10 @@ pub(crate) static NO_PRESETS: std::sync::LazyLock<IndexMap<String, PresetView>> 
 #[cfg(test)]
 pub(crate) static NO_EQUIP_BLACKLIST: std::sync::LazyLock<EquipmentFilterDetails> =
     std::sync::LazyLock::new(EquipmentFilterDetails::default);
+#[cfg(test)]
+pub(crate) static NO_BUFFS: std::sync::LazyLock<BonusSettings> = std::sync::LazyLock::new(|| {
+    serde_json::from_value(serde_json::json!({
+        "rarityWeight": {}, "bonusTypeWeight": {}, "Common": {}, "Rare": {}
+    }))
+    .expect("empty bonus settings parse")
+});

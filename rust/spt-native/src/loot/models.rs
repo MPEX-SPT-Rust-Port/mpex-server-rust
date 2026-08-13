@@ -546,6 +546,22 @@ pub struct ItemView {
     pub caliber: Option<String>,
     pub ammo_caliber: Option<String>,
     pub def_ammo: Option<String>,
+    /// `TemplateItem.Properties.ReloadMode` (`TemplateItem.cs:807-808`) — the `ReloadMode` enum
+    /// member name verbatim (`ExternalMagazine`, `InternalMagazine`, `OnlyBarrel`,
+    /// `ExternalMagazineWithInternalReloadSupport`), which is how `JsonStringEnumConverter` writes
+    /// it. Only `OnlyBarrel` is ever compared against.
+    pub reload_mode: Option<String>,
+    /// `TemplateItem.Properties.ReloadMagType` (`TemplateItem.cs:568-569`), same enum. Only
+    /// `InternalMagazine` is ever compared against.
+    pub reload_mag_type: Option<String>,
+    /// `TemplateItem.Properties.IsChamberLoad` (`TemplateItem.cs:771`).
+    pub is_chamber_load: Option<bool>,
+    /// `TemplateItem.Properties.DefMagType` (`TemplateItem.cs:780`) — what
+    /// `TemplateItemExtensions.GetWeaponsDefaultMagazineTpl` returns.
+    pub def_mag_type: Option<String>,
+    /// `TemplateItem.Properties.LinkedWeapon` (`TemplateItem.cs:1484-1485`). Only its emptiness is
+    /// read, by `BotWeaponGenerator.GetWeaponCaliber`.
+    pub linked_weapon: Option<String>,
     /// `TemplateItem._name` — the sealed-crate pool is found by substring on it
     /// (`LootGenerator.cs:57`).
     pub name: Option<String>,

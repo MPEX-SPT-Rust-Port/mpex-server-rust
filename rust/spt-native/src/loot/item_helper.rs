@@ -51,6 +51,14 @@ pub const ASSAULT_SCOPE: &str = "55818add4bdc2d5b648b456f";
 pub const OPTIC_SCOPE: &str = "55818ae44bdc2dde698b456c";
 /// `BaseClasses.SPECIAL_SCOPE`
 pub const SPECIAL_SCOPE: &str = "55818aeb4bdc2ddc698b456a";
+/// `BaseClasses.SHOTGUN`
+pub const SHOTGUN: &str = "5447b6094bdc2dc3278b4567";
+/// `BaseClasses.COLLIMATOR`
+pub const COLLIMATOR: &str = "55818ad54bdc2ddc698b4569";
+/// `BaseClasses.COMPACT_COLLIMATOR`
+pub const COMPACT_COLLIMATOR: &str = "55818acf4bdc2dde698b456b";
+/// `BaseClasses.PORTABLE_RANGE_FINDER`
+pub const PORTABLE_RANGE_FINDER: &str = "61605ddea09d851a0a0c1bbc";
 
 /// `ItemHelper.GetItem` (`ItemHelper.cs:491-501`) — a plain lookup, absent tpl included.
 pub fn get_item<'a>(items_view: &'a IndexMap<String, ItemView>, tpl: &str) -> Option<&'a ItemView> {

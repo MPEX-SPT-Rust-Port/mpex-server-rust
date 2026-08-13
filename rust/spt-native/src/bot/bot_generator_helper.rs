@@ -67,9 +67,9 @@ use crate::loot::models::{
 use crate::loot::random_util::{get_chance_100, get_double, get_percent_of_value, round_to_digits};
 
 /// `BaseClasses.FLASHLIGHT` (`Models/Enums/BaseClasses.cs:39`).
-const FLASHLIGHT: &str = "55818b084bdc2d5b648b4571";
+pub(crate) const FLASHLIGHT: &str = "55818b084bdc2d5b648b4571";
 /// `BaseClasses.TACTICAL_COMBO` (`:120`).
-const TACTICAL_COMBO: &str = "55818b164bdc2ddc698b456c";
+pub(crate) const TACTICAL_COMBO: &str = "55818b164bdc2ddc698b456c";
 /// `BaseClasses.NIGHT_VISION` (`:85`).
 const NIGHT_VISION: &str = "5a2c3a9486f774688b05e574";
 /// `BaseClasses.ITEM` (`:57`).
@@ -1221,6 +1221,10 @@ mod tests {
                 presets_by_id: &crate::bot::NO_PRESETS,
                 equipment_blacklist: &crate::bot::NO_EQUIP_BLACKLIST,
                 low_profile_gas_block_tpls: &crate::bot::NO_BLACKLIST,
+                item_presets: &crate::bot::NO_PRESETS,
+                weapon_has_enhancement_chance_percent: 0.0,
+                repair_kit_weapon: &crate::bot::NO_BUFFS,
+                secure_container_ammo_stack_count: 0,
                 is_night_time,
                 diagnostics: Vec::new(),
             }
