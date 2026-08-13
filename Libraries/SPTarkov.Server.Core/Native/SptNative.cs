@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using SPTarkov.Server.Core.Native.Bot;
 using SPTarkov.Server.Core.Native.Loot;
 using SPTarkov.Server.Core.Utils;
 
@@ -28,7 +29,7 @@ public sealed class VerifyResult
 }
 
 /// <summary>
-/// Picks which of the loot exports a request goes to.
+/// Picks which of the generation exports a request goes to.
 /// </summary>
 internal enum LootExport
 {
@@ -38,6 +39,7 @@ internal enum LootExport
     CreateForcedLoot,
     SealedWeaponCase,
     RandomLootContainer,
+    BotInventory,
 }
 
 public static class SptNative
@@ -126,6 +128,15 @@ public static class SptNative
     }
 
     /// <summary>
+    /// Generates one bot's equipment, weapons and container loot.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">Generation failed, or the native side misbehaved.</exception>
+    internal static BotInventoryResult GenerateBotInventory(GenerateBotInventoryRequest request)
+    {
+        return Generate<BotInventoryResult>(LootExport.BotInventory, JsonSerializer.SerializeToUtf8Bytes(request, LootJsonOptions));
+    }
+
+    /// <summary>
     /// The shared body of the generation wrappers, taking the request as the UTF-8 JSON the
     /// native side reads. Internal so tests can hand it JSON that no typed payload can express: a
     /// mod-added field, or a deliberately malformed request.
@@ -163,6 +174,7 @@ public static class SptNative
                     &outPtr,
                     &outLen
                 ),
+                LootExport.BotInventory => NativeMethods.GenerateBotInventory(requestPtr, (nuint)requestUtf8.Length, &outPtr, &outLen),
                 _ => throw new ArgumentOutOfRangeException(nameof(export), export, null),
             };
         }

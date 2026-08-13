@@ -62,14 +62,10 @@ internal static class PayloadProjection
                 CartridgesMaxCount = firstCartridgeSlot?.MaxCount,
                 CartridgesFirstFilter = firstCartridgeSlot?.Properties?.Filters?.FirstOrDefault()?.Filter,
                 ChambersFirstFilter = firstChamber?.Properties?.Filters?.FirstOrDefault()?.Filter,
-                Slots = props
-                    .Slots?.Select(slot => new SlotView
-                    {
-                        Name = slot.Name,
-                        Required = slot.Required,
-                        Filter = slot.Properties?.Filters?.FirstOrDefault()?.Filter,
-                    })
-                    .ToList(),
+                Slots = ToSlotViews(props.Slots),
+                // Projected verbatim - an empty chamber list is not the same as no chamber list
+                Chambers = ToSlotViews(props.Chambers),
+                Cartridges = ToSlotViews(props.Cartridges),
                 ConflictingItems = props.ConflictingItems,
                 Caliber = props.Caliber,
                 AmmoCaliber = props.AmmoCaliber,
@@ -80,10 +76,63 @@ internal static class PayloadProjection
                 // Not coalesced: the reward pool filters on `false` and the sealed container pool on
                 // `null`, so the two have to stay distinguishable
                 QuestItem = props.QuestItem,
+                // Enum member names, not their numeric values - the native side string-compares them
+                ReloadMode = props.ReloadMode?.ToString(),
+                ReloadMagType = props.ReloadMagType?.ToString(),
+                IsChamberLoad = props.IsChamberLoad,
+                DefMagType = props.DefMagType,
+                LinkedWeapon = props.LinkedWeapon,
+                MaxDurability = props.MaxDurability,
+                WeapClass = props.WeapClass,
+                HasHinge = props.HasHinge,
+                Foldable = props.Foldable,
+                FoldedSlot = props.FoldedSlot,
+                SizeReduceRight = props.SizeReduceRight,
+                WeapFireType = props.WeapFireType,
+                MaxHpResource = props.MaxHpResource,
+                MaxResource = props.MaxResource,
+                FoodUseTime = props.FoodUseTime,
+                FaceShieldComponent = props.FaceShieldComponent,
+                BlocksEarpiece = props.BlocksEarpiece,
+                BlocksEyewear = props.BlocksEyewear,
+                BlocksFaceCover = props.BlocksFaceCover,
+                BlocksHeadwear = props.BlocksHeadwear,
+                BlocksFolding = props.BlocksFolding,
+                BlocksCollapsible = props.BlocksCollapsible,
+                BlockLeftStance = props.BlockLeftStance,
+                BlocksArmorVest = props.BlocksArmorVest,
+                Grids = props
+                    .Grids?.Select(grid => new GridView
+                    {
+                        Name = grid.Name,
+                        CellsH = grid.Properties?.CellsH,
+                        CellsV = grid.Properties?.CellsV,
+                        Filters = grid
+                            .Properties?.Filters?.Select(filter => new GridFilterView
+                            {
+                                Filter = filter.Filter,
+                                ExcludedFilter = filter.ExcludedFilter,
+                            })
+                            .ToList(),
+                    })
+                    .ToList(),
             };
         }
 
         return itemsView;
+    }
+
+    private static List<SlotView>? ToSlotViews(IEnumerable<Slot>? slots)
+    {
+        return slots
+            ?.Select(slot => new SlotView
+            {
+                Name = slot.Name,
+                Required = slot.Required,
+                Filter = slot.Properties?.Filters?.FirstOrDefault()?.Filter,
+                Plate = slot.Properties?.Filters?.FirstOrDefault()?.Plate,
+            })
+            .ToList();
     }
 
     /// <summary>

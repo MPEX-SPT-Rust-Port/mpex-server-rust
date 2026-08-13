@@ -181,6 +181,116 @@ public record ItemView
     /// </summary>
     [JsonPropertyName("questItem")]
     public bool? QuestItem { get; set; }
+
+    // Added for the bot port. Every one is nullable, so the loot payloads that never read them stay
+    // absent from the wire and the loot side of the contract is unchanged.
+
+    /// <summary>
+    /// <c>Chambers</c> as slot objects - <see cref="ChambersFirstFilter"/> flattens the first
+    /// chamber only. Projected verbatim: an empty list must stay an empty list, because the native
+    /// <c>patron_in_weapon</c> lookup tells "no chambers" and "chambers with nothing in them" apart.
+    /// </summary>
+    [JsonPropertyName("chambers")]
+    public List<SlotView>? Chambers { get; set; }
+
+    /// <summary>
+    /// <c>Cartridges</c> as slot objects - <see cref="CartridgesMaxCount"/> and
+    /// <see cref="CartridgesFirstFilter"/> flatten the first cartridge only.
+    /// </summary>
+    [JsonPropertyName("cartridges")]
+    public List<SlotView>? Cartridges { get; set; }
+
+    /// <summary>
+    /// The <c>ReloadMode</c> enum member name - the native side compares it against
+    /// <c>OnlyBarrel</c> as a string.
+    /// </summary>
+    [JsonPropertyName("reloadMode")]
+    public string? ReloadMode { get; set; }
+
+    /// <summary>
+    /// The <c>ReloadMagType</c> enum member name, compared against <c>InternalMagazine</c>.
+    /// </summary>
+    [JsonPropertyName("reloadMagType")]
+    public string? ReloadMagType { get; set; }
+
+    [JsonPropertyName("isChamberLoad")]
+    public bool? IsChamberLoad { get; set; }
+
+    [JsonPropertyName("defMagType")]
+    public MongoId? DefMagType { get; set; }
+
+    [JsonPropertyName("linkedWeapon")]
+    public string? LinkedWeapon { get; set; }
+
+    [JsonPropertyName("maxDurability")]
+    public double? MaxDurability { get; set; }
+
+    /// <summary>
+    /// Only its presence is read - it is what marks a template "is a weapon".
+    /// </summary>
+    [JsonPropertyName("weapClass")]
+    public string? WeapClass { get; set; }
+
+    [JsonPropertyName("hasHinge")]
+    public bool? HasHinge { get; set; }
+
+    [JsonPropertyName("foldable")]
+    public bool? Foldable { get; set; }
+
+    [JsonPropertyName("foldedSlot")]
+    public string? FoldedSlot { get; set; }
+
+    [JsonPropertyName("sizeReduceRight")]
+    public int? SizeReduceRight { get; set; }
+
+    [JsonPropertyName("weapFireType")]
+    public HashSet<string>? WeapFireType { get; set; }
+
+    [JsonPropertyName("maxHpResource")]
+    public int? MaxHpResource { get; set; }
+
+    [JsonPropertyName("maxResource")]
+    public int? MaxResource { get; set; }
+
+    [JsonPropertyName("foodUseTime")]
+    public double? FoodUseTime { get; set; }
+
+    [JsonPropertyName("faceShieldComponent")]
+    public bool? FaceShieldComponent { get; set; }
+
+    [JsonPropertyName("blocksEarpiece")]
+    public bool? BlocksEarpiece { get; set; }
+
+    [JsonPropertyName("blocksEyewear")]
+    public bool? BlocksEyewear { get; set; }
+
+    [JsonPropertyName("blocksFaceCover")]
+    public bool? BlocksFaceCover { get; set; }
+
+    [JsonPropertyName("blocksHeadwear")]
+    public bool? BlocksHeadwear { get; set; }
+
+    [JsonPropertyName("blocksFolding")]
+    public bool? BlocksFolding { get; set; }
+
+    [JsonPropertyName("blocksCollapsible")]
+    public bool? BlocksCollapsible { get; set; }
+
+    /// <summary>
+    /// The C# prop is <c>BlockLeftStance</c>, not <c>Blocks…</c>.
+    /// </summary>
+    [JsonPropertyName("blockLeftStance")]
+    public bool? BlockLeftStance { get; set; }
+
+    [JsonPropertyName("blocksArmorVest")]
+    public bool? BlocksArmorVest { get; set; }
+
+    /// <summary>
+    /// Every grid, not just the first: a bot container is walked grid by grid.
+    /// <see cref="GridCellsH"/> / <see cref="GridCellsV"/> flatten the first one.
+    /// </summary>
+    [JsonPropertyName("grids")]
+    public List<GridView>? Grids { get; set; }
 }
 
 /// <summary>
@@ -199,6 +309,42 @@ public record SlotView
     /// </summary>
     [JsonPropertyName("filter")]
     public HashSet<MongoId>? Filter { get; set; }
+
+    /// <summary>
+    /// <c>Props.Filters[0].Plate</c> - read by the bot port's default-plate lookup only.
+    /// </summary>
+    [JsonPropertyName("plate")]
+    public MongoId? Plate { get; set; }
+}
+
+/// <summary>
+/// A <c>Grid</c> flattened onto its <c>_props</c>.
+/// </summary>
+public record GridView
+{
+    /// <summary>
+    /// <c>Grid._name</c> - becomes the placed item's <c>slotId</c>.
+    /// </summary>
+    [JsonPropertyName("name")]
+    public string? Name { get; set; }
+
+    [JsonPropertyName("cellsH")]
+    public int? CellsH { get; set; }
+
+    [JsonPropertyName("cellsV")]
+    public int? CellsV { get; set; }
+
+    [JsonPropertyName("filters")]
+    public List<GridFilterView>? Filters { get; set; }
+}
+
+public record GridFilterView
+{
+    [JsonPropertyName("filter")]
+    public HashSet<MongoId>? Filter { get; set; }
+
+    [JsonPropertyName("excludedFilter")]
+    public HashSet<MongoId>? ExcludedFilter { get; set; }
 }
 
 public record PresetView
