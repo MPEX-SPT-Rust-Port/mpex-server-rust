@@ -167,6 +167,17 @@ public class PresetHelper(GlobalTable globalTable, ItemHelper itemHelper, IClone
         return PresetCache.Keys;
     }
 
+    /// <summary>
+    /// The globals' preset map, keyed exactly as <see cref="IsPreset"/> and <see cref="GetPreset"/>
+    /// key it, so a caller handing the whole map over a boundary keeps that key domain. Not cloned -
+    /// unlike <see cref="GetAllPresets"/>, which also drops the keys
+    /// </summary>
+    /// <returns>Presets keyed by preset id</returns>
+    internal IReadOnlyDictionary<MongoId, Preset> GetPresetsByPresetId()
+    {
+        return globalTable.ItemPresets;
+    }
+
     public Preset? GetPreset(MongoId id)
     {
         return cloner.Clone(globalTable.ItemPresets[id]);

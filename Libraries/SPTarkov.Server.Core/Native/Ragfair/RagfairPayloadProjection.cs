@@ -64,8 +64,9 @@ internal static class RagfairPayloadProjection
             OfferCounterStart = offerCounterStart,
             ExpiredOffers = expiredOffers,
             Dynamic = ragfairConfig.Dynamic,
-            // Keyed by preset id, in the globals' insertion order - the assort walk scans it in order
-            ItemPresets = (presetHelper.GetAllPresets() ?? []).ToDictionary(preset => preset.Id, ToPresetView),
+            // The globals' map itself, keys included: the native side mirrors PresetHelper.IsPreset
+            // and GetPreset, whose key domain is that map's keys, not each preset's own `_id`
+            ItemPresets = presetHelper.GetPresetsByPresetId().ToDictionary(preset => preset.Key, preset => ToPresetView(preset.Value)),
             DefaultPresets = ToPresetViews(presetHelper.GetDefaultPresets().Values),
             DefaultPresetsByTpl = presetHelper
                 .GetDefaultPresetByTpl()

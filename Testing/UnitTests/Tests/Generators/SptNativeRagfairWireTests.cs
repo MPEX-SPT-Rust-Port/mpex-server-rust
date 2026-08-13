@@ -116,6 +116,25 @@ public class SptNativeRagfairWireTests
     }
 
     /// <summary>
+    /// The seed seam every parity harness stands on: a mistyped <c>testSeed</c> wire name would leave
+    /// the native side seeding from entropy with every other test still green. Minted ids are
+    /// excluded - <c>mongo_id::generate</c> is a clock plus an atomic counter, deliberately outside
+    /// the seeded draw stream, exactly as C#'s <see cref="MongoId"/> is; every value compared here is
+    /// a draw (the price variance, the stack count, the offer duration).
+    /// </summary>
+    [Test]
+    public void TheSameSeedProducesTheSameOffers()
+    {
+        var first = SptNative.GenerateDynamicOffers(_request);
+        var second = SptNative.GenerateDynamicOffers(_request);
+
+        Assert.That(
+            second.Offers.Select(offer => (offer.SummaryCost, offer.Quantity, offer.EndTime - offer.StartTime)),
+            Is.EqualTo(first.Offers.Select(offer => (offer.SummaryCost, offer.Quantity, offer.EndTime - offer.StartTime)))
+        );
+    }
+
+    /// <summary>
     /// A mod-added field on a game-data object inside the payload must survive the round trip - the
     /// `[serde(flatten)] extra` contract that mirrors Ceciler's `[JsonExtensionData]`.
     /// </summary>
