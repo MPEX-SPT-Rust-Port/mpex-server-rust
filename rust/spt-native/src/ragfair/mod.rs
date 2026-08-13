@@ -74,6 +74,10 @@ pub(crate) fn plain(level: &str, message: String) -> Diagnostic {
     }
 }
 
+#[expect(
+    dead_code,
+    reason = "the ragfair port's first localised diagnostic lands with the offer generator; drop               this attribute when a caller arrives"
+)]
 pub(crate) fn localised(level: &str, locale_key: &str, args: serde_json::Value) -> Diagnostic {
     Diagnostic {
         level: level.to_owned(),

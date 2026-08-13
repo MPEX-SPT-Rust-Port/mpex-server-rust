@@ -26,11 +26,11 @@
 //!   downstream of them returns `Result` where the C# returns a bare `double`.
 
 use super::models::{MinMaxDoubleWire, UnreasonableModPricesWire};
-use super::{RagfairContext, localised, plain};
+use super::{RagfairContext, plain};
 use crate::loot::item_helper::{
-    BUILT_IN_INSERTS, LootError, WEAPON, get_item, get_item_quality_modifier, is_of_baseclass,
+    BUILT_IN_INSERTS, LootError, WEAPON, get_item_quality_modifier, is_of_baseclass,
 };
-use crate::loot::models::{DEBUG, Item, PresetView, WARNING};
+use crate::loot::models::{DEBUG, Item, PresetView};
 use crate::loot::random_util::{get_biased_random_number, round_half_even};
 
 /// `Money.ROUBLES`.
@@ -38,30 +38,20 @@ pub(crate) const ROUBLES: &str = "5449016a4bdc2d6f028b456f";
 
 /// `RagfairPriceService.GetFleaPriceForItem` (`:171-193`).
 ///
-/// The C#'s `itemPrice is null` arm cannot be reached through its own types —
-/// `GetStaticPriceForItem` bottoms out in `HandbookHelper.GetTemplatePrice`, which returns `0` for
-/// a tpl it has never seen rather than null. The warning is kept for the case that arm was written
-/// for: neither table knows the tpl. The `0 -> 1` floor stays *after* it, so a tpl the handbook
-/// prices at zero floors without warning.
-pub fn get_flea_price_for_item(ctx: &mut RagfairContext, tpl: &str) -> f64 {
+/// The C#'s warning arm (`:175-184`, the localisation key
+/// `ragfair-unable_to_find_item_price_for_item_in_flea_handbook`) is **dead code and stays dead**:
+/// its trigger is `itemPrice is null`, but the coalesce that produces `itemPrice` ends in
+/// `GetStaticPriceForItem` → `HandbookHelper.GetTemplatePrice`, a non-nullable `double` that
+/// answers `0` for a tpl it has never seen (`HandbookHelper.cs:106-134`). No SPT server can emit
+/// that line, so neither does this port. A tpl in neither table takes the same route the C# does:
+/// `0` from the handbook, then the `0 -> 1` floor at `:186-190`.
+pub fn get_flea_price_for_item(ctx: &RagfairContext, tpl: &str) -> f64 {
     // Get dynamic price (templates/prices), if that doesn't exist get price from static array
     // (templates/handbook)
-    let dynamic_price = ctx.flea_prices.get(tpl).copied();
-    let mut item_price = match dynamic_price {
+    let mut item_price = match ctx.flea_prices.get(tpl).copied() {
         Some(price) => price,
         None => get_static_price_for_item(ctx, tpl),
     };
-
-    if dynamic_price.is_none() && !ctx.handbook_prices.contains_key(tpl) {
-        let name = get_item(ctx.items, tpl)
-            .and_then(|item_from_db| item_from_db.name.clone())
-            .unwrap_or_default();
-        ctx.diagnostics.push(localised(
-            WARNING,
-            "ragfair-unable_to_find_item_price_for_item_in_flea_handbook",
-            serde_json::json!({ "tpl": tpl, "name": name }),
-        ));
-    }
 
     // If no price in dynamic/static, set to 1. The C# compares to zero exactly, so this does too.
     if item_price == 0.0 {
@@ -345,7 +335,7 @@ fn get_weapon_preset_price(
 }
 
 /// `RagfairPriceService.GetPresetPriceByChildren` (`:527-544`).
-fn get_preset_price_by_children(ctx: &mut RagfairContext, weapon_with_children: &[Item]) -> f64 {
+fn get_preset_price_by_children(ctx: &RagfairContext, weapon_with_children: &[Item]) -> f64 {
     let mut price_total = 0.0;
     for item in weapon_with_children {
         // Root item uses static price
@@ -496,7 +486,7 @@ mod tests {
 
     use super::*;
     use crate::loot::item_helper::{AMMO_BOX, BUILT_IN_INSERTS, LootError, MOD, MONEY, WEAPON};
-    use crate::loot::models::{Diagnostic, ItemView, Upd, UpdRepairable};
+    use crate::loot::models::{ItemView, Upd, UpdRepairable};
     use crate::loot::random_util::{TestSeedGuard, get_biased_random_number, get_double};
     use crate::ragfair::models::DynamicConfigWire;
     use crate::ragfair::{NO_BLACKLIST, NO_DEFAULT_PRESETS, NO_NAMES};
@@ -724,13 +714,6 @@ mod tests {
         item
     }
 
-    fn warnings(diagnostics: &[Diagnostic]) -> Vec<&Diagnostic> {
-        diagnostics
-            .iter()
-            .filter(|d| d.level == "warning")
-            .collect()
-    }
-
     /// Where the seeded stream stands after `consume` — the read-the-next-draw idiom the bot
     /// modules use to pin a draw count.
     fn stream_position_after(consume: impl FnOnce()) -> f64 {
@@ -747,52 +730,42 @@ mod tests {
     #[test]
     fn flea_price_prefers_the_dynamic_price() {
         let fixture = Fixture::new();
-        let mut ctx = fixture.ctx();
+        let ctx = fixture.ctx();
 
-        assert_eq!(get_flea_price_for_item(&mut ctx, PLAIN_TPL), 25_000.0);
+        assert_eq!(get_flea_price_for_item(&ctx, PLAIN_TPL), 25_000.0);
         assert!(ctx.diagnostics.is_empty());
     }
 
     #[test]
     fn flea_price_falls_back_to_the_handbook_price() {
         let fixture = Fixture::new();
-        let mut ctx = fixture.ctx();
+        let ctx = fixture.ctx();
 
-        assert_eq!(
-            get_flea_price_for_item(&mut ctx, HANDBOOK_ONLY_TPL),
-            7_000.0
-        );
+        assert_eq!(get_flea_price_for_item(&ctx, HANDBOOK_ONLY_TPL), 7_000.0);
         assert!(ctx.diagnostics.is_empty());
     }
 
     #[test]
     fn a_zero_price_floors_at_one_without_warning() {
         let fixture = Fixture::new();
-        let mut ctx = fixture.ctx();
+        let ctx = fixture.ctx();
 
         // The `0 -> 1` floor is applied *after* the warning check, and a tpl the handbook knows
         // about at a price of zero is not a missing price.
-        assert_eq!(get_flea_price_for_item(&mut ctx, ZERO_PRICE_TPL), 1.0);
+        assert_eq!(get_flea_price_for_item(&ctx, ZERO_PRICE_TPL), 1.0);
         assert!(ctx.diagnostics.is_empty());
     }
 
     #[test]
-    fn a_price_in_neither_table_warns_and_floors_at_one() {
+    fn a_price_in_neither_table_floors_at_one_and_says_nothing() {
         let fixture = Fixture::new();
-        let mut ctx = fixture.ctx();
+        let ctx = fixture.ctx();
 
-        // The ammo box is in the items view but in neither price table.
-        let unknown = get_flea_price_for_item(&mut ctx, AMMO_BOX_TPL);
-
-        assert_eq!(unknown, 1.0);
-        let warnings = warnings(&ctx.diagnostics);
-        assert_eq!(warnings.len(), 1);
-        assert_eq!(
-            warnings[0].locale_key.as_deref(),
-            Some("ragfair-unable_to_find_item_price_for_item_in_flea_handbook")
-        );
-        assert_eq!(warnings[0].args.as_ref().unwrap()["tpl"], AMMO_BOX_TPL);
-        assert_eq!(warnings[0].args.as_ref().unwrap()["name"], "ammo box");
+        // The ammo box is in the items view but in neither price table. The C# warning arm for
+        // this case is unreachable there (its coalesce is non-nullable), so it is unreachable here
+        // too: the handbook miss is `0`, and the `0 -> 1` floor takes it from there.
+        assert_eq!(get_flea_price_for_item(&ctx, AMMO_BOX_TPL), 1.0);
+        assert!(ctx.diagnostics.is_empty());
     }
 
     #[test]
@@ -1143,7 +1116,7 @@ mod tests {
     #[test]
     fn a_preset_priced_by_children_uses_the_static_price_for_its_root() {
         let fixture = Fixture::new();
-        let mut ctx = fixture.ctx();
+        let ctx = fixture.ctx();
         let children = vec![
             item("i1", WEAPON_DEFAULT_TPL),
             mod_item("i2", STOCK_TPL, "i1", "mod_stock"),
@@ -1151,16 +1124,16 @@ mod tests {
         ];
 
         // handbook 45000 for the root + flea 3000 + flea 8000 for the mods
-        assert_eq!(get_preset_price_by_children(&mut ctx, &children), 56_000.0);
+        assert_eq!(get_preset_price_by_children(&ctx, &children), 56_000.0);
     }
 
     #[test]
     fn a_hideout_parented_root_is_still_a_root() {
         let fixture = Fixture::new();
-        let mut ctx = fixture.ctx();
+        let ctx = fixture.ctx();
         let children = vec![mod_item("i1", WEAPON_DEFAULT_TPL, "HIDEOUT", "hideout")];
 
-        assert_eq!(get_preset_price_by_children(&mut ctx, &children), 45_000.0);
+        assert_eq!(get_preset_price_by_children(&ctx, &children), 45_000.0);
     }
 
     #[test]
