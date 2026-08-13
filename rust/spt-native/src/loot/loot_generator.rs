@@ -115,21 +115,25 @@ pub fn create_random_loot(request: CreateRandomLootRequest) -> Result<RewardLoot
         get_int_of(options.weapon_crate_count.as_ref(), "WeaponCrateCount")?;
     if sealed_weapon_crate_count > 0 {
         // Get list of all sealed containers from db - they're all the same, just for flavor.
-        // A template without a `_name` cannot match; C# would throw on it, but every real item has
-        // one.
-        let sealed_weapon_container_pool: Vec<&str> = db
-            .items_view
-            .iter()
-            .filter(|(_, item)| {
-                item.name
-                    .as_deref()
-                    .is_some_and(|name| name.contains("event_container_airdrop"))
-            })
-            .map(|(tpl, _)| tpl.as_str())
-            .collect();
+        let mut sealed_weapon_container_pool: Vec<&str> = Vec::new();
+        for (tpl, item) in &db.items_view {
+            // `item.Name.Contains(...)` (`:57`) dereferences a null `_name` and throws.
+            let name = item.name.as_deref().ok_or_else(|| {
+                LootError::new(format!(
+                    "Item: {tpl} has no name when filtering sealed crates"
+                ))
+            })?;
+
+            if name.contains("event_container_airdrop") {
+                sealed_weapon_container_pool.push(tpl.as_str());
+            }
+        }
 
         if sealed_weapon_container_pool.is_empty() {
-            // `GetRandomElement` throws "Sequence contains no elements." on an empty pool (`:62`).
+            // The pool is a lazy `Where`, so `GetRandomElement` copies it with `ToList()`
+            // (`RandomUtil.cs:172-173`), draws `GetInt(0, -1)` — which short-circuits to 0 without
+            // consuming any randomness — and indexes the empty list:
+            // `ArgumentOutOfRangeException` (`:62`).
             return Err(LootError::new(
                 "No sealed weapon containers found in the item db",
             ));
@@ -206,7 +210,7 @@ pub fn create_random_loot(request: CreateRandomLootRequest) -> Result<RewardLoot
                     &reward_pool_results.blacklist,
                     &mut result,
                     &mut diagnostics,
-                ) {
+                )? {
                     index += 1;
                 }
             }
@@ -227,6 +231,9 @@ pub fn create_random_loot(request: CreateRandomLootRequest) -> Result<RewardLoot
         // Both C# filters are lazy, but `GetRandomElement` copies the sequence with `ToList()`
         // (`RandomUtil.cs:173`) on the first draw that follows the `Any()` check, so every preset is
         // run through the predicate either way — filtering eagerly here changes nothing observable.
+        // Neither predicate draws, so the RNG stream is identical; the one difference is which error
+        // surfaces first when both stages would throw (a preset without an `_encyclopedia` *after*
+        // one with a null armor class reports the encyclopedia here, the armor class in C#).
         let mut level_filtered_armor_presets = Vec::new();
         for preset in armor_default_presets {
             if is_armor_of_desired_protection_level(db, preset, options)? {
@@ -246,7 +253,7 @@ pub fn create_random_loot(request: CreateRandomLootRequest) -> Result<RewardLoot
                     &reward_pool_results.blacklist,
                     &mut result,
                     &mut diagnostics,
-                ) {
+                )? {
                     index += 1;
                 }
             }
@@ -477,8 +484,10 @@ fn find_and_add_random_item_to_loot(
     result: &mut Vec<Vec<Item>>,
 ) -> Result<bool, LootError> {
     if items.is_empty() {
-        // `GetRandomElement` throws "Sequence contains no elements." (`:310`); the only C# caller
-        // checks `Any()` first, so this is unreachable from `create_random_loot`.
+        // The pool is a lazy `Where`, so `GetRandomElement` copies it with `ToList()`
+        // (`RandomUtil.cs:172-173`), draws `GetInt(0, -1)` — no randomness consumed, it
+        // short-circuits to 0 — and indexes the empty list: `ArgumentOutOfRangeException` (`:310`).
+        // The only C# caller checks `Any()` first, so this is unreachable from `create_random_loot`.
         return Err(LootError::new("Item reward pool is empty"));
     }
 
@@ -499,7 +508,9 @@ fn find_and_add_random_item_to_loot(
         return Ok(false);
     }
 
-    // Special case - handle items that need a stackcount > 1
+    // Special case - handle items that need a stackcount > 1. C# mints the item's `MongoId` before
+    // drawing the stack count (`:324-335`) and this draws first; both orders consume the same
+    // randomness, since ids are not drawn from the seeded stream.
     let stack_objects_count = if random_item.stack_max_size.is_some_and(|size| size > 1) {
         f64::from(get_randomised_stack_count(
             random_item,
@@ -552,11 +563,11 @@ fn find_and_add_random_preset_to_loot(
     item_blacklist: &HashSet<String>,
     result: &mut Vec<Vec<Item>>,
     diagnostics: &mut Vec<Diagnostic>,
-) -> bool {
+) -> Result<bool, LootError> {
     if preset_pool.is_empty() {
         diagnostics.push(localised(WARNING, "loot-preset_pool_is_empty", None));
 
-        return false;
+        return Ok(false);
     }
 
     // Choose random preset and get details from item db using encyclopedia value (encyclopedia ===
@@ -574,7 +585,7 @@ fn find_and_add_random_preset_to_loot(
             Some(json!(chosen_preset.id)),
         ));
 
-        return false;
+        return Ok(false);
     };
 
     // Get preset root item db details via its `_encyclopedia` property
@@ -585,36 +596,40 @@ fn find_and_add_random_preset_to_loot(
             format!("$Unable to find preset with tpl: {encyclopedia}, skipping"),
         ));
 
-        return false;
+        return Ok(false);
     };
 
-    // Skip preset if root item is blacklisted. C# dereferences `FirstOrDefault().Template` and
-    // throws on a preset with no items (`:419`); an empty tpl cannot be blacklisted, so this skips
-    // instead of panicking behind the FFI boundary.
+    // Skip preset if root item is blacklisted. `FirstOrDefault().Template` (`:419`) dereferences a
+    // null on a preset with no items and throws.
     let root_tpl = chosen_preset
         .items
         .first()
         .map(|item| item.template.as_str())
-        .unwrap_or_default();
+        .ok_or_else(|| {
+            LootError::new(format!(
+                "Preset: {} has no items",
+                chosen_preset.id.as_deref().unwrap_or_default()
+            ))
+        })?;
     if item_blacklist.contains(root_tpl) {
-        return false;
+        return Ok(false);
     }
 
     // Some custom mod items lack a parent property.
     //
-    // Deviation: the C# guard (`:425-430`) is dead — `TemplateItem.Parent` is a non-nullable
-    // `MongoId` and the item was just found in the db, so `Value?.Parent is null` never holds there
-    // and an item without a `_parent` is keyed under the empty id instead. Kept live here because
-    // `ItemView.parent` can genuinely be absent; the two only differ for a db item with no parent,
-    // which cannot be a preset root.
-    let Some(parent) = item_db_details.parent.as_deref().filter(|p| !p.is_empty()) else {
+    // Note: the C# guard (`:425-430`) is dead — `TemplateItem.Parent` is a non-nullable `MongoId`
+    // and the item was just found in the db, so `Value?.Parent is null` never holds. An **empty**
+    // `_parent` is therefore not the error branch there: it proceeds and keys the limit lookup under
+    // the empty id, which is what this does. Only an entirely absent `parent` — impossible from a C#
+    // `MongoId`, but expressible on `ItemView` — takes the error branch.
+    let Some(parent) = item_db_details.parent.as_deref() else {
         diagnostics.push(localised(
             ERROR,
             "loot-item_missing_parentid",
             Some(json!(item_db_details.name)),
         ));
 
-        return false;
+        return Ok(false);
     };
 
     // Check chosen preset hasn't exceeded spawn limit. Second dead guard, replicated as written
@@ -622,7 +637,7 @@ fn find_and_add_random_preset_to_loot(
     let item_limit_count = item_type_counts.get(parent).copied();
     let has_item_limit_count = item_limit_count.is_some();
     if !has_item_limit_count && item_limit_count.is_some_and(|limit| limit.current > limit.max) {
-        return false;
+        return Ok(false);
     }
 
     let mut preset_and_mods_clone = chosen_preset.items.clone();
@@ -640,7 +655,7 @@ fn find_and_add_random_preset_to_loot(
     }
 
     // Item added okay
-    true
+    Ok(true)
 }
 
 #[cfg(test)]
@@ -684,11 +699,13 @@ mod tests {
     fn db_json() -> Value {
         json!({
             "itemsView": {
-                ITEM_NODE: {},
-                MISC_NODE: { "parent": ITEM_NODE },
-                WEAPON: { "parent": ITEM_NODE },
-                ARMOR: { "parent": ITEM_NODE },
-                AMMO: { "parent": ITEM_NODE },
+                // Every entry carries a `_name`, as every real db template does — a null one is
+                // the C# throw path in the sealed-crate filter.
+                ITEM_NODE: { "name": "Item" },
+                MISC_NODE: { "parent": ITEM_NODE, "name": "misc" },
+                WEAPON: { "parent": ITEM_NODE, "name": "Weapon" },
+                ARMOR: { "parent": ITEM_NODE, "name": "Armor" },
+                AMMO: { "parent": ITEM_NODE, "name": "Ammo" },
                 // Parented outside the whitelist so the crates cannot also be drawn as plain items.
                 CRATE_A_TPL: { "parent": ITEM_NODE, "type": "item", "name": "event_container_airdrop_a" },
                 CRATE_B_TPL: { "parent": ITEM_NODE, "type": "item", "name": "event_container_airdrop_b" },
@@ -764,10 +781,13 @@ mod tests {
         })
     }
 
+    fn random_request(seed: u64, options: Value) -> CreateRandomLootRequest {
+        request_from(db_json(), seed, options)
+    }
+
     /// `RewardLootDb` is flattened into the request, so its members are spliced in one level up
     /// rather than nested.
-    fn random_request(seed: u64, options: Value) -> CreateRandomLootRequest {
-        let mut envelope = db_json();
+    fn request_from(mut envelope: Value, seed: u64, options: Value) -> CreateRandomLootRequest {
         envelope["testSeed"] = json!(seed);
         envelope
             .as_object_mut()
@@ -775,6 +795,16 @@ mod tests {
             .insert("lootRequest".to_owned(), options);
 
         serde_json::from_value(envelope).unwrap()
+    }
+
+    /// Only the sealed-crate phase runs.
+    fn crates_only_options() -> Value {
+        let mut options = options_json();
+        options["itemCount"] = json!({ "min": 0, "max": 0 });
+        options["weaponPresetCount"] = json!({ "min": 0, "max": 0 });
+        options["armorPresetCount"] = json!({ "min": 0, "max": 0 });
+
+        options
     }
 
     fn forced_request(seed: u64, forced_loot: Value) -> CreateForcedLootRequest {
@@ -827,6 +857,38 @@ mod tests {
 
             assert_eq!(shape(&a), shape(&b), "seed {seed}");
         }
+    }
+
+    /// Golden: the exact draw sequence at one pinned seed — crate pick, three item picks with their
+    /// stack counts, then the two preset picks. Comparing two runs of the same code (as
+    /// `a_test_seed_makes_random_loot_deterministic` does) shifts both sides together and would miss
+    /// a draw-order or draw-count regression; this literal does not.
+    #[test]
+    fn a_pinned_seed_draws_a_known_sequence() {
+        let mut options = options_json();
+        options["itemCount"] = json!({ "min": 3, "max": 3 });
+
+        let result = create_random_loot(random_request(12345, options)).unwrap();
+
+        // Any draw the retry loop rejected (the pool holds two armor entries) is invisible in the
+        // output but still shifts everything after it, which is what makes this a draw-order check.
+        // Crate B, then ammo (stack 1 of 1-3), a bandage, screws (stack 50 of 1-50), the weapon
+        // preset and the vest preset — with the armor item and the vest tpl rejected in between,
+        // each rejection having consumed its own draw.
+        assert_eq!(
+            shape(&result),
+            vec![
+                vec![(CRATE_B_TPL.to_owned(), Some(1.0))],
+                vec![(AMMO_ITEM_TPL.to_owned(), Some(1.0))],
+                vec![(PLAIN_ITEM_TPL.to_owned(), Some(1.0))],
+                vec![(STACK_ITEM_TPL.to_owned(), Some(50.0))],
+                vec![
+                    (WEAPON_TPL.to_owned(), None),
+                    (WEAPON_MOD_TPL.to_owned(), None)
+                ],
+                vec![(VEST_TPL.to_owned(), None), (PLATE_TPL.to_owned(), None)],
+            ]
+        );
     }
 
     #[test]
@@ -982,6 +1044,37 @@ mod tests {
         let error = create_random_loot(random_request(1, options)).unwrap_err();
 
         assert!(error.message.contains("WeaponCrateCount"), "{error:?}");
+    }
+
+    /// `item.Name.Contains(...)` (`:57`) dereferences a null `_name`.
+    #[test]
+    fn a_template_without_a_name_is_the_c_sharp_null_dereference() {
+        let mut envelope = db_json();
+        envelope["itemsView"][PLAIN_ITEM_TPL]["name"] = Value::Null;
+
+        let error =
+            create_random_loot(request_from(envelope, 1, crates_only_options())).unwrap_err();
+
+        assert!(error.message.contains("has no name"), "{error:?}");
+    }
+
+    /// `chosenPreset.Items.FirstOrDefault().Template` (`:419`) dereferences a null on a preset with
+    /// no items.
+    #[test]
+    fn a_preset_without_items_is_the_c_sharp_null_dereference() {
+        let mut envelope = db_json();
+        envelope["defaultPresets"] = json!([{
+            "id": "7b7b7b7b7b7b7b7b7b7b7b7b",
+            "encyclopedia": WEAPON_TPL,
+            "items": []
+        }]);
+        let mut options = crates_only_options();
+        options["weaponCrateCount"] = json!({ "min": 0, "max": 0 });
+        options["weaponPresetCount"] = json!({ "min": 1, "max": 1 });
+
+        let error = create_random_loot(request_from(envelope, 1, options)).unwrap_err();
+
+        assert!(error.message.contains("has no items"), "{error:?}");
     }
 
     #[test]
