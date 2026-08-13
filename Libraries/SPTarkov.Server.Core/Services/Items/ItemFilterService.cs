@@ -102,6 +102,18 @@ public class ItemFilterService(ItemConfig itemConfig)
     }
 
     /// <summary>
+    ///     Return every template id <see cref="IsItemBlacklisted"/> rejects: the config/item.json
+    ///     blacklist plus anything added at runtime through <see cref="AddItemToBlacklistCache"/>, so a
+    ///     caller that would otherwise probe it per tpl can hand the whole set over the native boundary
+    ///     at once
+    /// </summary>
+    /// <returns>HashSet of blacklisted template ids</returns>
+    internal HashSet<MongoId> GetItemBlacklistCache()
+    {
+        return ItemBlacklistCache;
+    }
+
+    /// <summary>
     ///     Check if the provided template id is boss item in config/item.json
     /// </summary>
     /// <param name="tpl"> Template id</param>

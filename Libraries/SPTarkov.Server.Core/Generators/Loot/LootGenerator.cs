@@ -1,4 +1,6 @@
+using System.Reflection;
 using System.Text.Json.Serialization;
+using HarmonyLib;
 using Microsoft.Extensions.Logging;
 using SPTarkov.Common.Models.Logging;
 using SPTarkov.DI.Annotations;
@@ -11,6 +13,8 @@ using SPTarkov.Server.Core.Models.Enums;
 using SPTarkov.Server.Core.Models.Spt.Config;
 using SPTarkov.Server.Core.Models.Spt.Services;
 using SPTarkov.Server.Core.Models.Spt.Tables;
+using SPTarkov.Server.Core.Native;
+using SPTarkov.Server.Core.Native.Loot;
 using SPTarkov.Server.Core.Services;
 using SPTarkov.Server.Core.Services.Commerce;
 using SPTarkov.Server.Core.Services.Items;
@@ -22,6 +26,18 @@ using SPTarkov.Server.Core.Utils.Cloners;
 
 namespace SPTarkov.Server.Core.Generators.Loot;
 
+/// <summary>
+/// Reward loot generation runs in <c>rust/spt-native/src/loot/loot_generator.rs</c> by default; the
+/// entry points project the live database and config into the native payload and replay the log
+/// lines the native side collected. The full 4.1.2 C# implementation is retained below as the
+/// legacy path - it is the frozen mod contract (constructor, protected members and DTOs are
+/// apicompat-gated against the 4.1.2 baseline) and runs instead of the native path when a Harmony
+/// patch on any protected member is detected or LocationConfig.ForceLegacyLootGeneration is set, so
+/// mod hooks fire with genuine baseline semantics.
+///
+/// A mod that constructs this class through the frozen 11 parameter constructor gets no
+/// LocationConfig, so only the config flag check is skipped - hook detection still works.
+/// </summary>
 [Injectable]
 public class LootGenerator(
     ISptLogger<LootGenerator> logger,
@@ -37,12 +53,170 @@ public class LootGenerator(
     ICloner cloner
 )
 {
+    private readonly LocationConfig? _locationConfig;
+
+    /// <summary>
+    ///     The constructor the container uses: the frozen 4.1.2 one plus the config that carries the
+    ///     legacy path flag. Additive, so the apicompat gate is unaffected.
+    /// </summary>
+    public LootGenerator(
+        ISptLogger<LootGenerator> logger,
+        TemplateTable templateTable,
+        RandomUtil randomUtil,
+        ItemHelper itemHelper,
+        PresetHelper presetHelper,
+        ItemFilterService itemFilterService,
+        ServerLocalisationService serverLocalisationService,
+        WeightedRandomHelper weightedRandomHelper,
+        RagfairLinkedItemService ragfairLinkedItemService,
+        SeasonalEventService seasonalEventService,
+        ICloner cloner,
+        LocationConfig locationConfig
+    )
+        : this(
+            logger,
+            templateTable,
+            randomUtil,
+            itemHelper,
+            presetHelper,
+            itemFilterService,
+            serverLocalisationService,
+            weightedRandomHelper,
+            ragfairLinkedItemService,
+            seasonalEventService,
+            cloner
+        )
+    {
+        _locationConfig = locationConfig;
+    }
+
+    /// <summary>
+    ///     Which implementation the most recent generation call ran - the spt-native path or the
+    ///     retained 4.1.2 C# path. Test seam; also handy in a debugger.
+    /// </summary>
+    internal LootGenerationPath LastPathTaken { get; private set; }
+
+    /// <summary>
+    ///     Test-only seed forwarded as <see cref="RewardLootDb.TestSeed"/> on every native request.
+    /// </summary>
+    internal ulong? NativeTestSeed { get; set; }
+
+    /// <summary>
+    ///     The 4.1.2 members a mod can Harmony-patch. Protected and declared on this class - exactly
+    ///     the surface the apicompat gate freezes. Computed once; patches come and go per call, so
+    ///     the check itself does not.
+    /// </summary>
+    private static readonly List<MethodBase> _hookableMembers =
+    [
+        .. typeof(LootGenerator)
+            .GetMethods(BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.DeclaredOnly)
+            .Where(method => method.IsFamily),
+    ];
+
+    /// <summary>
+    ///     The legacy path runs when forced by config, or when any of the frozen 4.1.2 members
+    ///     carries a live Harmony patch - running the retained C# implementation is the only way
+    ///     those hooks can fire with real baseline semantics.
+    /// </summary>
+    private bool UseLegacyPath()
+    {
+        if (_locationConfig?.ForceLegacyLootGeneration == true)
+        {
+            return true;
+        }
+
+        return _hookableMembers.Any(member =>
+            Harmony.GetPatchInfo(member) is { } patches
+            && (patches.Prefixes.Count > 0 || patches.Postfixes.Count > 0 || patches.Transpilers.Count > 0 || patches.Finalizers.Count > 0)
+        );
+    }
+
+    /// <summary>
+    ///     Everything all four native entry points read from the live database and services, built
+    ///     fresh per call so a mod that swaps an item or blacklists one at runtime is picked up.
+    /// </summary>
+    /// <param name="defaultPresets">
+    ///     <c>PresetHelper.GetDefaultPresets().Values</c>, order preserved - only random loot draws
+    ///     from it, so the other three envelopes pass an empty list
+    /// </param>
+    /// <param name="defaultPresetsByTpl">
+    ///     The tpl to default-preset map, which is not the same method at every call site:
+    ///     <c>GetDefaultPresetsByTplKey()</c> for forced loot, <c>GetDefaultPresetByTpl()</c> for the
+    ///     sealed case and the reward container, and unread by random loot
+    /// </param>
+    private RewardLootDb BuildRewardLootDb(List<PresetView> defaultPresets, Dictionary<MongoId, PresetView> defaultPresetsByTpl)
+    {
+        return new RewardLootDb
+        {
+            ItemsView = PayloadProjection.BuildItemsView(templateTable.Items),
+            DefaultPresets = defaultPresets,
+            DefaultPresetsByTpl = defaultPresetsByTpl,
+            // The cache, not the config list: it also holds anything a mod blacklisted at runtime
+            GlobalBlacklist = itemFilterService.GetItemBlacklistCache(),
+            RewardItemBlacklist = itemFilterService.GetItemRewardBlacklist(),
+            RewardBaseTypeBlacklist = itemFilterService.GetItemRewardBaseTypeBlacklist(),
+            BossItems = itemFilterService.GetBossItems(),
+            InactiveSeasonalItems = seasonalEventService.GetInactiveSeasonalEventItems(),
+            TestSeed = NativeTestSeed,
+        };
+    }
+
+    private static PresetView ToPresetView(Preset preset)
+    {
+        return new PresetView
+        {
+            Items = preset.Items,
+            Id = preset.Id,
+            Name = preset.Name,
+            Encyclopedia = preset.Encyclopedia,
+        };
+    }
+
+    private static Dictionary<MongoId, PresetView> ToPresetViews(Dictionary<MongoId, Preset> presets)
+    {
+        return presets.ToDictionary(preset => preset.Key, preset => ToPresetView(preset.Value));
+    }
+
     /// <summary>
     ///     Generate a list of items based on configuration options parameter
     /// </summary>
     /// <param name="options">parameters to adjust how loot is generated</param>
     /// <returns>An array of loot items</returns>
     public IEnumerable<List<Item>> CreateRandomLoot(LootRequest options)
+    {
+        if (UseLegacyPath())
+        {
+            LastPathTaken = LootGenerationPath.Legacy;
+            return CreateRandomLootLegacy(options);
+        }
+
+        LastPathTaken = LootGenerationPath.Native;
+
+        // The tpl keyed preset map is not read by this export, so it is not built
+        var db = BuildRewardLootDb([.. presetHelper.GetDefaultPresets().Values.Select(ToPresetView)], []);
+
+        var result = SptNative.CreateRandomLoot(
+            new CreateRandomLootRequest
+            {
+                ItemsView = db.ItemsView,
+                DefaultPresets = db.DefaultPresets,
+                DefaultPresetsByTpl = db.DefaultPresetsByTpl,
+                GlobalBlacklist = db.GlobalBlacklist,
+                RewardItemBlacklist = db.RewardItemBlacklist,
+                RewardBaseTypeBlacklist = db.RewardBaseTypeBlacklist,
+                BossItems = db.BossItems,
+                InactiveSeasonalItems = db.InactiveSeasonalItems,
+                TestSeed = db.TestSeed,
+                LootRequest = options,
+            }
+        );
+
+        PayloadProjection.ReplayDiagnostics(result.Diagnostics, logger, serverLocalisationService);
+
+        return result.Items;
+    }
+
+    private IEnumerable<List<Item>> CreateRandomLootLegacy(LootRequest options)
     {
         var result = new List<List<Item>>();
 
@@ -148,6 +322,40 @@ public class LootGenerator(
     /// <param name="forcedLootToAdd">Dictionary of item tpls with minmax values</param>
     /// <returns>Array of Item</returns>
     public List<List<Item>> CreateForcedLoot(Dictionary<MongoId, MinMax<int>> forcedLootToAdd)
+    {
+        if (UseLegacyPath())
+        {
+            LastPathTaken = LootGenerationPath.Legacy;
+            return CreateForcedLootLegacy(forcedLootToAdd);
+        }
+
+        LastPathTaken = LootGenerationPath.Native;
+
+        // The preset list is not read by this export, so it is not built
+        var db = BuildRewardLootDb([], ToPresetViews(presetHelper.GetDefaultPresetsByTplKey()));
+
+        var result = SptNative.CreateForcedLoot(
+            new CreateForcedLootRequest
+            {
+                ItemsView = db.ItemsView,
+                DefaultPresets = db.DefaultPresets,
+                DefaultPresetsByTpl = db.DefaultPresetsByTpl,
+                GlobalBlacklist = db.GlobalBlacklist,
+                RewardItemBlacklist = db.RewardItemBlacklist,
+                RewardBaseTypeBlacklist = db.RewardBaseTypeBlacklist,
+                BossItems = db.BossItems,
+                InactiveSeasonalItems = db.InactiveSeasonalItems,
+                TestSeed = db.TestSeed,
+                ForcedLoot = forcedLootToAdd,
+            }
+        );
+
+        PayloadProjection.ReplayDiagnostics(result.Diagnostics, logger, serverLocalisationService);
+
+        return result.Items;
+    }
+
+    private List<List<Item>> CreateForcedLootLegacy(Dictionary<MongoId, MinMax<int>> forcedLootToAdd)
     {
         var result = new List<List<Item>>();
 
@@ -461,6 +669,51 @@ public class LootGenerator(
     /// <returns>List of items with children lists</returns>
     public List<List<Item>> GetSealedWeaponCaseLoot(SealedAirdropContainerSettings containerSettings)
     {
+        if (UseLegacyPath())
+        {
+            LastPathTaken = LootGenerationPath.Legacy;
+            return GetSealedWeaponCaseLootLegacy(containerSettings);
+        }
+
+        LastPathTaken = LootGenerationPath.Native;
+
+        // Any of the weighted weapons can be drawn, so every one of them brings its presets and the
+        // items that fit it. The preset list is not read by this export, so it is not built
+        var db = BuildRewardLootDb([], ToPresetViews(presetHelper.GetDefaultPresetByTpl()));
+        var presetsByTpl = new Dictionary<MongoId, List<PresetView>>(containerSettings.WeaponRewardWeight.Count);
+        var linkedItems = new Dictionary<MongoId, List<MongoId>>(containerSettings.WeaponRewardWeight.Count);
+
+        foreach (var weaponTpl in containerSettings.WeaponRewardWeight.Keys)
+        {
+            presetsByTpl[weaponTpl] = [.. (presetHelper.GetPresets(weaponTpl) ?? []).Select(ToPresetView)];
+            linkedItems[weaponTpl] = [.. ragfairLinkedItemService.GetLinkedDbItems(weaponTpl).Select(item => item.Id)];
+        }
+
+        var result = SptNative.GetSealedWeaponCaseLoot(
+            new SealedWeaponCaseRequest
+            {
+                ItemsView = db.ItemsView,
+                DefaultPresets = db.DefaultPresets,
+                DefaultPresetsByTpl = db.DefaultPresetsByTpl,
+                GlobalBlacklist = db.GlobalBlacklist,
+                RewardItemBlacklist = db.RewardItemBlacklist,
+                RewardBaseTypeBlacklist = db.RewardBaseTypeBlacklist,
+                BossItems = db.BossItems,
+                InactiveSeasonalItems = db.InactiveSeasonalItems,
+                TestSeed = db.TestSeed,
+                ContainerSettings = containerSettings,
+                PresetsByTpl = presetsByTpl,
+                LinkedItems = linkedItems,
+            }
+        );
+
+        PayloadProjection.ReplayDiagnostics(result.Diagnostics, logger, serverLocalisationService);
+
+        return result.Items;
+    }
+
+    private List<List<Item>> GetSealedWeaponCaseLootLegacy(SealedAirdropContainerSettings containerSettings)
+    {
         List<List<Item>> itemsToReturn = [];
 
         // Choose a weapon to give to the player (weighted)
@@ -658,6 +911,43 @@ public class LootGenerator(
     /// <param name="rewardContainerDetails"></param>
     /// <returns>List of item with children lists</returns>
     public List<List<Item>> GetRandomLootContainerLoot(RewardDetails rewardContainerDetails)
+    {
+        if (UseLegacyPath())
+        {
+            LastPathTaken = LootGenerationPath.Legacy;
+            return GetRandomLootContainerLootLegacy(rewardContainerDetails);
+        }
+
+        LastPathTaken = LootGenerationPath.Native;
+
+        // The preset list is not read by this export, so it is not built
+        var db = BuildRewardLootDb([], ToPresetViews(presetHelper.GetDefaultPresetByTpl()));
+
+        var result = SptNative.GetRandomLootContainerLoot(
+            new RandomLootContainerRequest
+            {
+                ItemsView = db.ItemsView,
+                DefaultPresets = db.DefaultPresets,
+                DefaultPresetsByTpl = db.DefaultPresetsByTpl,
+                GlobalBlacklist = db.GlobalBlacklist,
+                RewardItemBlacklist = db.RewardItemBlacklist,
+                RewardBaseTypeBlacklist = db.RewardBaseTypeBlacklist,
+                BossItems = db.BossItems,
+                InactiveSeasonalItems = db.InactiveSeasonalItems,
+                TestSeed = db.TestSeed,
+                RewardDetails = rewardContainerDetails,
+                // Every tpl PresetHelper.HasPreset answers true for, which the native side probes per
+                // chosen reward
+                PresetTpls = [.. presetHelper.GetTplsWithPresets()],
+            }
+        );
+
+        PayloadProjection.ReplayDiagnostics(result.Diagnostics, logger, serverLocalisationService);
+
+        return result.Items;
+    }
+
+    private List<List<Item>> GetRandomLootContainerLootLegacy(RewardDetails rewardContainerDetails)
     {
         List<List<Item>> itemsToReturn = [];
 
