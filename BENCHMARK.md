@@ -203,9 +203,15 @@ the two the server actually makes. *Full pass*: no expired offers, so the assort
 every sellable template gets its offers — ~24k offers with full item trees. *Regeneration pass*:
 1,400 cloned single-item lists (the configured `expiredOfferThreshold`), the shape
 `RagfairServer.ProcessExpiredFleaOffers` hands over. `RagfairPayloadProjection.BuildRequest` is
-timed on its own in a third phase per scenario. The holder is emptied of everything a run added
-between runs, outside the stopwatch — the per-template cap would otherwise make later runs measure
-rejection rather than generation.
+timed on its own in a third phase per scenario.
+
+**The flea is already full when the timing starts.** The test harness runs every `IOnLoad`, so
+`RagfairCallbacks.OnLoadAsync` → `RagfairServer.Load()` has already generated a complete set of
+dynamic offers into the holder before the fixture takes its baseline snapshot. The fixture removes
+everything each run adds, outside the stopwatch, but deliberately preserves that pre-existing set —
+so every timed run is a pass over an *already-populated* flea, on both paths. That is the state the
+`ProcessExpiredFleaOffers` call runs in for real, and it is symmetric across paths, so the verdict
+below is unaffected; it does change what the offer column means (see below).
 
 ### Wall clock
 
@@ -222,9 +228,14 @@ Speedup on median wall clock: **0.29x** on the full pass (**3.4x slower**) and *
 regeneration pass (**8.8x slower**). Projection share of the native median: **1.0%** (full pass),
 **13.8%** (regeneration).
 
-Offer counts are what the holder *accepted*: its per-template cap drops the rest (the 1,400 expired
-inputs land as ~880 offers on both paths). The two paths land within 0.5% of each other on the full
-pass, so both are doing the same amount of work.
+The offer column is **offers accepted into an already-full flea**, not offers the path produced.
+`RagfairOfferHolder.AddOffer` drops a fake-player offer once that template is at its cap, and the
+cap is re-rolled per call (`RagfairServerHelper.GetOfferCountByBaseType` is a `RandomUtil.GetInt`
+over the configured range), so a full flea still admits whatever a high roll leaves room for. That
+is why 1,400 distinct expired templates land as ~880 offers — the pre-filled holder, not anything
+about the run's own interleaving. Against an empty holder the same input would land as ~1,400. The
+two paths land within 0.5% of each other on the full pass, so both are doing the same amount of
+work.
 
 Working set over the timed phase: native grows +265 MB on the full pass against the legacy path's
 +0 MB; peak RSS is process-wide and cumulative, so only the growth figures are comparable, and only
@@ -234,17 +245,32 @@ within one invocation.
 The shape differs from bot generation: there the fixed payload was the whole story, here it is not.
 `BuildRequest` is 15 ms of a 1,485 ms native pass — **1%** — so the sanctioned lever, the shared
 items-view cache ([RUST-ROADMAP.md](RUST-ROADMAP.md) roadmap #3), cannot buy back a loss of this
-size. The ~1.47 s that is not projection is serialising the request, the FFI crossing, and
-deserialising a response of ~24k offers with full item trees back into managed objects — the
-response volume spec §7 flagged as the unknown.
+size.
+
+The remaining ~1.47 s splits in two, and the fixture's own log says how. The native side replays its
+internal timings through the same logger the legacy path uses, and they read `Took 709-722ms to
+CreateOffersFromAssort` on every full-pass run: **~713 ms — 48% of the native median — is the Rust
+generation itself**, running single-threaded. The legacy path's own diagnostic for the same work is
+375-469 ms (median ~405 ms of its 437 ms total), spread across 12 threads. The other **~772 ms** of
+the native pass is the wrapper: serialising the request, the FFI crossing, deserialising a response
+of ~24k offers with full item trees, and inserting them into the holder — the response volume
+spec §7 flagged as the unknown. So neither half alone explains the loss: a free projection saves 1%,
+a perfect wrapper still leaves single-threaded Rust generation at ~1.75x the parallel C#, and a
+parallelised Rust batch still pays ~772 ms of wrapper. On the regeneration pass the internal figure
+is 16 ms of a 94.7 ms median — there the wrapper is nearly the whole cost.
 
 Ragfair-specific caveats, on top of the general ones below:
 
 - **The legacy path is parallel, the native path is not.** `GenerateDynamicOffersLegacy` fans one
-  `Task.Factory.StartNew` per assort entry across the thread pool — on this 12-thread machine that
-  is most of its advantage. The native side has no rayon and runs the batch on the calling thread.
-  A single-threaded legacy comparison is not measured; against one, native would look better, but
-  the parallel version is what the server actually runs.
+  `Task.Factory.StartNew` per assort entry across the thread pool; on this 12-thread machine it does
+  its 405 ms of generation in 437 ms of wall clock. The native side has no rayon and runs the batch
+  on the calling thread, so its 713 ms of generation is 713 ms of wall clock. A single-threaded
+  legacy comparison is not measured; against one, native would look better, but the parallel version
+  is what the server actually runs.
+- **Every timed run works on a pre-filled flea** (see Workload). Both paths pay the holder's
+  per-template cap checks against a full `_fakePlayerOffers` index, so the absolute numbers include
+  work an empty-flea pass would not do — but symmetrically, and this is the state the real
+  regeneration pass runs in.
 - **n=5 after 1 warmup**, not the 20 the other fixtures use — a full pass is seconds, not
   milliseconds. Spread is narrow (native full pass 1386-1506 ms), so the medians are still usable.
 - **Regeneration input is fixed.** The same 1,400 single-item lists every run, sampled from the head

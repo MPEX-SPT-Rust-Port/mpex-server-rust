@@ -56,8 +56,9 @@ public class RagfairBenchmarkTests
     /// <summary>
     /// The regeneration workload: one cloned single-item list per expired offer, at the configured
     /// <c>expiredOfferThreshold</c> - the shape <c>RagfairServer.cs:69</c> hands over. Neither path
-    /// mutates it (the legacy one clones per offer at <c>CreateOffersFromAssort:491</c>), so it is
-    /// built once and reused across runs.
+    /// mutates it: the only in-place edit legacy makes to the list it is handed is
+    /// <c>RemoveBannedPlatesFromPreset</c>, and its <c>!isExpiredOffer</c> guard means an expired
+    /// pass never reaches it. So the list is built once and reused across runs.
     /// </summary>
     private List<List<Item>> _expiredOffers = default!;
 
