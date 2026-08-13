@@ -61,7 +61,7 @@ use crate::bot::models::{
 use crate::loot::container_extensions::{container_is_full, find_slot_for_item};
 use crate::loot::item_helper::{LootError, get_item};
 use crate::loot::models::{
-    Diagnostic, Item, ItemLocation, ItemRotation, ItemView, Upd, UpdFoldable, UpdFoodDrink,
+    Diagnostic, ERROR, Item, ItemLocation, ItemRotation, ItemView, Upd, UpdFoldable, UpdFoodDrink,
     UpdLight, UpdMedKit, UpdRepairable, UpdTogglable, WARNING,
 };
 use crate::loot::random_util::{get_chance_100, get_double, get_percent_of_value, round_to_digits};
@@ -980,21 +980,32 @@ fn get_item_size(
 ) -> (i32, i32) {
     // Invalid item
     let Some(item_template) = get_item(items_view, item_tpl) else {
-        diagnostics.push(Diagnostic {
-            level: WARNING.to_owned(),
-            locale_key: Some("inventory-invalid_item_missing_from_db".to_owned()),
-            args: Some(serde_json::Value::String(item_tpl.to_owned())),
-            message: None,
-        });
+        // Two separate `logger.Error` calls in C# (`:625` and `:639`), both keyed on the tpl.
+        for locale_key in [
+            "inventory-invalid_item_missing_from_db",
+            "inventory-return_default_size",
+        ] {
+            diagnostics.push(Diagnostic {
+                level: ERROR.to_owned(),
+                locale_key: Some(locale_key.to_owned()),
+                args: Some(serde_json::Value::String(item_tpl.to_owned())),
+                message: None,
+            });
+        }
 
         // return default size of 1x1
         return (1, 1);
     };
 
     let Some(root_item) = items.iter().find(|item| item.id == item_id) else {
-        diagnostics.push(debug_diagnostic(format!(
-            "Unable to get root item with Id: {item_id} from player inventory. Defaulting to 1x1"
-        )));
+        diagnostics.push(Diagnostic {
+            level: ERROR.to_owned(),
+            locale_key: None,
+            args: None,
+            message: Some(format!(
+                "Unable to get root item with Id: {item_id} from player inventory. Defaulting to 1x1"
+            )),
+        });
 
         return (1, 1);
     };
@@ -1043,7 +1054,7 @@ fn get_item_size(
 
                 let Some(template) = get_item(items_view, &child_item.template) else {
                     diagnostics.push(Diagnostic {
-                        level: WARNING.to_owned(),
+                        level: ERROR.to_owned(),
                         locale_key: Some(
                             "inventory-get_item_size_item_not_found_by_tpl".to_owned(),
                         ),
@@ -1211,11 +1222,8 @@ mod tests {
         }
     }
 
-    fn template(fixture: &Fixture, tpl: &str) -> &'static ItemView {
-        // The fixture outlives every test body; leaking the borrow keeps the call sites readable.
-        let view: &ItemView = &fixture.items[tpl];
-
-        unsafe { &*std::ptr::from_ref(view) }
+    fn template<'a>(fixture: &'a Fixture, tpl: &str) -> &'a ItemView {
+        &fixture.items[tpl]
     }
 
     fn upd(result: Result<Option<Upd>, LootError>) -> serde_json::Value {
@@ -1792,12 +1800,7 @@ mod tests {
 
     /// A bot inventory holding one container per requested `(slot, tpl)`, plus the grids that
     /// track them.
-    fn containers(
-        fixture: &Fixture,
-        ctx: &BotContext,
-        slots: &[(&str, &str)],
-    ) -> (ContainerGrids, Vec<Item>) {
-        let _ = fixture;
+    fn containers(ctx: &BotContext, slots: &[(&str, &str)]) -> (ContainerGrids, Vec<Item>) {
         let mut grids = ContainerGrids::default();
         let mut inventory = Vec::new();
 
@@ -1848,7 +1851,7 @@ mod tests {
     fn a_one_by_one_then_a_two_by_one_pack_row_major_with_rotation() {
         let fixture = Fixture::new();
         let mut ctx = fixture.ctx(false);
-        let (mut grids, mut inventory) = containers(&fixture, &ctx, &[("TacticalVest", "cont2x2")]);
+        let (mut grids, mut inventory) = containers(&ctx, &[("TacticalVest", "cont2x2")]);
         let slots = vec!["TacticalVest".to_owned()];
 
         let (result, placed) = add(&mut grids, &mut ctx, &slots, "i1", "i1x1", &mut inventory);
@@ -1885,7 +1888,7 @@ mod tests {
     fn a_full_container_reports_no_space_and_latches_the_grid_full_flag() {
         let fixture = Fixture::new();
         let mut ctx = fixture.ctx(false);
-        let (mut grids, mut inventory) = containers(&fixture, &ctx, &[("TacticalVest", "cont1x1")]);
+        let (mut grids, mut inventory) = containers(&ctx, &[("TacticalVest", "cont1x1")]);
         let slots = vec!["TacticalVest".to_owned()];
 
         assert_eq!(
@@ -1911,7 +1914,6 @@ mod tests {
         ] {
             let mut ctx = fixture.ctx(false);
             let (mut grids, mut inventory) = containers(
-                &fixture,
                 &ctx,
                 &[("TacticalVest", "cont2x2"), ("Backpack", "cont2x2")],
             );
@@ -1928,7 +1930,7 @@ mod tests {
     fn a_missing_container_for_every_slot_is_no_containers() {
         let fixture = Fixture::new();
         let mut ctx = fixture.ctx(false);
-        let (mut grids, mut inventory) = containers(&fixture, &ctx, &[]);
+        let (mut grids, mut inventory) = containers(&ctx, &[]);
         let slots = vec!["TacticalVest".to_owned(), "Backpack".to_owned()];
 
         assert_eq!(
@@ -1949,8 +1951,7 @@ mod tests {
     fn a_grid_filter_that_excludes_the_items_parent_rejects_it() {
         let fixture = Fixture::new();
         let mut ctx = fixture.ctx(false);
-        let (mut grids, mut inventory) =
-            containers(&fixture, &ctx, &[("TacticalVest", "contfiltered")]);
+        let (mut grids, mut inventory) = containers(&ctx, &[("TacticalVest", "contfiltered")]);
         let slots = vec!["TacticalVest".to_owned()];
 
         // `i1x1`'s parent is in the grid's Filter, `i2x1`'s is not.
@@ -1966,10 +1967,60 @@ mod tests {
     }
 
     #[test]
+    fn an_unresolvable_item_size_falls_back_to_one_by_one_and_logs_the_c_sharp_errors() {
+        let fixture = Fixture::new();
+        let mut ctx = fixture.ctx(false);
+        let (mut grids, mut inventory) = containers(&ctx, &[("TacticalVest", "cont2x2")]);
+        let slots = vec!["TacticalVest".to_owned()];
+
+        // Tpl missing from the view: `GetSizeByInventoryItemHash` logs `:625` *and* `:639`, both
+        // at Error, then returns 1x1 - so the item still lands, in one cell.
+        let (result, placed) = add(&mut grids, &mut ctx, &slots, "i1", "ghost", &mut inventory);
+
+        assert_eq!(result, ItemAddedResult::Success);
+        assert_eq!(
+            placed.location,
+            Some(json!({"x": 0, "y": 0, "r": "Horizontal"}))
+        );
+        assert_eq!(
+            ctx.diagnostics
+                .iter()
+                .map(|diagnostic| (diagnostic.level.as_str(), diagnostic.locale_key.as_deref()))
+                .collect::<Vec<_>>(),
+            vec![
+                (ERROR, Some("inventory-invalid_item_missing_from_db")),
+                (ERROR, Some("inventory-return_default_size")),
+            ]
+        );
+
+        // Root id absent from the item list is the other 1x1 fallback (`:644`), a plain message.
+        ctx.diagnostics.clear();
+        let mut orphan = vec![inventory_item("i2", "i2x1", None)];
+        grids.add_item_with_children_to_equipment_slot(
+            &mut ctx,
+            &slots,
+            "not-in-the-list",
+            "i2x1",
+            &mut orphan,
+            &mut inventory,
+        );
+
+        assert_eq!(ctx.diagnostics.len(), 1);
+        assert_eq!(ctx.diagnostics[0].level, ERROR);
+        assert!(
+            ctx.diagnostics[0]
+                .message
+                .as_deref()
+                .unwrap()
+                .starts_with("Unable to get root item with Id: not-in-the-list")
+        );
+    }
+
+    #[test]
     fn container_grids_serialize_to_the_wire_shape_task_14_rebuilds_from() {
         let fixture = Fixture::new();
         let mut ctx = fixture.ctx(false);
-        let (mut grids, mut inventory) = containers(&fixture, &ctx, &[("TacticalVest", "cont1x1")]);
+        let (mut grids, mut inventory) = containers(&ctx, &[("TacticalVest", "cont1x1")]);
         let slots = vec!["TacticalVest".to_owned()];
         add(&mut grids, &mut ctx, &slots, "i1", "i1x1", &mut inventory);
 
