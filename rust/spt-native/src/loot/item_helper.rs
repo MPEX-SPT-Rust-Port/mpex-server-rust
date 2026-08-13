@@ -291,6 +291,107 @@ pub fn to_loot_item(item: &Item) -> SptLootItem {
     }
 }
 
+/// `ItemHelper.SplitStack` (`ItemHelper.cs:753-784`) — chops `Upd.StackObjectsCount` into
+/// `StackMaxSize`-sized stacks, each one a clone of the input carrying a fresh [`mongo_id`]. A count
+/// that already fits comes back as a single clone under the *original* id.
+///
+/// C# hands back the very item it was given when the count is null and a clone in every other case;
+/// here every element is an owned clone, so a caller mutating the result never reaches the input.
+///
+/// The `Upd.StackObjectsCount` setter's `MidpointRounding.AwayFromZero` is not replicated (see
+/// `models::Upd`): every count that reaches this function has already been through that setter, so
+/// the chunks are integral and the rounding is a no-op.
+///
+/// **`Err` is the C# hang path.** With a null or non-positive `StackMaxSize` — a tpl missing from the
+/// view, or a template without the property — `remainingCount <= maxStackSize` is false and
+/// `ItemHelper.cs:773` then subtracts `Math.Min(remaining, maxStackSize ?? 0)`, zero or negative,
+/// from `remainingCount` on every pass: the loop never ends and clones pile up until the process
+/// dies. A non-finite count loops forever the same way.
+pub fn split_stack(
+    items_view: &HashMap<String, ItemView>,
+    item_to_split: &Item,
+) -> Result<Vec<Item>, LootError> {
+    // No count to split by — the template is never consulted.
+    let Some(remaining_count) = item_to_split
+        .upd
+        .as_ref()
+        .and_then(|upd| upd.stack_objects_count)
+    else {
+        return Ok(vec![item_to_split.clone()]);
+    };
+
+    let max_stack_size =
+        get_item(items_view, &item_to_split.template).and_then(|template| template.stack_max_size);
+
+    // If the current count is already equal or less than the max return the item as is. A lifted
+    // comparison in C#, so a null max answers false rather than true.
+    if max_stack_size.is_some_and(|max_stack_size| remaining_count <= f64::from(max_stack_size)) {
+        return Ok(vec![item_to_split.clone()]);
+    }
+
+    // `while (remainingCount > 0)` never runs, so C# returns the list it built: empty. A NaN count
+    // fails that comparison too, in C# as here.
+    if remaining_count <= 0.0 || remaining_count.is_nan() {
+        return Ok(Vec::new());
+    }
+
+    let Some(max_stack_size) = max_stack_size.filter(|max_stack_size| *max_stack_size > 0) else {
+        return Err(LootError::new(format!(
+            "StackMaxSize is null or not positive when trying to split stack of item: {}",
+            item_to_split.template
+        )));
+    };
+
+    if !remaining_count.is_finite() {
+        return Err(LootError::new(format!(
+            "StackObjectsCount is not finite when trying to split stack of item: {}",
+            item_to_split.template
+        )));
+    }
+
+    let mut remaining_count = remaining_count;
+    let mut root_and_children = Vec::new();
+
+    while remaining_count > 0.0 {
+        let amount = remaining_count.min(f64::from(max_stack_size));
+        let mut new_stack_clone = item_to_split.clone();
+
+        new_stack_clone.id = mongo_id::generate();
+        // Upd is present — the count came out of it.
+        if let Some(upd) = new_stack_clone.upd.as_mut() {
+            upd.stack_objects_count = Some(amount);
+        }
+
+        remaining_count -= amount;
+        root_and_children.push(new_stack_clone);
+    }
+
+    Ok(root_and_children)
+}
+
+/// `ItemHelper.SetFoundInRaid(IEnumerable<Item>)` (`ItemHelper.cs:1033-1050`) — flags every item as
+/// found in raid, except money and ammo, which have any existing flag *cleared* instead (and never
+/// gain an `Upd` they did not already have).
+///
+/// C# assigns `null` to `Upd.SpawnedInSession` and `WhenWritingNull` drops it on the way out, so
+/// removing the key is what reproduces the C# JSON.
+pub fn set_found_in_raid(items_view: &HashMap<String, ItemView>, items: &mut [Item]) {
+    for item in items.iter_mut() {
+        if is_of_baseclasses(items_view, &item.template, &[MONEY, AMMO]) {
+            if let Some(upd) = item.upd.as_mut() {
+                upd.extra.remove("SpawnedInSession");
+            }
+
+            continue;
+        }
+
+        item.upd
+            .get_or_insert_default()
+            .extra
+            .insert("SpawnedInSession".to_owned(), serde_json::Value::Bool(true));
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Cartridge / magazine / child-slot assembly
 // ---------------------------------------------------------------------------
@@ -836,6 +937,9 @@ mod tests {
     const MOD_FORCED_B_TPL: &str = "666666666666666666666666";
     const CONTAINER_TPL: &str = "777777777777777777777777";
     const ORPHAN_TPL: &str = "888888888888888888888888";
+    /// Stackable, and money — so it splits, and `set_found_in_raid` clears its flag.
+    const MONEY_ROUBLES_TPL: &str = "f0f0f0f0f0f0f0f0f0f0f0f0";
+    const AMMO_545_TPL: &str = "f1f1f1f1f1f1f1f1f1f1f1f1";
 
     /// Every view is built through serde so the tests exercise the same wire shape the C# caller
     /// sends, rather than a hand-rolled struct literal.
@@ -866,6 +970,10 @@ mod tests {
                 "extraSizeLeft": 2, "extraSizeRight": 0, "extraSizeForceAdd": true
             },
             CONTAINER_TPL: { "parent": ITEM_NODE, "gridCellsH": 5, "gridCellsV": 3 },
+            MONEY: { "parent": ITEM_NODE },
+            AMMO: { "parent": ITEM_NODE },
+            MONEY_ROUBLES_TPL: { "parent": MONEY, "stackMaxSize": 100 },
+            AMMO_545_TPL: { "parent": AMMO, "stackMaxSize": 60 },
             // Parent points at a tpl that is not in the view at all.
             ORPHAN_TPL: { "parent": "999999999999999999999999" },
         }))
@@ -1146,6 +1254,158 @@ mod tests {
         assert_eq!(out["upd"]["StackObjectsCount"], 2.0);
         assert_eq!(out["modAddedField"], "kept");
         assert!(out.as_object().unwrap().get("composedKey").is_none());
+    }
+
+    /// A stack of `count` roubles, id `s`.
+    fn stack(template: &str, count: f64) -> Item {
+        Item {
+            id: "s".to_owned(),
+            template: template.to_owned(),
+            upd: Some(Upd {
+                stack_objects_count: Some(count),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn counts(items: &[Item]) -> Vec<Option<f64>> {
+        items
+            .iter()
+            .map(|item| item.upd.as_ref().and_then(|upd| upd.stack_objects_count))
+            .collect()
+    }
+
+    #[test]
+    fn split_stack_chunks_the_count_into_max_size_pieces() {
+        let result = split_stack(&fixture(), &stack(MONEY_ROUBLES_TPL, 250.0)).unwrap();
+
+        assert_eq!(counts(&result), vec![Some(100.0), Some(100.0), Some(50.0)]);
+        // Every chunk is a fresh MongoId, none of them the original's.
+        let new_ids: HashSet<&str> = ids(&result).into_iter().collect();
+        assert_eq!(new_ids.len(), 3);
+        assert!(!new_ids.contains("s"));
+        assert!(result.iter().all(|item| item.id.len() == 24));
+        assert!(result.iter().all(|item| item.template == MONEY_ROUBLES_TPL));
+    }
+
+    #[test]
+    fn split_stack_returns_the_item_unchanged_when_it_fits() {
+        let view = fixture();
+
+        for count in [1.0, 99.0, 100.0] {
+            let result = split_stack(&view, &stack(MONEY_ROUBLES_TPL, count)).unwrap();
+
+            assert_eq!(counts(&result), vec![Some(count)]);
+            assert_eq!(ids(&result), vec!["s"]);
+        }
+    }
+
+    /// `ItemHelper.cs:755` returns the item as-is when there is no count to split by, without
+    /// consulting the template at all.
+    #[test]
+    fn split_stack_returns_the_item_when_the_count_is_absent() {
+        let view = fixture();
+
+        let no_upd = item("s", ORPHAN_TPL, None);
+        assert_eq!(ids(&split_stack(&view, &no_upd).unwrap()), vec!["s"]);
+
+        let mut no_count = no_upd.clone();
+        no_count.upd = Some(Upd::default());
+        assert_eq!(ids(&split_stack(&view, &no_count).unwrap()), vec!["s"]);
+    }
+
+    /// The C# hang path: a null (or non-positive) `StackMaxSize` makes `ItemHelper.cs:773` subtract
+    /// nothing from `remainingCount` on every pass.
+    #[test]
+    fn split_stack_errors_when_the_max_size_cannot_end_the_loop() {
+        let view = fixture();
+
+        // Template absent from the view entirely.
+        assert!(split_stack(&view, &stack("999999999999999999999999", 5.0)).is_err());
+        // Template present, no StackMaxSize.
+        assert!(split_stack(&view, &stack(HELMET_TPL, 5.0)).is_err());
+        // Would never terminate either, for all that JSON cannot carry it.
+        assert!(split_stack(&view, &stack(MONEY_ROUBLES_TPL, f64::INFINITY)).is_err());
+    }
+
+    /// `remainingCount <= maxStackSize` is false against a null max, and `while (remainingCount > 0)`
+    /// is false for a count that is not positive, so C# returns the empty list it just built.
+    #[test]
+    fn split_stack_is_empty_for_a_non_positive_count_with_no_max_size() {
+        let view = fixture();
+
+        assert!(
+            split_stack(&view, &stack(HELMET_TPL, 0.0))
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            split_stack(&view, &stack(HELMET_TPL, -5.0))
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            split_stack(&view, &stack(HELMET_TPL, f64::NAN))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn set_found_in_raid_flags_every_item_in_the_tree() {
+        let view = fixture();
+        let mut items = vec![
+            item("r", HELMET_TPL, None),
+            item("a", MOD_PLAIN_A_TPL, Some("r")),
+            item("b", MOD_PLAIN_B_TPL, Some("r")),
+        ];
+        // An item that already has an Upd keeps the rest of it.
+        items[1].upd = Some(Upd {
+            stack_objects_count: Some(2.0),
+            ..Default::default()
+        });
+
+        set_found_in_raid(&view, &mut items);
+
+        for item in &items {
+            let upd = item.upd.as_ref().expect("Upd is created when missing");
+            assert_eq!(upd.extra["SpawnedInSession"], json!(true));
+        }
+        assert_eq!(counts(&items[1..2]), vec![Some(2.0)]);
+    }
+
+    /// `ItemHelper.cs:1037-1045`: money and ammo have the flag cleared, never set, and a missing
+    /// `Upd` is left missing.
+    #[test]
+    fn set_found_in_raid_clears_the_flag_on_money_and_ammo() {
+        let view = fixture();
+        let mut items = vec![
+            stack(MONEY_ROUBLES_TPL, 1.0),
+            item("a", AMMO_545_TPL, None),
+            item("b", AMMO_545_TPL, None),
+        ];
+        items[0]
+            .upd
+            .as_mut()
+            .unwrap()
+            .extra
+            .insert("SpawnedInSession".to_owned(), json!(true));
+        items[2].upd = Some(Upd::default());
+
+        set_found_in_raid(&view, &mut items);
+
+        // C# assigns null, and WhenWritingNull drops it — so the key is gone on the wire.
+        let money = serde_json::to_value(&items[0]).unwrap();
+        assert!(
+            money["upd"]
+                .as_object()
+                .unwrap()
+                .get("SpawnedInSession")
+                .is_none()
+        );
+        assert!(items[1].upd.is_none());
+        assert!(items[2].upd.as_ref().unwrap().extra.is_empty());
     }
 
     // -----------------------------------------------------------------------
