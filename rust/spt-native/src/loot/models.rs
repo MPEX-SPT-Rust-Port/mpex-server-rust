@@ -117,8 +117,9 @@ pub struct Upd {
 /// none of which appear in the database.
 ///
 /// Not mirrored: C#'s `Upd.StackObjectsCount` setter rounds with
-/// `Math.Round(value, 0, MidpointRounding.AwayFromZero)`. Unobservable — no production Rust code
-/// reads this value, and every value re-enters C# through that same setter.
+/// `Math.Round(value, 0, MidpointRounding.AwayFromZero)`. Unobservable — `item_helper::split_stack`
+/// is the only reader and every count that reaches it has already been through that setter, so the
+/// values are integral, and everything written here re-enters C# through the same setter.
 fn deserialize_string_or_number<'de, D>(deserializer: D) -> Result<Option<f64>, D::Error>
 where
     D: serde::Deserializer<'de>,
