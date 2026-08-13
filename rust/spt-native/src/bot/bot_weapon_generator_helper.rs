@@ -247,6 +247,8 @@ mod tests {
                 durability: &self.durability,
                 equipment: &self.equipment,
                 loot_item_resource_randomization: &self.randomization,
+                item_blacklist: &crate::bot::NO_BLACKLIST,
+                default_presets_by_tpl: &crate::bot::NO_PRESETS,
                 is_night_time: false,
                 diagnostics: Vec::new(),
             }

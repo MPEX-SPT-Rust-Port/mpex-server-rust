@@ -620,6 +620,10 @@ pub struct SlotView {
     pub name: Option<String>,
     pub required: Option<bool>,
     pub filter: Option<Vec<String>>,
+    /// `Slot.Properties.Filters.First().Plate` (`TemplateItem.cs`), flattened alongside `filter` the
+    /// way the rest of this view flattens `_props` — `TemplateItemExtensions.GetDefaultPlateTpl`
+    /// reads it, and nothing else in the port does.
+    pub plate: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

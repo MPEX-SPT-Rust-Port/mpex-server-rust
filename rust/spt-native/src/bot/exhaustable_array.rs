@@ -1,14 +1,9 @@
 //! Draw-without-replacement over a pool, ported from `Utils/Collections/ExhaustableArray.cs`.
 //!
-//! Crate-internal, so nothing outside the tests below reaches it until the mod-generation tasks
-//! land — hence the blanket allow. Drop it once they do. Not an `expect`: the lint is per-target
-//! and the tests here already use every item, so an `expect` would go unfulfilled under `cfg(test)`
-//! and fail `clippy --all-targets`.
-#![allow(
-    dead_code,
-    reason = "consumed by the bot mod-generation tasks that follow"
-)]
-
+//! The equipment-mod path consumes the random draws, so the blanket module allow is gone; only
+//! [`ExhaustableArray::get_first_value`] is still waiting on the weapon-mod path. Not an `expect`:
+//! the lint is per-target and the tests below already call it, so an `expect` would go unfulfilled
+//! under `cfg(test)` and fail `clippy --all-targets`.
 use crate::loot::random_util::get_int;
 
 /// A pool each draw permanently removes from, mirroring `ExhaustableArray<T>`.
@@ -48,6 +43,7 @@ impl<T> ExhaustableArray<T> {
     }
 
     /// The head of the pool, removed from it; `None` once exhausted. Consumes no draw either way.
+    #[allow(dead_code, reason = "consumed by the weapon-mod path")]
     pub fn get_first_value(&mut self) -> Option<T> {
         if self.pool.is_empty() {
             return None;

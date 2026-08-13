@@ -1,3 +1,4 @@
+pub(crate) mod bot_equipment_mod_generator;
 pub(crate) mod bot_generator_helper;
 pub(crate) mod bot_weapon_generator_helper;
 pub(crate) mod durability_limits_helper;
@@ -10,7 +11,9 @@ use indexmap::IndexMap;
 
 use crate::bot::durability_limits_helper::BotDurability;
 use crate::bot::models::{EquipmentFilters, RandomisedResourceDetails};
-use crate::loot::models::{Diagnostic, ItemView};
+use crate::loot::models::{Diagnostic, ItemView, PresetView};
+
+use std::collections::HashSet;
 
 /// The read-only views one bot generation run consults, plus the diagnostics the C# caller replays
 /// through its logger — the bot family's analog of [`crate::loot::item_helper::LootContext`].
@@ -38,5 +41,19 @@ pub struct BotContext<'a> {
     /// `profileActivityService.GetFirstProfileActivityRaidData()?.RaidConfiguration`, whose absence
     /// (no raid) defaults to day — the caller folds that into this `false`.
     pub is_night_time: bool,
+    /// `ItemFilterService.GetBlacklistedItems()` — one half of the union
+    /// `BotEquipmentModGenerator.FilterModsByBlacklist` builds.
+    pub item_blacklist: &'a HashSet<String>,
+    /// `PresetHelper.GetDefaultPresetByTpl()`, keyed by the tpl the preset is the default for — the
+    /// projection `GetDefaultPresetArmorSlot` reads.
+    pub default_presets_by_tpl: &'a IndexMap<String, PresetView>,
     pub diagnostics: Vec<Diagnostic>,
 }
+
+/// Empty stand-ins for the two views a fixture that exercises neither still has to supply.
+#[cfg(test)]
+pub(crate) static NO_BLACKLIST: std::sync::LazyLock<HashSet<String>> =
+    std::sync::LazyLock::new(HashSet::new);
+#[cfg(test)]
+pub(crate) static NO_PRESETS: std::sync::LazyLock<IndexMap<String, PresetView>> =
+    std::sync::LazyLock::new(IndexMap::new);

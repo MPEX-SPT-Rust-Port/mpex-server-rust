@@ -9,9 +9,10 @@
 //! Blocks typed `serde_json::Value` here are deliberate: each grows a real type in the task that
 //! first reads it, the way the loot port grew its models.
 
-use indexmap::IndexMap;
+use indexmap::{IndexMap, IndexSet};
 use serde::{Deserialize, Serialize};
 
+use crate::bot::repair_service::MinMax;
 use crate::loot::models::{Diagnostic, ItemView};
 
 /// Mod-added fields captured on the way in and replayed on the way out.
@@ -114,6 +115,82 @@ pub struct EquipmentFilters {
     pub nvg_is_active_chance_day_percent: Option<f64>,
     #[serde(rename = "nvgIsActiveChanceNightPercent")]
     pub nvg_is_active_chance_night_percent: Option<f64>,
+
+    // -- Read by `bot::bot_equipment_mod_generator` (`BotConfig.cs:226-282`).
+    /// Skip the back plate slot when no front plate spawned.
+    #[serde(rename = "skipBackPlateIfFrontPlateMissing")]
+    pub skip_back_plate_if_front_plate_missing: Option<bool>,
+    /// Match the back plate's class to the front plate's instead of letting it roll higher.
+    #[serde(rename = "limitPlateClassToFrontPlateClass")]
+    pub limit_plate_class_to_front_plate_class: Option<bool>,
+    #[serde(rename = "filterPlatesByLevel")]
+    pub filter_plates_by_level: Option<bool>,
+    /// Extra slot ids treated as required when choosing a mod (`ShouldModBeSpawned`).
+    #[serde(rename = "weaponSlotIdsToMakeRequired")]
+    pub weapon_slot_ids_to_make_required: Option<IndexSet<String>>,
+    #[serde(rename = "armorPlateWeighting")]
+    pub armor_plate_weighting: Option<Vec<ArmorPlateWeights>>,
+}
+
+/// `Models/Spt/Config/BotConfig.cs:456-463`. `MinMax` is reused from
+/// [`crate::bot::repair_service`], which ported it first; both are the same `Models/Common/MinMax.cs`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ArmorPlateWeights {
+    #[serde(rename = "levelRange")]
+    pub level_range: MinMax<i32>,
+    /// Plate slot name (`front_plate`, …) → armor class as a string → weight. Ordered: the inner map
+    /// is what `get_weighted_value` scans.
+    #[serde(rename = "values")]
+    pub values: IndexMap<String, IndexMap<String, f64>>,
+}
+
+/// `Models/Spt/Config/BotConfig.cs:399-418`, narrowed to the one member the mod generators read.
+/// `LevelRange` is resolved by the C# caller (`GetBotEquipmentBlacklist`) before the call, and
+/// `Cartridge` grows a field in the task that first reads it.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct EquipmentFilterDetails {
+    /// Mod slot name → blacklisted tpls.
+    #[serde(rename = "equipment")]
+    pub equipment: Option<IndexMap<String, IndexSet<String>>>,
+}
+
+/// `Models/Spt/Bots/GenerateEquipmentProperties.cs`, narrowed to what the equipment-mod path reads.
+/// The remaining members (`BotId`, `RootEquipmentSlot`, `RootEquipmentPool`, `Inventory`,
+/// `RandomisationDetails`, `GenerateModsBlacklist`, `GeneratingPlayerLevel`) belong to the
+/// orchestrator, which is a later task; they land here when it reads them.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct GenerateEquipmentPropertiesWire {
+    /// `GlobalMods` — item tpl → mod slot name → compatible tpls, in
+    /// `mod_pool_service::get_mods_for_gear_slot` shape.
+    #[serde(rename = "modPool", default)]
+    pub mod_pool: IndexMap<String, IndexMap<String, IndexSet<String>>>,
+    #[serde(rename = "spawnChances", default)]
+    pub spawn_chances: ChancesWire,
+    #[serde(rename = "botData", default)]
+    pub bot_data: BotDataWire,
+    #[serde(rename = "botEquipmentConfig", default)]
+    pub bot_equipment_config: EquipmentFilters,
+}
+
+/// `Models/Eft/Common/Tables/BotType.cs:63-73`, narrowed to the one chance map the equipment path
+/// reads; `equipment` and `weaponMods` land here when their tasks read them.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ChancesWire {
+    #[serde(rename = "equipmentMods", default)]
+    pub equipment_mods: IndexMap<String, f64>,
+}
+
+/// `Models/Spt/Bots/GenerateWeaponRequest.cs:70-89`. Every member is nullable in C#; `role` is
+/// interpolated into log lines and passed to `GenerateExtraPropertiesForItem`, so an absent one is
+/// the empty string rather than a missing value.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct BotDataWire {
+    #[serde(rename = "role", default)]
+    pub role: String,
+    #[serde(rename = "level", default)]
+    pub level: i32,
+    #[serde(rename = "equipmentRole", default)]
+    pub equipment_role: String,
 }
 
 /// `Models/Spt/Bots/ChooseRandomCompatibleModResult.cs`. Every member is nullable there and the
