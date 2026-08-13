@@ -157,6 +157,16 @@ public class PresetHelper(GlobalTable globalTable, ItemHelper itemHelper, IClone
         return PresetCache.ContainsKey(templateId);
     }
 
+    /// <summary>
+    /// Every tpl <see cref="HasPreset"/> answers true for, so a caller that would otherwise probe it
+    /// per tpl can hand the whole set over the native boundary at once
+    /// </summary>
+    /// <returns>The preset cache's tpl keys</returns>
+    internal IReadOnlyCollection<MongoId> GetTplsWithPresets()
+    {
+        return PresetCache.Keys;
+    }
+
     public Preset? GetPreset(MongoId id)
     {
         return cloner.Clone(globalTable.ItemPresets[id]);

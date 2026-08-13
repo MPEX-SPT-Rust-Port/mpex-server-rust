@@ -43,6 +43,18 @@ internal static unsafe partial class NativeMethods
     [LibraryImport(LibraryName, EntryPoint = "spt_generate_dynamic_loot")]
     internal static partial int GenerateDynamicLoot(byte* requestUtf8, nuint requestLen, byte** outPtr, nuint* outLen);
 
+    [LibraryImport(LibraryName, EntryPoint = "spt_create_random_loot")]
+    internal static partial int CreateRandomLoot(byte* requestUtf8, nuint requestLen, byte** outPtr, nuint* outLen);
+
+    [LibraryImport(LibraryName, EntryPoint = "spt_create_forced_loot")]
+    internal static partial int CreateForcedLoot(byte* requestUtf8, nuint requestLen, byte** outPtr, nuint* outLen);
+
+    [LibraryImport(LibraryName, EntryPoint = "spt_get_sealed_weapon_case_loot")]
+    internal static partial int GetSealedWeaponCaseLoot(byte* requestUtf8, nuint requestLen, byte** outPtr, nuint* outLen);
+
+    [LibraryImport(LibraryName, EntryPoint = "spt_get_random_loot_container_loot")]
+    internal static partial int GetRandomLootContainerLoot(byte* requestUtf8, nuint requestLen, byte** outPtr, nuint* outLen);
+
     [LibraryImport(LibraryName, EntryPoint = "spt_buf_free")]
     internal static partial void BufFree(byte* ptr, nuint len);
 }

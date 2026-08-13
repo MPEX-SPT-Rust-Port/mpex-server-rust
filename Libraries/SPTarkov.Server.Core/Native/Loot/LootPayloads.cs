@@ -159,6 +159,28 @@ public record ItemView
 
     [JsonPropertyName("defAmmo")]
     public MongoId? DefAmmo { get; set; }
+
+    /// <summary>
+    /// <c>TemplateItem.Name</c> - the template's <c>_name</c>, not a localised one.
+    /// </summary>
+    [JsonPropertyName("name")]
+    public string? Name { get; set; }
+
+    /// <summary>
+    /// <c>TemplateItem.Type</c> - the template's <c>_type</c>.
+    /// </summary>
+    [JsonPropertyName("type")]
+    public string? Type { get; set; }
+
+    [JsonPropertyName("armorClass")]
+    public int? ArmorClass { get; set; }
+
+    /// <summary>
+    /// Null and <c>false</c> are not interchangeable: the reward pool filters on one and the sealed
+    /// container pool on the other.
+    /// </summary>
+    [JsonPropertyName("questItem")]
+    public bool? QuestItem { get; set; }
 }
 
 /// <summary>
@@ -183,6 +205,24 @@ public record PresetView
 {
     [JsonPropertyName("items")]
     public required List<Item> Items { get; set; }
+
+    /// <summary>
+    /// <c>Preset.Id</c>, read only for diagnostics.
+    /// </summary>
+    [JsonPropertyName("id")]
+    public MongoId? Id { get; set; }
+
+    /// <summary>
+    /// <c>Preset.Name</c>, read only for diagnostics.
+    /// </summary>
+    [JsonPropertyName("name")]
+    public string? Name { get; set; }
+
+    /// <summary>
+    /// <c>Preset.Encyclopedia</c> - the root tpl of a default preset.
+    /// </summary>
+    [JsonPropertyName("encyclopedia")]
+    public MongoId? Encyclopedia { get; set; }
 }
 
 /// <summary>

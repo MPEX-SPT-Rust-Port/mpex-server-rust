@@ -28,12 +28,16 @@ public sealed class VerifyResult
 }
 
 /// <summary>
-/// Picks which of the two loot exports a request goes to.
+/// Picks which of the loot exports a request goes to.
 /// </summary>
 internal enum LootExport
 {
     StaticContainers,
     DynamicLoot,
+    CreateRandomLoot,
+    CreateForcedLoot,
+    SealedWeaponCase,
+    RandomLootContainer,
 }
 
 public static class SptNative
@@ -85,7 +89,44 @@ public static class SptNative
     }
 
     /// <summary>
-    /// The shared body of the two generation wrappers, taking the request as the UTF-8 JSON the
+    /// Rolls a random assortment of rewards - weapon and armor presets, sealed crates and loose
+    /// items - within the counts the request asks for.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">Generation failed, or the native side misbehaved.</exception>
+    public static RewardLootResult CreateRandomLoot(CreateRandomLootRequest request)
+    {
+        return Generate<RewardLootResult>(LootExport.CreateRandomLoot, JsonSerializer.SerializeToUtf8Bytes(request, LootJsonOptions));
+    }
+
+    /// <summary>
+    /// Builds the rewards a forced loot list names, splitting any that exceed their stack size.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">Generation failed, or the native side misbehaved.</exception>
+    public static RewardLootResult CreateForcedLoot(CreateForcedLootRequest request)
+    {
+        return Generate<RewardLootResult>(LootExport.CreateForcedLoot, JsonSerializer.SerializeToUtf8Bytes(request, LootJsonOptions));
+    }
+
+    /// <summary>
+    /// Fills a sealed weapon case: one weapon preset plus its mod and non-mod reward types.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">Generation failed, or the native side misbehaved.</exception>
+    public static RewardLootResult GetSealedWeaponCaseLoot(SealedWeaponCaseRequest request)
+    {
+        return Generate<RewardLootResult>(LootExport.SealedWeaponCase, JsonSerializer.SerializeToUtf8Bytes(request, LootJsonOptions));
+    }
+
+    /// <summary>
+    /// Fills a random loot container from its reward pool.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">Generation failed, or the native side misbehaved.</exception>
+    public static RewardLootResult GetRandomLootContainerLoot(RandomLootContainerRequest request)
+    {
+        return Generate<RewardLootResult>(LootExport.RandomLootContainer, JsonSerializer.SerializeToUtf8Bytes(request, LootJsonOptions));
+    }
+
+    /// <summary>
+    /// The shared body of the generation wrappers, taking the request as the UTF-8 JSON the
     /// native side reads. Internal so tests can hand it JSON that no typed payload can express: a
     /// mod-added field, or a deliberately malformed request.
     /// </summary>
@@ -108,6 +149,20 @@ public static class SptNative
                     &outLen
                 ),
                 LootExport.DynamicLoot => NativeMethods.GenerateDynamicLoot(requestPtr, (nuint)requestUtf8.Length, &outPtr, &outLen),
+                LootExport.CreateRandomLoot => NativeMethods.CreateRandomLoot(requestPtr, (nuint)requestUtf8.Length, &outPtr, &outLen),
+                LootExport.CreateForcedLoot => NativeMethods.CreateForcedLoot(requestPtr, (nuint)requestUtf8.Length, &outPtr, &outLen),
+                LootExport.SealedWeaponCase => NativeMethods.GetSealedWeaponCaseLoot(
+                    requestPtr,
+                    (nuint)requestUtf8.Length,
+                    &outPtr,
+                    &outLen
+                ),
+                LootExport.RandomLootContainer => NativeMethods.GetRandomLootContainerLoot(
+                    requestPtr,
+                    (nuint)requestUtf8.Length,
+                    &outPtr,
+                    &outLen
+                ),
                 _ => throw new ArgumentOutOfRangeException(nameof(export), export, null),
             };
         }
