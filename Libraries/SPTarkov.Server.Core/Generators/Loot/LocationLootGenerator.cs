@@ -320,70 +320,10 @@ public class LocationLootGenerator(
         };
     }
 
-    /// <summary>
-    /// Every projection the native generator reads off a <c>TemplateItem</c>, in one pass over the
-    /// live items table. Templates without props are dropped - their absence is how the native side
-    /// says "lacks _props".
-    /// </summary>
+    /// <inheritdoc cref="PayloadProjection.BuildItemsView"/>
     private Dictionary<MongoId, ItemView> BuildItemsView()
     {
-        var itemsView = new Dictionary<MongoId, ItemView>(itemHelper.TemplateTable.Items.Count);
-
-        foreach (var (tpl, template) in itemHelper.TemplateTable.Items)
-        {
-            var props = template.Properties;
-            if (props is null)
-            {
-                continue;
-            }
-
-            var firstGrid = props.Grids?.FirstOrDefault();
-            var firstStackSlot = props.StackSlots?.FirstOrDefault();
-            var firstCartridgeSlot = props.Cartridges?.FirstOrDefault();
-            var firstChamber = props.Chambers?.FirstOrDefault();
-            var stackSlotFilter = firstStackSlot?.Properties?.Filters?.FirstOrDefault()?.Filter;
-
-            itemsView[tpl] = new ItemView
-            {
-                // Cast needed on both arms: MongoId's implicit string conversion otherwise turns the
-                // null arm into a default MongoId instead of leaving the member absent
-                Parent = template.Parent.IsEmpty ? null : (MongoId?)template.Parent,
-                Width = props.Width,
-                Height = props.Height,
-                StackMaxSize = props.StackMaxSize,
-                StackMinRandom = props.StackMinRandom,
-                StackMaxRandom = props.StackMaxRandom,
-                ExtraSizeUp = props.ExtraSizeUp,
-                ExtraSizeDown = props.ExtraSizeDown,
-                ExtraSizeLeft = props.ExtraSizeLeft,
-                ExtraSizeRight = props.ExtraSizeRight,
-                ExtraSizeForceAdd = props.ExtraSizeForceAdd,
-                GridCellsH = firstGrid?.Properties?.CellsH,
-                GridCellsV = firstGrid?.Properties?.CellsV,
-                StackSlotMaxCount = firstStackSlot?.MaxCount,
-                // Deliberate divergence: an empty filter set is sent as null rather than as the
-                // empty MongoId `Filter?.FirstOrDefault()` would have produced. Never fires on
-                // vanilla data - a stack slot with an empty filter has nothing to stack
-                StackSlotFirstFilterFirst = stackSlotFilter is { Count: > 0 } ? (MongoId?)stackSlotFilter.First() : null,
-                CartridgesMaxCount = firstCartridgeSlot?.MaxCount,
-                CartridgesFirstFilter = firstCartridgeSlot?.Properties?.Filters?.FirstOrDefault()?.Filter,
-                ChambersFirstFilter = firstChamber?.Properties?.Filters?.FirstOrDefault()?.Filter,
-                Slots = props
-                    .Slots?.Select(slot => new SlotView
-                    {
-                        Name = slot.Name,
-                        Required = slot.Required,
-                        Filter = slot.Properties?.Filters?.FirstOrDefault()?.Filter,
-                    })
-                    .ToList(),
-                ConflictingItems = props.ConflictingItems,
-                Caliber = props.Caliber,
-                AmmoCaliber = props.AmmoCaliber,
-                DefAmmo = props.DefAmmo,
-            };
-        }
-
-        return itemsView;
+        return PayloadProjection.BuildItemsView(itemHelper.TemplateTable.Items);
     }
 
     private LootConfigView BuildConfigView(string locationId)
@@ -420,70 +360,10 @@ public class LocationLootGenerator(
         return multipliers.TryGetValue(locationId, out var multiplier) ? multiplier : multipliers["default"];
     }
 
-    /// <summary>
-    /// Write out the log lines the native generator collected instead of logging itself, so the
-    /// server log reads as it did before the cutover
-    /// </summary>
+    /// <inheritdoc cref="PayloadProjection.ReplayDiagnostics{T}"/>
     private void ReplayDiagnostics(List<Diagnostic> diagnostics)
     {
-        foreach (var diagnostic in diagnostics)
-        {
-            if (diagnostic.Level == "debug" && !logger.IsLogEnabled(LogLevel.Debug))
-            {
-                continue;
-            }
-
-            var message = LocaliseDiagnostic(diagnostic);
-            switch (diagnostic.Level)
-            {
-                case "debug":
-                    logger.Debug(message);
-                    break;
-                case "warning":
-                    logger.Warning(message);
-                    break;
-                case "error":
-                    logger.Error(message);
-                    break;
-                case "success":
-                    logger.Success(message);
-                    break;
-                default:
-                    // Never drop a line a future native version tags with a level we don't know
-                    logger.Warning($"[{diagnostic.Level}] {message}");
-                    break;
-            }
-        }
-    }
-
-    private string LocaliseDiagnostic(Diagnostic diagnostic)
-    {
-        if (diagnostic.LocaleKey is null)
-        {
-            return diagnostic.Message ?? string.Empty;
-        }
-
-        if (diagnostic.Args is not { } args)
-        {
-            return serverLocalisationService.GetText(diagnostic.LocaleKey);
-        }
-
-        // A scalar argument is the `%s` overload
-        if (args.ValueKind != JsonValueKind.Object)
-        {
-            return serverLocalisationService.GetText(diagnostic.LocaleKey, args.ToString());
-        }
-
-        // Named arguments are substituted here rather than by ServerLocalisationService: it reads its
-        // args object's *properties* by reflection, which only works for the anonymous types the C#
-        // call sites passed - a dictionary would leave every `{{placeholder}}` in place
-        var text = serverLocalisationService.GetText(diagnostic.LocaleKey);
-        foreach (var argument in args.EnumerateObject())
-        {
-            text = text.Replace($"{{{{{argument.Name}}}}}", argument.Value.ToString());
-        }
-
-        return text;
+        PayloadProjection.ReplayDiagnostics(diagnostics, logger, serverLocalisationService);
     }
 
     private List<SpawnpointTemplate> GenerateStaticContainersLegacy(
