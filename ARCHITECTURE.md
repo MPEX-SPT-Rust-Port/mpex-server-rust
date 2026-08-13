@@ -181,7 +181,8 @@ Two non-obvious steps run during build, both in `SPTarkov.Server.Core.csproj`:
 `rust/` is a Cargo workspace with one crate, `spt-native`, built as a `cdylib`. It owns two jobs:
 hashing `SPT_Data` with XXH3-128 and comparing it against `checks.dat`, in parallel on a
 process-wide tokio runtime (`runtime.rs`), replacing the per-file MD5 loop that used to run inside
-the import; and generating a location's static and loose loot (`src/loot/`).
+the import; and generating both loot families in `src/loot/` — a location's static and loose loot, and
+reward loot (airdrop, sealed weapon cases, reward containers).
 
 Nine C-ABI exports (`src/ffi.rs`), consumed by `Libraries/SPTarkov.Server.Core/Native/`:
 
@@ -205,8 +206,8 @@ them.
 `unsafe` is confined to `ffi.rs` (raw pointer in/out) on the Rust side and, on the C# side, to the
 `[LibraryImport]` declarations in `NativeMethods.cs` plus the two `unsafe` methods in `SptNative.cs`
 that pin the input, pass the out-params, and read the returned buffer as a span; `verify.rs`,
-`loot/`, `runtime.rs` and the rest of `SptNative` are safe code. The three exports that run fallible
-work — verification and the two generators — wrap it in `catch_unwind` and map a panic to a status
+`loot/`, `runtime.rs` and the rest of `SptNative` are safe code. The seven exports that run fallible
+work — verification and the six generators — wrap it in `catch_unwind` and map a panic to a status
 code; the other two cannot panic, and `extern "C"` aborts rather than unwinding regardless, so a
 Rust panic can never unwind into the CLR.
 `DatabaseImporter.LoadDatabaseAsync` calls `SptNative.EnsureLoadable()` on every startup — including
@@ -362,7 +363,9 @@ location generator uses, and the items-view projection is shared between both ge
   12th-parameter overload adding `LocationConfig` is what the container selects (proven by the
   dispatch test, which resolves the class and asserts the flag is honoured). A mod that constructs
   the class manually through the 11-parameter constructor still gets Harmony hook detection, it just
-  has no config to read, so the flag check is skipped. Additive, so the apicompat gate is unaffected.
+  has no config to read, so the flag check is skipped. Additive-only, so it is expected to be
+  apicompat-neutral — but that gate has not been run for this port (the `mpex-api-compat` repo is
+  absent from the dev machine) and must be run before this merges to `main`.
 - **The blacklist crosses as two collections, not one.** `configBlacklist`
   (`ItemFilterService.GetBlacklistedItems()`) is what the reward-pool union reads; `globalBlacklist`
   (`GetItemBlacklistCache()`, the mod-extensible cache behind `IsItemBlacklisted`) is what the sealed
