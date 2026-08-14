@@ -56,6 +56,31 @@ pub struct RagfairContext<'a> {
     pub diagnostics: Vec<Diagnostic>,
 }
 
+impl<'a> RagfairContext<'a> {
+    /// A worker's view of the same pass: every shared reference copied, a fresh diagnostics
+    /// buffer of its own — what lets the batch walk fan out without sharing `&mut self`.
+    pub fn fork(&self) -> RagfairContext<'a> {
+        RagfairContext {
+            items: self.items,
+            dynamic: self.dynamic,
+            item_presets: self.item_presets,
+            default_presets: self.default_presets,
+            default_presets_by_tpl: self.default_presets_by_tpl,
+            presets_by_tpl: self.presets_by_tpl,
+            flea_prices: self.flea_prices,
+            handbook_prices: self.handbook_prices,
+            highest_trader_prices: self.highest_trader_prices,
+            config_blacklist: self.config_blacklist,
+            seasonal_item_tpl_blacklist: self.seasonal_item_tpl_blacklist,
+            pmc_names_usec: self.pmc_names_usec,
+            pmc_names_bear: self.pmc_names_bear,
+            timestamp: self.timestamp,
+            seasonal_event_active: self.seasonal_event_active,
+            diagnostics: Vec::new(),
+        }
+    }
+}
+
 /// Empty stand-ins for the views a fixture that exercises none of them still has to supply.
 #[cfg(test)]
 pub(crate) static NO_BLACKLIST: std::sync::LazyLock<HashSet<String>> =

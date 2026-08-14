@@ -770,6 +770,41 @@ mod tests {
         );
     }
 
+    /// Thirty expired single-item entries, unseeded — the parallel walk. One offer per expired
+    /// entry, `intId` sequential from `offerCounterStart`, offers in assort order: the merge
+    /// contract stage A must preserve.
+    #[test]
+    fn an_unseeded_expired_pass_keeps_assort_order_and_sequential_int_ids() {
+        let expired: Vec<String> = (0..30)
+            .map(|i| format!(r#"[{{"_id":"{i:024x}","_tpl":"{SELLABLE_TPL}"}}]"#))
+            .collect();
+        let request = ragfair_request_with(
+            &format!(
+                r#"{{"{SELLABLE_TPL}":{{"parent":"cccccccccccccccccccccccc","type":"Item",
+                "stackMaxSize":1,"canSellOnRagfair":true}}}}"#
+            ),
+            r#"{"default":{"min":2,"max":5}}"#,
+        )
+        // splice the expired entries and a non-zero counter start into the request JSON
+        .replacen(
+            r#"{"timestamp":"#,
+            &format!(r#"{{"expiredOffers":[{}],"timestamp":"#, expired.join(",")),
+            1,
+        )
+        .replacen(r#""offerCounterStart":0"#, r#""offerCounterStart":7"#, 1);
+
+        let (status, out) = call_generate(spt_generate_dynamic_offers, request.as_bytes());
+
+        assert_eq!(status, STATUS_OK);
+        let result: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        let offers = result["offers"].as_array().unwrap();
+        assert_eq!(offers.len(), 30);
+        for (i, offer) in offers.iter().enumerate() {
+            assert_eq!(offer["intId"], serde_json::json!(7 + i as i64));
+            assert_eq!(offer["root"], serde_json::json!(format!("{i:024x}")));
+        }
+    }
+
     #[test]
     fn null_generation_arguments_return_bad_args() {
         let status = unsafe {

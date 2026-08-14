@@ -58,6 +58,7 @@ use std::collections::HashSet;
 use std::time::Instant;
 
 use indexmap::IndexSet;
+use rayon::prelude::*;
 use serde_json::json;
 
 use super::{RagfairContext, plain};
@@ -472,16 +473,54 @@ pub fn generate_dynamic_offers(
     let stopwatch = Instant::now();
     let mut offers = Vec::new();
     let mut rejected = IndexSet::new();
-    let mut offer_counter = offer_counter_start;
-    for assort_item_with_children in &mut assort_items_to_process {
-        create_offers_from_assort(
-            &mut ctx,
-            assort_item_with_children,
-            replacing_expired_offers,
-            &mut offers,
-            &mut rejected,
-            &mut offer_counter,
-        )?;
+    if _seed_guard.is_some() {
+        // A seeded run stays sequential: the seeded RNG is thread-local, so fanning out would
+        // silently drop every worker onto entropy. Parity rides this path byte-for-byte.
+        let mut offer_counter = offer_counter_start;
+        for assort_item_with_children in &mut assort_items_to_process {
+            create_offers_from_assort(
+                &mut ctx,
+                assort_item_with_children,
+                replacing_expired_offers,
+                &mut offers,
+                &mut rejected,
+                &mut offer_counter,
+            )?;
+        }
+    } else {
+        // Unseeded: one worker context per assort entry, merged in assort order. `intId` is
+        // reassigned during the merge so the counter stays sequential regardless of which
+        // worker finished first — legacy's own per-entry Task fan-out makes no ordering
+        // promise, but the holder insert loop deserves a stable one.
+        let worker_results = assort_items_to_process
+            .par_iter_mut()
+            .map(|assort_item_with_children| {
+                let mut worker_ctx = ctx.fork();
+                let mut worker_offers = Vec::new();
+                let mut worker_rejected = IndexSet::new();
+                let mut worker_counter = 0;
+                create_offers_from_assort(
+                    &mut worker_ctx,
+                    assort_item_with_children,
+                    replacing_expired_offers,
+                    &mut worker_offers,
+                    &mut worker_rejected,
+                    &mut worker_counter,
+                )?;
+                Ok((worker_offers, worker_rejected, worker_ctx.diagnostics))
+            })
+            .collect::<Result<Vec<_>, LootError>>()?;
+
+        let mut offer_counter = offer_counter_start;
+        for (worker_offers, worker_rejected, worker_diagnostics) in worker_results {
+            for mut offer in worker_offers {
+                offer.internal_id = offer_counter;
+                offer_counter += 1;
+                offers.push(offer);
+            }
+            rejected.extend(worker_rejected);
+            ctx.diagnostics.extend(worker_diagnostics);
+        }
     }
     ctx.diagnostics.push(plain(
         "debug",
