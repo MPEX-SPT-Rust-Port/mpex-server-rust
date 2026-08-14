@@ -35,7 +35,7 @@ UTF-8 JSON request and hand back a heap buffer the caller releases with `spt_buf
 
 ```
 C# SptNative → spt_generate_* (JSON in)
-  → serde deserialize into a request envelope from loot/models.rs or bot/models.rs
+  → serde deserialize into a request envelope from loot/, bot/ or ragfair/models.rs
   → catch_unwind( generator )
   → serde serialize the result, or the LootError message, into an out-buffer
 ```
@@ -49,8 +49,8 @@ C# SptNative → spt_generate_* (JSON in)
   must not be copied into the generators.
 - `catch_unwind` on every fallible path: a Rust panic never unwinds into the CLR.
 - **Diagnostics do not survive a failure.** On the `LootError` path `run_generator` writes only
-  `error.message`; everything the run had accumulated in `LootContext`/`BotContext` is dropped, so a failed
-  call tells the C# caller nothing about what it logged on the way down.
+  `error.message`; everything the run had accumulated in `LootContext`/`BotContext`/`RagfairContext`
+  is dropped, so a failed call tells the C# caller nothing about what it logged on the way down.
 
 Adding an export means bumping `ABI_VERSION` and `SptNative.ExpectedAbiVersion` together; a test in `ffi.rs`
 asserts the constant so the bump can't be forgotten.
@@ -145,8 +145,9 @@ These are what keep the port correct; break one and output silently diverges fro
   is a bug.
 - **No logging, no throwing.** C# `ISptLogger` calls become `Diagnostic` values the caller replays through its
   own logger; C# exceptions (and unguarded null derefs) become `LootError`, returned rather than panicked.
-- **Wire models come in two families** (`loot/models.rs`, `bot/models.rs`). DB/EFT models mirror C# records
-  field-for-field, pinned to the exact `JsonPropertyName`, each with a `#[serde(flatten)] extra` map so
+- **Wire models come in three families** (`loot/models.rs`, `bot/models.rs`, `ragfair/models.rs`). DB/EFT
+  models mirror C# records field-for-field, pinned to the exact `JsonPropertyName`, each with a
+  `#[serde(flatten)] extra` map so
   mod-added fields survive the round trip — the counterpart to the `[JsonExtensionData]` that `Tools/Ceciler`
   injects. Request/response envelopes are a fresh contract and use plain camelCase with no passthrough map.
 - **One C# RNG lifetime can span two native calls.** Each generator entry point (not `ffi.rs`) opens the run
@@ -161,7 +162,7 @@ These are what keep the port correct; break one and output silently diverges fro
 
 ## Tests
 
-All tests are inline `#[cfg(test)]` modules (~400 of them); there is no `tests/` integration suite. Three kinds:
+All tests are inline `#[cfg(test)]` modules (~565 of them); there is no `tests/` integration suite. Three kinds:
 
 - **Parity fixtures** — replay a C# scenario and assert the exact item list.
 - **Seeded-RNG tests** — a `testSeed` field on every request envelope installs a `TestSeedGuard`, swapping

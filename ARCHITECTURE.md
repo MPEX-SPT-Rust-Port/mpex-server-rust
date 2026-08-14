@@ -215,10 +215,10 @@ Two sanctioned divergences this port added: the assort walk is **sequential** wh
 one task per entry, and the batch takes **one timestamp**, where legacy stamps each offer as it is
 built (so `startTime`/`endTime` fold to the batch clock plus the per-offer spread).
 
-Performance: native **loses** here — 1485 ms vs 436 ms on the full pass (3.4x slower) and 95 ms vs
+Performance: native **loses** here — 1485 ms vs 437 ms on the full pass (3.4x slower) and 95 ms vs
 11 ms on regeneration (8.8x), see [`BENCHMARK.md`](BENCHMARK.md). Roughly half is single-threaded
 Rust generation against legacy's 12-thread fan-out, half is wrapper and response serialisation of
-~24k offers; the shared items-view cache is only 1% here and is not the lever. Absolute cost is
+~24k offers; the shared items-view cache is only 1% of the full pass and is not the lever. Absolute cost is
 small (startup, then per-expiry bursts) and native stays the default for family consistency, with
 `ForceLegacyRagfairGeneration` as the one-line opt-out.
 
