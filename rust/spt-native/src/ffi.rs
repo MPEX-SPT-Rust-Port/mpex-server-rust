@@ -301,7 +301,7 @@ mod tests {
         assert_eq!(spt_native_abi_version(), crate::ABI_VERSION);
         assert_eq!(
             crate::ABI_VERSION,
-            7,
+            8,
             "bump SptNative.ExpectedAbiVersion too"
         );
     }

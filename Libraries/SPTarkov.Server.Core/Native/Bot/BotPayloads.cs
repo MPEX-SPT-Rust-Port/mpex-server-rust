@@ -260,12 +260,25 @@ internal record BotSlice
 }
 
 /// <summary>
-/// One result per requested bot, in request order.
+/// One envelope per requested bot, in request order.
 /// </summary>
 internal record BotInventoryBatchResult
 {
     [JsonPropertyName("bots")]
-    public required List<BotInventoryResult> Bots { get; set; }
+    public required List<BotResultEnvelope> Bots { get; set; }
+}
+
+/// <summary>
+/// Exactly one of <see cref="Result"/> or <see cref="Error"/> is set. A failed bot is skipped
+/// with a Critical log, the same choice <c>BotController.TryGenerateSingleBot</c> makes.
+/// </summary>
+internal record BotResultEnvelope
+{
+    [JsonPropertyName("result")]
+    public BotInventoryResult? Result { get; set; }
+
+    [JsonPropertyName("error")]
+    public string? Error { get; set; }
 }
 
 /// <summary>

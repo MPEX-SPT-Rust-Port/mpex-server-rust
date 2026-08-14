@@ -98,7 +98,7 @@ public class BotBatchTests
         for (var index = 0; index < botCount; index++)
         {
             Assert.That(
-                Serialize(batched.Bots[index].Inventory),
+                Serialize(batched.Bots[index].Result!.Inventory),
                 Is.EqualTo(Serialize(perBot[index].Inventory)),
                 $"bot {index} diverged between the batched and per-bot paths"
             );

@@ -692,11 +692,23 @@ pub struct GenerateBotInventoryBatchRequest {
     pub bots: Vec<BotSliceWire>,
 }
 
-/// One result per requested bot, in request order.
+/// One entry per requested bot, in request order: exactly one of `result` or `error` is set.
+/// A bot that fails no longer aborts the wave — `BotController.TryGenerateSingleBot` skips a
+/// failed bot with one Critical log, and the batch has to offer the caller the same choice.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BotResultEnvelope {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<BotInventoryResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// One envelope per requested bot, in request order.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BotInventoryBatchResult {
-    pub bots: Vec<BotInventoryResult>,
+    pub bots: Vec<BotResultEnvelope>,
 }
 
 /// `Models/Spt/Bots/BotGenerationDetails.cs`, narrowed to what the generator reads.

@@ -84,9 +84,10 @@ use crate::bot::bot_weapon_generator::{add_extra_magazines_to_inventory, generat
 use crate::bot::mod_pool_service::get_mods_for_gear_slot;
 use crate::bot::models::{
     BotBaseInventoryWire, BotGenerationDetailsWire, BotInventoryBatchResult, BotInventoryResult,
-    BotSliceWire, BotTemplateWire, BotTypeInventoryWire, ChancesWire, EquipmentFilterDetails,
-    GenerateBotInventoryBatchRequest, GenerateBotInventoryRequest, GenerateEquipmentPropertiesWire,
-    GenerationWire, PmcConfigWire, RandomisationDetails, SharedBotViewsWire,
+    BotResultEnvelope, BotSliceWire, BotTemplateWire, BotTypeInventoryWire, ChancesWire,
+    EquipmentFilterDetails, GenerateBotInventoryBatchRequest, GenerateBotInventoryRequest,
+    GenerateEquipmentPropertiesWire, GenerationWire, PmcConfigWire, RandomisationDetails,
+    SharedBotViewsWire,
 };
 use crate::loot::item_helper::{LootError, get_item};
 use crate::loot::models::{DEBUG, Diagnostic, ERROR, Item, ItemView, WARNING};
@@ -231,20 +232,27 @@ pub fn generate_inventory(
 /// does today - `BotController.GenerateBotWave` generates a wave under `.AsParallel()`, so no bot
 /// has ever been able to rely on seeing its predecessor's clamps.
 ///
-/// # Errors
-///
-/// The first bot that fails aborts the wave; see [`generate_inventory`].
+/// A bot that fails comes back as an error envelope; the rest of the wave still generates.
 pub fn generate_inventory_batch(
     request: GenerateBotInventoryBatchRequest,
 ) -> Result<BotInventoryBatchResult, LootError> {
     let GenerateBotInventoryBatchRequest { shared, bots } = request;
 
-    let mut results = Vec::with_capacity(bots.len());
-    for slice in bots {
-        results.push(generate_one(&shared, slice)?);
-    }
+    let bots = bots
+        .into_iter()
+        .map(|slice| match generate_one(&shared, slice) {
+            Ok(result) => BotResultEnvelope {
+                result: Some(result),
+                error: None,
+            },
+            Err(error) => BotResultEnvelope {
+                result: None,
+                error: Some(error.message),
+            },
+        })
+        .collect();
 
-    Ok(BotInventoryBatchResult { bots: results })
+    Ok(BotInventoryBatchResult { bots })
 }
 
 /// `BotInventoryGenerator.GenerateInventory` (`:80-120`) proper - one bot against views the caller
@@ -1431,6 +1439,52 @@ mod tests {
         let mut night = base_request();
         night["isNightTime"] = json!(true);
         assert_eq!(worn(&generate(night).unwrap()), baseline);
+    }
+
+    #[test]
+    fn batch_isolates_a_failing_bot() {
+        // The flat single-bot request is shared views + slice merged; split it back apart.
+        const SLICE_KEYS: [&str; 6] = [
+            "botId",
+            "testSeed",
+            "details",
+            "template",
+            "lootPools",
+            "handbookPrices",
+        ];
+        let mut shared = base_request();
+        let mut slice = serde_json::Map::new();
+        for key in SLICE_KEYS {
+            if let Some(value) = shared.as_object_mut().unwrap().remove(key) {
+                slice.insert(key.to_string(), value);
+            }
+        }
+        let good = serde_json::Value::Object(slice);
+
+        // Poison a role the good bot does not use: night + nighttimeChanges configured but no
+        // equipmentMods is the error return at the top of equipment generation.
+        shared["isNightTime"] = json!(true);
+        shared["equipment"]["poisoned"] = json!({
+            "randomisation": [{
+                "levelRange": {"min": 1, "max": 99},
+                "nighttimeChanges": {"equipmentModsModifiers": {"front_plate": 30}},
+            }],
+        });
+        let mut bad = good.clone();
+        bad["details"]["roleLowercase"] = json!("poisoned");
+
+        let request =
+            serde_json::from_value(json!({"shared": shared, "bots": [good, bad]})).unwrap();
+        let result = generate_inventory_batch(request).unwrap();
+
+        assert_eq!(result.bots.len(), 2);
+        assert!(result.bots[0].result.is_some());
+        assert!(result.bots[0].error.is_none());
+        assert!(result.bots[1].result.is_none());
+        assert_eq!(
+            result.bots[1].error.as_deref(),
+            Some("Object reference not set to an instance of an object.")
+        );
     }
 
     #[test]
