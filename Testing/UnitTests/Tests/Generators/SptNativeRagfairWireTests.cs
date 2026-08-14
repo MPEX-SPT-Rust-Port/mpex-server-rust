@@ -71,6 +71,8 @@ public class SptNativeRagfairWireTests
             Assert.That(_request.PresetsByTpl, Is.Not.Empty);
             Assert.That(_request.PmcNamesUsec, Is.Not.Empty);
             Assert.That(_request.PmcNamesBear, Is.Not.Empty);
+            Assert.That(_request.ConfigBlacklist, Is.Not.Empty);
+            Assert.That(_request.SeasonalItemTplBlacklist, Is.Not.Empty);
             Assert.That(_request.ExpiredOffers, Is.Null);
         });
     }

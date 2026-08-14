@@ -66,28 +66,13 @@ pub(crate) static NO_NAMES: std::sync::LazyLock<Vec<String>> = std::sync::LazyLo
 pub(crate) static NO_DEFAULT_PRESETS: std::sync::LazyLock<Vec<PresetView>> =
     std::sync::LazyLock::new(Vec::new);
 
-/// The two [`Diagnostic`] constructors the ragfair modules share. The bot modules re-declare their
-/// own per file; here they live once and are imported.
+/// The [`Diagnostic`] constructor the ragfair modules share. The bot modules re-declare their own
+/// per file; here it lives once and is imported.
 pub(crate) fn plain(level: &str, message: String) -> Diagnostic {
     Diagnostic {
         level: level.to_owned(),
         locale_key: None,
         args: None,
         message: Some(message),
-    }
-}
-
-#[expect(
-    dead_code,
-    reason = "no caller arrives in this port: every localised log line in RagfairOfferGenerator.cs \
-              sits in GenerateFleaOffersForTrader, which stays C#. Kept for symmetry with the bot \
-              module's diagnostic pair; delete it if a future port has no use for it"
-)]
-pub(crate) fn localised(level: &str, locale_key: &str, args: serde_json::Value) -> Diagnostic {
-    Diagnostic {
-        level: level.to_owned(),
-        locale_key: Some(locale_key.to_owned()),
-        args: Some(args),
-        message: None,
     }
 }

@@ -376,7 +376,10 @@ pub fn get_offer_end_time(
 /// inserts into `RagfairOfferService`, both of which stay in the caller's loop.
 ///
 /// **The draw sequence for one plain item** — not a preset, not a pack, not a barter — which is
-/// what the parity fixtures pin:
+/// what the parity fixtures pin. A "price draw" below is one biased-random draw
+/// ([`get_biased_random_number`](crate::loot::random_util::get_biased_random_number)), which is
+/// itself `2 * attempts` raw `next_double48` draws unless the range is degenerate, per
+/// [`price_service`](super::price_service)'s own checklist.
 ///
 /// | step | draws |
 /// |---|---|
@@ -386,7 +389,7 @@ pub fn get_offer_end_time(
 /// | the barter chance roll | **1** |
 /// | the pack chance roll, **skipped when the barter roll won** | **1** |
 /// | [`randomise_offer_item_upd_properties`] | the condition table above |
-/// | [`create_currency_barter_scheme`] | **1** currency + **1** price |
+/// | [`create_currency_barter_scheme`] | **1** currency + **1** price per priced item (inserts skipped, weapon-preset break) |
 /// | [`create_offer`] | **5** user-block + **1** end-time |
 ///
 /// The two `Stopwatch` debug lines become diagnostics carrying the same text, timed with an

@@ -212,6 +212,10 @@ public class RagfairParityTests
                     Assert.That(offer.Requirements, Is.Not.Empty, $"offer {offer.Id} has an empty barter scheme");
                     Assert.That(offer.SummaryCost, Is.GreaterThan(0), $"offer {offer.Id} is free");
                     Assert.That(offer.Quantity, Is.GreaterThan(0), $"offer {offer.Id} has no quantity");
+
+                    // CreatedBy is [JsonIgnore], so it never crosses the wire - ToRagfairOffer
+                    // hardcodes it, and the holder's per-template cap keys off this predicate
+                    Assert.That(offer.IsFakePlayerOffer(), Is.True, $"offer {offer.Id} is not a fake-player offer");
                     Assert.That(
                         offer.EndTime,
                         Is.InRange(now + _ragfairConfig.Dynamic.EndTimeSeconds.Min, now + _ragfairConfig.Dynamic.EndTimeSeconds.Max + 60),

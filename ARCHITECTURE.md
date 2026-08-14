@@ -210,6 +210,10 @@ Mod-facing limitations:
   documented divergence, not a bug.
 - `customMoneyTpls` (mod-added currencies) are not projected — offers priced in one are routed
   through the unrounded arm.
+- A mod that assigns `RagfairConfig.Dynamic.GenerateBaseFleaPrices = null` makes the serialiser omit
+  the member (`WhenWritingNull`), and the native request parse fails on the missing field, aborting
+  the whole pass. Legacy only dereferences it on the weapon-preset arm, so it survives the null for
+  every other offer. `ForceLegacyRagfairGeneration` is the workaround.
 
 Two sanctioned divergences this port added: the assort walk is **sequential** where legacy fans out
 one task per entry, and the batch takes **one timestamp**, where legacy stamps each offer as it is
