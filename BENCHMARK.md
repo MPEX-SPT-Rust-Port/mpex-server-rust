@@ -181,7 +181,8 @@ instead of once per bot, so a wave of N divides ~95.7% of the request between N 
 against the baseline production actually runs — `BotController.GenerateBotWave`'s `.AsParallel()`
 per-bot loop — a **single-threaded** batch is worth **~1.7x** at the median wave of 10 (12.5 → 7.3
 ms/bot) and **~2.4-2.5x** at `assault`'s real wave of 45 (13.2 → 5.2-5.5 ms/bot). The batch loop now
-runs under rayon, so those are floors, not the current figures; `BotBatchTests.WaveCostPerBot`
+runs under rayon; the measured figures for that are in the next section, and they land on those same
+numbers rather than below them. `BotBatchTests.WaveCostPerBot`
 reports the serial, parallel and batched arms together so the sequential-baseline ratio cannot be
 quoted alone again. Two payload trims landed alongside it — sixteen always-default item members
 (−640 KB, −13.8%) and `slots[].required` (−49 KB), taking an `assault` request to ~4.18 MB — worth
@@ -198,6 +199,39 @@ Bot-specific caveats, on top of the general ones below:
   than the legacy path's — unmeasured here.
 - **The legacy figures include a warm `BotLootCacheService`.** Hydration happens during the warmup
   runs. A cold first bot of a role costs more on both paths.
+
+### Batched wave, rayon batch loop — measured
+
+Recorded 2026-08-14 on `aa733a7`, same machine and environment table as the bot-generation figures
+above (AMD Ryzen 5 5600H, 6C/12T; Release; .NET SDK 10.0.110; rustc 1.97.1), so the same caveats
+apply — one machine, `assault`, warm caches, wall clock only. Source: `BotBatchTests.WaveCostPerBot`
+(`[Explicit]`, `dotnet test -c Release --filter "Name=WaveCostPerBot"`), medians of 5 runs per arm
+per wave. Two independent invocations of the whole test are reported, because the spread between
+them is the honest error bar on any single figure here.
+
+| wave | serial per-bot | `.AsParallel()` per-bot | batched (rayon) | batched vs parallel | pre-rayon batched |
+|---|---|---|---|---|---|
+| 45 | 44.10 / 43.16 ms | 12.33 / 11.98 ms | **5.73 / 6.22 ms** | 2.15x / 1.92x | 5.2-5.5 ms |
+| 20 | 43.94 / 42.83 ms | 12.72 / 12.26 ms | **6.02 / 5.95 ms** | 2.11x / 2.06x | not recorded |
+| 10 | 43.11 / 42.67 ms | 11.67 / 11.85 ms | **7.63 / 7.85 ms** | 1.53x / 1.51x | 7.3 ms |
+| 5 | 42.48 / 42.71 ms | 13.89 / 13.62 ms | **11.83 / 11.97 ms** | 1.17x / 1.14x | not recorded |
+| 1 | 41.42 / 41.46 ms | 43.29 / 43.25 ms | **42.72 / 41.81 ms** | 1.01x / 1.03x | not recorded |
+
+All figures are ms per bot. Request bytes per bot over the same waves: 3.78 MiB single-bot, against
+0.30 (wave 45), 0.40 (20), 0.58 (10), 0.94 (5), 3.78 (1) MiB batched.
+
+**Rayon did not move the batched number.** 5.73/6.22 ms/bot at wave 45 against a pre-rayon 5.2-5.5,
+and 7.63/7.85 at wave 10 against a pre-rayon 7.3 — the parallel batch is at best level with the
+single-threaded batch it replaced, and both readings sit slightly above it. That is what the ~92%
+transport share predicts: rayon parallelises the ~3 ms of generation inside a ~6 ms/bot batch, while
+the serialise/deserialise around it stays single-threaded on the C# side and does not shrink. The
+batch's win over production's `.AsParallel()` per-bot loop is amortising the shared block, not
+parallelism — it was already won before rayon. Rayon's value is therefore a ceiling on wave sizes and
+bot kinds that generate more than `assault` does, not a gain visible here; it is kept because it
+costs nothing measurable, not because this table justifies it.
+
+Wave 1 is the degenerate case and reads as expected: a one-bot batch is a one-bot request, `1.01x`,
+and `.AsParallel()` over a single element is the serial arm.
 
 ## Results — ragfair offer generation
 
