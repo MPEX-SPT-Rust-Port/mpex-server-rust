@@ -45,6 +45,50 @@ public class BotController(
     ICloner cloner
 )
 {
+    private readonly BotWaveBatcher? _botWaveBatcher;
+
+    /// <summary>
+    ///     The constructor the container uses: the frozen 4.1.2 one plus the wave batcher.
+    ///     Additive and apicompat-verified. A mod subclass built against the frozen constructor
+    ///     gets no batcher and therefore never batches - per-bot semantics by construction.
+    /// </summary>
+    public BotController(
+        ISptLogger<BotController> logger,
+        BotTable botTable,
+        BotGenerator botGenerator,
+        BotHelper botHelper,
+        BotDifficultyHelper botDifficultyHelper,
+        ServerLocalisationService serverLocalisationService,
+        SeasonalEventService seasonalEventService,
+        MatchBotDetailsCacheService matchBotDetailsCacheService,
+        ProfileHelper profileHelper,
+        ProfileActivityService profileActivityService,
+        RandomUtil randomUtil,
+        BotConfig botConfig,
+        PmcConfig pmcConfig,
+        ICloner cloner,
+        BotWaveBatcher botWaveBatcher
+    )
+        : this(
+            logger,
+            botTable,
+            botGenerator,
+            botHelper,
+            botDifficultyHelper,
+            serverLocalisationService,
+            seasonalEventService,
+            matchBotDetailsCacheService,
+            profileHelper,
+            profileActivityService,
+            randomUtil,
+            botConfig,
+            pmcConfig,
+            cloner
+        )
+    {
+        _botWaveBatcher = botWaveBatcher;
+    }
+
     /// <summary>
     ///     Return the number of bot load-out varieties to be generated
     /// </summary>
@@ -253,6 +297,19 @@ public class BotController(
             logger.Debug(
                 $"Generating wave of: {botGenerationDetails.BotCountToGenerate} bots of type: {role} {botGenerationDetails.BotDifficulty}"
             );
+        }
+
+        // Batched native wave: one call for every inventory in the wave. Declined - null - when
+        // a mod could observe the difference or the wave can write nighttime clamps, in which
+        // case the unchanged per-bot path below runs. A subclass never batches: its GetType()
+        // differs, and the frozen constructor leaves the batcher null anyway.
+        if (GetType() == typeof(BotController) && _botWaveBatcher is not null)
+        {
+            var batchedWave = _botWaveBatcher.TryGenerateWave(sessionId, botGenerationDetails);
+            if (batchedWave is not null)
+            {
+                return batchedWave;
+            }
         }
 
         var generatedBots = Enumerable

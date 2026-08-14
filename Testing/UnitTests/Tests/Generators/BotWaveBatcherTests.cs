@@ -1,15 +1,21 @@
+using System.Reflection;
+using HarmonyLib;
 using NUnit.Framework;
 using SPTarkov.Common.Models.Logging;
 using SPTarkov.Server.Core.Generators.Bot;
 using SPTarkov.Server.Core.Helpers;
 using SPTarkov.Server.Core.Helpers.Bot;
+using SPTarkov.Server.Core.Helpers.InRaid;
 using SPTarkov.Server.Core.Models.Common;
+using SPTarkov.Server.Core.Models.Eft.Match;
+using SPTarkov.Server.Core.Models.Enums;
 using SPTarkov.Server.Core.Models.Spt.Bots;
 using SPTarkov.Server.Core.Models.Spt.Config;
 using SPTarkov.Server.Core.Models.Spt.Tables;
 using SPTarkov.Server.Core.Servers;
 using SPTarkov.Server.Core.Services.Bot;
 using SPTarkov.Server.Core.Services.Items;
+using SPTarkov.Server.Core.Services.Profile;
 using SPTarkov.Server.Core.Services.Server;
 using SPTarkov.Server.Core.Utils;
 using SPTarkov.Server.Core.Utils.Cloners;
@@ -124,6 +130,76 @@ public class BotWaveBatcherTests
 
         Assert.That(batcher.TryGenerateWave(_sessionId, BuildWaveDetails()), Is.Null);
     }
+
+    /// <summary>
+    /// A live Harmony patch on a frozen member of BotGenerator means a mod expects per-bot
+    /// semantics. Harmony patches are process-wide, so the patch is removed in a finally.
+    /// </summary>
+    [Test]
+    public void AHarmonyPatchOnGenerateBotDeclinesTheBatch()
+    {
+        var harmony = new Harmony("unit-tests.botwave-batcher.GenerateBot");
+        var generateBot = typeof(BotGenerator).GetMethod("GenerateBot", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.That(generateBot, Is.Not.Null, "frozen member BotGenerator.GenerateBot not found");
+
+        try
+        {
+            harmony.Patch(generateBot, prefix: new HarmonyMethod(typeof(BotWaveBatcherTests), nameof(Prefix)));
+
+            Assert.That(_batcher.TryGenerateWave(_sessionId, BuildWaveDetails()), Is.Null, "a patched wave must run per bot");
+        }
+        finally
+        {
+            harmony.UnpatchSelf();
+        }
+    }
+
+    /// <summary>
+    /// The nighttime equipment clamp is a cross-bot feedback loop through the live BotConfig that
+    /// only the per-bot path replays, so a nighttime wave whose role carries nighttime modifiers
+    /// declines. The same config by day still batches - the decline is about the clamp firing, not
+    /// about the config existing.
+    /// </summary>
+    [Test]
+    public void ANighttimeWaveWithNighttimeChangesDeclinesTheBatch()
+    {
+        var di = DI.GetInstance();
+        var raidData = di.GetService<ProfileActivityService>().GetProfileActivityRaidData(_sessionId);
+        var weatherHelper = di.GetService<WeatherHelper>();
+
+        // Premise: these inputs must read as night; factory4_night is night at any hour. If this
+        // assert fails, fix the raid configuration inputs, not the dispatcher.
+        var raidConfig = new GetRaidConfigurationRequestData { Location = "factory4_night", TimeVariant = DateTimeEnum.CURR };
+        Assert.That(weatherHelper.IsNightTime(raidConfig.TimeVariant, raidConfig.Location!), Is.True);
+
+        var equipConfig = _botConfig.Equipment["assault"]!;
+        var previousRandomisation = equipConfig.Randomisation;
+        equipConfig.Randomisation =
+        [
+            new RandomisationDetails
+            {
+                LevelRange = new MinMax<int> { Min = 1, Max = 99 },
+                EquipmentMods = new Dictionary<string, double> { ["mod_nvg"] = 50 },
+                NighttimeChanges = new NighttimeChanges { EquipmentModsModifiers = new Dictionary<string, float> { ["mod_nvg"] = 30 } },
+            },
+        ];
+        raidData.RaidConfiguration = raidConfig;
+        try
+        {
+            Assert.That(_batcher.TryGenerateWave(_sessionId, BuildWaveDetails()), Is.Null, "nighttime clamp wave must run per bot");
+
+            // Same config by day still batches - the fallback is about the clamp, not the config
+            raidData.RaidConfiguration = null;
+            Assert.That(_batcher.TryGenerateWave(_sessionId, BuildWaveDetails()), Is.Not.Null);
+        }
+        finally
+        {
+            equipConfig.Randomisation = previousRandomisation;
+            raidData.RaidConfiguration = null;
+        }
+    }
+
+    private static void Prefix() { }
 
     private static object Construct(Type type, params object[] substitutes)
     {
