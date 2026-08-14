@@ -134,6 +134,18 @@ public class BotGenerator(
     /// <returns>constructed bot</returns>
     public BotBase PrepareAndGenerateBot(MongoId sessionId, BotGenerationDetails botGenerationDetails)
     {
+        var (botBaseClone, botJsonTemplateClone) = PrepareBot(botGenerationDetails);
+
+        return GenerateBot(sessionId, botBaseClone, botJsonTemplateClone, botGenerationDetails);
+    }
+
+    /// <summary>
+    ///     The per-bot work PrepareAndGenerateBot does before GenerateBot: the base clone with
+    ///     role/side/difficulty applied, and the bot's own template clone. Internal so the batched
+    ///     wave path can run it without the frozen method in the middle.
+    /// </summary>
+    internal (BotBase Bot, BotType? Template) PrepareBot(BotGenerationDetails botGenerationDetails)
+    {
         var botBaseClone = GetPreparedBotBaseClone(
             botGenerationDetails.EventRole ?? botGenerationDetails.Role, // Use eventRole if provided
             botGenerationDetails.Side,
@@ -150,7 +162,7 @@ public class BotGenerator(
             logger.Error($"Unable to retrieve: {botRole} bot template, cannot generate bot of this type");
         }
 
-        return GenerateBot(sessionId, botBaseClone, botJsonTemplateClone, botGenerationDetails);
+        return (botBaseClone, botJsonTemplateClone);
     }
 
     /// <summary>
@@ -188,6 +200,22 @@ public class BotGenerator(
     /// <param name="botGenerationDetails">details on how to generate the bot</param>
     /// <returns>BotBase object</returns>
     protected BotBase GenerateBot(MongoId sessionId, BotBase bot, BotType botJsonTemplate, BotGenerationDetails botGenerationDetails)
+    {
+        GenerateBotPrelude(sessionId, bot, botJsonTemplate, botGenerationDetails);
+
+        bot.Inventory = botInventoryGenerator.GenerateInventory(bot.Id.Value, sessionId, botJsonTemplate, botGenerationDetails);
+
+        GenerateBotFinish(bot, botGenerationDetails);
+
+        return bot;
+    }
+
+    /// <summary>
+    ///     Everything GenerateBot does before the inventory call: level, ids, equipment filter,
+    ///     names, seasonal/blacklist strips, stats, health, skills, PMC game version, appearance.
+    ///     Internal so the batched wave path can run it per bot ahead of the single native call.
+    /// </summary>
+    internal void GenerateBotPrelude(MongoId sessionId, BotBase bot, BotType botJsonTemplate, BotGenerationDetails botGenerationDetails)
     {
         botGenerationDetails.RoleLowercase = botGenerationDetails.Role.ToLowerInvariant();
 
@@ -280,9 +308,14 @@ public class BotGenerator(
 
         // Add drip
         SetBotAppearance(bot, botJsonTemplate.BotAppearance, botGenerationDetails);
+    }
 
-        bot.Inventory = botInventoryGenerator.GenerateInventory(bot.Id.Value, sessionId, botJsonTemplate, botGenerationDetails);
-
+    /// <summary>
+    ///     Everything GenerateBot does after the inventory call: dogtag, inventory id rewrite,
+    ///     event-role restore. Internal for the same reason as the prelude.
+    /// </summary>
+    internal void GenerateBotFinish(BotBase bot, BotGenerationDetails botGenerationDetails)
+    {
         if (botConfig.BotRolesWithDogTags.Contains(botGenerationDetails.RoleLowercase))
         {
             AddDogtagToBot(bot);
@@ -296,8 +329,6 @@ public class BotGenerator(
         {
             bot.Info.Settings.Role = botGenerationDetails.EventRole;
         }
-
-        return bot;
     }
 
     /// <summary>
