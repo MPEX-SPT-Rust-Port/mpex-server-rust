@@ -614,7 +614,13 @@ mod tests {
         // Game-data passthrough: an unknown item key survives back out through an offer
         let items = parsed.expired_offers.unwrap().remove(0);
         assert_eq!(items[0].extra["modFieldFromAMod"], 7);
-        let out = serde_json::to_value(offer_with(items)).unwrap();
+        let out = serde_json::to_value(offer_with(items.clone())).unwrap();
+        assert_eq!(out["items"][0]["modFieldFromAMod"], 7);
+
+        // ...and out through MessagePack too: `#[serde(flatten)]` serializes as an unknown-length
+        // map, which `to_vec_named` must accept for the framed payloads to carry mod fields.
+        let packed = rmp_serde::to_vec_named(&offer_with(items)).unwrap();
+        let out: serde_json::Value = rmp_serde::from_slice(&packed).unwrap();
         assert_eq!(out["items"][0]["modFieldFromAMod"], 7);
     }
 

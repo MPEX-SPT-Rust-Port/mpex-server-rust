@@ -5,4 +5,4 @@ pub mod ragfair;
 pub mod runtime;
 pub mod verify;
 
-pub const ABI_VERSION: u32 = 9;
+pub const ABI_VERSION: u32 = 10;

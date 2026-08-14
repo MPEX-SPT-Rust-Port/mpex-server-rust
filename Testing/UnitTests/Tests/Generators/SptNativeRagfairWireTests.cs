@@ -5,6 +5,7 @@ using SPTarkov.Server.Core.Helpers.Items;
 using SPTarkov.Server.Core.Helpers.Profile;
 using SPTarkov.Server.Core.Helpers.Traders;
 using SPTarkov.Server.Core.Models.Common;
+using SPTarkov.Server.Core.Models.Eft.Common.Tables;
 using SPTarkov.Server.Core.Models.Enums;
 using SPTarkov.Server.Core.Models.Spt.Config;
 using SPTarkov.Server.Core.Models.Spt.Tables;
@@ -155,5 +156,31 @@ public class SptNativeRagfairWireTests
         var result = SptNative.GenerateDynamicOffersFramed(System.Text.Encoding.UTF8.GetBytes(json.ToJsonString()));
 
         Assert.That(result.Offers, Is.Not.Empty);
+    }
+
+    /// <summary>
+    /// A mod-added field on an expired offer's item must survive Rust's `extra` flatten and come
+    /// back through the MessagePack frames into the Ceciler-injected extension data.
+    /// </summary>
+    [Test]
+    public void AModAddedItemFieldSurvivesTheRoundTrip()
+    {
+        if (typeof(Item).GetProperty("ExtensionData") is not { } extensionData)
+        {
+            Assert.Ignore("extension data is Ceciler-injected in Release builds only");
+            return;
+        }
+
+        var json = JsonNode.Parse(JsonSerializer.Serialize(_request, JsonUtil.JsonSerializerOptionsNoIndent))!.AsObject();
+        var itemTpl = json["items"]!.AsObject().First().Key;
+        json["expiredOffers"] = new JsonArray(
+            new JsonArray(new JsonObject { ["_id"] = "0123456789abcdef01234567", ["_tpl"] = itemTpl, ["modField"] = "kept" })
+        );
+
+        var result = SptNative.GenerateDynamicOffersFramed(System.Text.Encoding.UTF8.GetBytes(json.ToJsonString()));
+
+        Assert.That(result.Offers, Has.Count.EqualTo(1));
+        var extension = (Dictionary<string, object>)extensionData.GetValue(result.Offers[0].Items![0])!;
+        Assert.That(((JsonElement)extension["modField"]).GetString(), Is.EqualTo("kept"));
     }
 }

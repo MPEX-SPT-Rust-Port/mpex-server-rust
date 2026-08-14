@@ -80,7 +80,12 @@ unsafe fn write_buffer(bytes: Vec<u8>, out_ptr: *mut *mut u8, out_len: *mut usiz
 }
 
 /// The payload encoding tags of the framed ragfair envelope.
+///
+/// The stage-B tag: no longer written, still accepted by the C# reader.
 pub const PAYLOAD_JSON: u8 = 0;
+/// What `write_framed_offers` emits from stage C on: `rmp_serde::to_vec_named`, so the maps stay
+/// string-keyed under the same wire names the JSON stage used.
+pub const PAYLOAD_MSGPACK: u8 = 1;
 
 /// The shared body of the generation exports: JSON request in, status plus either the JSON
 /// result or an error message out. Runs on the calling thread.
@@ -279,7 +284,7 @@ pub unsafe extern "C" fn spt_generate_bot_inventory_batch(
 /// The framed ragfair response: encoding tag, length-prefixed header, then one length-prefixed
 /// payload per offer, serialized across rayon. Stage C changes only the payloads' encoding.
 fn write_framed_offers(result: DynamicOffersResult) -> Vec<u8> {
-    let header = serde_json::to_vec(&DynamicOffersHeader {
+    let header = rmp_serde::to_vec_named(&DynamicOffersHeader {
         rejected_can_sell_templates: result.rejected_can_sell_templates,
         diagnostics: result.diagnostics,
     })
@@ -287,12 +292,12 @@ fn write_framed_offers(result: DynamicOffersResult) -> Vec<u8> {
     let payloads: Vec<Vec<u8>> = result
         .offers
         .par_iter()
-        .map(|offer| serde_json::to_vec(offer).expect("offer serialization cannot fail"))
+        .map(|offer| rmp_serde::to_vec_named(offer).expect("offer serialization cannot fail"))
         .collect();
 
     let body: usize = payloads.iter().map(|payload| 4 + payload.len()).sum();
     let mut out = Vec::with_capacity(1 + 4 + header.len() + 4 + body);
-    out.push(PAYLOAD_JSON);
+    out.push(PAYLOAD_MSGPACK);
     out.extend_from_slice(
         &u32::try_from(header.len())
             .expect("header fits u32")
@@ -373,7 +378,7 @@ mod tests {
         assert_eq!(spt_native_abi_version(), crate::ABI_VERSION);
         assert_eq!(
             crate::ABI_VERSION,
-            9,
+            10,
             "bump SptNative.ExpectedAbiVersion too"
         );
     }
@@ -801,6 +806,16 @@ mod tests {
         )
     }
 
+    /// Decodes one frame payload by the envelope's encoding tag. The writer never emits msgpack
+    /// bin/ext, so every payload lands in a `Value` cleanly.
+    fn decode(encoding: u8, payload: &[u8]) -> serde_json::Value {
+        match encoding {
+            PAYLOAD_JSON => serde_json::from_slice(payload).unwrap(),
+            PAYLOAD_MSGPACK => rmp_serde::from_slice(payload).unwrap(),
+            other => panic!("unknown payload encoding {other}"),
+        }
+    }
+
     /// Splits a framed ragfair response: (encoding, header, offer payloads).
     fn parse_framed(out: &[u8]) -> (u8, serde_json::Value, Vec<Vec<u8>>) {
         let encoding = out[0];
@@ -810,7 +825,7 @@ mod tests {
         };
         let header_len = read_len(out, at);
         at += 4;
-        let header = serde_json::from_slice(&out[at..at + header_len]).unwrap();
+        let header = decode(encoding, &out[at..at + header_len]);
         at += header_len;
         let count = read_len(out, at);
         at += 4;
@@ -833,7 +848,7 @@ mod tests {
 
         assert_eq!(status, STATUS_OK);
         let (encoding, header, payloads) = parse_framed(&out);
-        assert_eq!(encoding, PAYLOAD_JSON);
+        assert_eq!(encoding, PAYLOAD_MSGPACK);
         assert!(payloads.is_empty());
         assert_eq!(header["rejectedCanSellTemplates"], serde_json::json!([]));
     }
@@ -893,12 +908,22 @@ mod tests {
         let (status, out) = call_generate(spt_generate_dynamic_offers, request.as_bytes());
 
         assert_eq!(status, STATUS_OK);
-        let (_, _, payloads) = parse_framed(&out);
+        let (encoding, _, payloads) = parse_framed(&out);
+        assert_eq!(encoding, PAYLOAD_MSGPACK);
         assert_eq!(payloads.len(), 30);
         for (i, payload) in payloads.iter().enumerate() {
-            let offer: serde_json::Value = serde_json::from_slice(payload).unwrap();
+            let offer = decode(encoding, payload);
             assert_eq!(offer["intId"], serde_json::json!(7 + i as i64));
             assert_eq!(offer["root"], serde_json::json!(format!("{i:024x}")));
+        }
+
+        // The C# reader keys off the JSON wire names — a serde rename regression must fail here.
+        let offer: serde_json::Value = rmp_serde::from_slice(&payloads[0]).unwrap();
+        for key in ["_id", "intId", "user", "root", "items", "requirements"] {
+            assert!(
+                offer.get(key).is_some(),
+                "offer payload lost wire key {key}"
+            );
         }
     }
 
