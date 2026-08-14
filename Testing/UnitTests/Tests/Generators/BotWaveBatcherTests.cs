@@ -98,6 +98,22 @@ public class BotWaveBatcherTests
     }
 
     /// <summary>
+    /// The negative control for the substitution test below: hand-building the batcher off the
+    /// container's own services is not by itself a reason to decline.
+    /// </summary>
+    [Test]
+    public void AHandBuiltBatcherWithStockServicesTakesTheBatchPath()
+    {
+        var batcher = (BotWaveBatcher)Construct(typeof(BotWaveBatcher));
+
+        var wave = batcher.TryGenerateWave(_sessionId, BuildWaveDetails());
+
+        Assert.That(wave, Is.Not.Null, "a hand-built batcher with stock services should still batch");
+        Assert.That(wave!, Has.Count.EqualTo(3));
+        Assert.That(wave!.All(bot => bot!.Inventory?.Items?.Count > 0), Is.True, "a bot came back without an inventory");
+    }
+
+    /// <summary>
     /// A mod registering its own BotGenerator with a higher TypePriority hands the container a
     /// subclass, which only the per-bot path routes through.
     /// </summary>
