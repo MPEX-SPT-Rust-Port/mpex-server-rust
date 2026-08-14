@@ -251,6 +251,14 @@ pub struct DynamicOffersResult {
     pub diagnostics: Vec<Diagnostic>,
 }
 
+/// The non-offer sections of a framed response — everything except the offer frames.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DynamicOffersHeader {
+    pub rejected_can_sell_templates: Vec<String>,
+    pub diagnostics: Vec<Diagnostic>,
+}
+
 /// `Models/Eft/Ragfair/RagfairOffer.cs:8-91`, only the members `CreateOffer` (`:118-138`) sets.
 /// `sellResult`, `unlimitedCount`, `buyRestrictionMax`, `buyRestrictionCurrent` are never set on
 /// this path and are omitted rather than sent as null.

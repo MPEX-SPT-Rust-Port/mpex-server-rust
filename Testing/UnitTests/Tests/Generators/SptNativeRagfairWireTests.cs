@@ -5,6 +5,7 @@ using SPTarkov.Server.Core.Helpers.Items;
 using SPTarkov.Server.Core.Helpers.Profile;
 using SPTarkov.Server.Core.Helpers.Traders;
 using SPTarkov.Server.Core.Models.Common;
+using SPTarkov.Server.Core.Models.Enums;
 using SPTarkov.Server.Core.Models.Spt.Config;
 using SPTarkov.Server.Core.Models.Spt.Tables;
 using SPTarkov.Server.Core.Native;
@@ -115,6 +116,9 @@ public class SptNativeRagfairWireTests
         // Id is declared MongoId on the C# record, so a malformed hex string would already have
         // failed the deserialize; this catches an all-zero default
         Assert.That(result.Offers[0].Id.IsEmpty, Is.False);
+        // The frames are deserialized in parallel: the envelope order is what pins the result order
+        Assert.That(result.Offers.Select(offer => offer.InternalId), Is.EqualTo(Enumerable.Range(0, result.Offers.Count)));
+        Assert.That(result.Offers[0].CreatedBy, Is.EqualTo(OfferCreator.FakePlayer));
     }
 
     /// <summary>
@@ -148,10 +152,7 @@ public class SptNativeRagfairWireTests
 
         // No assertion on the value coming back - the native result carries offers, not the config;
         // this asserts only that an unknown key does not fail the parse.
-        var result = SptNative.Generate<DynamicOffersResult>(
-            LootExport.DynamicOffers,
-            System.Text.Encoding.UTF8.GetBytes(json.ToJsonString())
-        );
+        var result = SptNative.GenerateDynamicOffersFramed(System.Text.Encoding.UTF8.GetBytes(json.ToJsonString()));
 
         Assert.That(result.Offers, Is.Not.Empty);
     }

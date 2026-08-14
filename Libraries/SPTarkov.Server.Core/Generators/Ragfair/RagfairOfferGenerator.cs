@@ -413,7 +413,7 @@ public class RagfairOfferGenerator(
         // same way either way, it just sees the whole batch at once here
         foreach (var offer in result.Offers)
         {
-            ragfairOfferService.AddOffer(offer.ToRagfairOffer());
+            ragfairOfferService.AddOffer(offer);
         }
 
         // CreateOffer increments the counter per offer created, not per offer the holder accepted

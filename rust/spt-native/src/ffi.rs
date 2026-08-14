@@ -1,6 +1,7 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 
+use rayon::prelude::*;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
@@ -11,6 +12,7 @@ use crate::loot::loot_generator::{
     create_forced_loot, create_random_loot, get_random_loot_container_loot,
     get_sealed_weapon_case_loot,
 };
+use crate::ragfair::models::{DynamicOffersHeader, DynamicOffersResult};
 use crate::ragfair::offer_generator::generate_dynamic_offers;
 use crate::runtime::runtime;
 use crate::verify;
@@ -77,6 +79,9 @@ unsafe fn write_buffer(bytes: Vec<u8>, out_ptr: *mut *mut u8, out_len: *mut usiz
     }
 }
 
+/// The payload encoding tags of the framed ragfair envelope.
+pub const PAYLOAD_JSON: u8 = 0;
+
 /// The shared body of the generation exports: JSON request in, status plus either the JSON
 /// result or an error message out. Runs on the calling thread.
 ///
@@ -93,6 +98,29 @@ where
     Request: DeserializeOwned,
     Response: Serialize,
 {
+    unsafe {
+        run_generator_with(req_ptr, req_len, out_ptr, out_len, generate, |response| {
+            serde_json::to_vec(&response).expect("result serialization cannot fail")
+        })
+    }
+}
+
+/// `run_generator` with the response encoding open: the ragfair export frames its response
+/// instead of emitting one JSON document.
+///
+/// # Safety
+/// As documented on the exports below.
+unsafe fn run_generator_with<Request, Response>(
+    req_ptr: *const u8,
+    req_len: usize,
+    out_ptr: *mut *mut u8,
+    out_len: *mut usize,
+    generate: fn(Request) -> Result<Response, LootError>,
+    encode: fn(Response) -> Vec<u8>,
+) -> i32
+where
+    Request: DeserializeOwned,
+{
     if req_ptr.is_null() || out_ptr.is_null() || out_len.is_null() {
         return STATUS_BAD_ARGS;
     }
@@ -106,11 +134,7 @@ where
         }
     };
 
-    let result = catch_unwind(AssertUnwindSafe(|| {
-        generate(request).map(|response| {
-            serde_json::to_vec(&response).expect("result serialization cannot fail")
-        })
-    }));
+    let result = catch_unwind(AssertUnwindSafe(|| generate(request).map(encode)));
 
     match result {
         Ok(Ok(json)) => {
@@ -252,6 +276,45 @@ pub unsafe extern "C" fn spt_generate_bot_inventory_batch(
     unsafe { run_generator(req_ptr, req_len, out_ptr, out_len, generate_inventory_batch) }
 }
 
+/// The framed ragfair response: encoding tag, length-prefixed header, then one length-prefixed
+/// payload per offer, serialized across rayon. Stage C changes only the payloads' encoding.
+fn write_framed_offers(result: DynamicOffersResult) -> Vec<u8> {
+    let header = serde_json::to_vec(&DynamicOffersHeader {
+        rejected_can_sell_templates: result.rejected_can_sell_templates,
+        diagnostics: result.diagnostics,
+    })
+    .expect("header serialization cannot fail");
+    let payloads: Vec<Vec<u8>> = result
+        .offers
+        .par_iter()
+        .map(|offer| serde_json::to_vec(offer).expect("offer serialization cannot fail"))
+        .collect();
+
+    let body: usize = payloads.iter().map(|payload| 4 + payload.len()).sum();
+    let mut out = Vec::with_capacity(1 + 4 + header.len() + 4 + body);
+    out.push(PAYLOAD_JSON);
+    out.extend_from_slice(
+        &u32::try_from(header.len())
+            .expect("header fits u32")
+            .to_le_bytes(),
+    );
+    out.extend_from_slice(&header);
+    out.extend_from_slice(
+        &u32::try_from(payloads.len())
+            .expect("count fits u32")
+            .to_le_bytes(),
+    );
+    for payload in &payloads {
+        out.extend_from_slice(
+            &u32::try_from(payload.len())
+                .expect("offer fits u32")
+                .to_le_bytes(),
+        );
+        out.extend_from_slice(payload);
+    }
+    out
+}
+
 /// # Safety
 /// See `spt_generate_static_containers`.
 #[unsafe(no_mangle)]
@@ -261,7 +324,16 @@ pub unsafe extern "C" fn spt_generate_dynamic_offers(
     out_ptr: *mut *mut u8,
     out_len: *mut usize,
 ) -> i32 {
-    unsafe { run_generator(req_ptr, req_len, out_ptr, out_len, generate_dynamic_offers) }
+    unsafe {
+        run_generator_with(
+            req_ptr,
+            req_len,
+            out_ptr,
+            out_len,
+            generate_dynamic_offers,
+            write_framed_offers,
+        )
+    }
 }
 
 /// # Safety
@@ -301,7 +373,7 @@ mod tests {
         assert_eq!(spt_native_abi_version(), crate::ABI_VERSION);
         assert_eq!(
             crate::ABI_VERSION,
-            8,
+            9,
             "bump SptNative.ExpectedAbiVersion too"
         );
     }
@@ -729,6 +801,30 @@ mod tests {
         )
     }
 
+    /// Splits a framed ragfair response: (encoding, header, offer payloads).
+    fn parse_framed(out: &[u8]) -> (u8, serde_json::Value, Vec<Vec<u8>>) {
+        let encoding = out[0];
+        let mut at = 1;
+        let read_len = |buf: &[u8], at: usize| {
+            u32::from_le_bytes(buf[at..at + 4].try_into().unwrap()) as usize
+        };
+        let header_len = read_len(out, at);
+        at += 4;
+        let header = serde_json::from_slice(&out[at..at + header_len]).unwrap();
+        at += header_len;
+        let count = read_len(out, at);
+        at += 4;
+        let mut payloads = Vec::with_capacity(count);
+        for _ in 0..count {
+            let len = read_len(out, at);
+            at += 4;
+            payloads.push(out[at..at + len].to_vec());
+            at += len;
+        }
+        assert_eq!(at, out.len(), "trailing bytes after the last frame");
+        (encoding, header, payloads)
+    }
+
     #[test]
     fn a_minimal_dynamic_offers_request_returns_an_empty_offer_list() {
         // Empty items view and empty presets: the assort walk yields nothing, so no draws happen.
@@ -736,9 +832,10 @@ mod tests {
             call_generate(spt_generate_dynamic_offers, ragfair_request().as_bytes());
 
         assert_eq!(status, STATUS_OK);
-        let result: serde_json::Value = serde_json::from_slice(&out).unwrap();
-        assert_eq!(result["offers"].as_array().unwrap().len(), 0);
-        assert_eq!(result["rejectedCanSellTemplates"], serde_json::json!([]));
+        let (encoding, header, payloads) = parse_framed(&out);
+        assert_eq!(encoding, PAYLOAD_JSON);
+        assert!(payloads.is_empty());
+        assert_eq!(header["rejectedCanSellTemplates"], serde_json::json!([]));
     }
 
     #[test]
@@ -796,10 +893,10 @@ mod tests {
         let (status, out) = call_generate(spt_generate_dynamic_offers, request.as_bytes());
 
         assert_eq!(status, STATUS_OK);
-        let result: serde_json::Value = serde_json::from_slice(&out).unwrap();
-        let offers = result["offers"].as_array().unwrap();
-        assert_eq!(offers.len(), 30);
-        for (i, offer) in offers.iter().enumerate() {
+        let (_, _, payloads) = parse_framed(&out);
+        assert_eq!(payloads.len(), 30);
+        for (i, payload) in payloads.iter().enumerate() {
+            let offer: serde_json::Value = serde_json::from_slice(payload).unwrap();
             assert_eq!(offer["intId"], serde_json::json!(7 + i as i64));
             assert_eq!(offer["root"], serde_json::json!(format!("{i:024x}")));
         }

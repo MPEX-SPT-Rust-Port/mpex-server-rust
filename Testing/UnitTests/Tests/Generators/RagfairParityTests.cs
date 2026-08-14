@@ -213,8 +213,8 @@ public class RagfairParityTests
                     Assert.That(offer.SummaryCost, Is.GreaterThan(0), $"offer {offer.Id} is free");
                     Assert.That(offer.Quantity, Is.GreaterThan(0), $"offer {offer.Id} has no quantity");
 
-                    // CreatedBy is [JsonIgnore], so it never crosses the wire - ToRagfairOffer
-                    // hardcodes it, and the holder's per-template cap keys off this predicate
+                    // CreatedBy is [JsonIgnore], so it never crosses the wire - the frame reader
+                    // stamps it, and the holder's per-template cap keys off this predicate
                     Assert.That(offer.IsFakePlayerOffer(), Is.True, $"offer {offer.Id} is not a fake-player offer");
                     Assert.That(
                         offer.EndTime,

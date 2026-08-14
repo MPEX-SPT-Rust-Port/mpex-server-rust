@@ -131,11 +131,12 @@ internal record GenerateDynamicOffersRequest
     public required Dictionary<MongoId, ItemView> Items { get; set; }
 }
 
-internal record DynamicOffersResult
+/// <summary>
+/// The header section of the framed <c>spt_generate_dynamic_offers</c> response — everything
+/// except the offer frames, which deserialize straight into <see cref="RagfairOffer"/>.
+/// </summary>
+internal record DynamicOffersHeader
 {
-    [JsonPropertyName("offers")]
-    public required List<RagfairOfferWire> Offers { get; set; }
-
     /// <summary>
     /// Template ids the custom-blacklist arm of <c>IsItemValidRagfairItem</c> set
     /// <c>CanSellOnRagfair</c> to <c>false</c> for. The caller replays these onto the live template
@@ -149,156 +150,14 @@ internal record DynamicOffersResult
 }
 
 /// <summary>
-/// The native offer, declared rather than deserialised straight into <see cref="RagfairOffer"/>:
-/// that record's <c>Requirements</c> is an <c>IEnumerable</c> and its <c>User</c> is
-/// <c>required</c>. Every id-shaped member is a <see cref="MongoId"/>, which round-trips through the
-/// hex string Rust emits, so a malformed id fails the deserialize instead of reaching the holder.
+/// A parsed framed response: the header sections plus the materialized offers, each already
+/// stamped <see cref="OfferCreator.FakePlayer"/> the way <c>CreateAndAddFleaOffer:72</c> does.
 /// </summary>
-internal record RagfairOfferWire
+internal record FramedOffersResult
 {
-    [JsonPropertyName("_id")]
-    public required MongoId Id { get; set; }
+    public required List<RagfairOffer> Offers { get; set; }
 
-    [JsonPropertyName("intId")]
-    public required int InternalId { get; set; }
+    public required List<MongoId> RejectedCanSellTemplates { get; set; }
 
-    [JsonPropertyName("user")]
-    public required RagfairOfferUserWire User { get; set; }
-
-    [JsonPropertyName("root")]
-    public required MongoId Root { get; set; }
-
-    [JsonPropertyName("items")]
-    public required List<Item> Items { get; set; }
-
-    [JsonPropertyName("itemsCost")]
-    public required double ItemsCost { get; set; }
-
-    [JsonPropertyName("requirements")]
-    public required List<OfferRequirementWire> Requirements { get; set; }
-
-    [JsonPropertyName("requirementsCost")]
-    public required double RequirementsCost { get; set; }
-
-    [JsonPropertyName("summaryCost")]
-    public required double SummaryCost { get; set; }
-
-    [JsonPropertyName("startTime")]
-    public required long StartTime { get; set; }
-
-    [JsonPropertyName("endTime")]
-    public required long EndTime { get; set; }
-
-    [JsonPropertyName("loyaltyLevel")]
-    public required int LoyaltyLevel { get; set; }
-
-    [JsonPropertyName("sellInOnePiece")]
-    public required bool SellInOnePiece { get; set; }
-
-    [JsonPropertyName("locked")]
-    public required bool Locked { get; set; }
-
-    [JsonPropertyName("quantity")]
-    public required int Quantity { get; set; }
-}
-
-internal record RagfairOfferUserWire
-{
-    [JsonPropertyName("id")]
-    public required MongoId Id { get; set; }
-
-    [JsonPropertyName("nickname")]
-    public string? Nickname { get; set; }
-
-    [JsonPropertyName("rating")]
-    public required double Rating { get; set; }
-
-    /// <summary>
-    /// The numeric <see cref="MemberCategory"/> - <c>EftEnumConverter</c> writes enums as numbers,
-    /// so this stays an integer on the wire and is cast back by the mapper.
-    /// </summary>
-    [JsonPropertyName("memberType")]
-    public required int MemberType { get; set; }
-
-    [JsonPropertyName("avatar")]
-    public string? Avatar { get; set; }
-
-    [JsonPropertyName("isRatingGrowing")]
-    public required bool IsRatingGrowing { get; set; }
-
-    [JsonPropertyName("aid")]
-    public required int Aid { get; set; }
-}
-
-/// <summary>
-/// <c>Level</c> and <c>Side</c> are only set for dogtag barters, which the dynamic path never
-/// produces - they are nullable so the wire stays faithful if that ever changes.
-/// </summary>
-internal record OfferRequirementWire
-{
-    [JsonPropertyName("_tpl")]
-    public required MongoId TemplateId { get; set; }
-
-    [JsonPropertyName("count")]
-    public required double Count { get; set; }
-
-    [JsonPropertyName("onlyFunctional")]
-    public required bool OnlyFunctional { get; set; }
-
-    [JsonPropertyName("level")]
-    public int? Level { get; set; }
-
-    [JsonPropertyName("side")]
-    public int? Side { get; set; }
-}
-
-internal static class RagfairOfferWireExtensions
-{
-    /// <summary>
-    ///     The native offer as the frozen 4.1.2 DTO the holder stores. <c>SellResults</c>,
-    ///     <c>UnlimitedCount</c> and the two buy-restriction members stay at their defaults: the
-    ///     dynamic path never sets them (<c>RagfairOfferGenerator.cs:118-138</c>).
-    /// </summary>
-    internal static RagfairOffer ToRagfairOffer(this RagfairOfferWire wire)
-    {
-        return new RagfairOffer
-        {
-            Id = wire.Id,
-            InternalId = wire.InternalId,
-            User = new RagfairOfferUser
-            {
-                Id = wire.User.Id,
-                Nickname = wire.User.Nickname,
-                Rating = wire.User.Rating,
-                // The wire carries the numeric EftEnumConverter value, matching CreateUserDataForFleaOffer
-                MemberType = (MemberCategory)wire.User.MemberType,
-                Avatar = wire.User.Avatar,
-                IsRatingGrowing = wire.User.IsRatingGrowing,
-                Aid = wire.User.Aid,
-            },
-            Root = wire.Root,
-            Items = wire.Items,
-            ItemsCost = wire.ItemsCost,
-            Requirements = wire
-                .Requirements.Select(requirement => new OfferRequirement
-                {
-                    TemplateId = requirement.TemplateId,
-                    Count = requirement.Count,
-                    OnlyFunctional = requirement.OnlyFunctional,
-                    Level = requirement.Level,
-                    Side = (DogtagExchangeSide?)requirement.Side,
-                })
-                .ToList(),
-            RequirementsCost = wire.RequirementsCost,
-            SummaryCost = wire.SummaryCost,
-            StartTime = wire.StartTime,
-            EndTime = wire.EndTime,
-            LoyaltyLevel = wire.LoyaltyLevel,
-            SellInOnePiece = wire.SellInOnePiece,
-            Locked = wire.Locked,
-            Quantity = wire.Quantity,
-            // What CreateAndAddFleaOffer:72 sets; the holder's fake-player cap keys off it
-            CreatedBy = OfferCreator.FakePlayer,
-        };
-    }
+    public required List<Diagnostic> Diagnostics { get; set; }
 }

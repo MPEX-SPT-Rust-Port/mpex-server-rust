@@ -1,6 +1,9 @@
+using System.Buffers.Binary;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using SPTarkov.Server.Core.Models.Eft.Ragfair;
+using SPTarkov.Server.Core.Models.Enums;
 using SPTarkov.Server.Core.Native.Bot;
 using SPTarkov.Server.Core.Native.Loot;
 using SPTarkov.Server.Core.Native.Ragfair;
@@ -42,12 +45,11 @@ internal enum LootExport
     RandomLootContainer,
     BotInventory,
     BotInventoryBatch,
-    DynamicOffers,
 }
 
 public static class SptNative
 {
-    private const uint ExpectedAbiVersion = 8;
+    private const uint ExpectedAbiVersion = 9;
 
     // ffi.rs
     private const int StatusOk = 0;
@@ -153,13 +155,128 @@ public static class SptNative
     }
 
     /// <summary>
-    /// Generates one full batch of dynamic flea offers - the assort walk, the per-item offer
-    /// creation and the pricing math.
+    /// Generates one full batch of dynamic flea offers. Unlike the other exports the response is
+    /// a framed envelope — encoding tag, length-prefixed header, one length-prefixed payload per
+    /// offer — deserialized in parallel straight into <see cref="RagfairOffer"/>.
     /// </summary>
     /// <exception cref="InvalidOperationException">Generation failed, or the native side misbehaved.</exception>
-    internal static DynamicOffersResult GenerateDynamicOffers(GenerateDynamicOffersRequest request)
+    internal static FramedOffersResult GenerateDynamicOffers(GenerateDynamicOffersRequest request)
     {
-        return Generate<DynamicOffersResult>(LootExport.DynamicOffers, JsonSerializer.SerializeToUtf8Bytes(request, LootJsonOptions));
+        return GenerateDynamicOffersFramed(JsonSerializer.SerializeToUtf8Bytes(request, LootJsonOptions));
+    }
+
+    /// <summary>
+    /// The raw-bytes seam of <see cref="GenerateDynamicOffers"/>, kept internal so tests can hand
+    /// it JSON no typed payload can express — a mod-added field, or a malformed request.
+    /// </summary>
+    internal static unsafe FramedOffersResult GenerateDynamicOffersFramed(ReadOnlySpan<byte> requestUtf8)
+    {
+        EnsureLoadable();
+
+        byte* outPtr = null;
+        nuint outLen = 0;
+        int status;
+
+        fixed (byte* requestPtr = requestUtf8)
+        {
+            status = NativeMethods.GenerateDynamicOffers(requestPtr, (nuint)requestUtf8.Length, &outPtr, &outLen);
+        }
+
+        try
+        {
+            if (status == StatusOk)
+            {
+                return ParseFramedOffers(outPtr, checked((int)outLen));
+            }
+
+            var message = outPtr == null ? "no message" : Encoding.UTF8.GetString(outPtr, checked((int)outLen));
+            if (status == StatusError)
+            {
+                throw new InvalidOperationException($"spt_native DynamicOffers generation failed: {message}");
+            }
+
+            throw new InvalidOperationException(
+                $"spt_native DynamicOffers generation failed with internal status {status}: {message}; this indicates a native library bug, not corrupt game data."
+            );
+        }
+        finally
+        {
+            NativeMethods.BufFree(outPtr, outLen);
+        }
+    }
+
+    private const byte PayloadJson = 0;
+
+    private static unsafe FramedOffersResult ParseFramedOffers(byte* buffer, int length)
+    {
+        var span = new ReadOnlySpan<byte>(buffer, length);
+        var encoding = span[0];
+        var at = 1;
+
+        var headerLength = checked((int)BinaryPrimitives.ReadUInt32LittleEndian(span[at..]));
+        at += 4;
+        var header =
+            DeserializeHeader(encoding, span.Slice(at, headerLength))
+            ?? throw new InvalidOperationException("spt_native returned an empty DynamicOffers header.");
+        at += headerLength;
+
+        var offerCount = checked((int)BinaryPrimitives.ReadUInt32LittleEndian(span[at..]));
+        at += 4;
+        var frames = new (int Offset, int Length)[offerCount];
+        for (var i = 0; i < offerCount; i++)
+        {
+            var frameLength = checked((int)BinaryPrimitives.ReadUInt32LittleEndian(span[at..]));
+            frames[i] = (at + 4, frameLength);
+            at += 4 + frameLength;
+        }
+
+        if (at != length)
+        {
+            throw new InvalidOperationException($"spt_native DynamicOffers envelope has {length - at} trailing bytes.");
+        }
+
+        var offers = new RagfairOffer[offerCount];
+        var basePointer = (nint)buffer;
+        Parallel.For(
+            0,
+            offerCount,
+            i =>
+            {
+                offers[i] = DeserializeOfferFrame(encoding, basePointer, frames[i].Offset, frames[i].Length);
+            }
+        );
+
+        return new FramedOffersResult
+        {
+            Offers = [.. offers],
+            RejectedCanSellTemplates = header.RejectedCanSellTemplates,
+            Diagnostics = header.Diagnostics,
+        };
+    }
+
+    private static DynamicOffersHeader? DeserializeHeader(byte encoding, ReadOnlySpan<byte> payload)
+    {
+        if (encoding != PayloadJson)
+        {
+            throw new InvalidOperationException($"unknown ragfair payload encoding {encoding}.");
+        }
+
+        return JsonSerializer.Deserialize<DynamicOffersHeader>(payload, LootJsonOptions);
+    }
+
+    private static unsafe RagfairOffer DeserializeOfferFrame(byte encoding, nint buffer, int offset, int length)
+    {
+        var frame = new ReadOnlySpan<byte>((byte*)buffer + offset, length);
+        if (encoding != PayloadJson)
+        {
+            throw new InvalidOperationException($"unknown ragfair payload encoding {encoding}.");
+        }
+
+        var offer =
+            JsonSerializer.Deserialize<RagfairOffer>(frame, LootJsonOptions)
+            ?? throw new InvalidOperationException("spt_native returned an empty ragfair offer frame.");
+        offer.CreatedBy = OfferCreator.FakePlayer;
+        return offer;
     }
 
     /// <summary>
@@ -207,7 +324,6 @@ public static class SptNative
                     &outPtr,
                     &outLen
                 ),
-                LootExport.DynamicOffers => NativeMethods.GenerateDynamicOffers(requestPtr, (nuint)requestUtf8.Length, &outPtr, &outLen),
                 _ => throw new ArgumentOutOfRangeException(nameof(export), export, null),
             };
         }
