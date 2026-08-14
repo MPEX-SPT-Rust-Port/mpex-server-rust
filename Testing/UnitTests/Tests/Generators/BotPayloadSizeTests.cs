@@ -154,6 +154,28 @@ public class BotPayloadSizeTests
                     );
                 }
             }
+
+            // slots, chambers and cartridges are all SlotView, and every native read of its
+            // `required` is an unwrap_or(false) too
+            foreach (var slotArray in new[] { "slots", "chambers", "cartridges" })
+            {
+                if (!item.Value.TryGetProperty(slotArray, out var slots))
+                {
+                    continue;
+                }
+
+                foreach (var slot in slots.EnumerateArray())
+                {
+                    if (slot.TryGetProperty("required", out var required))
+                    {
+                        Assert.That(
+                            required.ValueKind is JsonValueKind.False,
+                            Is.False,
+                            $"{item.Name}.{slotArray}[].required is on the wire at its default; the native side unwraps to it anyway"
+                        );
+                    }
+                }
+            }
         }
 
         // questItem keeps null and false distinct, and canSellOnRagfair defaults to true in the

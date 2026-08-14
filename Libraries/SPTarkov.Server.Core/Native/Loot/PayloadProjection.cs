@@ -157,7 +157,7 @@ internal static class PayloadProjection
             ?.Select(slot => new SlotView
             {
                 Name = slot.Name,
-                Required = slot.Required,
+                Required = NullIfFalse(slot.Required),
                 Filter = slot.Properties?.Filters?.FirstOrDefault()?.Filter,
                 Plate = slot.Properties?.Filters?.FirstOrDefault()?.Plate,
             })
