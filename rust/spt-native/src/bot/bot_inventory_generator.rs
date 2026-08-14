@@ -70,6 +70,7 @@
 //!    as listed in [`crate::bot::bot_weapon_generator`].
 //! 4. `GenerateLoot` (`:111`) — as listed in [`crate::bot::bot_loot_generator`].
 use indexmap::{IndexMap, IndexSet};
+use rayon::prelude::*;
 
 use crate::bot::BotContext;
 use crate::bot::bot_equipment_mod_generator::{
@@ -223,14 +224,20 @@ pub fn generate_inventory(
     )
 }
 
-/// One wave in one call: the shared views are parsed and borrowed once, then every bot is generated
-/// against them.
+/// One wave in one call: the shared views are parsed once, then every bot is generated against
+/// them, in parallel. Envelope order matches request order.
 ///
-/// Bots are generated in request order on the calling thread. The clamp feedback loop
-/// (`randomisation_clamps`, see the module docs) still travels back to C# per bot rather than being
-/// applied to [`SharedBotViewsWire::equipment`] between iterations, which is what the per-bot path
-/// does today - `BotController.GenerateBotWave` generates a wave under `.AsParallel()`, so no bot
-/// has ever been able to rely on seeing its predecessor's clamps.
+/// The clamp feedback loop (`randomisation_clamps`, see the module docs) is NOT applied between
+/// bots here — the C# dispatcher routes any wave that could write nighttime clamps to the per-bot
+/// path (`BotWaveBatcher.CanBatch`), so a batch is clamp-free by construction and every envelope's
+/// `randomisation_clamps` comes back empty. That guarantee is what makes the parallel loop safe.
+///
+/// Thread-safety inventory: the shared views are borrowed immutably; every `&mut` in
+/// `generate_one` is bot-local; `MongoId`'s counter is atomic; the RNG is `thread_local!` and
+/// `generate_one` installs its own seed guard per bot, so seeded output is deterministic per bot
+/// regardless of worker assignment. The guard's `Drop` also parks the stream in `PARKED_RNG`,
+/// which is harmless here: the only consumer of a park is the loot dynamic entry point, which
+/// runs on C# calling threads, never on rayon workers — parks left on workers are dead writes.
 ///
 /// A bot that fails comes back as an error envelope; the rest of the wave still generates.
 pub fn generate_inventory_batch(
@@ -239,7 +246,7 @@ pub fn generate_inventory_batch(
     let GenerateBotInventoryBatchRequest { shared, bots } = request;
 
     let bots = bots
-        .into_iter()
+        .into_par_iter()
         .map(|slice| match generate_one(&shared, slice) {
             Ok(result) => BotResultEnvelope {
                 result: Some(result),
