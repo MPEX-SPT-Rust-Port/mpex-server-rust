@@ -238,8 +238,9 @@ and `.AsParallel()` over a single element is the serial arm.
 
 ## Results — ragfair offer generation
 
-Recorded 2026-08-13 on `ad1b6ea`. Same machine as the bot-generation figures above, **not** the
-machine the location-loot figures came from.
+Recorded 2026-08-14, final figures on `df07d54` — the end of the native-parity effort
+(`.superpowers/sdd/2026-08-14-ragfair-native-parity/`). Same machine as the bot-generation figures
+above, **not** the machine the location-loot figures came from.
 
 | | |
 |---|---|
@@ -252,8 +253,9 @@ machine the location-loot figures came from.
 
 **Workload.** Two `RagfairOfferGenerator.GenerateDynamicOffers` calls on the live shipped database,
 the two the server actually makes. *Full pass*: no expired offers, so the assort is generated and
-every sellable template gets its offers — ~24k offers with full item trees. *Regeneration pass*:
-1,400 cloned single-item lists (the configured `expiredOfferThreshold`), the shape
+every sellable template gets its offers — ~58k offers with full item trees, of which the holder's
+per-template cap accepts ~24k. *Regeneration pass*: 1,400 cloned single-item lists (the configured
+`expiredOfferThreshold`), the shape
 `RagfairServer.ProcessExpiredFleaOffers` hands over. `RagfairPayloadProjection.BuildRequest` is
 timed on its own in a third phase per scenario.
 
@@ -267,64 +269,135 @@ below is unaffected; it does change what the offer column means (see below).
 
 ### Wall clock
 
-| Scenario | Path | median | mean | min | max | offers | alloc/run |
+| Scenario | Path | median | mean | min | max | offers accepted | alloc/run |
 |---|---|---|---|---|---|---|---|
-| full pass | native (rust) | **1485.30 ms** | 1463.00 ms | 1385.77 ms | 1505.78 ms | 24,190 | 184.1 MB |
-| full pass | legacy (C# 4.1.2) | 436.57 ms | 439.95 ms | 409.66 ms | 483.10 ms | 24,296 | 283.9 MB |
-| full pass | `BuildRequest` only | 14.90 ms | 14.80 ms | 8.37 ms | 21.58 ms | — | 7.1 MB |
-| regeneration | native (rust) | **94.70 ms** | 93.62 ms | 88.12 ms | 97.71 ms | 893 | 17.5 MB |
-| regeneration | legacy (C# 4.1.2) | 10.74 ms | 10.64 ms | 7.26 ms | 13.62 ms | 873 | 5.9 MB |
-| regeneration | `BuildRequest` only | 13.03 ms | 13.16 ms | 8.37 ms | 18.09 ms | — | 7.1 MB |
+| full pass | native (rust) | **625.78 ms** | 703.63 ms | 614.24 ms | 872.36 ms | 24,387 | 219.3 MB |
+| full pass | legacy (C# 4.1.2) | 426.57 ms | 444.94 ms | 409.61 ms | 520.09 ms | 24,296 | 283.1 MB |
+| full pass | `BuildRequest` only | 13.39 ms | 14.18 ms | 8.79 ms | 20.48 ms | — | 7.1 MB |
+| regeneration | native (rust) | **74.59 ms** | 74.96 ms | 67.44 ms | 83.60 ms | 911 | 17.6 MB |
+| regeneration | legacy (C# 4.1.2) | 10.25 ms | 10.43 ms | 5.58 ms | 16.06 ms | 920 | 5.9 MB |
+| regeneration | `BuildRequest` only | 13.85 ms | 14.74 ms | 8.43 ms | 22.26 ms | — | 7.1 MB |
 
-Speedup on median wall clock: **0.29x** on the full pass (**3.4x slower**) and **0.11x** on the
-regeneration pass (**8.8x slower**). Projection share of the native median: **1.0%** (full pass),
-**13.8%** (regeneration).
+Speedup on median wall clock: **0.68x** on the full pass (**1.47x slower**) and **0.14x** on the
+regeneration pass (**7.3x slower**). Projection share of the native median: **2.1%** (full pass),
+**18.6%** (regeneration).
 
 The offer column is **offers accepted into an already-full flea**, not offers the path produced.
-`RagfairOfferHolder.AddOffer` drops a fake-player offer once that template is at its cap, and the
-cap is re-rolled per call (`RagfairServerHelper.GetOfferCountByBaseType` is a `RandomUtil.GetInt`
-over the configured range), so a full flea still admits whatever a high roll leaves room for. That
-is why 1,400 distinct expired templates land as ~880 offers — the pre-filled holder, not anything
-about the run's own interleaving. Against an empty holder the same input would land as ~1,400. The
-two paths land within 0.5% of each other on the full pass, so both are doing the same amount of
-work.
+The full pass *produces* ~58k offers — the framed response captured for the deserialize attribution
+below held 58,137 frames — and `RagfairOfferHolder.AddOffer` drops a fake-player offer once that
+template is at its cap, which is what leaves ~24k. The cap is re-rolled per call
+(`RagfairServerHelper.GetOfferCountByBaseType` is a `RandomUtil.GetInt` over the configured range),
+so a full flea still admits whatever a high roll leaves room for. That is also why 1,400 distinct
+expired templates land as ~900 offers — the pre-filled holder, not anything about the run's own
+interleaving. Against an empty holder the same input would land as ~1,400. The two paths land
+within 0.5% of each other on the full pass, so both are doing the same amount of work.
 
-Working set over the timed phase: native grows +265 MB on the full pass against the legacy path's
+Wire volume: that same capture was **41.4 MB** of framed JSON — a **stage B (ABI 9)** figure. The
+shipped path is stage C, the same frames carrying MessagePack payloads (ABI 10), and its wire size
+was never re-measured. Quote the 41.4 MB with its stage label, not as the current number.
+
+Working set over the timed phase: native grows +467 MB on the full pass against the legacy path's
 +0 MB; peak RSS is process-wide and cumulative, so only the growth figures are comparable, and only
 within one invocation.
 
-**This is a gate failure.** The full pass is the one the plan said to judge on, and native loses it.
-The shape differs from bot generation: there the fixed payload was the whole story, here it is not.
-`BuildRequest` is 15 ms of a 1,485 ms native pass — **1%** — so nothing on the projection side can
-buy back a loss of this size (and caching the projection is off the table anyway: see
-[RUST-ROADMAP.md](RUST-ROADMAP.md) roadmap #3).
+### Checkpoint series — what the native-parity effort bought
 
-The remaining ~1.47 s splits in two, and the fixture's own log says how. The native side replays its
-internal timings through the same logger the legacy path uses, and they read `Took 709-722ms to
-CreateOffersFromAssort` on every full-pass run: **~713 ms — 48% of the native median — is the Rust
-generation itself**, running single-threaded. The legacy path's own diagnostic for the same work is
-375-469 ms (median ~405 ms of its 437 ms total), spread across 12 threads. The other **~772 ms** of
-the native pass is the wrapper: serialising the request, the FFI crossing, deserialising a response
-of ~24k offers with full item trees, and inserting them into the holder — the response volume
-spec §7 flagged as the unknown. So neither half alone explains the loss: a free projection saves 1%,
-a perfect wrapper still leaves single-threaded Rust generation at ~1.75x the parallel C#, and a
-parallelised Rust batch still pays ~772 ms of wrapper. On the regeneration pass the internal figure
-is 16 ms of a 94.7 ms median — there the wrapper is nearly the whole cost.
+Each row is one `RagfairBenchmarkTests` invocation, medians, same machine, native and legacy from
+the **same run**. Ratio is native / legacy on the full pass; above 1.00x means native is slower.
+
+| Stage | Commit | Full pass native | Full pass legacy | Ratio | Regen native | Regen legacy | Alloc/run native |
+|---|---|---|---|---|---|---|---|
+| Baseline | `7fab74d` | 1550 ms | 517 ms | 3.00x | ~103 ms | ~12.8 ms | not recorded |
+| A — rayon batch fan-out | `5fefd61` | 884.67 ms | 454.37 ms | 1.95x | 85.42 ms | 9.87 ms | 182.9 MB |
+| B — framed response, ABI 9 | `357c7f3` | 676.12 ms | 443.22 ms | 1.53x | 75.00 ms | 10.50 ms | 208.4 MB |
+| C — MessagePack payloads, ABI 10 | `d076b39` | 719.39 ms | 441.66 ms | 1.63x | 75.67 ms | 10.78 ms | 358.3 MB |
+| C — reader allocation remediation | `a2acb6f` | 663.95 ms | 457.44 ms | 1.45x | 76.14 ms | 10.51 ms | 219.9 MB |
+| One-pass fresh-id offer items | `df07d54` | 625.78 ms | 426.57 ms | **1.47x** | 74.59 ms | 10.25 ms | 219.3 MB |
+
+**Stage A** moved generation, not the pass: the `CreateOffersFromAssort` timer inside the native
+full pass fell from ~710 ms to ~97 ms, while the full pass only fell 1550 → 885 ms. Everything
+after that is transport work.
+
+**Stage C regressed on arrival** — 676.12 → 719.39 ms with native alloc/run up 208.4 → 358.3 MB
+(+72%) at a flat offer count, reproduced back-to-back. The cost was in the C# reader, not the
+codec: a `ToArray` copy per frame, a fresh `Utf8JsonWriter` pair per transcoded value, a reflection
+`GetValue` per item, and ~2M `ReadString` map-key allocations per pass. Removing all four
+(`a2acb6f`) brought it to 663.95 ms / 219.9 MB — msgpack then beat the stage B JSON frames it
+replaced, by 12 ms, at +11.5 MB.
+
+**The one-pass fresh-id change is real but small.** Full-pass medians cannot resolve it: run-to-run
+spread on the native median is ±25 ms, and an A/B with the change stashed and unstashed read
+1.46x/1.46x before against 1.47x/1.53x after. The finer instrument is the `CreateOffersFromAssort`
+timer, which measures only the leg the change touches — median 92 → 85 ms, **~8% off a ~92 ms
+generation leg**, which is ~1% of a transport-bound pass.
+
+### The 1.25x parity gate — MISSED
+
+The effort's success criterion was a native full-pass median at or under **1.25x** the same-run
+legacy median. The final state is **1.47x** (625.78 / 426.57; the bar was 533.2 ms), and the
+preceding checkpoint was 1.45x. **The gate is missed and every in-scope lever is spent.**
+
+What was achieved instead: the full pass went **1550 → 626 ms, a 2.48x improvement** on the native
+path, and native allocation fell below legacy's (219 MB vs 283 MB). Native is now within ~200 ms of
+legacy rather than a second behind it, but it is still behind it.
+
+Where the residual sits, measured rather than assumed:
+
+- **Not generation.** The Rust half is ~85 ms of a ~626 ms pass.
+- **Not the payload projection.** `BuildRequest` is 13 ms, ~2% of the full pass.
+- **Not converter taxes.** Timed at their real per-pass instance counts against the shipped
+  `Parallel.For` deserialize (~305 ms, 41.4 MB / 58,137 frames): the Ceciler-injected
+  `[JsonExtensionData]` dictionary is **3.4 ms**, `MongoId`'s ctor validation over 425,550 ids is
+  **11.1 ms**, and `string.Intern` on 58,558 nicknames is **15.1 ms** — ~30 ms all together, 15x
+  under the 50 ms bar that would have justified changing the injected property. (The 3.4 ms is the
+  dictionaries' allocation cost measured in isolation, not System.Text.Json's metadata overhead for
+  them.)
+- **It is C#-side response binding plus GC.** The pass materialises **366,851** `Models` instances
+  (`Item` 83,292, `Upd` 60,325, `RagfairOffer`/`OfferRequirement`/`RagfairOfferUser` 58,558 each,
+  `UpdRepairable` 43,300, tail 4,260). After the ~30 ms of taxes above, the remaining ~275 ms is
+  System.Text.Json binding those objects, which no converter-level change reaches. Legacy has no
+  equivalent leg at all — it never crosses a wire. (That ~305 ms leg is larger than the ~199 ms
+  native is behind legacy; the two do not subtract, because the rest of the native pass is cheaper
+  than the C# work legacy does in its place. Removing the leg entirely would put native ahead.)
+
+**The fixture runs workstation GC; the shipped server does not.**
+`<ServerGarbageCollection>true</ServerGarbageCollection>` is set on `SPTarkov.Server.csproj` only,
+not on `UnitTests.csproj`, so at ~220 MB per pass the fixture's parallel deserialize is
+GC-throttled — single-threaded deserialize (268.6 ms) actually beat the `Parallel.For` one
+(304.8 ms) in the attribution run. Re-running the whole benchmark with `DOTNET_gcServer=1` on the
+same commit and machine moves **both** sides, so the verdict does not change:
+
+```
+full pass native (rust)     median=558.95 ms  min=417.63  alloc/run=209.1 MB
+full pass legacy (C# 4.1.2) median=329.51 ms  min=300.32  alloc/run=282.6 MB
+                            ratio 1.70x (vs 1.53x under workstation GC at the same commit)
+```
+
+Server GC takes ~117 ms off native and ~113 ms off legacy — the ratio is unchanged to slightly
+worse while both absolute numbers improve. Read the shipped server's real numbers off the server-GC
+figures and the *comparison* off either; the gate was evaluated in the fixture's own GC mode, for
+consistency with the baseline it was set against.
+
+**The regeneration pass is a different problem.** ~60% of it is building and serialising the 5.8 MB
+call-invariant request slice, against ~1% of a full pass — the one place where a request-side cache
+would pay. It needs a database mutation stamp first; see [RUST-ROADMAP.md](RUST-ROADMAP.md) roadmap
+#3 and #8.
 
 Ragfair-specific caveats, on top of the general ones below:
 
-- **The legacy path is parallel, the native path is not.** `GenerateDynamicOffersLegacy` fans one
-  `Task.Factory.StartNew` per assort entry across the thread pool; on this 12-thread machine it does
-  its 405 ms of generation in 437 ms of wall clock. The native side runs the ragfair batch on the
-  calling thread — rayon is in the crate, but only the bot batch uses it — so its 713 ms of
-  generation is 713 ms of wall clock. A single-threaded legacy comparison is not measured; against
-  one, native would look better, but the parallel version is what the server actually runs.
+- **The legacy path is parallel, and so is the native path now.** `GenerateDynamicOffersLegacy`
+  fans one `Task.Factory.StartNew` per assort entry across the thread pool; since `5fefd61` the
+  native side fans the unseeded batch walk across rayon (seeded runs stay sequential for parity),
+  and the C# side deserialises the response frames with `Parallel.For`. Both paths are using the
+  12 threads.
 - **Every timed run works on a pre-filled flea** (see Workload). Both paths pay the holder's
   per-template cap checks against a full `_fakePlayerOffers` index, so the absolute numbers include
   work an empty-flea pass would not do — but symmetrically, and this is the state the real
   regeneration pass runs in.
 - **n=5 after 1 warmup**, not the 20 the other fixtures use — a full pass is seconds, not
-  milliseconds. Spread is narrow (native full pass 1386-1506 ms), so the medians are still usable.
+  milliseconds. Spread is now wide relative to the differences being measured (native full pass
+  614-872 ms, and ±25 ms run-to-run on the median), so a change worth less than ~5% of the pass
+  cannot be resolved here — use the `CreateOffersFromAssort` timer the native path logs instead.
 - **Regeneration input is fixed.** The same 1,400 single-item lists every run, sampled from the head
   of the assort rather than from offers that actually expired. Real expired offers skew towards
   fast-selling templates and can carry item trees.
@@ -333,7 +406,7 @@ Ragfair-specific caveats, on top of the general ones below:
   both paths.
 - **Native is measured first in each scenario**, so the legacy phase inherits a warmer process (and
   a heap already grown to the native path's high-water mark). That biases mildly *against* native —
-  it does not account for a 3.4x gap, but the gap is not smaller than measured.
+  it does not account for the remaining 1.47x, but the gap is not smaller than measured.
 
 ## Caveats
 

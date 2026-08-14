@@ -154,7 +154,8 @@ startup outside DEBUG. That format is a contract shared with `rust/spt-native/sr
 `rust/spt-native` is a `cdylib` called over C ABI from `Libraries/SPTarkov.Server.Core/Native/`
 (`NativeMethods.cs`, `SptNative.cs`). It owns database hash verification and the ported generation
 paths: location loot, reward loot, whole-bot inventory, and dynamic ragfair offers. Twelve exports,
-JSON in / JSON out, with `spt_native_abi_version` handshaking against `SptNative.ExpectedAbiVersion`.
+JSON in / JSON out — except the ragfair response, which comes back as a framed MessagePack envelope
+— with `spt_native_abi_version` handshaking against `SptNative.ExpectedAbiVersion`.
 
 Every ported class keeps its complete 4.1.2 C# implementation as a **legacy path**, taken
 automatically when a mod hooks it or forced by config — so a Rust cutover never removes a mod's
@@ -199,8 +200,11 @@ The two escape hatches are config flags: `forcePerBotGeneration` (batch off, nat
 
 One export, `spt_generate_dynamic_offers`, called **once per batch** from
 `RagfairOfferGenerator.GenerateDynamicOffers` — its two callers are `RagfairServer.Load()` (the
-startup full pass, ~24k offers) and `RagfairServer.Update()`'s expired-offer regeneration. The call
-folds in three collaborators: `RagfairPriceService`, `RagfairServerHelper`, `RagfairAssortGenerator`.
+startup full pass, ~58k offers generated, ~24k accepted past the holder's cap) and
+`RagfairServer.Update()`'s expired-offer regeneration. The call folds in three collaborators:
+`RagfairPriceService`, `RagfairServerHelper`, `RagfairAssortGenerator`. Uniquely among the exports
+it answers with a framed MessagePack envelope — one frame per offer, deserialised in parallel —
+rather than one JSON buffer.
 
 What stays C#: the `AddOffer` insert loop and the holder's live per-template cap; the player-offer
 path (`CreateAndAddFleaOffer`/`CreateOffer`); `GenerateFleaOffersForTrader`. `RagfairPriceService`

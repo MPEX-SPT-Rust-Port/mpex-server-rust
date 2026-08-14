@@ -9,7 +9,8 @@ internals see [rust/ARCHITECTURE.md](rust/ARCHITECTURE.md); for the C# side of t
 The loot family, the bot family and dynamic ragfair offer generation are ported and run natively by
 default. Every ported class keeps its full 4.1.2 C# implementation as a **legacy path**, selected
 automatically when a mod hooks it or manually via a config flag. Twelve C-ABI exports (`src/ffi.rs`)
-carry it, all JSON in / JSON out.
+carry it, JSON in and JSON out — except the ragfair response, which is a framed MessagePack
+envelope (ABI 10) the C# side parses in parallel.
 
 ## Working
 
@@ -46,13 +47,20 @@ seeded-RNG parity at the primitive level (xoshiro256\*\*, twin known-answer test
   the win is amortising the shared block, and transport stays single-threaded on the C# side.
 - **Reward loot is ~3x slower** — ~53 ms native vs ~17 ms legacy per `CreateRandomLoot`; same
   per-call items-view projection with only 15-35 items to amortise it against.
-- **Ragfair generation is 3.4x slower on the full pass** — 1485 ms native vs 437 ms legacy, and
-  8.8x on the expired-offer regeneration pass (95 ms vs 11 ms). Two roughly equal halves: ~713 ms of
-  single-threaded Rust generation against legacy's 12-thread fan-out, and ~772 ms of wrapper —
-  request serialisation, the FFI crossing and deserialising ~24k offers with full item trees. The
-  payload projection is only 1% of the full pass, so trimming or caching it is *not* the lever
-  here. Absolute cost is small (once at startup, then per-expiry bursts) and native stays the
-  default for family consistency; `RagfairConfig.ForceLegacyRagfairGeneration` is the opt-out.
+- **Ragfair generation is 1.47x slower on the full pass** — 626 ms native vs 427 ms legacy, and
+  7.3x on the expired-offer regeneration pass (75 ms vs 10 ms). Down from 3.0x after the
+  native-parity effort (1550 → 626 ms, a 2.48x improvement on the native path), but the 1.25x
+  parity gate was **missed** and every in-scope lever is spent — see the ragfair section of
+  BENCHMARK.md. What is left is neither generation (~85 ms) nor the payload projection (~13 ms,
+  ~2%): it is the C# side binding ~367k `Models` objects out of the response, plus GC. Absolute
+  cost is small (once at startup, then per-expiry bursts) and native stays the default for family
+  consistency; `RagfairConfig.ForceLegacyRagfairGeneration` is the opt-out.
+- **`get_flea_prices_as_array` is O(offers × price table) if a mod enables barters** — it re-derives
+  the whole filtered flea price list per barter offer, with an `is_of_baseclasses` walk per entry.
+  Dead on shipped data (`ragfair.json` `dynamic.barter.chancePercent` is `0`, so no barter offer is
+  ever rolled), but a mod that raises that percentage pays it on every barter offer of a ~58k-offer
+  pass. Legacy avoids it by caching the list in `AllowedFleaPriceItemsForBarter` — the same cache
+  that makes legacy stale (next bullet). Latent, not measured.
 - **The native ragfair path is fresher than legacy for runtime-added items** — the C#
   `AllowedFleaPriceItemsForBarter` cache is built once per generator instance and never invalidated;
   Rust re-derives it per call. A divergence in native's favour, but a divergence.
@@ -145,13 +153,20 @@ seeded-RNG parity at the primitive level (xoshiro256\*\*, twin known-answer test
   itself, the dispatcher. A container-substituted subclass of any of the three collaborators flips
   too. `RagfairConfig.ForceLegacyRagfairGeneration` is the flag, and `RagfairConfig` was already an
   injected parameter, so nothing about the constructor moved.
-- **The ragfair batch walk is sequential.** `GenerateDynamicOffersLegacy` fans one
-  `Task.Factory.StartNew` per assort entry; the native side walks the batch on the calling thread.
-  Deliberate, and the larger half of the performance loss above. Rayon (`1.12.0`) is in the crate,
-  but only `generate_inventory_batch` uses it: `bots.into_par_iter()`, with a per-bot `TestSeedGuard`
-  so seeded output stays deterministic per bot regardless of which worker takes it, and no effect on
-  `PARKED_RNG` — the only consumer of a park is the loot dynamic entry point, which never runs on a
-  rayon worker.
+- **The ragfair batch walk is parallel only when unseeded.** An unseeded walk fans across rayon
+  (`1.12.0`): a forked `RagfairContext` per assort entry, results and diagnostics merged back in
+  assort order with `intId` reassigned during the merge, so the counter is sequential regardless of
+  which worker finished first. A **seeded** walk stays sequential — the seeded RNG is
+  `thread_local`, and all 19 `RagfairParityTests` cases set a seed, so parity rides the unchanged
+  path byte-for-byte. Production is unseeded on both paths (legacy fans one `Task.Factory.StartNew`
+  per assort entry), so the parallel arm breaks no promise. Same rayon rules as the bot batch: no
+  effect on `PARKED_RNG`, whose only consumer is the loot dynamic entry point, which never runs on
+  a rayon worker.
+- **The ragfair response is a framed MessagePack envelope, not a JSON buffer.** One length-prefixed
+  frame per offer behind a header frame (ABI **10**, encoding tag 1), which C# deserialises with
+  `Parallel.For` over the frames straight out of the native buffer — no whole-response JSON
+  document is ever materialised. Only the ragfair response uses it; every other export is still
+  JSON in / JSON out.
 - **One timestamp per ragfair batch**, where legacy calls `TimeUtil.GetTimeStamp()` as each offer is
   built. `startTime` is therefore uniform across a native batch, and `endTime` is that timestamp
   plus the same per-offer random spread legacy draws.
@@ -163,23 +178,34 @@ seeded-RNG parity at the primitive level (xoshiro256\*\*, twin known-answer test
 
 1. ~~Mod-compatibility test gaps~~ — done, `ModCompatibilityTests` (`todo/TODO-TESTING.md`).
 2. ~~Ragfair offer + price generation~~ — done, `.superpowers/sdd/2026-08-13-ragfair-port/`
-   (`todo/TODO.md` #4). Native by default, 19/19 parity, but slower than legacy — see items 4a/4b.
+   (`todo/TODO.md` #4). Native by default, 19/19 parity, still slower than legacy — see item 4.
 3. ~~Shared invalidation-aware items-view cache~~ — **retracted.** There is no database mutation
    stamp, and mods mutate the database at runtime, so a cache cannot know when it is stale;
    rebuilding the projection per call is the only correct choice until such a stamp exists
    (guideline 3). It would also only have covered the ~20% build phase of the bot payload cost, and
-   ~1% of a ragfair full pass.
-4. The two ragfair performance levers, neither of which is item 3:
-   - **a. Fan the batch walk out with rayon** — attacks the ~713 ms single-threaded generation half,
-     against legacy's 12-thread ~405 ms.
-   - **b. Slim the response** — the other ~772 ms is serialising, crossing and deserialising ~24k
-     offers with full item trees. Both together are projected at ~1.6-1.8x, i.e. still short of the
-     legacy path; ship them only if the startup and per-expiry bursts start to matter.
+   ~1% of a ragfair full pass. **One exception, measured after the fact:** the ragfair
+   *regeneration* pass spends ~60% of its time building and serialising the 5.8 MB call-invariant
+   request slice, so it is the one caller where the cache would pay — see item 8, which still
+   requires the stamp first.
+4. ~~The two ragfair performance levers~~ — **done, gate missed.** Both shipped: the batch walk
+   fans across rayon when unseeded, and the response is a framed MessagePack envelope (ABI 10)
+   deserialised in parallel, plus a one-pass fresh-id offer copy. Full pass **1550 → 626 ms**
+   (2.48x), regeneration ~103 → 75 ms, and native allocation now under legacy's (219 vs 283 MB).
+   The 1.25x parity target was **missed at 1.47x** and the in-scope levers are exhausted; the
+   residual is C#-side binding of ~367k `Models` objects out of the response, not generation
+   (~85 ms) and not the projection (~13 ms). Figures and attribution: BENCHMARK.md § *Results —
+   ragfair offer generation*, effort record `.superpowers/sdd/2026-08-14-ragfair-native-parity/`.
 5. `ConcurrentDictionary` mod-pool ordering divergence — project the C# enumeration order across the
    FFI per item rather than emulating .NET's hash.
 6. Full-output golden tests (same seed, bit-identical output vs the legacy path as oracle) for the
    loot and bot families; ragfair already has them (`RagfairParityTests`).
 7. `checks.dat` generate path in Rust (`todo/TODO.md` #12) — detached quick win, drops
    `PostBuild.cs`'s `System.IO.Hashing` NuGet dependency.
-8. Later candidates, in `todo/TODO.md` order: repeatable quests, scav case rewards, weather, fence
+8. **Database mutation stamp, then a cached serialized request slice** — the sanctioned way to
+   reopen the request-side cache item 3 retracted, and the only lever left on the ragfair
+   regeneration pass (~60% of it is building and serialising a 5.8 MB slice that does not change
+   between calls). **The stamp is the precondition, and it is the hard half**: a counter every
+   mod-facing database mutation path bumps, so a cache can tell staleness. Do not cache first and
+   add the stamp later — that is exactly the incorrect cache guideline 3 forbids.
+9. Later candidates, in `todo/TODO.md` order: repeatable quests, scav case rewards, weather, fence
    assorts, raid-time adjustment, ragfair linked-item table.
