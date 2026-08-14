@@ -174,7 +174,14 @@ public class SptNativeRagfairWireTests
         var json = JsonNode.Parse(JsonSerializer.Serialize(_request, JsonUtil.JsonSerializerOptionsNoIndent))!.AsObject();
         var itemTpl = json["items"]!.AsObject().First().Key;
         json["expiredOffers"] = new JsonArray(
-            new JsonArray(new JsonObject { ["_id"] = "0123456789abcdef01234567", ["_tpl"] = itemTpl, ["modField"] = "kept" })
+            new JsonArray(
+                new JsonObject
+                {
+                    ["_id"] = "0123456789abcdef01234567",
+                    ["_tpl"] = itemTpl,
+                    ["modField"] = "kept",
+                }
+            )
         );
 
         var result = SptNative.GenerateDynamicOffersFramed(System.Text.Encoding.UTF8.GetBytes(json.ToJsonString()));
