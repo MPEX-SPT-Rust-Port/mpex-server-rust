@@ -127,6 +127,81 @@ public class BotPayloadSizeTests
         );
     }
 
+    /// <summary>
+    /// The batch request carries the shared block once for the whole wave, so its per-bot cost is
+    /// <c>shared/N + slice</c>. Nothing else guards that block from re-inflating - which is the very
+    /// thing both fixes exist to protect - so this pins the ratio rather than an absolute size: at a
+    /// wave of 10 a bot must cost under a fifth of a single-bot request.
+    /// </summary>
+    [Test]
+    public void BatchAmortisesTheSharedBlock()
+    {
+        const int waveSize = 10;
+
+        var singleBytes = SerializeRequest().Length;
+        var batchBytes = JsonSerializer.SerializeToUtf8Bytes(BuildBatchRequest(waveSize), JsonUtil.JsonSerializerOptionsNoIndent!).Length;
+
+        Assert.That(
+            batchBytes / waveSize,
+            Is.LessThan(singleBytes / 5),
+            "the shared block stopped amortising - something per-bot moved into it, or a per-bot member grew"
+        );
+    }
+
+    private GenerateBotInventoryBatchRequest BuildBatchRequest(int waveSize)
+    {
+        var details = new BotGenerationDetails
+        {
+            Role = "pmcUSEC",
+            RoleLowercase = "pmcusec",
+            Side = "Usec",
+            BotDifficulty = "normal",
+            GameVersion = "standard",
+            BotLevel = 1,
+            IsPmc = true,
+        };
+
+        return new GenerateBotInventoryBatchRequest
+        {
+            Shared = BotPayloadProjection.BuildSharedViews(
+                _sessionId,
+                details.RoleLowercase,
+                _profileHelper,
+                _profileActivityService,
+                _weatherHelper,
+                _botGeneratorHelper,
+                _botEquipmentFilterService,
+                _botEquipmentModGenerator.PresetHelper,
+                _botEquipmentModGenerator.ItemFilterService,
+                _itemHelper,
+                _botWeaponGenerator.GlobalTable,
+                _botConfig,
+                _pmcConfig,
+                _botWeaponGenerator.RepairConfig
+            ),
+            Bots =
+            [
+                .. Enumerable
+                    .Range(0, waveSize)
+                    .Select(_ =>
+                    {
+                        var template = _cloner.Clone(_botTable.Types["usec"])!;
+                        _botEquipmentFilterService.FilterBotEquipment(_sessionId, template, details);
+
+                        return BotPayloadProjection.BuildBotSlice(
+                            new MongoId(),
+                            template,
+                            details,
+                            null,
+                            _botLootGenerator.BotLootCacheService,
+                            _botLootGenerator.HandbookHelper,
+                            _pmcConfig
+                        );
+                    }),
+            ],
+        };
+    }
+
     private byte[] SerializeRequest()
     {
         var details = new BotGenerationDetails

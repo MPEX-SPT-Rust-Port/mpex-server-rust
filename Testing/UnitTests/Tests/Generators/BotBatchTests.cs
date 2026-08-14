@@ -107,6 +107,11 @@ public class BotBatchTests
 
     /// <summary>
     /// The number the batching question turns on: wall clock per bot, both paths, same wave.
+    ///
+    /// Three arms, because the sequential per-bot arm is not what production runs -
+    /// <c>BotController.GenerateBotWave</c> generates a wave under <c>.AsParallel()</c>. Comparing a
+    /// single-threaded batch against a single-threaded loop measures CPU time, which flatters the
+    /// batch by roughly the core count. The parallel arm is the honest baseline.
     /// </summary>
     [Test]
     [Explicit("benchmark, run on demand in Release")]
@@ -130,6 +135,7 @@ public class BotBatchTests
             GC.Collect();
 
             var perBotTimings = new List<double>();
+            var parallelTimings = new List<double>();
             var batchTimings = new List<double>();
 
             // Measured outside the timed loops - each path serialises its own request once inside
@@ -150,6 +156,12 @@ public class BotBatchTests
                 stopwatch.Stop();
                 perBotTimings.Add(stopwatch.Elapsed.TotalMilliseconds / waveSize);
 
+                // What GenerateBotWave actually does
+                stopwatch = Stopwatch.StartNew();
+                cases.AsParallel().ForAll(entry => SptNative.GenerateBotInventory(BuildSingleRequest(entry.Case, null)));
+                stopwatch.Stop();
+                parallelTimings.Add(stopwatch.Elapsed.TotalMilliseconds / waveSize);
+
                 stopwatch = Stopwatch.StartNew();
                 _ = SptNative.GenerateBotInventoryBatch(BuildBatchRequest(cases));
                 stopwatch.Stop();
@@ -157,10 +169,12 @@ public class BotBatchTests
             }
 
             var perBot = Median(perBotTimings);
+            var parallel = Median(parallelTimings);
             var batch = Median(batchTimings);
             TestContext.Out.WriteLine(
-                $"wave={waveSize, 2}  per-bot path: {perBot, 7:F2} ms/bot ({perBotBytes / 1024.0 / 1024.0:F2} MiB/bot)   "
-                    + $"batched: {batch, 7:F2} ms/bot ({batchBytes / 1024.0 / 1024.0:F2} MiB/bot)   speedup: {perBot / batch:F2}x"
+                $"wave={waveSize, 2}  serial: {perBot, 7:F2}  parallel: {parallel, 7:F2}  batched: {batch, 7:F2} ms/bot   "
+                    + $"({perBotBytes / 1024.0 / 1024.0:F2} -> {batchBytes / 1024.0 / 1024.0:F2} MiB/bot)   "
+                    + $"speedup vs serial: {perBot / batch:F2}x  vs parallel: {parallel / batch:F2}x"
             );
         }
     }
