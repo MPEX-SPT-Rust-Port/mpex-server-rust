@@ -160,6 +160,118 @@ public class MsgpackOfferReaderTests
         });
     }
 
+    /// <summary>
+    /// The production <c>upd</c> is not flat - <c>randomise_item_condition</c> fills
+    /// <c>Repairable</c> and <c>Buff</c> - so the transcoder's map-in-map recursion carries real
+    /// traffic.
+    /// </summary>
+    [Test]
+    public void ANestedUpdMapRecursesThroughTheTranscoder()
+    {
+        var payload = BuildOfferWithOneItem(
+            (ref MessagePackWriter writer) =>
+            {
+                writer.WriteMapHeader(3);
+                writer.Write("_id");
+                writer.Write(ItemId);
+                writer.Write("_tpl");
+                writer.Write(TemplateId);
+                writer.Write("upd");
+                writer.WriteMapHeader(2);
+                writer.Write("Repairable");
+                writer.WriteMapHeader(2);
+                writer.Write("Durability");
+                writer.Write(79.5);
+                writer.Write("MaxDurability");
+                writer.Write(100);
+                writer.Write("SpawnedInSession");
+                writer.Write(true);
+            }
+        );
+
+        var offer = MsgpackOfferReader.ReadOffer(payload);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(offer.Items![0].Upd!.Repairable!.Durability, Is.EqualTo(79.5));
+            Assert.That(offer.Items[0].Upd!.Repairable!.MaxDurability, Is.EqualTo(100));
+            Assert.That(offer.Items[0].Upd!.SpawnedInSession, Is.True);
+        });
+    }
+
+    /// <summary>
+    /// Every remaining transcoder arm in one value: an array, a float, a boolean, a nested map and
+    /// a nil both as a member and inside a container.
+    /// </summary>
+    [Test]
+    public void AStructuredLocationTranscodesEveryScalarArm()
+    {
+        var payload = BuildOfferWithOneItem(
+            (ref MessagePackWriter writer) =>
+            {
+                writer.WriteMapHeader(3);
+                writer.Write("_id");
+                writer.Write(ItemId);
+                writer.Write("_tpl");
+                writer.Write(TemplateId);
+                writer.Write("location");
+                writer.WriteMapHeader(4);
+                writer.Write("rotation");
+                writer.Write(true);
+                writer.Write("offset");
+                writer.Write(2.5);
+                writer.Write("isSearched");
+                writer.WriteNil();
+                writer.Write("cells");
+                writer.WriteArrayHeader(4);
+                writer.Write(-1);
+                writer.Write(0.25);
+                writer.Write(false);
+                writer.WriteNil();
+            }
+        );
+
+        var offer = MsgpackOfferReader.ReadOffer(payload);
+
+        var location = (JsonElement)offer.Items![0].Location!;
+        var cells = location.GetProperty("cells");
+        Assert.Multiple(() =>
+        {
+            Assert.That(location.GetProperty("rotation").GetBoolean(), Is.True);
+            Assert.That(location.GetProperty("offset").GetDouble(), Is.EqualTo(2.5));
+            Assert.That(location.GetProperty("isSearched").ValueKind, Is.EqualTo(JsonValueKind.Null));
+            Assert.That(cells.GetArrayLength(), Is.EqualTo(4));
+            Assert.That(cells[0].GetInt32(), Is.EqualTo(-1));
+            Assert.That(cells[1].GetDouble(), Is.EqualTo(0.25));
+            Assert.That(cells[2].GetBoolean(), Is.False);
+            Assert.That(cells[3].ValueKind, Is.EqualTo(JsonValueKind.Null));
+        });
+    }
+
+    /// <summary>
+    /// <c>bin</c> has no JSON spelling and nothing on the Rust side emits it, so it is a wire
+    /// contract violation rather than something to transcode.
+    /// </summary>
+    [Test]
+    public void ABinaryValueIsAWireContractViolation()
+    {
+        var payload = BuildOfferWithOneItem(
+            (ref MessagePackWriter writer) =>
+            {
+                writer.WriteMapHeader(3);
+                writer.Write("_id");
+                writer.Write(ItemId);
+                writer.Write("_tpl");
+                writer.Write(TemplateId);
+                writer.Write("location");
+                writer.Write(new byte[] { 1, 2, 3 });
+            }
+        );
+
+        var thrown = Assert.Throws<InvalidOperationException>(() => MsgpackOfferReader.ReadOffer(payload));
+        Assert.That(thrown!.Message, Does.Contain("Binary"));
+    }
+
     [Test]
     public void AnIntegerLocationBecomesAJsonElementNumber()
     {
