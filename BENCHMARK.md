@@ -292,9 +292,23 @@ expired templates land as ~900 offers — the pre-filled holder, not anything ab
 interleaving. Against an empty holder the same input would land as ~1,400. The two paths land
 within 0.5% of each other on the full pass, so both are doing the same amount of work.
 
-Wire volume: that same capture was **41.4 MB** of framed JSON — a **stage B (ABI 9)** figure. The
-shipped path is stage C, the same frames carrying MessagePack payloads (ABI 10), and its wire size
-was never re-measured. Quote the 41.4 MB with its stage label, not as the current number.
+Wire volume, both encodings measured off the same generated batch (a captured 5.8 MB request run
+straight through `generate_dynamic_offers`, 57,842 offers, framed both ways by the crate's own
+serializers):
+
+| Envelope | Bytes |
+|---|---|
+| stage B — framed JSON (ABI 9) | 43.2 MB |
+| **stage C — framed MessagePack (ABI 10), the shipped path** | **35.4 MB** |
+
+MessagePack is **0.82x** the JSON wire, ~18% smaller. The **41.4 MB** figure quoted elsewhere for
+this response is the *stage B* capture taken through the C# path for the deserialize attribution
+(58,137 frames); it and the 43.2 MB above are the same encoding measured on two different passes.
+
+Offer counts differ between captures — 57,842 here, 58,137 in the attribution capture, 58,558
+`RagfairOffer`/nickname instances in its type census. A production pass is unseeded and therefore
+nondeterministic (offer counts are per-template `RandomUtil.GetInt` rolls), so these are three
+captures of the same workload varying ~0.7% run to run, not three measurements of one number.
 
 Working set over the timed phase: native grows +467 MB on the full pass against the legacy path's
 +0 MB; peak RSS is process-wide and cumulative, so only the growth figures are comparable, and only
@@ -315,8 +329,8 @@ the **same run**. Ratio is native / legacy on the full pass; above 1.00x means n
 | One-pass fresh-id offer items | `df07d54` | 625.78 ms | 426.57 ms | **1.47x** | 74.59 ms | 10.25 ms | 219.3 MB |
 
 **Stage A** moved generation, not the pass: the `CreateOffersFromAssort` timer inside the native
-full pass fell from ~710 ms to ~97 ms, while the full pass only fell 1550 → 885 ms. Everything
-after that is transport work.
+full pass fell from ~710 ms to 91–103 ms across the run's samples, while the full pass only fell
+1550 → 885 ms. Everything after that is transport work.
 
 **Stage C regressed on arrival** — 676.12 → 719.39 ms with native alloc/run up 208.4 → 358.3 MB
 (+72%) at a flat offer count, reproduced back-to-back. The cost was in the C# reader, not the

@@ -242,15 +242,16 @@ Mod-facing limitations:
   the whole pass. Legacy only dereferences it on the weapon-preset arm, so it survives the null for
   every other offer. `ForceLegacyRagfairGeneration` is the workaround.
 
-Two sanctioned divergences this port added: the assort walk is **sequential** where legacy fans out
-one task per entry, and the batch takes **one timestamp**, where legacy stamps each offer as it is
-built (so `startTime`/`endTime` fold to the batch clock plus the per-offer spread).
+Two sanctioned divergences this port added: an **unseeded** assort walk fans across rayon like
+legacy's per-entry task fan-out while a **seeded** walk stays sequential (that is what keeps the
+parity tests byte-equal), and the batch takes **one timestamp**, where legacy stamps each offer as
+it is built (so `startTime`/`endTime` fold to the batch clock plus the per-offer spread).
 
-Performance: native **loses** here — 1485 ms vs 437 ms on the full pass (3.4x slower) and 95 ms vs
-11 ms on regeneration (8.8x), see [`BENCHMARK.md`](BENCHMARK.md). Roughly half is single-threaded
-Rust generation against legacy's 12-thread fan-out, half is wrapper and response serialisation of
-~24k offers; the payload projection is only 1% of the full pass and is not the lever. Absolute cost is
-small (startup, then per-expiry bursts) and native stays the default for family consistency, with
+Performance: native still **loses** here — 1.47x on the full pass (626 ms vs 427 ms) and 7.3x on
+regeneration (75 ms vs 10 ms), see [`BENCHMARK.md`](BENCHMARK.md). Generation is no longer the
+problem: it is ~85 ms of a ~626 ms pass, and the payload projection ~13 ms. What is left is the C#
+side binding the ~58k offers the pass produces out of the response. Absolute cost is small (startup,
+then per-expiry bursts) and native stays the default for family consistency, with
 `ForceLegacyRagfairGeneration` as the one-line opt-out.
 
 → [`rust/ARCHITECTURE.md`](rust/ARCHITECTURE.md) for the crate internals and the FFI contract.

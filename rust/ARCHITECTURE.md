@@ -122,10 +122,11 @@ One native call generates a whole batch of offers, not one offer.
 
 Two crate-internal facts:
 
-- **The walk is sequential.** C# fans one `Task.Factory.StartNew` per assort entry across the thread
-  pool; this crate walks the ragfair batch on the calling thread — rayon is in the crate, but only
-  the bot batch loop uses it. That is a deliberate divergence and the larger half of the port's
-  performance loss (see `../BENCHMARK.md`).
+- **The walk is parallel only when unseeded.** C# fans one `Task.Factory.StartNew` per assort entry;
+  an unseeded batch here fans across rayon the same way (a forked context per entry, merged back in
+  assort order with `intId` reassigned). A **seeded** batch stays sequential — the seeded RNG is
+  thread-local, so fanning out would drop every worker onto entropy, and parity rides the sequential
+  path byte-for-byte. Generation is no longer where the port loses to legacy (see `../BENCHMARK.md`).
 - **`GetFleaPricesAsArray`'s cache is re-derived per call.** The C# `AllowedFleaPriceItemsForBarter`
   field is built once per generator instance and never invalidated; here it is rebuilt on every call,
   which makes the native path *fresher* than legacy for runtime-added items.
