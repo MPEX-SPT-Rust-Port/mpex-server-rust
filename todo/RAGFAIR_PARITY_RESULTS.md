@@ -16,6 +16,7 @@ Ratio is the printed speedup: median legacy / median native. Below 1.0x means na
 | Stage B (framed FFI response, ABI 9) | 2026-08-14 | 676.12 ms | 443.22 ms | 0.66x | 75.00 ms | 10.50 ms | 0.14x | 208.4 MB | 283.4 MB |
 | Stage C (MessagePack payloads, ABI 10) | 2026-08-14 | 719.39 ms | 441.66 ms | 0.61x | 75.67 ms | 10.78 ms | 0.14x | 358.3 MB | 282.6 MB |
 | Stage C remediation (reader buffer pooling) | 2026-08-14 | 663.95 ms | 457.44 ms | 0.69x | 76.14 ms | 10.51 ms | 0.14x | 219.9 MB | 283.9 MB |
+| Task 9 (one-pass fresh-id offer items) | 2026-08-14 | 625.78 ms | 426.57 ms | 0.68x | 74.59 ms | 10.25 ms | 0.14x | 219.3 MB | 283.1 MB |
 
 ## Stage A notes
 
@@ -268,5 +269,62 @@ measurement changes is only the leg's standing *against projection*: it is now a
 100–170 ms, so the shortfall relative to the plan lives elsewhere — the request legs and the ~63 ms
 floor the regeneration pass shows. Closing the remaining gap to legacy still means making the response
 leg cheaper than the plan ever projected, or not paying it at all.
+
+## Task 9 notes — one-pass fresh-id offer items
+
+`CreateOffersFromAssort`'s per-offer copy was clone → snapshot the root → `ReparentItemAndChildren`
+(which re-ids in place and then hands back a `ToOwned` copy) → write the snapshot into slot 0 → clear
+the root's parentage: **three** copies of the item list per offer. `clone_with_fresh_ids` does it in
+one, cloning each item exactly once while it mints the ids. Same output — the root keeps its `_id`,
+children get fresh mongo ids, every `parent_id` is remapped through the old→new map (a parent outside
+the list still gets a mapping of its own), the root's `parent_id`/`slot_id` are cleared.
+
+Verbatim from the run:
+
+```
+full pass native (rust)              n=5  mean=703.63 ms  median=625.78 ms  min=614.24 ms  max=872.36 ms
+                                     offers=24387  alloc/run=219.3 MB  peak RSS=1250 MB (+467 MB over the phase)
+full pass legacy (C# 4.1.2)          n=5  mean=444.94 ms  median=426.57 ms  min=409.61 ms  max=520.09 ms
+                                     offers=24296  alloc/run=283.1 MB  peak RSS=1155 MB (+0 MB over the phase)
+full pass BuildRequest only          n=5  mean=14.18 ms  median=13.39 ms  min=8.79 ms  max=20.48 ms
+                                     offers=0  alloc/run=7.1 MB  peak RSS=986 MB (+6 MB over the phase)
+full pass            speedup (median legacy / median native): 0.68x  projection share of native median: 2.1%
+
+regeneration pass native (rust)      n=5  mean=74.96 ms  median=74.59 ms  min=67.44 ms  max=83.60 ms
+                                     offers=911  alloc/run=17.6 MB  peak RSS=1007 MB (+27 MB over the phase)
+regeneration pass legacy (C# 4.1.2)  n=5  mean=10.43 ms  median=10.25 ms  min=5.58 ms  max=16.06 ms
+                                     offers=920  alloc/run=5.9 MB  peak RSS=980 MB (+0 MB over the phase)
+regeneration pass BuildRequest only  n=5  mean=14.74 ms  median=13.85 ms  min=8.43 ms  max=22.26 ms
+                                     offers=0  alloc/run=7.1 MB  peak RSS=945 MB (+0 MB over the phase)
+regeneration pass    speedup (median legacy / median native): 0.14x  projection share of native median: 18.6%
+```
+
+**Gate: still MISSED.** 625.78 / 426.57 = **1.47x** same-run legacy, against the spec §1 bar of 1.25x
+(533.2 ms here). The full-pass medians do not resolve a win this small — same machine, same session,
+change stashed and unstashed between runs:
+
+| run | full pass native | full pass legacy | ratio |
+|---|---|---|---|
+| before, run 1 | 643.47 ms | 440.22 ms | 1.46x |
+| before, run 2 | 659.28 ms | 452.62 ms | 1.46x |
+| after, run 1 | 625.78 ms | 426.57 ms | 1.47x |
+| after, run 2 | 672.82 ms | 441.21 ms | 1.53x |
+
+Run-to-run spread on the native median is ±25 ms, so the ratio is flat within noise. The finer
+instrument is the `CreateOffersFromAssort` timer, which measures only the leg this change touches
+(6 samples per run — warmup plus n=5):
+
+```
+before: 91 102 100 93 86 91 ms   median 92
+after:  86  91  93 82 83 84 ms   median 85
+```
+
+**~7 ms off the ~92 ms generation leg (~8%)**, which is the honest size of the win. It is consistent
+with DIAG_2 §4.3: the 244 ms of clone + reparent it measured was sequential, so post-stage-A it is
+~20 ms of parallel wall time across 12 threads, and dropping two of the three list copies takes about
+a third of that. It is ~1% of the native full pass, which is transport-bound.
+
+`alloc/run` is unchanged (219.3 vs 219.9 MB) as expected — that counter reads the C# GC heap, and this
+change only removes Rust-side allocations.
 
 Delete this file in Task 10 once BENCHMARK.md carries the final numbers.
