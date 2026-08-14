@@ -2,6 +2,7 @@ using System.Reflection;
 using HarmonyLib;
 using NUnit.Framework;
 using SPTarkov.Common.Models.Logging;
+using SPTarkov.Server.Core.Controllers;
 using SPTarkov.Server.Core.Generators.Bot;
 using SPTarkov.Server.Core.Helpers;
 using SPTarkov.Server.Core.Helpers.Bot;
@@ -197,6 +198,24 @@ public class BotWaveBatcherTests
             equipConfig.Randomisation = previousRandomisation;
             raidData.RaidConfiguration = null;
         }
+    }
+
+    /// <summary>
+    /// The production wiring: the container must pick BotController's additive constructor, not the
+    /// frozen 4.1.2 one. Without this the dispatch branch is a silent no-op and every other test
+    /// here still passes, because they all call the batcher directly.
+    /// </summary>
+    [Test]
+    public void AResolvedBotControllerGetsTheBatcher()
+    {
+        var controller = DI.GetInstance().GetService<BotController>();
+        var batcher = typeof(BotController).GetField("_botWaveBatcher", BindingFlags.Instance | BindingFlags.NonPublic);
+
+        Assert.That(
+            batcher!.GetValue(controller),
+            Is.Not.Null,
+            "the container fell back to the frozen 14-parameter constructor - waves never batch"
+        );
     }
 
     private static void Prefix() { }
