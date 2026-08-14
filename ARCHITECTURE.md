@@ -190,8 +190,10 @@ The batch declines on any of: `BotConfig.ForcePerBotGeneration`; anything that w
 the wave role's equipment config carries `NighttimeChanges.EquipmentModsModifiers` in some
 randomisation band, because that clamp is a cross-bot feedback loop only the per-bot path replays. A
 mod subclassing `BotController` through the frozen 14-parameter constructor gets a null batcher and
-never batches. The two escape hatches are config flags: `forcePerBotGeneration` (batch off, native
-per-bot on) and `forceLegacyBotGeneration` (native off entirely).
+never batches; one built through the new 15-parameter constructor gets a batcher but is still
+blocked by the `GetType() == typeof(BotController)` guard, so a subclass never batches either way.
+The two escape hatches are config flags: `forcePerBotGeneration` (batch off, native per-bot on) and
+`forceLegacyBotGeneration` (native off entirely).
 
 ### Ragfair offer generation
 

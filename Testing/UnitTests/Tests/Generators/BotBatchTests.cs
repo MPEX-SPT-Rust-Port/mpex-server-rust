@@ -106,6 +106,44 @@ public class BotBatchTests
     }
 
     /// <summary>
+    /// The wire contract for a bot that fails inside the batch: its own envelope carries the error
+    /// and the rest of the wave still comes back. Same poison as the native side's
+    /// <c>batch_isolates_a_failing_bot</c> - an equipment config with a nighttime band but no
+    /// equipmentMods, generated at night, errors at the top of equipment generation.
+    /// </summary>
+    [Test]
+    public void AFailingBotComesBackAsAnErrorEnvelopeOnItsOwn()
+    {
+        var request = BuildBatchRequest(Enumerable.Range(0, 2).Select(_ => (Case: BuildCase(), Seed: (ulong?)null)).ToList());
+
+        request.Shared.IsNightTime = true;
+        request.Shared.Equipment["poisoned"] = new EquipmentFilters
+        {
+            Randomisation =
+            [
+                new RandomisationDetails
+                {
+                    LevelRange = new MinMax<int> { Min = 1, Max = 99 },
+                    NighttimeChanges = new NighttimeChanges
+                    {
+                        EquipmentModsModifiers = new Dictionary<string, float> { ["front_plate"] = 30 },
+                    },
+                },
+            ],
+        };
+        // Only the second bot names the poisoned config; the first is untouched `assault`
+        request.Bots[1].Details.RoleLowercase = "poisoned";
+
+        var result = SptNative.GenerateBotInventoryBatch(request);
+
+        Assert.That(result.Bots, Has.Count.EqualTo(2));
+        Assert.That(result.Bots[0].Result, Is.Not.Null);
+        Assert.That(result.Bots[0].Error, Is.Null);
+        Assert.That(result.Bots[1].Result, Is.Null);
+        Assert.That(result.Bots[1].Error, Is.Not.Null);
+    }
+
+    /// <summary>
     /// The number the batching question turns on: wall clock per bot, both paths, same wave.
     ///
     /// Three arms, because the sequential per-bot arm is not what production runs -

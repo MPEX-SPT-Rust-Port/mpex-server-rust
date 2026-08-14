@@ -2,6 +2,7 @@ using System.Reflection;
 using HarmonyLib;
 using NUnit.Framework;
 using SPTarkov.Common.Models.Logging;
+using SPTarkov.Server.Core.Constants;
 using SPTarkov.Server.Core.Controllers;
 using SPTarkov.Server.Core.Generators.Bot;
 using SPTarkov.Server.Core.Helpers;
@@ -47,15 +48,17 @@ public class BotWaveBatcherTests
         di.GetService<SaveServer>().CreateProfile(new ProfileInfo { ProfileId = _sessionId });
     }
 
-    private static BotGenerationDetails BuildWaveDetails(int count = 3)
+    private static BotGenerationDetails BuildWaveDetails(int count = 3, bool isPmc = false)
     {
         return new BotGenerationDetails
         {
-            Role = "assault",
-            Side = "Savage",
+            Role = isPmc ? Sides.PmcUsec : "assault",
+            RoleLowercase = isPmc ? "pmcusec" : "assault",
+            Side = isPmc ? Sides.Usec : Sides.Savage,
             BotDifficulty = "normal",
             GameVersion = "standard",
             BotCountToGenerate = count,
+            IsPmc = isPmc,
         };
     }
 
@@ -74,6 +77,26 @@ public class BotWaveBatcherTests
 
         // GenerateInventoryId reroots every bot onto a fresh equipment id - all distinct
         Assert.That(wave!.Select(bot => bot!.Inventory!.Equipment).Distinct().Count(), Is.EqualTo(3));
+    }
+
+    /// <summary>
+    /// The two behaviours an assault wave never reaches: the PMC side rewrite to <c>Savage</c> the
+    /// batcher copies from <c>BotController.TryGenerateSingleBot</c>, and <c>GenerateBotFinish</c>'s
+    /// dogtag branch, which only fires for the roles in <c>BotConfig.BotRolesWithDogTags</c>.
+    /// </summary>
+    [Test]
+    public void APmcWaveIsRewrittenToSavageAndKeepsItsDogtag()
+    {
+        var wave = _batcher.TryGenerateWave(_sessionId, BuildWaveDetails(isPmc: true));
+
+        // No raid configuration is set here, so the nighttime clamp cannot fire and the wave batches
+        Assert.That(wave, Is.Not.Null, "a PMC wave should take the batch path");
+        Assert.That(wave!, Has.Count.EqualTo(3));
+        foreach (var bot in wave!)
+        {
+            Assert.That(bot!.Info!.Side, Is.EqualTo(Sides.Savage));
+            Assert.That(bot.Inventory!.Items!.Any(item => item.SlotId == Slots.Dogtag), Is.True, "a PMC came back without a dogtag");
+        }
     }
 
     [Test]

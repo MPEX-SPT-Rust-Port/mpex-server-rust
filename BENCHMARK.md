@@ -186,9 +186,10 @@ figures in the next section come out slightly *above* those batch times — **1.
 **~1.5x** at wave 10 — so treat the ratios in this paragraph as the historical single-threaded
 reading, not the current one. `BotBatchTests.WaveCostPerBot` reports the serial, parallel and batched
 arms together so the sequential-baseline ratio cannot be quoted alone again. Two payload trims landed
-alongside it — sixteen always-default item members (−640 KB, −13.8%) and `slots[].required` (−49 KB),
-taking the `pmcUSEC` request the size guards measure to ~4.18 MB — worth ~4-6% on the per-bot path
-and ~0% batched, since the batch already divides the block they shrink.
+alongside it — sixteen always-default item members (−640 KB / −13.8% on `assault`, −13.3% on
+`pmcUSEC`) and `slots[].required` (−49 KB), taking the `pmcUSEC` request the size guards measure to
+~4.18 MB — worth ~4-6% on the per-bot path and ~0% batched, since the batch already divides the
+block they shrink.
 
 Bot-specific caveats, on top of the general ones below:
 

@@ -166,10 +166,10 @@ and 15 `IChatMessageHandler` implementations under `SPTFriend/Commands/`.
 | `Weapons/` | `IInventoryMagGen` and four implementations: barrel, external, internal magazine, UBGL |
 | `Weather/`, `Ragfair/`, root | Weather presets; ragfair offers/assorts; fence assorts, PMC waves, scav case rewards |
 
-**Three are dual-path** — `LocationLootGenerator`, `LootGenerator` and `BotInventoryGenerator`
-forward to Rust by default and keep their 4.1.2 implementation as a legacy fallback. They use
-HarmonyX to detect a live patch and fall back, as do `RagfairOfferGenerator` and `BotWaveBatcher` —
-five files in Core reference it.
+**Four are dual-path** — `LocationLootGenerator`, `LootGenerator`, `BotInventoryGenerator` and
+`RagfairOfferGenerator` forward to Rust by default and keep their 4.1.2 implementation as a legacy
+fallback. They use HarmonyX to detect a live patch and fall back, as does `BotWaveBatcher` — five
+files in Core reference it.
 
 `BotInventoryGenerator` is the single entry point for the whole bot inventory, so
 `BotWeaponGenerator`, `BotEquipmentModGenerator` and `BotLootGenerator` do **not** forward to Rust
