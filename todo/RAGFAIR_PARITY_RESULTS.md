@@ -106,7 +106,7 @@ MongoId's ctor validation (11.1 ms over 425,550 ids) and `RagfairOfferUser.Nickn
 (15.1 ms over 58,558 offers) do not explain the gap either. All three together are ~30 ms; the
 remaining ~275 ms is System.Text.Json binding 366,851 objects, which no converter-level change reaches.
 
-### The response leg is a harness artifact, not a converter tax
+### The response leg's *overshoot* is a harness artifact, not a converter tax
 
 `A1` is the finding that matters: single-threaded deserialize (268.6 ms) beats the `Parallel.For`
 one (304.8 ms). The test host runs **workstation GC** — `<ServerGarbageCollection>true</ServerGarbageCollection>`
@@ -119,9 +119,11 @@ A. Deserialize<RagfairOffer> (shipped)       median=158.2 ms  min=67.8   alloc=1
 A1. Deserialize<RagfairOffer> sequential     median=255.4 ms  min=253.4  alloc=191 MB
 ```
 
-Under the GC the shipped server actually uses, the response leg is **158 ms** — inside the plan's
-100–170 ms projection. The "roughly half the framing win is outstanding" note in the stage B block is
-measuring workstation GC, not the port.
+Under the GC the shipped server actually uses, the response leg is **158 ms** — at the top of the
+plan's 100–170 ms projection. Read that number with the spread in mind: min 67.8 vs median 158.2 is a
+2.3x min/median ratio, where the workstation-GC distribution is tight (292.7–326.4), so at n=7 the
+server-GC leg is somewhere in the 70–160 ms range rather than pinned at 158. The "roughly half the
+framing win is outstanding" note in the stage B block is measuring workstation GC, not the port.
 
 The whole benchmark under `DOTNET_gcServer=1` (same commit, same machine) moves both sides, so the
 gate does not come back:
@@ -137,7 +139,14 @@ regeneration pass    speedup: 0.10x
 ```
 
 Server GC takes ~117 ms off native and ~113 ms off legacy, so the ratio is unchanged-to-slightly-worse
-while both absolute numbers improve. The residual native deficit is therefore not in the response leg
-and not in the converters; it is in the request legs and the ~63 ms floor the regeneration pass shows.
+while both absolute numbers improve.
+
+The response leg is still the largest identified component of the deficit and Task 6 should not be
+steered off it. Native is 229 ms behind legacy under server GC (559 vs 330), and the ~158 ms response
+leg is ~69% of that gap — legacy has no equivalent leg at all, since it never crosses a wire. What the
+measurement changes is only the leg's standing *against projection*: it is now at the plan's projected
+100–170 ms, so the shortfall relative to the plan lives elsewhere — the request legs and the ~63 ms
+floor the regeneration pass shows. Closing the remaining gap to legacy still means making the response
+leg cheaper than the plan ever projected, or not paying it at all.
 
 Delete this file in Task 10 once BENCHMARK.md carries the final numbers.
