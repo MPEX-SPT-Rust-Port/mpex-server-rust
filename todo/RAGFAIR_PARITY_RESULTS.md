@@ -77,4 +77,67 @@ Native alloc/run rose 182.9 → 208.4 MB and the phase RSS delta rose +275 → +
 more managed allocation than the single-buffer path they replaced, and that GC pressure is part of why the
 response leg stopped short of the projection.
 
+## Converter-tax attribution (Task 5) — no code change
+
+Measured with a throwaway `RagfairDeserializeCostTests` fixture (deleted afterwards, along with the
+`AllowUnsafeBlocks` it needed) that captures one framed full-pass response, then times the shipped
+`Parallel.For` deserialize against the tokenizer floor and against each candidate tax at its real
+per-pass instance count. Release, n=7 medians, 12 cores, 41.4 MB / 58,137 frames.
+
+```
+A. Deserialize<RagfairOffer> (shipped)       median=304.8 ms  alloc=193 MB
+A1. Deserialize<RagfairOffer> sequential     median=268.6 ms  alloc=193 MB
+B. Utf8JsonReader skim (token floor)         median= 16.3 ms  alloc=  1 MB
+C. new Dictionary<string, object>() x census median=  3.4 ms  alloc= 28 MB
+D. new MongoId(ReadOnlySpan<byte>) x ids     median= 11.1 ms  alloc= 49 MB
+E. string.Intern(nickname) x offers          median= 15.1 ms  alloc=  0 MB
+
+Models-type instances per pass: 366,851   (Item 83,292 | Upd 60,325 | RagfairOffer 58,558 |
+OfferRequirement 58,558 | RagfairOfferUser 58,558 | UpdRepairable 43,300 | tail 4,260)
+MongoId values per pass: 425,550   nicknames per pass: 58,558
+```
+
+The Ceciler-injected `[JsonExtensionData]` dictionary is **3.4 ms** of the ~305 ms leg — 28 MB of the
+193 MB the pass allocates, but allocation is a pointer bump and the collection cost rides along with
+the other 165 MB. That is 15x under the 50 ms bar the plan set for changing the injected property, so
+`JsonExtensionDataGeneratorLauncher`'s template and `Ceciler.JsonExtensionData` are left alone.
+
+MongoId's ctor validation (11.1 ms over 425,550 ids) and `RagfairOfferUser.Nickname`'s `string.Intern`
+(15.1 ms over 58,558 offers) do not explain the gap either. All three together are ~30 ms; the
+remaining ~275 ms is System.Text.Json binding 366,851 objects, which no converter-level change reaches.
+
+### The response leg is a harness artifact, not a converter tax
+
+`A1` is the finding that matters: single-threaded deserialize (268.6 ms) beats the `Parallel.For`
+one (304.8 ms). The test host runs **workstation GC** — `<ServerGarbageCollection>true</ServerGarbageCollection>`
+is set on `SPTarkov.Server.csproj` only, not on `UnitTests.csproj` — so at 193 MB per pass the fan-out
+is GC-throttled and Task 3's parallelism is a net loss in the fixture. Re-running the same fixture with
+`DOTNET_gcServer=1`:
+
+```
+A. Deserialize<RagfairOffer> (shipped)       median=158.2 ms  min=67.8   alloc=191 MB
+A1. Deserialize<RagfairOffer> sequential     median=255.4 ms  min=253.4  alloc=191 MB
+```
+
+Under the GC the shipped server actually uses, the response leg is **158 ms** — inside the plan's
+100–170 ms projection. The "roughly half the framing win is outstanding" note in the stage B block is
+measuring workstation GC, not the port.
+
+The whole benchmark under `DOTNET_gcServer=1` (same commit, same machine) moves both sides, so the
+gate does not come back:
+
+```
+full pass native (rust)              n=5  median=558.95 ms  min=417.63  alloc/run=209.1 MB
+full pass legacy (C# 4.1.2)          n=5  median=329.51 ms  min=300.32  alloc/run=282.6 MB
+full pass            speedup: 0.59x   (1.70x legacy, vs 1.53x under workstation GC)
+
+regeneration pass native (rust)      n=5  median=63.40 ms
+regeneration pass legacy (C# 4.1.2)  n=5  median= 6.29 ms
+regeneration pass    speedup: 0.10x
+```
+
+Server GC takes ~117 ms off native and ~113 ms off legacy, so the ratio is unchanged-to-slightly-worse
+while both absolute numbers improve. The residual native deficit is therefore not in the response leg
+and not in the converters; it is in the request legs and the ~63 ms floor the regeneration pass shows.
+
 Delete this file in Task 10 once BENCHMARK.md carries the final numbers.
