@@ -110,15 +110,74 @@ public class BotPayloadSizeTests
     }
 
     /// <summary>
+    /// The `items` block is 81% of the request, and most templates carry the default for the
+    /// extra-size and blocking members. Every native read of those is an <c>unwrap_or</c> of that
+    /// same default, so omitting them cannot change generation - but a member that grows a real
+    /// meaning later would be silently dropped, which is what this pins.
+    /// </summary>
+    [Test]
+    public void OmitsDefaultsTheNativeSideUnwraps()
+    {
+        using var request = JsonDocument.Parse(SerializeRequest());
+        var items = request.RootElement.GetProperty("items");
+
+        string[] omitted =
+        [
+            "extraSizeUp",
+            "extraSizeDown",
+            "extraSizeLeft",
+            "extraSizeRight",
+            "extraSizeForceAdd",
+            "sizeReduceRight",
+            "hasHinge",
+            "faceShieldComponent",
+            "blocksEarpiece",
+            "blocksEyewear",
+            "blocksFaceCover",
+            "blocksHeadwear",
+            "blocksFolding",
+            "blocksCollapsible",
+            "blockLeftStance",
+            "blocksArmorVest",
+        ];
+
+        foreach (var item in items.EnumerateObject())
+        {
+            foreach (var member in omitted)
+            {
+                if (item.Value.TryGetProperty(member, out var value))
+                {
+                    Assert.That(
+                        value.ValueKind is JsonValueKind.False || (value.ValueKind is JsonValueKind.Number && value.GetInt32() == 0),
+                        Is.False,
+                        $"{item.Name}.{member} is on the wire at its default; the native side unwraps to it anyway"
+                    );
+                }
+            }
+        }
+
+        // questItem keeps null and false distinct, and canSellOnRagfair defaults to true in the
+        // database while the native read unwraps to false - both must keep paying their bytes
+        Assert.That(
+            items
+                .EnumerateObject()
+                .Any(item => item.Value.TryGetProperty("questItem", out var quest) && quest.ValueKind is JsonValueKind.False),
+            Is.True,
+            "questItem false must stay on the wire - the sealed container pool filters on null"
+        );
+    }
+
+    /// <summary>
     /// Both fixes together, as the thing they are actually for: bytes crossing the FFI per bot.
     /// Sending the presets twice and inlining the defaults cost 766,817 bytes of a 5,583,351-byte
-    /// request; the budget is the 4,816,534 that leaves, plus headroom for database churn. It is a
-    /// regression guard, so re-baseline it deliberately - never widen it to make a diff pass.
+    /// request, and the always-default members another ~595,000; the budget is what that leaves,
+    /// plus headroom for database churn. It is a regression guard, so re-baseline it deliberately -
+    /// never widen it to make a diff pass.
     /// </summary>
     [Test]
     public void RequestStaysUnderTheWireBudget()
     {
-        const int budgetBytes = 4_900_000;
+        const int budgetBytes = 4_300_000;
 
         Assert.That(
             SerializeRequest().Length,

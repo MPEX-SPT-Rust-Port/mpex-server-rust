@@ -47,11 +47,15 @@ internal static class PayloadProjection
                 StackMaxSize = props.StackMaxSize,
                 StackMinRandom = props.StackMinRandom,
                 StackMaxRandom = props.StackMaxRandom,
-                ExtraSizeUp = props.ExtraSizeUp,
-                ExtraSizeDown = props.ExtraSizeDown,
-                ExtraSizeLeft = props.ExtraSizeLeft,
-                ExtraSizeRight = props.ExtraSizeRight,
-                ExtraSizeForceAdd = props.ExtraSizeForceAdd,
+                // The five extra-size members are read only through `unwrap_or(0)`/`unwrap_or(false)`
+                // on the native side, so an absent member and an explicit default are the same
+                // value there - and the default is what 4,400 of 4,673 templates carry. See
+                // OmitsDefaultsTheNativeSideUnwraps
+                ExtraSizeUp = NullIfZero(props.ExtraSizeUp),
+                ExtraSizeDown = NullIfZero(props.ExtraSizeDown),
+                ExtraSizeLeft = NullIfZero(props.ExtraSizeLeft),
+                ExtraSizeRight = NullIfZero(props.ExtraSizeRight),
+                ExtraSizeForceAdd = NullIfFalse(props.ExtraSizeForceAdd),
                 GridCellsH = firstGrid?.Properties?.CellsH,
                 GridCellsV = firstGrid?.Properties?.CellsV,
                 StackSlotMaxCount = firstStackSlot?.MaxCount,
@@ -84,23 +88,26 @@ internal static class PayloadProjection
                 LinkedWeapon = props.LinkedWeapon,
                 MaxDurability = props.MaxDurability,
                 WeapClass = props.WeapClass,
-                HasHinge = props.HasHinge,
+                HasHinge = NullIfFalse(props.HasHinge),
                 Foldable = props.Foldable,
                 FoldedSlot = props.FoldedSlot,
-                SizeReduceRight = props.SizeReduceRight,
+                SizeReduceRight = NullIfZero(props.SizeReduceRight),
                 WeapFireType = props.WeapFireType,
                 MaxHpResource = props.MaxHpResource,
                 MaxResource = props.MaxResource,
                 FoodUseTime = props.FoodUseTime,
-                FaceShieldComponent = props.FaceShieldComponent,
-                BlocksEarpiece = props.BlocksEarpiece,
-                BlocksEyewear = props.BlocksEyewear,
-                BlocksFaceCover = props.BlocksFaceCover,
-                BlocksHeadwear = props.BlocksHeadwear,
-                BlocksFolding = props.BlocksFolding,
-                BlocksCollapsible = props.BlocksCollapsible,
-                BlockLeftStance = props.BlockLeftStance,
-                BlocksArmorVest = props.BlocksArmorVest,
+                // Same as the extra-size members: every read of the blocking family goes through
+                // `has_blocking_property` or a local `unwrap_or(false)`, so `false` and absent are
+                // indistinguishable natively
+                FaceShieldComponent = NullIfFalse(props.FaceShieldComponent),
+                BlocksEarpiece = NullIfFalse(props.BlocksEarpiece),
+                BlocksEyewear = NullIfFalse(props.BlocksEyewear),
+                BlocksFaceCover = NullIfFalse(props.BlocksFaceCover),
+                BlocksHeadwear = NullIfFalse(props.BlocksHeadwear),
+                BlocksFolding = NullIfFalse(props.BlocksFolding),
+                BlocksCollapsible = NullIfFalse(props.BlocksCollapsible),
+                BlockLeftStance = NullIfFalse(props.BlockLeftStance),
+                BlocksArmorVest = NullIfFalse(props.BlocksArmorVest),
                 Grids = props
                     .Grids?.Select(grid => new GridView
                     {
@@ -124,6 +131,24 @@ internal static class PayloadProjection
         }
 
         return itemsView;
+    }
+
+    /// <summary>
+    /// Drops a member the native side would have read as its default anyway. Only safe for members
+    /// whose every native read is an <c>unwrap_or</c> of that same default - <c>questItem</c> and
+    /// <c>canSellOnRagfair</c> are deliberately excluded: the first keeps <c>null</c> and
+    /// <c>false</c> distinct, and the second defaults to <c>true</c> in the database while the
+    /// native read unwraps to <c>false</c>.
+    /// </summary>
+    private static int? NullIfZero(int? value)
+    {
+        return value is 0 ? null : value;
+    }
+
+    /// <inheritdoc cref="NullIfZero"/>
+    private static bool? NullIfFalse(bool? value)
+    {
+        return value is false ? null : value;
     }
 
     private static List<SlotView>? ToSlotViews(IEnumerable<Slot>? slots)
