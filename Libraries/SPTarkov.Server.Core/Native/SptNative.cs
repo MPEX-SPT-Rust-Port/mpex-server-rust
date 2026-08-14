@@ -182,21 +182,48 @@ public static class SptNative
             status = NativeMethods.GenerateDynamicOffers(requestPtr, (nuint)requestUtf8.Length, &outPtr, &outLen);
         }
 
+        return DecodeResult(
+            "DynamicOffers",
+            status,
+            outPtr,
+            outLen,
+            (buffer, length) =>
+            {
+                return ParseFramedOffers((byte*)buffer, length);
+            }
+        );
+    }
+
+    /// <summary>
+    /// The status and ownership ladder the generation exports share: decode on success, otherwise
+    /// read the failure message out of the same buffer, and free it either way.
+    /// </summary>
+    private static unsafe TResult DecodeResult<TResult>(
+        string export,
+        int status,
+        byte* outPtr,
+        nuint outLen,
+        Func<nint, int, TResult> decode
+    )
+    {
+        // Unlike verify, these exports also write a buffer when they fail - the error message - so
+        // ownership is decided by the pointer, never by the status. BufFree ignores the null pointer
+        // a null-argument rejection or a panic leaves behind.
         try
         {
             if (status == StatusOk)
             {
-                return ParseFramedOffers(outPtr, checked((int)outLen));
+                return decode((nint)outPtr, checked((int)outLen));
             }
 
             var message = outPtr == null ? "no message" : Encoding.UTF8.GetString(outPtr, checked((int)outLen));
             if (status == StatusError)
             {
-                throw new InvalidOperationException($"spt_native DynamicOffers generation failed: {message}");
+                throw new InvalidOperationException($"spt_native {export} generation failed: {message}");
             }
 
             throw new InvalidOperationException(
-                $"spt_native DynamicOffers generation failed with internal status {status}: {message}; this indicates a native library bug, not corrupt game data."
+                $"spt_native {export} generation failed with internal status {status}: {message}; this indicates a native library bug, not corrupt game data."
             );
         }
         finally
@@ -223,6 +250,15 @@ public static class SptNative
 
         var offerCount = checked((int)BinaryPrimitives.ReadUInt32LittleEndian(span[at..]));
         at += 4;
+        // Every frame carries at least its own 4-byte length prefix, so a count past that bound is
+        // corrupt - reject it before it sizes an allocation.
+        if (offerCount > (length - at) / 4)
+        {
+            throw new InvalidOperationException(
+                $"spt_native DynamicOffers envelope claims {offerCount} offers with only {length - at} bytes left."
+            );
+        }
+
         var frames = new (int Offset, int Length)[offerCount];
         for (var i = 0; i < offerCount; i++)
         {
@@ -339,31 +375,17 @@ public static class SptNative
             };
         }
 
-        // Unlike verify, these exports also write a buffer when they fail - the error message - so
-        // ownership is decided by the pointer, never by the status. BufFree ignores the null pointer
-        // a null-argument rejection or a panic leaves behind.
-        try
-        {
-            if (status == StatusOk)
+        return DecodeResult(
+            export.ToString(),
+            status,
+            outPtr,
+            outLen,
+            (buffer, length) =>
             {
-                return JsonSerializer.Deserialize<TResult>(new ReadOnlySpan<byte>(outPtr, checked((int)outLen)), LootJsonOptions)
+                return JsonSerializer.Deserialize<TResult>(new ReadOnlySpan<byte>((byte*)buffer, length), LootJsonOptions)
                     ?? throw new InvalidOperationException($"spt_native returned an empty {export} result.");
             }
-
-            var message = outPtr == null ? "no message" : Encoding.UTF8.GetString(outPtr, checked((int)outLen));
-            if (status == StatusError)
-            {
-                throw new InvalidOperationException($"spt_native {export} generation failed: {message}");
-            }
-
-            throw new InvalidOperationException(
-                $"spt_native {export} generation failed with internal status {status}: {message}; this indicates a native library bug, not corrupt game data."
-            );
-        }
-        finally
-        {
-            NativeMethods.BufFree(outPtr, outLen);
-        }
+        );
     }
 
     /// <summary>

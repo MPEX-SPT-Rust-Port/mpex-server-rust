@@ -541,7 +541,8 @@ internal static class MsgpackOfferReader
         var scratch = _frameScratch;
         if (scratch is null || scratch.Length < payload.Length)
         {
-            scratch = new byte[payload.Length];
+            // Double on growth so a run of ascending frame sizes stops reallocating every frame.
+            scratch = new byte[Math.Max(payload.Length, (scratch?.Length ?? 0) * 2)];
             _frameScratch = scratch;
         }
 
