@@ -9,7 +9,6 @@ pub(crate) mod exhaustable_array;
 pub(crate) mod inventory_mag_gen;
 pub(crate) mod mod_pool_service;
 pub mod models;
-mod phase_diag;
 pub(crate) mod repair_service;
 
 use indexmap::IndexMap;
