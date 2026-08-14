@@ -295,31 +295,16 @@ public class MsgpackOfferReaderTests
 
     /// <summary>
     /// The transcoder's buffer and the frame scratch are reused per thread, so a value materialized
-    /// from an earlier frame must not be reading bytes a later one overwrote.
+    /// from an earlier frame must not be reading bytes a later one overwrote. The follow-up frame is
+    /// deliberately the *smaller* of the two: that is the case both buffers are big enough for
+    /// already, so they are overwritten in place rather than replaced, and a value that aliased them
+    /// would read the new frame's bytes.
     /// </summary>
     [Test]
-    public void AMaterializedValueSurvivesTheNextFrameReusingTheBuffers()
+    public void AMaterializedValueSurvivesASmallerFrameReusingTheBuffers()
     {
+        var large = new string('z', 512);
         var first = MsgpackOfferReader.ReadOffer(
-            BuildOfferWithOneItem(
-                (ref MessagePackWriter writer) =>
-                {
-                    writer.WriteMapHeader(3);
-                    writer.Write("_id");
-                    writer.Write(ItemId);
-                    writer.Write("_tpl");
-                    writer.Write(TemplateId);
-                    writer.Write("location");
-                    writer.WriteMapHeader(1);
-                    writer.Write("x");
-                    writer.Write("first");
-                }
-            )
-        );
-        var location = (JsonElement)first.Items![0].Location!;
-
-        // Longer in every dimension, so a stale view would read this frame's bytes, not its own
-        var second = MsgpackOfferReader.ReadOffer(
             BuildOfferWithOneItem(
                 (ref MessagePackWriter writer) =>
                 {
@@ -331,17 +316,36 @@ public class MsgpackOfferReaderTests
                     writer.Write("location");
                     writer.WriteMapHeader(2);
                     writer.Write("x");
-                    writer.Write(new string('z', 512));
+                    writer.Write(large);
                     writer.Write("y");
                     writer.Write(new string('q', 512));
+                }
+            )
+        );
+        var location = (JsonElement)first.Items![0].Location!;
+
+        var second = MsgpackOfferReader.ReadOffer(
+            BuildOfferWithOneItem(
+                (ref MessagePackWriter writer) =>
+                {
+                    writer.WriteMapHeader(3);
+                    writer.Write("_id");
+                    writer.Write(ItemId);
+                    writer.Write("_tpl");
+                    writer.Write(TemplateId);
+                    writer.Write("location");
+                    writer.WriteMapHeader(1);
+                    writer.Write("x");
+                    writer.Write("second");
                 }
             )
         );
 
         Assert.Multiple(() =>
         {
-            Assert.That(location.GetProperty("x").GetString(), Is.EqualTo("first"));
-            Assert.That(((JsonElement)second.Items![0].Location!).GetProperty("x").GetString(), Is.EqualTo(new string('z', 512)));
+            Assert.That(location.GetProperty("x").GetString(), Is.EqualTo(large));
+            Assert.That(location.GetProperty("y").GetString(), Is.EqualTo(new string('q', 512)));
+            Assert.That(((JsonElement)second.Items![0].Location!).GetProperty("x").GetString(), Is.EqualTo("second"));
         });
     }
 

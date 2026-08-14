@@ -42,6 +42,9 @@ internal static class MsgpackOfferReader
     /// <see cref="ReadOnlyMemory{T}"/> it needs without a <c>byte[]</c> per offer. Per-thread because
     /// frames are parsed under a <c>Parallel.For</c>, and grown to the largest frame the thread sees.
     /// </summary>
+    // ponytail: this and the two transcoder buffers below are never released - every thread pool
+    // thread that has parsed a frame holds a few KB for the process' life; move them to
+    // ArrayPool<byte>.Shared with a rent/return finally if that retention ever shows up in RSS
     [ThreadStatic]
     private static byte[]? _frameScratch;
 
@@ -62,6 +65,9 @@ internal static class MsgpackOfferReader
     /// instance instead of allocating one: a pass reads ~2M keys, and the STJ arm this reader
     /// replaced allocated none of them. A key a mod added is not in here and still allocates.
     /// </summary>
+    // ponytail: hand-kept in step with the switch labels below - a label added without its key here
+    // costs an allocation per occurrence, not correctness; pin it with a test that reflects over the
+    // readers if the list ever drifts far enough to matter
     private static readonly HashSet<string> _wireKeys =
     [
         "rejectedCanSellTemplates",

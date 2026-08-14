@@ -161,7 +161,7 @@ regeneration pass legacy (C# 4.1.2)  n=5  mean=10.18 ms  median=10.51 ms  min=5.
                                      offers=878  alloc/run=5.9 MB  peak RSS=972 MB (+0 MB over the phase)
 regeneration pass BuildRequest only  n=5  mean=14.25 ms  median=14.14 ms  min=8.53 ms  max=19.89 ms
                                      offers=0  alloc/run=7.1 MB  peak RSS=942 MB (+0 MB over the phase)
-regeneration pass    speedup (median legacy / median native): 0.15x  projection share of native median: 17.6%
+regeneration pass    speedup (median legacy / median native): 0.14x  projection share of native median: 18.6%
 ```
 
 The run before it, same build, same machine, was `median=651.45 ms` / `mean=724.51 ms` for the native
