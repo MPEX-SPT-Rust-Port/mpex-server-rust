@@ -293,6 +293,58 @@ public class MsgpackOfferReaderTests
         Assert.That(((JsonElement)offer.Items![0].Location!).GetInt32(), Is.EqualTo(5));
     }
 
+    /// <summary>
+    /// The transcoder's buffer and the frame scratch are reused per thread, so a value materialized
+    /// from an earlier frame must not be reading bytes a later one overwrote.
+    /// </summary>
+    [Test]
+    public void AMaterializedValueSurvivesTheNextFrameReusingTheBuffers()
+    {
+        var first = MsgpackOfferReader.ReadOffer(
+            BuildOfferWithOneItem(
+                (ref MessagePackWriter writer) =>
+                {
+                    writer.WriteMapHeader(3);
+                    writer.Write("_id");
+                    writer.Write(ItemId);
+                    writer.Write("_tpl");
+                    writer.Write(TemplateId);
+                    writer.Write("location");
+                    writer.WriteMapHeader(1);
+                    writer.Write("x");
+                    writer.Write("first");
+                }
+            )
+        );
+        var location = (JsonElement)first.Items![0].Location!;
+
+        // Longer in every dimension, so a stale view would read this frame's bytes, not its own
+        var second = MsgpackOfferReader.ReadOffer(
+            BuildOfferWithOneItem(
+                (ref MessagePackWriter writer) =>
+                {
+                    writer.WriteMapHeader(3);
+                    writer.Write("_id");
+                    writer.Write(ItemId);
+                    writer.Write("_tpl");
+                    writer.Write(TemplateId);
+                    writer.Write("location");
+                    writer.WriteMapHeader(2);
+                    writer.Write("x");
+                    writer.Write(new string('z', 512));
+                    writer.Write("y");
+                    writer.Write(new string('q', 512));
+                }
+            )
+        );
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(location.GetProperty("x").GetString(), Is.EqualTo("first"));
+            Assert.That(((JsonElement)second.Items![0].Location!).GetProperty("x").GetString(), Is.EqualTo(new string('z', 512)));
+        });
+    }
+
     [Test]
     public void AModAddedItemFieldLandsInExtensionData()
     {

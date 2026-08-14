@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Text;
 using System.Text.Json;
 using MessagePack;
 using SPTarkov.Server.Core.Models.Common;
@@ -21,26 +22,101 @@ namespace SPTarkov.Server.Core.Native.Ragfair;
 /// </summary>
 internal static class MsgpackOfferReader
 {
+    /// <summary> Longest key <see cref="ReadKey"/> decodes on the stack; a longer one is a mod's </summary>
+    private const int MaxStackKeyLength = 256;
+
     /// <summary>
     /// <c>Item.ExtensionData</c> is IL-injected by Ceciler on Release and publish builds only, so
     /// it cannot be named in source. Null on a Debug build, where unknown keys are dropped - exactly
     /// what STJ does for a type without <c>[JsonExtensionData]</c>.
     /// </summary>
-    private static readonly Func<Item, Dictionary<string, object>?>? _itemExtensionData = typeof(Item).GetProperty("ExtensionData")
-        is { } property
-        ? item => (Dictionary<string, object>?)property.GetValue(item)
+    private static readonly Func<Item, Dictionary<string, object>?>? _itemExtensionData = typeof(Item)
+        .GetProperty("ExtensionData")
+        ?.GetGetMethod()
+        is { } getter
+        ? (Func<Item, Dictionary<string, object>?>)Delegate.CreateDelegate(typeof(Func<Item, Dictionary<string, object>?>), getter)
         : null;
+
+    /// <summary>
+    /// Scratch the frame is copied into so <see cref="MessagePackReader"/> gets the
+    /// <see cref="ReadOnlyMemory{T}"/> it needs without a <c>byte[]</c> per offer. Per-thread because
+    /// frames are parsed under a <c>Parallel.For</c>, and grown to the largest frame the thread sees.
+    /// </summary>
+    [ThreadStatic]
+    private static byte[]? _frameScratch;
+
+    /// <summary>
+    /// The transcoder's writer and its output, reused per thread: a fresh pair per <c>upd</c> and
+    /// <c>location</c> is ~166k throwaway writers a pass. Everything <see cref="Materialize{T}"/>
+    /// returns owns its own copy of the bytes - <c>JsonDocument</c> copies the span it parses - so
+    /// the buffer is free to be overwritten by the next value.
+    /// </summary>
+    [ThreadStatic]
+    private static ArrayBufferWriter<byte>? _transcodeBuffer;
+
+    [ThreadStatic]
+    private static Utf8JsonWriter? _transcodeWriter;
+
+    /// <summary>
+    /// Every map key the wire contract names, so <see cref="ReadKey"/> hands the switches a cached
+    /// instance instead of allocating one: a pass reads ~2M keys, and the STJ arm this reader
+    /// replaced allocated none of them. A key a mod added is not in here and still allocates.
+    /// </summary>
+    private static readonly HashSet<string> _wireKeys =
+    [
+        "rejectedCanSellTemplates",
+        "diagnostics",
+        "_id",
+        "intId",
+        "user",
+        "root",
+        "items",
+        "itemsCost",
+        "requirements",
+        "requirementsCost",
+        "summaryCost",
+        "startTime",
+        "endTime",
+        "loyaltyLevel",
+        "sellInOnePiece",
+        "locked",
+        "quantity",
+        "id",
+        "nickname",
+        "rating",
+        "memberType",
+        "avatar",
+        "isRatingGrowing",
+        "aid",
+        "_tpl",
+        "count",
+        "onlyFunctional",
+        "level",
+        "side",
+        "parentId",
+        "slotId",
+        "desc",
+        "location",
+        "upd",
+        "localeKey",
+        "message",
+        "args",
+    ];
+
+    private static readonly HashSet<string>.AlternateLookup<ReadOnlySpan<char>> _wireKeyLookup = _wireKeys.GetAlternateLookup<
+        ReadOnlySpan<char>
+    >();
 
     internal static DynamicOffersHeader ReadHeader(ReadOnlySpan<byte> payload)
     {
-        var reader = new MessagePackReader(payload.ToArray());
+        var reader = new MessagePackReader(CopyToScratch(payload));
         List<MongoId> rejectedCanSellTemplates = [];
         List<Diagnostic> diagnostics = [];
 
         var memberCount = reader.ReadMapHeader();
         for (var i = 0; i < memberCount; i++)
         {
-            switch (reader.ReadString())
+            switch (ReadKey(ref reader))
             {
                 case "rejectedCanSellTemplates":
                     var templateCount = reader.ReadArrayHeader();
@@ -71,15 +147,13 @@ internal static class MsgpackOfferReader
 
     internal static RagfairOffer ReadOffer(ReadOnlySpan<byte> payload)
     {
-        // ponytail: per-frame copy to satisfy MessagePackReader's ReadOnlySequence input; swap to
-        // a pooled buffer or a MemoryManager over the native buffer if stage C profiling flags it
-        var reader = new MessagePackReader(payload.ToArray());
+        var reader = new MessagePackReader(CopyToScratch(payload));
         var offer = new RagfairOffer { User = null! };
 
         var memberCount = reader.ReadMapHeader();
         for (var i = 0; i < memberCount; i++)
         {
-            switch (reader.ReadString())
+            switch (ReadKey(ref reader))
             {
                 case "_id":
                     offer.Id = new MongoId(reader.ReadString());
@@ -198,7 +272,7 @@ internal static class MsgpackOfferReader
         var memberCount = reader.ReadMapHeader();
         for (var i = 0; i < memberCount; i++)
         {
-            switch (reader.ReadString())
+            switch (ReadKey(ref reader))
             {
                 case "id":
                     user.Id = new MongoId(reader.ReadString());
@@ -253,7 +327,7 @@ internal static class MsgpackOfferReader
         var memberCount = reader.ReadMapHeader();
         for (var i = 0; i < memberCount; i++)
         {
-            switch (reader.ReadString())
+            switch (ReadKey(ref reader))
             {
                 case "_tpl":
                     requirement.TemplateId = new MongoId(reader.ReadString());
@@ -298,12 +372,15 @@ internal static class MsgpackOfferReader
     private static Item ReadItem(ref MessagePackReader reader)
     {
         var item = new Item { Id = default };
-        var extensionData = _itemExtensionData?.Invoke(item);
+
+        // Fetched on the first unknown key rather than up front: the wire carries none on a stock
+        // build, and this runs for every item in the pass
+        Dictionary<string, object>? extensionData = null;
 
         var memberCount = reader.ReadMapHeader();
         for (var i = 0; i < memberCount; i++)
         {
-            var key = reader.ReadString();
+            var key = ReadKey(ref reader);
             switch (key)
             {
                 case "_id":
@@ -344,6 +421,7 @@ internal static class MsgpackOfferReader
 
                     break;
                 default:
+                    extensionData ??= _itemExtensionData?.Invoke(item);
                     if (extensionData is null || key is null)
                     {
                         reader.Skip();
@@ -367,7 +445,7 @@ internal static class MsgpackOfferReader
         var memberCount = reader.ReadMapHeader();
         for (var i = 0; i < memberCount; i++)
         {
-            switch (reader.ReadString())
+            switch (ReadKey(ref reader))
             {
                 case "level":
                     diagnostic.Level = reader.ReadString() ?? string.Empty;
@@ -404,13 +482,65 @@ internal static class MsgpackOfferReader
     /// </summary>
     private static T? Materialize<T>(ref MessagePackReader reader)
     {
-        var buffer = new ArrayBufferWriter<byte>();
-        using (var writer = new Utf8JsonWriter(buffer))
+        var buffer = _transcodeBuffer ??= new ArrayBufferWriter<byte>();
+        buffer.ResetWrittenCount();
+
+        var writer = _transcodeWriter;
+        if (writer is null)
         {
-            TranscodeValue(ref reader, writer);
+            writer = new Utf8JsonWriter(buffer);
+            _transcodeWriter = writer;
+        }
+        else
+        {
+            // Also what clears the half-written state a value that violated the wire contract left
+            writer.Reset();
         }
 
+        TranscodeValue(ref reader, writer);
+        writer.Flush();
+
         return JsonSerializer.Deserialize<T>(buffer.WrittenSpan, JsonOptions);
+    }
+
+    /// <summary>
+    /// Reads a map key without allocating a string for it when the wire contract already names it.
+    /// </summary>
+    private static string? ReadKey(ref MessagePackReader reader)
+    {
+        if (!reader.TryReadStringSpan(out var utf8))
+        {
+            // A key split across sequence segments, or one that is not a string at all - the frame
+            // is a single contiguous buffer, so this is only the nil-key contract violation
+            return reader.ReadString();
+        }
+
+        if (utf8.Length > MaxStackKeyLength)
+        {
+            return Encoding.UTF8.GetString(utf8);
+        }
+
+        // A UTF-8 sequence never decodes to more chars than it has bytes
+        Span<char> key = stackalloc char[utf8.Length];
+        var length = Encoding.UTF8.GetChars(utf8, key);
+        return _wireKeyLookup.TryGetValue(key[..length], out var cached) ? cached : new string(key[..length]);
+    }
+
+    /// <summary>
+    /// Copies a frame into the calling thread's scratch buffer. The frame is a span over the native
+    /// allocation, which <see cref="MessagePackReader"/> cannot take directly.
+    /// </summary>
+    private static ReadOnlyMemory<byte> CopyToScratch(ReadOnlySpan<byte> payload)
+    {
+        var scratch = _frameScratch;
+        if (scratch is null || scratch.Length < payload.Length)
+        {
+            scratch = new byte[payload.Length];
+            _frameScratch = scratch;
+        }
+
+        payload.CopyTo(scratch);
+        return new ReadOnlyMemory<byte>(scratch, 0, payload.Length);
     }
 
     private static void TranscodeValue(ref MessagePackReader reader, Utf8JsonWriter writer)
@@ -431,7 +561,16 @@ internal static class MsgpackOfferReader
                 writer.WriteNumberValue(reader.ReadDouble());
                 break;
             case MessagePackType.String:
-                writer.WriteStringValue(reader.ReadString());
+                // The UTF-8 goes straight across; decoding it to a string first is pure garbage
+                if (reader.TryReadStringSpan(out var utf8Value))
+                {
+                    writer.WriteStringValue(utf8Value);
+                }
+                else
+                {
+                    writer.WriteStringValue(reader.ReadString());
+                }
+
                 break;
             case MessagePackType.Array:
                 var elementCount = reader.ReadArrayHeader();
@@ -448,9 +587,17 @@ internal static class MsgpackOfferReader
                 writer.WriteStartObject();
                 for (var i = 0; i < memberCount; i++)
                 {
-                    writer.WritePropertyName(
-                        reader.ReadString() ?? throw new InvalidOperationException("a ragfair msgpack map has a non-string key.")
-                    );
+                    if (reader.TryReadStringSpan(out var utf8Key))
+                    {
+                        writer.WritePropertyName(utf8Key);
+                    }
+                    else
+                    {
+                        writer.WritePropertyName(
+                            reader.ReadString() ?? throw new InvalidOperationException("a ragfair msgpack map has a non-string key.")
+                        );
+                    }
+
                     TranscodeValue(ref reader, writer);
                 }
 

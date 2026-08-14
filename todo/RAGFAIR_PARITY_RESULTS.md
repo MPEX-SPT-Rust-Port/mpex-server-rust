@@ -15,6 +15,7 @@ Ratio is the printed speedup: median legacy / median native. Below 1.0x means na
 | Stage A (rayon batch fan-out) | 2026-08-14 | 884.67 ms | 454.37 ms | 0.51x | 85.42 ms | 9.87 ms | 0.12x | 182.9 MB | 285.0 MB |
 | Stage B (framed FFI response, ABI 9) | 2026-08-14 | 676.12 ms | 443.22 ms | 0.66x | 75.00 ms | 10.50 ms | 0.14x | 208.4 MB | 283.4 MB |
 | Stage C (MessagePack payloads, ABI 10) | 2026-08-14 | 719.39 ms | 441.66 ms | 0.61x | 75.67 ms | 10.78 ms | 0.14x | 358.3 MB | 282.6 MB |
+| Stage C remediation (reader buffer pooling) | 2026-08-14 | 663.95 ms | 457.44 ms | 0.69x | 76.14 ms | 10.51 ms | 0.14x | 219.9 MB | 283.9 MB |
 
 ## Stage A notes
 
@@ -122,6 +123,60 @@ The mechanism is visible in the allocation column: native alloc/run jumped **208
 per pass than the JSON path it replaced, and under the fixture's workstation GC that extra pressure costs
 more than the parsing win it buys. The spread supports that reading: native min/max widened to
 679.47–937.93 (stage B: 598.22–738.76), the signature of GC pauses landing inside timed runs.
+
+## Stage C remediation notes
+
+`MsgpackOfferReader` only, no Rust change. Four allocation sources removed, in the order they were found:
+
+1. `payload.ToArray()` per frame — now a copy into a `[ThreadStatic]` scratch array grown to the
+   largest frame the thread has seen (`MessagePackReader` needs a `ReadOnlyMemory`, and the frame is a
+   span over the native buffer). ~58k `byte[]` a pass, gone.
+2. A fresh `ArrayBufferWriter<byte>` + `Utf8JsonWriter` per `upd`/`location`/unknown value — now one
+   pair per thread, `ResetWrittenCount()` + `Reset()` between values. Safe because everything
+   `Materialize` returns owns its bytes (`JsonDocument` copies the span it parses); the added
+   `AMaterializedValueSurvivesTheNextFrameReusingTheBuffers` test pins that.
+3. `_itemExtensionData?.Invoke(item)` per item — moved into the `default:` arm, so a stock build (no
+   unknown keys on the wire) never pays it, and the delegate is now bound with
+   `Delegate.CreateDelegate` on the getter instead of a boxing `PropertyInfo.GetValue`.
+4. `reader.ReadString()` on every map key — a pass reads ~2M of them and STJ's binder allocated none.
+   Keys are now read as UTF-8 spans, decoded onto the stack and looked up in a `HashSet<string>` of the
+   wire's key names via `GetAlternateLookup<ReadOnlySpan<char>>()`; a mod's key still allocates. The
+   transcoder writes msgpack strings and map keys straight through as UTF-8 as well.
+
+1–3 alone: median 719.39 → 677.19 ms, alloc/run 358.3 → 296.6 MB — time back to stage B but still
++88 MB over it, which is the size of the key strings. With 4 (verbatim from the run):
+
+```
+full pass native (rust)              n=5  mean=710.73 ms  median=663.95 ms  min=610.16 ms  max=865.59 ms
+                                     offers=24133  alloc/run=219.9 MB  peak RSS=1258 MB (+453 MB over the phase)
+full pass legacy (C# 4.1.2)          n=5  mean=468.52 ms  median=457.44 ms  min=425.53 ms  max=507.05 ms
+                                     offers=24199  alloc/run=283.9 MB  peak RSS=1207 MB (+0 MB over the phase)
+full pass BuildRequest only          n=5  mean=13.08 ms  median=13.29 ms  min=8.38 ms  max=15.75 ms
+                                     offers=0  alloc/run=7.1 MB  peak RSS=982 MB (+2 MB over the phase)
+full pass            speedup (median legacy / median native): 0.69x  projection share of native median: 2.0%
+
+regeneration pass native (rust)      n=5  mean=74.37 ms  median=76.14 ms  min=66.82 ms  max=80.94 ms
+                                     offers=891  alloc/run=17.6 MB  peak RSS=998 MB (+23 MB over the phase)
+regeneration pass legacy (C# 4.1.2)  n=5  mean=10.18 ms  median=10.51 ms  min=5.63 ms  max=13.97 ms
+                                     offers=878  alloc/run=5.9 MB  peak RSS=972 MB (+0 MB over the phase)
+regeneration pass BuildRequest only  n=5  mean=14.25 ms  median=14.14 ms  min=8.53 ms  max=19.89 ms
+                                     offers=0  alloc/run=7.1 MB  peak RSS=942 MB (+0 MB over the phase)
+regeneration pass    speedup (median legacy / median native): 0.15x  projection share of native median: 17.6%
+```
+
+The run before it, same build, same machine, was `median=651.45 ms` / `mean=724.51 ms` for the native
+full pass, so read the median as ~652–664 ms.
+
+**The regression is paid off and a little more.** Against stage C: −55 ms (719.39 → 663.95) and −138 MB
+(358.3 → 219.9). Against stage B: −12 ms (676.12 → 663.95) and +11.5 MB (208.4 → 219.9), i.e. the
+msgpack reader now allocates within noise of the STJ arm it replaced, and MessagePack finally shows a
+small net win instead of a loss.
+
+**The spec §1 gate is still missed.** 663.95 / 457.44 = 1.45x legacy, against the 1.25x bar (≈572 ms at
+this run's legacy median). The remaining ~206 ms over legacy is not reader allocation any more — the
+mean/max spread (710.73 / 865.59) is still wide, so what is left is the response leg's remaining
+per-object binding cost plus the fixture's workstation-GC pauses, both of which the Task 5 attribution
+already identified as untouched by converter-level work.
 
 ## Spec §1 gate decision — MISSED
 
