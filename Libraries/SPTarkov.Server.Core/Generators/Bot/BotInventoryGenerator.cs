@@ -146,7 +146,7 @@ public class BotInventoryGenerator(
     ///     folded in - running the retained C# implementation is the only way those hooks and
     ///     replacements can take effect with real baseline semantics. Cheapest check first.
     /// </summary>
-    private bool UseLegacyPath()
+    internal bool UseLegacyPath()
     {
         if (botConfig.ForceLegacyBotGeneration)
         {
@@ -258,7 +258,7 @@ public class BotInventoryGenerator(
     /// </summary>
     /// <param name="botId">Bots unique identifier</param>
     /// <param name="containerGrids">Container state keyed by equipment slot name</param>
-    private void RestoreContainerGrids(MongoId botId, Dictionary<string, ContainerDetailsView> containerGrids)
+    internal void RestoreContainerGrids(MongoId botId, Dictionary<string, ContainerDetailsView> containerGrids)
     {
         foreach (var (slotName, container) in containerGrids)
         {
@@ -305,7 +305,7 @@ public class BotInventoryGenerator(
     /// </summary>
     /// <param name="botGenerationDetails">Details related to generating a bot</param>
     /// <param name="randomisationClamps">Equipment mod slot to clamped chance</param>
-    private void ReplayRandomisationClamps(BotGenerationDetails botGenerationDetails, Dictionary<string, double> randomisationClamps)
+    internal void ReplayRandomisationClamps(BotGenerationDetails botGenerationDetails, Dictionary<string, double> randomisationClamps)
     {
         if (randomisationClamps.Count == 0)
         {

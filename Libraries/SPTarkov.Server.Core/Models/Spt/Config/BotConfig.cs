@@ -19,6 +19,14 @@ public record BotConfig : BaseConfig
     public bool ForceLegacyBotGeneration { get; set; }
 
     /// <summary>
+    ///     Route wave generation through the per-bot native path instead of the single batched
+    ///     native call. Narrower escape hatch than ForceLegacyBotGeneration, which forces the
+    ///     retained C# implementation outright.
+    /// </summary>
+    [JsonPropertyName("forcePerBotGeneration")]
+    public bool ForcePerBotGeneration { get; set; }
+
+    /// <summary>
     ///     How many variants of each bot should be generated on raid start
     /// </summary>
     [JsonPropertyName("presetBatch")]
