@@ -54,7 +54,7 @@
 //!   property reads as `0`. Every one of them needs a template that omits the property its own
 //!   branch selected on, which real data never does.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use indexmap::IndexSet;
@@ -65,7 +65,7 @@ use super::{RagfairContext, plain};
 use crate::loot::item_helper::{
     AMMO_BOX, ARMOR_PLATE, ARMORED_EQUIPMENT, FUEL, LootError, WEAPON, add_cartridges_to_ammo_box,
     armor_item_can_hold_mods, armor_item_has_removable_plate_slots, get_item,
-    get_removable_plate_slot_ids, is_of_baseclass, is_of_baseclasses, reparent_item_and_children,
+    get_removable_plate_slot_ids, is_of_baseclass, is_of_baseclasses,
 };
 use crate::loot::models::{
     Item, UpdFoodDrink, UpdKey, UpdMedKit, UpdRepairKit, UpdRepairable, UpdResource,
@@ -598,16 +598,7 @@ fn create_offers_from_assort(
 
     for _ in 0..offer_count {
         // Clone the item so we don't have shared references and generate new item IDs
-        let mut cloned_assort = assort_item_with_children.clone();
-        // C# hands `ReparentItemAndChildren` the very item it is about to overwrite slot 0 with;
-        // this port needs the root as a separate value, so it snapshots it first. The only
-        // difference — the snapshot misses the root's own re-parenting — is erased two lines below.
-        let cloned_root = cloned_assort[0].clone();
-        let mut cloned_assort = reparent_item_and_children(&cloned_root, &mut cloned_assort);
-
-        // Clear unnecessary properties
-        cloned_assort[0].parent_id = None;
-        cloned_assort[0].slot_id = None;
+        let cloned_assort = clone_with_fresh_ids(assort_item_with_children);
 
         create_single_offer_for_item(
             ctx,
@@ -623,6 +614,55 @@ fn create_offers_from_assort(
     }
 
     Ok(())
+}
+
+/// The per-offer item copy `CreateOffersFromAssort` (`:358-366`) spells as clone +
+/// `ReparentItemAndChildren` + clearing the root's parentage, in one pass instead of three copies
+/// of the list (the clone, the reparent's `ToOwned`, and the root snapshot it writes back).
+///
+/// Same result as [`reparent_item_and_children`] called with the clone's own root: the root keeps
+/// its `_id`, every other item gets a fresh [`mongo_id`], and every `parent_id` — including one
+/// pointing outside the list, which gets a mapping of its own — is remapped through the old→new
+/// map. The root's `parent_id`/`slot_id` are then cleared, which is what made the C#'s write-back
+/// of the un-reparented root snapshot unobservable.
+///
+/// [`reparent_item_and_children`]: crate::loot::item_helper::reparent_item_and_children
+fn clone_with_fresh_ids(assort_item_with_children: &[Item]) -> Vec<Item> {
+    let mut id_mappings: HashMap<&str, String> = HashMap::new();
+    if let Some(root) = assort_item_with_children.first() {
+        id_mappings.insert(&root.id, root.id.clone());
+    }
+
+    let mut cloned: Vec<Item> = assort_item_with_children
+        .iter()
+        .map(|item| {
+            let mut cloned_item = item.clone();
+
+            cloned_item.id = id_mappings
+                .entry(&item.id)
+                .or_insert_with(mongo_id::generate)
+                .clone();
+
+            if let Some(parent_id) = item.parent_id.as_deref() {
+                cloned_item.parent_id = Some(
+                    id_mappings
+                        .entry(parent_id)
+                        .or_insert_with(mongo_id::generate)
+                        .clone(),
+                );
+            }
+
+            cloned_item
+        })
+        .collect();
+
+    // Clear unnecessary properties
+    if let Some(root) = cloned.first_mut() {
+        root.parent_id = None;
+        root.slot_id = None;
+    }
+
+    cloned
 }
 
 /// `RagfairOfferGenerator.CreateSingleOfferForItem` (`:427-501`). The C# takes the raw
@@ -3297,6 +3337,36 @@ mod tests {
         assert_ne!(offers[0].items[1].id, offers[1].items[1].id);
         // The shared assort list is untouched by the per-offer re-id.
         assert_eq!(assort[1].id, "front");
+    }
+
+    #[test]
+    fn a_grandchild_is_reparented_onto_its_parents_fresh_id() {
+        let item = |id: &str, parent: Option<&str>| Item {
+            id: id.to_owned(),
+            template: "tpl".to_owned(),
+            parent_id: parent.map(str::to_owned),
+            slot_id: parent.map(|_| "slot".to_owned()),
+            ..Item::default()
+        };
+        let assort = vec![
+            item("root", Some("hideout")),
+            item("child", Some("root")),
+            item("grandchild", Some("child")),
+        ];
+
+        let cloned = clone_with_fresh_ids(&assort);
+
+        // The root keeps its id and loses its assort parentage.
+        assert_eq!(cloned[0].id, "root");
+        assert_eq!(cloned[0].parent_id, None);
+        assert_eq!(cloned[0].slot_id, None);
+        // Depth 1 hangs off the unchanged root id, depth 2 off its parent's *fresh* id.
+        assert_ne!(cloned[1].id, "child");
+        assert_eq!(cloned[1].parent_id.as_deref(), Some("root"));
+        assert_ne!(cloned[2].id, "grandchild");
+        assert_eq!(cloned[2].parent_id.as_deref(), Some(cloned[1].id.as_str()));
+        // Everything else survives the copy.
+        assert_eq!(cloned[2].slot_id.as_deref(), Some("slot"));
     }
 
     // -----------------------------------------------------------------------
