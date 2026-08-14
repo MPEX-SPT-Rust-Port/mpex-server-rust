@@ -206,6 +206,7 @@ public static class SptNative
     }
 
     private const byte PayloadJson = 0;
+    private const byte PayloadMsgpack = 1;
 
     private static unsafe FramedOffersResult ParseFramedOffers(byte* buffer, int length)
     {
@@ -256,6 +257,11 @@ public static class SptNative
 
     private static DynamicOffersHeader? DeserializeHeader(byte encoding, ReadOnlySpan<byte> payload)
     {
+        if (encoding == PayloadMsgpack)
+        {
+            return MsgpackOfferReader.ReadHeader(payload);
+        }
+
         if (encoding != PayloadJson)
         {
             throw new InvalidOperationException($"unknown ragfair payload encoding {encoding}.");
@@ -267,6 +273,11 @@ public static class SptNative
     private static unsafe RagfairOffer DeserializeOfferFrame(byte encoding, nint buffer, int offset, int length)
     {
         var frame = new ReadOnlySpan<byte>((byte*)buffer + offset, length);
+        if (encoding == PayloadMsgpack)
+        {
+            return MsgpackOfferReader.ReadOffer(frame);
+        }
+
         if (encoding != PayloadJson)
         {
             throw new InvalidOperationException($"unknown ragfair payload encoding {encoding}.");
