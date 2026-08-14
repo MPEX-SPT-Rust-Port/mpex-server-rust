@@ -14,6 +14,7 @@ Ratio is the printed speedup: median legacy / median native. Below 1.0x means na
 | Baseline (pre-stage A) | 2026-08-14 | 1550 ms | 517 ms | 0.33x | ~103 ms | ~12.8 ms | ~0.12x | not recorded | not recorded |
 | Stage A (rayon batch fan-out) | 2026-08-14 | 884.67 ms | 454.37 ms | 0.51x | 85.42 ms | 9.87 ms | 0.12x | 182.9 MB | 285.0 MB |
 | Stage B (framed FFI response, ABI 9) | 2026-08-14 | 676.12 ms | 443.22 ms | 0.66x | 75.00 ms | 10.50 ms | 0.14x | 208.4 MB | 283.4 MB |
+| Stage C (MessagePack payloads, ABI 10) | 2026-08-14 | 719.39 ms | 441.66 ms | 0.61x | 75.67 ms | 10.78 ms | 0.14x | 358.3 MB | 282.6 MB |
 
 ## Stage A notes
 
@@ -76,6 +77,70 @@ plan expected is still outstanding.
 Native alloc/run rose 182.9 → 208.4 MB and the phase RSS delta rose +275 → +449 MB: the per-offer frames cost
 more managed allocation than the single-buffer path they replaced, and that GC pressure is part of why the
 response leg stopped short of the projection.
+
+## Stage C notes
+
+Commit d076b39 (`perf: MessagePack payloads in the ragfair frames via rmp-serde 1.3.1 (ABI 10)`).
+
+Verbatim from the run:
+
+```
+full pass native (rust)              n=5  mean=788.57 ms  median=719.39 ms  min=679.47 ms  max=937.93 ms
+                                     offers=24258  alloc/run=358.3 MB  peak RSS=1252 MB (+440 MB over the phase)
+full pass legacy (C# 4.1.2)          n=5  mean=451.93 ms  median=441.66 ms  min=430.87 ms  max=508.01 ms
+                                     offers=24098  alloc/run=282.6 MB  peak RSS=1185 MB (+0 MB over the phase)
+full pass BuildRequest only          n=5  mean=14.28 ms  median=13.02 ms  min=8.44 ms  max=22.80 ms
+                                     offers=0  alloc/run=7.1 MB  peak RSS=1000 MB (+2 MB over the phase)
+full pass            speedup (median legacy / median native): 0.61x  projection share of native median: 1.8%
+
+regeneration pass native (rust)      n=5  mean=76.07 ms  median=75.67 ms  min=74.68 ms  max=79.23 ms
+                                     offers=899  alloc/run=20.8 MB  peak RSS=1025 MB (+33 MB over the phase)
+regeneration pass legacy (C# 4.1.2)  n=5  mean=11.07 ms  median=10.78 ms  min=6.00 ms  max=17.62 ms
+                                     offers=888  alloc/run=5.9 MB  peak RSS=981 MB (+0 MB over the phase)
+regeneration pass BuildRequest only  n=5  mean=14.36 ms  median=13.79 ms  min=8.35 ms  max=22.15 ms
+                                     offers=0  alloc/run=7.1 MB  peak RSS=929 MB (+0 MB over the phase)
+regeneration pass    speedup (median legacy / median native): 0.14x  projection share of native median: 18.2%
+```
+
+Because the primary run is a *regression* against stage B, a second run was taken back-to-back on the same
+machine to rule out noise. It reproduces:
+
+```
+full pass native (rust)              n=5  mean=799.32 ms  median=727.67 ms  min=685.19 ms  max=953.73 ms
+                                     offers=24213  alloc/run=357.0 MB  peak RSS=1242 MB (+453 MB over the phase)
+full pass legacy (C# 4.1.2)          n=5  mean=447.26 ms  median=429.17 ms  min=427.89 ms  max=512.59 ms
+                                     offers=24121  alloc/run=283.6 MB  peak RSS=1163 MB (+0 MB over the phase)
+full pass            speedup (median legacy / median native): 0.59x
+```
+
+MessagePack made the full pass **slower**, not faster: 676.12 → 719.39 ms median (+43 ms, +6.4%), and the
+mean moved further, 664.78 → 788.57 ms (+18.6%). Legacy is unchanged (443.22 → 441.66 ms), so this is the
+native leg alone. The regeneration pass did not move (75.00 → 75.67 ms).
+
+The mechanism is visible in the allocation column: native alloc/run jumped **208.4 → 358.3 MB** (+150 MB,
++72%) while the offer count is flat (~24.2k). The msgpack reader allocates substantially more managed memory
+per pass than the JSON path it replaced, and under the fixture's workstation GC that extra pressure costs
+more than the parsing win it buys. The spread supports that reading: native min/max widened to
+679.47–937.93 (stage B: 598.22–738.76), the signature of GC pauses landing inside timed runs.
+
+## Spec §1 gate decision — MISSED
+
+The gate: stage C native full-pass median ≤ **1.25×** the same-run legacy median.
+
+```
+native median  719.39 ms
+legacy median  441.66 ms   (same run)
+ratio          719.39 / 441.66 = 1.629x
+bar            1.25x
+```
+
+**The gate is missed at 1.63x** — native is 63% slower than legacy, needing 552.08 ms to pass, i.e. **167 ms
+still to remove**. The confirmation run is worse, 727.67 / 429.17 = **1.70x**. Stage C did not close the gap;
+it widened it, from stage B's 1.53x to 1.63x.
+
+**Task 9 therefore executes.** Its first question should be the +150 MB allocation regression stage C
+introduced, since reverting or fixing that alone plausibly recovers the 43 ms back to stage B's 1.53x — but
+1.53x is itself still well over the 1.25x bar, so recovering stage B is necessary and not sufficient.
 
 ## Converter-tax attribution (Task 5) — no code change
 
