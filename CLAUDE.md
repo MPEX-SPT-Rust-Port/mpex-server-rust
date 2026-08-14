@@ -28,20 +28,11 @@ first, and a missing toolchain fails the build with `MSB3073`. Publishing for a 
 `-p:SptNativeRid=<rid>` as well (`dotnet publish -r` alone never reaches a RID-agnostic project reference, so cargo
 would silently emit a host-triple library); `Build.props` maps the RID to a Rust target triple and
 `SPTarkov.Server.csproj` errors out for unmapped RIDs. Only `linux-x64` on Linux hosts is mapped — arm64 is not a
-supported target for this fork, and Docker builds accept only `TARGETARCH=amd64`.
+supported target, and Docker builds accept only `TARGETARCH=amd64`.
 
 Release builds also regenerate `SPT_Data/checks.dat` by running `Libraries/SPTarkov.Server.Assets/build/PostBuild.cs`,
 which pulls `System.IO.Hashing` from NuGet — a Release build on a machine with an empty NuGet cache needs network
 access.
-
-This fork has no CI: `.github/` (workflows, CODEOWNERS, issue templates, funding config) was removed. Formatting,
-tests, and build checks are local-only — nothing enforces them on push. Upstream formats JSON under `SPT_Data` with
-Biome; there is no committed `biome.json` to reproduce that locally.
-
-Upstream stores its large database JSON files (`looseLoot.json`, `items.json`) via a custom LFS server and rejects PRs
-that touch them — open an issue instead. This fork instead bundles those files as a plain 7z archive
-(`Libraries/SPTarkov.Server.Assets/looseLoot.7z`, extracted by `scripts/decompress-assets.sh`/`.ps1`), so no LFS
-setup is needed here and normal PRs touching them are fine.
 
 ## Architecture
 
