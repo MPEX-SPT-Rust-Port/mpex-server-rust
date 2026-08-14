@@ -10,8 +10,9 @@ Build coupling and cross-RID rules live in [CLAUDE.md](../CLAUDE.md); the bounda
 
 Toolchain is pinned in `rust-toolchain.toml` (1.97.1, edition 2024). Dependencies are deliberately few:
 `serde`/`serde_json` (with `preserve_order`, so untyped maps keep C# `Dictionary` insertion order),
-`indexmap`, `rand`/`rand_xoshiro`, `tokio`, `walkdir`, `xxhash-rust`, `base64` — plus `tempfile` as the
-only dev-dependency (the `verify` FFI tests need a real directory). `Cargo.lock` is committed.
+`indexmap`, `rand`/`rand_xoshiro`, `rayon` (the bot batch loop only), `tokio`, `walkdir`, `xxhash-rust`,
+`base64` — plus `tempfile` as the only dev-dependency (the `verify` FFI tests need a real directory).
+`Cargo.lock` is committed.
 
 Roughly 35k lines across 32 files, tests included. `src/bot/` is ~45% of that and
 `bot_equipment_mod_generator.rs` alone ~4.2k; `src/loot/` ~31%, `src/ragfair/` ~20%.
@@ -20,7 +21,7 @@ Roughly 35k lines across 32 files, tests included. `src/bot/` is ~45% of that an
 
 | Path | Role |
 |---|---|
-| `src/lib.rs` | Module roots and `ABI_VERSION` (currently 6; must equal `SptNative.ExpectedAbiVersion`) |
+| `src/lib.rs` | Module roots and `ABI_VERSION` (currently 8; must equal `SptNative.ExpectedAbiVersion`) |
 | `src/ffi.rs` | The C-ABI surface. The **only** module containing `unsafe` |
 | `src/runtime.rs` | Process-wide multi-thread tokio runtime, `OnceLock`-built. Used only by `verify` |
 | `src/verify.rs` | Hashes `SPT_Data` with XXH3-128 and diffs it against `checks.dat` |
@@ -30,7 +31,7 @@ Roughly 35k lines across 32 files, tests included. `src/bot/` is ~45% of that an
 
 ## FFI boundary (`ffi.rs`)
 
-Eleven `extern "C"` exports. Two are trivial (`spt_native_abi_version`, `spt_buf_free`); the other nine take a
+Twelve `extern "C"` exports. Two are trivial (`spt_native_abi_version`, `spt_buf_free`); the other ten take a
 UTF-8 JSON request and hand back a heap buffer the caller releases with `spt_buf_free`.
 
 ```
@@ -40,7 +41,7 @@ C# SptNative → spt_generate_* (JSON in)
   → serde serialize the result, or the LootError message, into an out-buffer
 ```
 
-- `run_generator` is the shared body of the eight generation exports. `spt_verify_database` is separate
+- `run_generator` is the shared body of the nine generation exports. `spt_verify_database` is separate
   because it blocks on the tokio runtime.
 - Status codes: `STATUS_OK` 0, `STATUS_BAD_ARGS` 1 (null pointer, bad UTF-8, unparseable JSON),
   `STATUS_PANIC` 2, `STATUS_ERROR` 3.
@@ -92,7 +93,7 @@ family's analog of `loot::item_helper::LootContext`.
 
 | Module | Stands in for | What it does |
 |---|---|---|
-| `bot_inventory_generator.rs` | `Generators/Bot/BotInventoryGenerator.cs` | `generate_inventory` — the orchestrator and the crate's single bot entry point |
+| `bot_inventory_generator.rs` | `Generators/Bot/BotInventoryGenerator.cs` | `generate_inventory` — the orchestrator and the crate's bot entry point — plus `generate_inventory_batch`, one wave in one call over a rayon loop |
 | `bot_equipment_mod_generator.rs` | `Generators/Bot/BotEquipmentModGenerator.cs` | Both mod halves (equipment, weapon), plus the one `BotWeaponModLimitService` method they call |
 | `bot_generator_helper.rs` | `Helpers/Bot/BotGeneratorHelper.cs`, `BotInventoryContainerService.cs` | Per-item `Upd` blocks, compatibility probes, and the `ContainerGrids` occupancy state |
 | `bot_loot_generator.rs` | `Generators/Loot/BotLootGenerator.cs` | Fills pockets/vest/backpack/secure from pools the C# caller resolved |
@@ -122,8 +123,9 @@ One native call generates a whole batch of offers, not one offer.
 Two crate-internal facts:
 
 - **The walk is sequential.** C# fans one `Task.Factory.StartNew` per assort entry across the thread
-  pool; this crate walks the batch on the calling thread. There is no rayon. That is a deliberate
-  divergence and the larger half of the port's performance loss (see `../BENCHMARK.md`).
+  pool; this crate walks the ragfair batch on the calling thread — rayon is in the crate, but only
+  the bot batch loop uses it. That is a deliberate divergence and the larger half of the port's
+  performance loss (see `../BENCHMARK.md`).
 - **`GetFleaPricesAsArray`'s cache is re-derived per call.** The C# `AllowedFleaPriceItemsForBarter`
   field is built once per generator instance and never invalidated; here it is rebuilt on every call,
   which makes the native path *fresher* than legacy for runtime-added items.

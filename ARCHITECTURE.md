@@ -153,7 +153,7 @@ startup outside DEBUG. That format is a contract shared with `rust/spt-native/sr
 
 `rust/spt-native` is a `cdylib` called over C ABI from `Libraries/SPTarkov.Server.Core/Native/`
 (`NativeMethods.cs`, `SptNative.cs`). It owns database hash verification and the ported generation
-paths: location loot, reward loot, whole-bot inventory, and dynamic ragfair offers. Eleven exports,
+paths: location loot, reward loot, whole-bot inventory, and dynamic ragfair offers. Twelve exports,
 JSON in / JSON out, with `spt_native_abi_version` handshaking against `SptNative.ExpectedAbiVersion`.
 
 Every ported class keeps its complete 4.1.2 C# implementation as a **legacy path**, taken
@@ -171,6 +171,27 @@ is mapped.
 
 → [`rust/ARCHITECTURE.md`](rust/ARCHITECTURE.md) for the crate internals and the FFI contract.
 → [`RUST-ROADMAP.md`](RUST-ROADMAP.md) for port status, known divergences, porting rules and roadmap.
+
+### Bot wave dispatch
+
+Bot generation has three tiers, chosen per wave in `BotController.GenerateBotWave`. First choice is
+the **batch**: `BotWaveBatcher.TryGenerateWave` projects the shared views once and generates the
+whole wave in a single `spt_generate_bot_inventory_batch` call (rayon-parallel on the Rust side, one
+`{result | error}` envelope per bot in request order — a failed bot is skipped with a Critical log
+and the wave continues). If the batcher declines it returns null, and the unchanged **per-bot**
+native path runs, `.AsParallel()` over `BotInventoryGenerator.GenerateInventory`; that dispatcher in
+turn falls to the **legacy** 4.1.2 C# under its own existing conditions.
+
+The batch declines on any of: `BotConfig.ForcePerBotGeneration`; anything that would send
+`GenerateInventory` to legacy anyway (`BotInventoryGenerator.UseLegacyPath()`, which includes
+`BotConfig.ForceLegacyBotGeneration`); a live Harmony patch on any frozen 4.1.2 member of
+`BotGenerator` or `BotController` except `GenerateBotWave` itself; a container-substituted
+`BotGenerator` subclass; or a wave that could write nighttime equipment clamps — a night raid where
+the wave role's equipment config carries `NighttimeChanges.EquipmentModsModifiers` in some
+randomisation band, because that clamp is a cross-bot feedback loop only the per-bot path replays. A
+mod subclassing `BotController` through the frozen 14-parameter constructor gets a null batcher and
+never batches. The two escape hatches are config flags: `forcePerBotGeneration` (batch off, native
+per-bot on) and `forceLegacyBotGeneration` (native off entirely).
 
 ### Ragfair offer generation
 
@@ -222,7 +243,7 @@ built (so `startTime`/`endTime` fold to the batch clock plus the per-offer sprea
 Performance: native **loses** here — 1485 ms vs 437 ms on the full pass (3.4x slower) and 95 ms vs
 11 ms on regeneration (8.8x), see [`BENCHMARK.md`](BENCHMARK.md). Roughly half is single-threaded
 Rust generation against legacy's 12-thread fan-out, half is wrapper and response serialisation of
-~24k offers; the shared items-view cache is only 1% of the full pass and is not the lever. Absolute cost is
+~24k offers; the payload projection is only 1% of the full pass and is not the lever. Absolute cost is
 small (startup, then per-expiry bursts) and native stays the default for family consistency, with
 `ForceLegacyRagfairGeneration` as the one-line opt-out.
 

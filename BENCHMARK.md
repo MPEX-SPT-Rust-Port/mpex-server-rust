@@ -149,7 +149,7 @@ and loot — on the live shipped database, for `assault` and for a level-1 `pmcU
 clone and `BotEquipmentFilterService.FilterBotEquipment` are rebuilt outside the stopwatch for every
 run, because the legacy path mutates the template it is handed. `BotPayloadProjection.BuildRequest`
 is timed on its own in a third phase — with the same hoisting, so the clone is not counted twice: it
-is the fixed per-call payload cost, and its share is what an items-view cache would be buying back.
+is the fixed per-call payload cost, and its share bounds what any projection-side fix could buy back.
 
 | Role | Path | median | mean | min | max |
 |---|---|---|---|---|---|
@@ -160,17 +160,32 @@ is the fixed per-call payload cost, and its share is what an items-view cache wo
 | usec | legacy (C# 4.1.2) | 1.20 ms | 1.59 ms | 0.82 ms | 5.22 ms |
 | usec | `BuildRequest` only | 5.09 ms | 5.41 ms | 4.83 ms | 8.14 ms |
 
-Speedup on median wall clock: **0.02x** for both roles — the native path is roughly **45-65x slower**
-per bot. Projection share of the native median: **11.2%** (assault), **9.4%** (usec).
+Speedup on median wall clock: **0.02x** for both roles — the native path is tens of times slower per
+bot. Projection share of the native median: **11.2%** (assault), **9.4%** (usec).
+
+**The assault-vs-usec gap is measurement order, not role.** Whichever role is timed first pays
+roughly 40 ms of extra serialise time against a still-growing heap; reverse the order and the two
+figures swap. Steady state is ~51-54 ms per bot for both roles, so the per-role reading of the table
+above — and any single ratio derived from it — is an artifact of the harness.
 
 The shape is the reward-loot result made worse. A 4.1.2 bot is one or two milliseconds of work, and
 the native path pays a fixed cost per bot to hand the whole items table across the boundary: 4,673
 `ItemView`s plus ~5,000 nested slot/grid/cartridge/chamber views (~9.7k objects), and every global
-preset. `BuildRequest` is only the *building* of that payload, and at ~10% it is not where the time
-goes; the other ~90% is serialising it to JSON, crossing the FFI, and deserialising it on the Rust
-side. Generation itself is not the cost. See the bot-generation section of
-[RUST-ROADMAP.md](RUST-ROADMAP.md) for why the projection is not cached today and what the sanctioned
-fix is.
+preset. A phase-by-phase split of a ~51 ms bot reads: `BuildRequest` 10.3 ms, C# serialise 21.6 ms,
+Rust deserialise 14.9 ms, **Rust generation 2.9 ms**, FFI plus result deserialise ~1.4 ms — so
+**~92% of the cost is payload transport**, not generation, and no projection-side fix reaches more
+than the build phase's fifth of it.
+
+That is what the batched wave path attacks: `BotWaveBatcher` sends the shared views once per wave
+instead of once per bot, so a wave of N divides ~95.7% of the request between N bots. Measured
+against the baseline production actually runs — `BotController.GenerateBotWave`'s `.AsParallel()`
+per-bot loop — a **single-threaded** batch is worth **~1.7x** at the median wave of 10 (12.5 → 7.3
+ms/bot) and **~2.4-2.5x** at `assault`'s real wave of 45 (13.2 → 5.2-5.5 ms/bot). The batch loop now
+runs under rayon, so those are floors, not the current figures; `BotBatchTests.WaveCostPerBot`
+reports the serial, parallel and batched arms together so the sequential-baseline ratio cannot be
+quoted alone again. Two payload trims landed alongside it — sixteen always-default item members
+(−640 KB, −13.8%) and `slots[].required` (−49 KB), taking an `assault` request to ~4.18 MB — worth
+~4-6% on the per-bot path and ~0% batched, since the batch already divides the block they shrink.
 
 Bot-specific caveats, on top of the general ones below:
 
@@ -243,9 +258,9 @@ within one invocation.
 
 **This is a gate failure.** The full pass is the one the plan said to judge on, and native loses it.
 The shape differs from bot generation: there the fixed payload was the whole story, here it is not.
-`BuildRequest` is 15 ms of a 1,485 ms native pass — **1%** — so the sanctioned lever, the shared
-items-view cache ([RUST-ROADMAP.md](RUST-ROADMAP.md) roadmap #3), cannot buy back a loss of this
-size.
+`BuildRequest` is 15 ms of a 1,485 ms native pass — **1%** — so nothing on the projection side can
+buy back a loss of this size (and caching the projection is off the table anyway: see
+[RUST-ROADMAP.md](RUST-ROADMAP.md) roadmap #3).
 
 The remaining ~1.47 s splits in two, and the fixture's own log says how. The native side replays its
 internal timings through the same logger the legacy path uses, and they read `Took 709-722ms to
@@ -263,10 +278,10 @@ Ragfair-specific caveats, on top of the general ones below:
 
 - **The legacy path is parallel, the native path is not.** `GenerateDynamicOffersLegacy` fans one
   `Task.Factory.StartNew` per assort entry across the thread pool; on this 12-thread machine it does
-  its 405 ms of generation in 437 ms of wall clock. The native side has no rayon and runs the batch
-  on the calling thread, so its 713 ms of generation is 713 ms of wall clock. A single-threaded
-  legacy comparison is not measured; against one, native would look better, but the parallel version
-  is what the server actually runs.
+  its 405 ms of generation in 437 ms of wall clock. The native side runs the ragfair batch on the
+  calling thread — rayon is in the crate, but only the bot batch uses it — so its 713 ms of
+  generation is 713 ms of wall clock. A single-threaded legacy comparison is not measured; against
+  one, native would look better, but the parallel version is what the server actually runs.
 - **Every timed run works on a pre-filled flea** (see Workload). Both paths pay the holder's
   per-template cap checks against a full `_fakePlayerOffers` index, so the absolute numbers include
   work an empty-flea pass would not do — but symmetrically, and this is the state the real

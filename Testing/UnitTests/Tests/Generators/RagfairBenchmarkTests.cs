@@ -24,8 +24,8 @@ namespace UnitTests.Tests.Generators;
 /// regeneration pass <c>RagfairServer.ProcessExpiredFleaOffers</c> fires once enough offers expire.
 /// A pass is tens of thousands of offers with full item trees, which is why the native path's
 /// payload matters twice over - <see cref="RagfairPayloadProjection.BuildRequest"/> is timed on its
-/// own as well: that number is the floor under the native path, and the share it takes of it is
-/// what an items-view cache would be buying. Run in Release; the cargo dev profile makes Debug
+/// own as well: that number is the floor under the native path, and the share it takes of it bounds
+/// what any projection-side fix could buy. Run in Release; the cargo dev profile makes Debug
 /// numbers meaningless.
 /// </summary>
 [TestFixture]

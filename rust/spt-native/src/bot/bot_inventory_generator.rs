@@ -235,7 +235,9 @@ pub fn generate_inventory(
 /// Thread-safety inventory: the shared views are borrowed immutably; every `&mut` in
 /// `generate_one` is bot-local; `MongoId`'s counter is atomic; the RNG is `thread_local!` and
 /// `generate_one` installs its own seed guard per bot, so seeded output is deterministic per bot
-/// regardless of worker assignment. The guard's `Drop` also parks the stream in `PARKED_RNG`,
+/// regardless of worker assignment — except `MongoId`s, which are drawn from entropy rather than
+/// the seeded stream and are therefore only guaranteed unique, never reproducible (the parity
+/// tests normalise ids before comparing). The guard's `Drop` also parks the stream in `PARKED_RNG`,
 /// which is harmless here: the only consumer of a park is the loot dynamic entry point, which
 /// runs on C# calling threads, never on rayon workers — parks left on workers are dead writes.
 ///

@@ -8,7 +8,7 @@ internals see [rust/ARCHITECTURE.md](rust/ARCHITECTURE.md); for the C# side of t
 
 The loot family, the bot family and dynamic ragfair offer generation are ported and run natively by
 default. Every ported class keeps its full 4.1.2 C# implementation as a **legacy path**, selected
-automatically when a mod hooks it or manually via a config flag. Eleven C-ABI exports (`src/ffi.rs`)
+automatically when a mod hooks it or manually via a config flag. Twelve C-ABI exports (`src/ffi.rs`)
 carry it, all JSON in / JSON out.
 
 ## Working
@@ -22,6 +22,7 @@ carry it, all JSON in / JSON out.
 | Sealed weapon cases | `LootGenerator.GetSealedWeaponCaseLoot` | `spt_get_sealed_weapon_case_loot` |
 | Reward containers | `LootGenerator.GetRandomLootContainerLoot` | `spt_get_random_loot_container_loot` |
 | Whole bot inventory (equipment, mods, weapons, loot) | `BotInventoryGenerator.GenerateInventory` | `spt_generate_bot_inventory` |
+| A whole bot wave in one call — shared views on the wire once, rayon-parallel per bot, one `{result \| error}` envelope each | `BotWaveBatcher.TryGenerateWave`, from `BotController.GenerateBotWave` | `spt_generate_bot_inventory_batch` |
 | A batch of dynamic flea offers (assort walk, pricing, barter schemes) | `RagfairOfferGenerator.GenerateDynamicOffers` | `spt_generate_dynamic_offers` |
 
 Also working: mod-added fields on game data survive the round trip (`#[serde(flatten)] extra` maps
@@ -35,15 +36,20 @@ seeded-RNG parity at the primitive level (xoshiro256\*\*, twin known-answer test
   the pool in database slot order, so slots fill in a different order and every draw after the first
   differs. Only affects roles that set `randomisedArmorSlots`/`randomisedWeaponModSlots` (shipped:
   `pmc`, buckets 1-3, levels 15-100). Workaround: `ForceLegacyBotGeneration`.
-- **Bot generation is 45-65x slower per bot** — ~88 ms native vs ~1.4 ms legacy (`assault`), ~54 ms
-  vs ~1.2 ms (`usec`). The whole items table (~9.7k objects) is projected and serialised per bot.
+- **Bot generation is tens of times slower per bot** — ~51-54 ms native vs ~1.2-1.4 ms legacy, for
+  both measured roles (the 88 ms/54 ms split in earlier figures is measurement order, not role). The
+  whole items table (~9.7k objects) is projected and serialised per bot, and ~92% of the cost is that
+  transport, not generation — Rust generation itself is ~2.9 ms. The batched wave path amortises the
+  shared block across the wave: against the `.AsParallel()` per-bot loop production runs, a
+  single-threaded batch is worth ~1.7x at the median wave of 10 and ~2.4-2.5x at `assault`'s wave of
+  45, and the batch loop is now rayon-parallel on top of that.
 - **Reward loot is ~3x slower** — ~53 ms native vs ~17 ms legacy per `CreateRandomLoot`; same
   per-call items-view projection with only 15-35 items to amortise it against.
 - **Ragfair generation is 3.4x slower on the full pass** — 1485 ms native vs 437 ms legacy, and
   8.8x on the expired-offer regeneration pass (95 ms vs 11 ms). Two roughly equal halves: ~713 ms of
   single-threaded Rust generation against legacy's 12-thread fan-out, and ~772 ms of wrapper —
   request serialisation, the FFI crossing and deserialising ~24k offers with full item trees. The
-  payload projection is only 1% of the full pass, so the items-view cache below is *not* the lever
+  payload projection is only 1% of the full pass, so trimming or caching it is *not* the lever
   here. Absolute cost is small (once at startup, then per-expiry bursts) and native stays the
   default for family consistency; `RagfairConfig.ForceLegacyRagfairGeneration` is the opt-out.
 - **The native ragfair path is fresher than legacy for runtime-added items** — the C#
@@ -113,6 +119,17 @@ seeded-RNG parity at the primitive level (xoshiro256\*\*, twin known-answer test
 - **Bots also flip to legacy on non-patch conditions**: a subclass of `BotEquipmentModGenerator` /
   `BotWeaponGenerator` / `BotLootGenerator` from the container, or an `InventoryMagGenComponents`
   set that isn't exactly the four built-ins.
+- **A wave is one native call before it is many.** `BotController.GenerateBotWave` offers the wave to
+  `BotWaveBatcher.TryGenerateWave` first; the batcher returns null — and the unchanged per-bot path
+  runs — on `BotConfig.ForcePerBotGeneration`, on anything `BotInventoryGenerator.UseLegacyPath()`
+  already catches, on a live patch of any frozen member of `BotGenerator`/`BotController` except
+  `GenerateBotWave`, on a container-substituted `BotGenerator`, or on a wave that could write
+  nighttime clamps (night raid **and** the role's equipment config carries
+  `NighttimeChanges.EquipmentModsModifiers` in some randomisation band) — that clamp is the cross-bot
+  feedback loop below, and only the per-bot path replays it. A `BotController` subclass built on the
+  frozen 14-parameter constructor gets a null batcher and never batches. The batch response is one
+  `{result | error}` envelope per bot in request order (ABI **8**): a failed bot is skipped with a
+  Critical log and the rest of the wave still generates.
 - **Two pieces of state are replayed after the bot call** because Rust keeps them to itself:
   container grid occupancy (`RestoreContainerGrids`) and nighttime mod-chance clamps
   (`ReplayRandomisationClamps`, a cross-bot feedback loop through `BotEquipmentFilterService`).
@@ -129,7 +146,11 @@ seeded-RNG parity at the primitive level (xoshiro256\*\*, twin known-answer test
   injected parameter, so nothing about the constructor moved.
 - **The ragfair batch walk is sequential.** `GenerateDynamicOffersLegacy` fans one
   `Task.Factory.StartNew` per assort entry; the native side walks the batch on the calling thread.
-  Deliberate — no rayon in the crate — and the larger half of the performance loss above.
+  Deliberate, and the larger half of the performance loss above. Rayon (`1.12.0`) is in the crate,
+  but only `generate_inventory_batch` uses it: `bots.into_par_iter()`, with a per-bot `TestSeedGuard`
+  so seeded output stays deterministic per bot regardless of which worker takes it, and no effect on
+  `PARKED_RNG` — the only consumer of a park is the loot dynamic entry point, which never runs on a
+  rayon worker.
 - **One timestamp per ragfair batch**, where legacy calls `TimeUtil.GetTimeStamp()` as each offer is
   built. `startTime` is therefore uniform across a native batch, and `endTime` is that timestamp
   plus the same per-offer random spread legacy draws.
@@ -142,8 +163,11 @@ seeded-RNG parity at the primitive level (xoshiro256\*\*, twin known-answer test
 1. ~~Mod-compatibility test gaps~~ — done, `ModCompatibilityTests` (`todo/TODO-TESTING.md`).
 2. ~~Ragfair offer + price generation~~ — done, `.superpowers/sdd/2026-08-13-ragfair-port/`
    (`todo/TODO.md` #4). Native by default, 19/19 parity, but slower than legacy — see items 4a/4b.
-3. Shared invalidation-aware items-view cache — the fix for the bot and reward-loot perf losses.
-   Worth ~1% of a ragfair full pass, so it does not help there.
+3. ~~Shared invalidation-aware items-view cache~~ — **retracted.** There is no database mutation
+   stamp, and mods mutate the database at runtime, so a cache cannot know when it is stale;
+   rebuilding the projection per call is the only correct choice until such a stamp exists
+   (guideline 3). It would also only have covered the ~20% build phase of the bot payload cost, and
+   ~1% of a ragfair full pass.
 4. The two ragfair performance levers, neither of which is item 3:
    - **a. Fan the batch walk out with rayon** — attacks the ~713 ms single-threaded generation half,
      against legacy's 12-thread ~405 ms.
