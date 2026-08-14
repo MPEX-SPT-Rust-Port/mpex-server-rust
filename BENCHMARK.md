@@ -179,14 +179,16 @@ than the build phase's fifth of it.
 That is what the batched wave path attacks: `BotWaveBatcher` sends the shared views once per wave
 instead of once per bot, so a wave of N divides ~95.7% of the request between N bots. Measured
 against the baseline production actually runs — `BotController.GenerateBotWave`'s `.AsParallel()`
-per-bot loop — a **single-threaded** batch is worth **~1.7x** at the median wave of 10 (12.5 → 7.3
-ms/bot) and **~2.4-2.5x** at `assault`'s real wave of 45 (13.2 → 5.2-5.5 ms/bot). The batch loop now
-runs under rayon; the measured figures for that are in the next section, and they land on those same
-numbers rather than below them. `BotBatchTests.WaveCostPerBot`
-reports the serial, parallel and batched arms together so the sequential-baseline ratio cannot be
-quoted alone again. Two payload trims landed alongside it — sixteen always-default item members
-(−640 KB, −13.8%) and `slots[].required` (−49 KB), taking an `assault` request to ~4.18 MB — worth
-~4-6% on the per-bot path and ~0% batched, since the batch already divides the block they shrink.
+per-bot loop — a **single-threaded** batch was worth **~1.7x** at the median wave of 10 (12.5 → 7.3
+ms/bot) and **~2.4-2.5x** at `assault`'s real wave of 45 (13.2 → 5.2-5.5 ms/bot). Those are the
+pre-rayon readings, kept for comparison. The batch loop now runs under rayon, and the measured
+figures in the next section come out slightly *above* those batch times — **1.9-2.2x** at wave 45 and
+**~1.5x** at wave 10 — so treat the ratios in this paragraph as the historical single-threaded
+reading, not the current one. `BotBatchTests.WaveCostPerBot` reports the serial, parallel and batched
+arms together so the sequential-baseline ratio cannot be quoted alone again. Two payload trims landed
+alongside it — sixteen always-default item members (−640 KB, −13.8%) and `slots[].required` (−49 KB),
+taking the `pmcUSEC` request the size guards measure to ~4.18 MB — worth ~4-6% on the per-bot path
+and ~0% batched, since the batch already divides the block they shrink.
 
 Bot-specific caveats, on top of the general ones below:
 

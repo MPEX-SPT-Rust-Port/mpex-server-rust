@@ -41,8 +41,9 @@ seeded-RNG parity at the primitive level (xoshiro256\*\*, twin known-answer test
   whole items table (~9.7k objects) is projected and serialised per bot, and ~92% of the cost is that
   transport, not generation — Rust generation itself is ~2.9 ms. The batched wave path amortises the
   shared block across the wave: against the `.AsParallel()` per-bot loop production runs, a
-  single-threaded batch is worth ~1.7x at the median wave of 10 and ~2.4-2.5x at `assault`'s wave of
-  45, and the batch loop is now rayon-parallel on top of that.
+  batch measures ~1.5x at the median wave of 10 and ~1.9-2.2x at `assault`'s wave of 45. The batch
+  loop is rayon-parallel, but that bought nothing measurable on top of the single-threaded batch —
+  the win is amortising the shared block, and transport stays single-threaded on the C# side.
 - **Reward loot is ~3x slower** — ~53 ms native vs ~17 ms legacy per `CreateRandomLoot`; same
   per-call items-view projection with only 15-35 items to amortise it against.
 - **Ragfair generation is 3.4x slower on the full pass** — 1485 ms native vs 437 ms legacy, and
