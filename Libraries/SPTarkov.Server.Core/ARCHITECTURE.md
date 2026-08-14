@@ -9,7 +9,7 @@ ARCHITECTURE.md](../../ARCHITECTURE.md); for which of the six library projects o
 [`Libraries/ARCHITECTURE.md`](../ARCHITECTURE.md).
 
 Core references only `SPTarkov.Common` and `SPTarkov.DI`, plus three NuGet packages: `HarmonyX`
-(the three dual-path generators use it to detect live patches), `FastCloner` (behind `Utils/Cloners/`)
+(the dual-path generators and `BotWaveBatcher` use it to detect live patches), `FastCloner` (behind `Utils/Cloners/`)
 and `System.IO.Hashing`. Core's csproj is also what invokes `cargo` to build `rust/spt-native`, so
 any `dotnet build` needs the Rust toolchain on `PATH`.
 
@@ -167,9 +167,9 @@ and 15 `IChatMessageHandler` implementations under `SPTFriend/Commands/`.
 | `Weather/`, `Ragfair/`, root | Weather presets; ragfair offers/assorts; fence assorts, PMC waves, scav case rewards |
 
 **Three are dual-path** — `LocationLootGenerator`, `LootGenerator` and `BotInventoryGenerator`
-forward to Rust by default and keep their 4.1.2 implementation as a legacy fallback. They are the
-only three files in Core that reference HarmonyX, which they use to detect a live patch and fall
-back.
+forward to Rust by default and keep their 4.1.2 implementation as a legacy fallback. They use
+HarmonyX to detect a live patch and fall back, as do `RagfairOfferGenerator` and `BotWaveBatcher` —
+five files in Core reference it.
 
 `BotInventoryGenerator` is the single entry point for the whole bot inventory, so
 `BotWeaponGenerator`, `BotEquipmentModGenerator` and `BotLootGenerator` do **not** forward to Rust
