@@ -10,7 +10,7 @@ The loot family, the bot family and dynamic ragfair offer generation are ported 
 default. Every ported class keeps its full 4.1.2 C# implementation as a **legacy path**, selected
 automatically when a mod hooks it or manually via a config flag. Twelve C-ABI exports (`src/ffi.rs`)
 carry it, JSON in and JSON out — except the ragfair response, which is a framed MessagePack
-envelope (ABI 10) the C# side parses in parallel.
+envelope (ABI 11) the C# side parses in parallel.
 
 ## Working
 
@@ -32,11 +32,14 @@ seeded-RNG parity at the primitive level (xoshiro256\*\*, twin known-answer test
 
 ## Broken / known divergences
 
-- **PMC level 15+ bots diverge from legacy** — both armor and weapon mod pools. Cause:
-  `BotEquipmentModPoolService`'s `ConcurrentDictionary` enumerates in hash-bucket order, Rust derives
-  the pool in database slot order, so slots fill in a different order and every draw after the first
-  differs. Only affects roles that set `randomisedArmorSlots`/`randomisedWeaponModSlots` (shipped:
-  `pmc`, buckets 1-3, levels 15-100). Workaround: `ForceLegacyBotGeneration`.
+- **Randomised weapon-mod spawn rolls can desync native from legacy** — one side spawns a randomised
+  weapon mod the other skips (e.g. `mod_mount_000` on the AK-74N), an RNG-stream desync in the
+  randomised-mod draw path (suspect: the randomised `mod_magazine` draw-count path). Pre-existing —
+  it was masked by the armor-plate ordering divergence (roadmap item 5) until that was fixed, and at
+  HEAD the failing seed set is a strict subset of the pre-fix commit's. Only affects roles that set
+  `randomisedArmorSlots`/`randomisedWeaponModSlots` (shipped: `pmc`, buckets 1-3, levels 15-100).
+  Pinned by the `[Ignore]`d `BotParityTests.TheRemainingWeaponModSpawnDesyncIsPinned` (usec/bear at
+  level 20, seed 42). Workaround: `ForceLegacyBotGeneration`.
 - **Bot generation is tens of times slower per bot** — ~51-54 ms native vs ~1.2-1.4 ms legacy, for
   both measured roles (the 88 ms/54 ms split in earlier figures is measurement order, not role). The
   whole items table (~9.7k objects) is projected and serialised per bot, and ~92% of the cost is that
@@ -163,10 +166,10 @@ seeded-RNG parity at the primitive level (xoshiro256\*\*, twin known-answer test
   effect on `PARKED_RNG`, whose only consumer is the loot dynamic entry point, which never runs on
   a rayon worker.
 - **The ragfair response is a framed MessagePack envelope, not a JSON buffer.** One length-prefixed
-  frame per offer behind a header frame (ABI **10**, encoding tag 1), which C# deserialises with
-  `Parallel.For` over the frames straight out of the native buffer — no whole-response JSON
-  document is ever materialised. Only the ragfair response uses it; every other export is still
-  JSON in / JSON out.
+  frame per offer behind a header frame (since ABI **10**, encoding tag 1; current ABI is 11), which
+  C# deserialises with `Parallel.For` over the frames straight out of the native buffer — no
+  whole-response JSON document is ever materialised. Only the ragfair response uses it; every other
+  export is still JSON in / JSON out.
 - **One timestamp per ragfair batch**, where legacy calls `TimeUtil.GetTimeStamp()` as each offer is
   built. `startTime` is therefore uniform across a native batch, and `endTime` is that timestamp
   plus the same per-offer random spread legacy draws.
@@ -195,8 +198,13 @@ seeded-RNG parity at the primitive level (xoshiro256\*\*, twin known-answer test
    residual is C#-side binding of ~367k `Models` objects out of the response, not generation
    (~85 ms) and not the projection (~13 ms). Figures and attribution: BENCHMARK.md § *Results —
    ragfair offer generation*, effort record `.superpowers/sdd/2026-08-14-ragfair-native-parity/`.
-5. `ConcurrentDictionary` mod-pool ordering divergence — project the C# enumeration order across the
-   FFI per item rather than emulating .NET's hash.
+5. ~~`ConcurrentDictionary` mod-pool ordering divergence~~ — done: the C# enumeration order
+   crosses the FFI as per-template slot indices (`modPoolSlotOrder`, ABI 11), and Rust's
+   `derive_pool` draws in that order with database order as the total fallback. Level-15+ parity
+   pinned by `BotParityTests` (usec/bear at level 20, seed 1337, plus the nighttime case now
+   comparing full inventories at that seed). Seed 42 still fails on an unrelated, pre-existing
+   weapon-mod spawn desync — first *Broken* bullet above. Spec:
+   `docs/superpowers/specs/2026-08-15-mod-pool-order-projection-design.md`.
 6. Full-output golden tests (same seed, bit-identical output vs the legacy path as oracle) for the
    loot and bot families; ragfair already has them (`RagfairParityTests`).
 7. `checks.dat` generate path in Rust (`todo/TODO.md` #12) — detached quick win, drops
