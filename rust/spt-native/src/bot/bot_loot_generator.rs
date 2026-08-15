@@ -130,8 +130,6 @@ pub struct BotLootConfig<'a> {
     pub equipment_id: &'a str,
     /// `botJsonTemplate.BotGeneration.Items`.
     pub item_counts: &'a ItemCountsWire,
-    /// `botJsonTemplate.BotChances.WeaponModsChances`, for loose weapons (`:285`).
-    pub weapon_mod_chances: &'a IndexMap<String, f64>,
     /// `BotConfig.DisableLootOnBotTypes`.
     pub disable_loot_on_bot_types: &'a HashSet<String>,
     /// `BotConfig.ItemSpawnLimits`, keyed by role (or `"pmc"`).
@@ -167,6 +165,7 @@ pub fn generate_loot(
     details: &BotGenerationDetailsWire,
     bot_template_inventory: &mut BotTypeInventoryWire,
     config: &BotLootConfig,
+    weapon_mod_chances: &mut IndexMap<String, f64>,
 ) -> Result<(), LootError> {
     // Limits on item types to be added as loot
     let item_counts = config.item_counts;
@@ -375,6 +374,7 @@ pub fn generate_loot(
                 BACKPACK,
                 details,
                 bot_template_inventory,
+                weapon_mod_chances,
             )?;
         }
 
@@ -1082,6 +1082,10 @@ pub fn add_required_child_items_to_parent(
 /// # Errors
 ///
 /// From [`generate_random_weapon`].
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one parameter per C# parameter, the weapon-mod chances included - C# reaches them through botJsonTemplate"
+)]
 pub fn add_loose_weapons_to_inventory_slot(
     ctx: &mut BotContext,
     grids: &mut ContainerGrids,
@@ -1090,6 +1094,7 @@ pub fn add_loose_weapons_to_inventory_slot(
     equipment_slot: &str,
     details: &BotGenerationDetailsWire,
     template_inventory: &mut BotTypeInventoryWire,
+    weapon_mod_chances: &mut IndexMap<String, f64>,
 ) -> Result<(), LootError> {
     // Three-to-one in favour of a primary weapon
     let chosen_weapon_type = *get_array_value(&[
@@ -1114,7 +1119,7 @@ pub fn add_loose_weapons_to_inventory_slot(
             template_inventory,
             details,
             config.equipment_id,
-            config.weapon_mod_chances,
+            weapon_mod_chances,
         )?;
 
         // C# dereferences a null `GenerateRandomWeapon` result before it reaches this check; a
@@ -1590,7 +1595,6 @@ mod tests {
             BotLootConfig {
                 equipment_id: "equipment1",
                 item_counts: &self.item_counts,
-                weapon_mod_chances: &self.mod_chances,
                 disable_loot_on_bot_types: &self.disable_loot_on_bot_types,
                 item_spawn_limits: &self.item_spawn_limits,
                 wallet_loot: &self.wallet_loot,
@@ -1690,6 +1694,7 @@ mod tests {
             &details("pmcusec", true),
             &mut BotTypeInventoryWire::default(),
             &fixture.config(),
+            &mut fixture.mod_chances.clone(),
         )
         .unwrap();
 
@@ -1779,6 +1784,7 @@ mod tests {
                     &details(role, false),
                     &mut BotTypeInventoryWire::default(),
                     &fixture.config(),
+                    &mut fixture.mod_chances.clone(),
                 )
                 .unwrap();
             });
@@ -1803,6 +1809,7 @@ mod tests {
                 &details("assault", false),
                 &mut BotTypeInventoryWire::default(),
                 &fixture.config(),
+                &mut fixture.mod_chances.clone(),
             )
             .unwrap();
         });
@@ -1846,6 +1853,7 @@ mod tests {
             &details("pmcusec", true),
             &mut BotTypeInventoryWire::default(),
             &fixture.config(),
+            &mut fixture.mod_chances.clone(),
         )
         .unwrap();
 
@@ -1882,6 +1890,7 @@ mod tests {
             &details("pmcusec", true),
             &mut BotTypeInventoryWire::default(),
             &fixture.config(),
+            &mut fixture.mod_chances.clone(),
         )
         .unwrap();
 
@@ -2228,6 +2237,7 @@ mod tests {
             BACKPACK,
             &details("pmcusec", true),
             &mut template_inventory,
+            &mut fixture.mod_chances.clone(),
         )
         .unwrap();
 

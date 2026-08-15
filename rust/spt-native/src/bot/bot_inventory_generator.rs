@@ -352,7 +352,7 @@ fn generate_one(
         &mut ctx,
         &mut grids,
         &mut template_inventory,
-        &worn_item_chances,
+        &mut worn_item_chances,
         &mut bot_inventory,
         &details,
         &item_generation_limits_min_max,
@@ -362,7 +362,6 @@ fn generate_one(
     let loot_config = BotLootConfig {
         equipment_id: &bot_inventory.equipment,
         item_counts: &item_generation_limits_min_max.items,
-        weapon_mod_chances: &worn_item_chances.weapon_mods,
         disable_loot_on_bot_types,
         item_spawn_limits,
         wallet_loot,
@@ -378,6 +377,7 @@ fn generate_one(
         &details,
         &mut template_inventory,
         &loot_config,
+        &mut worn_item_chances.weapon_mods,
     )?;
 
     // Inventory cache isn't needed, clear to save memory
@@ -996,7 +996,7 @@ pub fn generate_and_add_weapons_to_bot(
     ctx: &mut BotContext,
     grids: &mut ContainerGrids,
     template_inventory: &mut BotTypeInventoryWire,
-    equipment_chances: &ChancesWire,
+    equipment_chances: &mut ChancesWire,
     bot_inventory: &mut BotBaseInventoryWire,
     details: &BotGenerationDetailsWire,
     item_generation_limits_min_max: &GenerationWire,
@@ -1089,7 +1089,7 @@ pub fn add_weapon_and_magazines_to_inventory(
     weapon_slot: &str,
     template_inventory: &mut BotTypeInventoryWire,
     bot_inventory: &mut BotBaseInventoryWire,
-    equipment_chances: &ChancesWire,
+    equipment_chances: &mut ChancesWire,
     details: &BotGenerationDetailsWire,
     item_generation_weights: &GenerationWire,
 ) -> Result<(), LootError> {
@@ -1099,7 +1099,7 @@ pub fn add_weapon_and_magazines_to_inventory(
         template_inventory,
         details,
         &bot_inventory.equipment.clone(),
-        &equipment_chances.weapon_mods,
+        &mut equipment_chances.weapon_mods,
     )?;
     let Some(generated_weapon) = generated_weapon else {
         return Err(LootError::new(

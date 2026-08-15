@@ -114,7 +114,7 @@ pub fn generate_random_weapon(
     bot_template_inventory: &mut BotTypeInventoryWire,
     details: &BotGenerationDetailsWire,
     weapon_parent_id: &str,
-    mod_chances: &IndexMap<String, f64>,
+    mod_chances: &mut IndexMap<String, f64>,
 ) -> Result<Option<GenerateWeaponResultWire>, LootError> {
     let weapon_tpl =
         pick_weighted_weapon_template_from_pool(ctx, equipment_slot, bot_template_inventory)?;
@@ -181,7 +181,7 @@ pub fn generate_weapon_by_tpl(
     slot_name: &str,
     bot_template_inventory: &mut BotTypeInventoryWire,
     weapon_parent_id: &str,
-    mod_chances: &IndexMap<String, f64>,
+    mod_chances: &mut IndexMap<String, f64>,
     details: &BotGenerationDetailsWire,
 ) -> Result<Option<GenerateWeaponResultWire>, LootError> {
     let items = ctx.items;
@@ -253,7 +253,11 @@ pub fn generate_weapon_by_tpl(
             // cached sub-mod pools have to survive into the bot's *next* weapon.
             mod_pool: std::mem::take(&mut bot_template_inventory.mods),
             parent_template: weapon_tpl.to_owned(),
-            mod_spawn_chances: mod_chances.clone(),
+            // Moved out of the caller's map for the same reason `mod_pool` is: C# aliases
+            // `equipmentChances.WeaponModsChances` here and `AdjustSlotSpawnChances`
+            // (`BotEquipmentModGenerator.cs:855`) writes through the alias, so a forced slot
+            // chance has to survive into the bot's *next* weapon.
+            mod_spawn_chances: std::mem::take(mod_chances),
             ammo_tpl: ammo_tpl.clone(),
             bot_data: BotDataWire {
                 role: details.role_lowercase.clone(),
@@ -264,9 +268,10 @@ pub fn generate_weapon_by_tpl(
             ..Default::default()
         };
         let outcome = generate_mods_for_weapon(ctx, &mut request);
-        // Hand the pool back before propagating: the C# writes are already in the caller's object
-        // by the time it throws.
+        // Hand the pool and the chances back before propagating: the C# writes are already in the
+        // caller's objects by the time it throws.
         bot_template_inventory.mods = std::mem::take(&mut request.mod_pool);
+        *mod_chances = std::mem::take(&mut request.mod_spawn_chances);
         outcome?;
 
         weapon_with_mods = request.weapon;
@@ -1460,7 +1465,7 @@ mod tests {
             "FirstPrimaryWeapon",
             &mut bot_template(),
             "equipment-id",
-            &no_chances(),
+            &mut no_chances(),
             &details("assault", false),
         )
         .unwrap()
@@ -1531,7 +1536,7 @@ mod tests {
             "Holster",
             &mut bot_template(),
             "equipment-id",
-            &no_chances(),
+            &mut no_chances(),
             &details("assault", false),
         )
         .unwrap()
@@ -1563,7 +1568,7 @@ mod tests {
             "Holster",
             &mut bot_template(),
             "equipment-id",
-            &no_chances(),
+            &mut no_chances(),
             &details("assault", false),
         )
         .unwrap();
@@ -1596,7 +1601,7 @@ mod tests {
             "Holster",
             &mut bot_template(),
             "equipment-id",
-            &no_chances(),
+            &mut no_chances(),
             &details("pmcUSEC", true),
         )
         .unwrap()
@@ -1620,7 +1625,7 @@ mod tests {
                 "Holster",
                 &mut bot_template(),
                 "equipment-id",
-                &no_chances(),
+                &mut no_chances(),
                 &details(role, is_pmc),
             )
             .unwrap()
@@ -1708,7 +1713,7 @@ mod tests {
             "FirstPrimaryWeapon",
             &mut bot_template(),
             "equipment-id",
-            &no_chances(),
+            &mut no_chances(),
             &details("assault", false),
         )
         .unwrap()
@@ -1767,7 +1772,7 @@ mod tests {
             "FirstPrimaryWeapon",
             &mut bot_template(),
             "equipment-id",
-            &no_chances(),
+            &mut no_chances(),
             &details("assault", false),
         )
         .unwrap()
@@ -1823,7 +1828,7 @@ mod tests {
             "FirstPrimaryWeapon",
             template,
             "equipment-id",
-            &mod_chances(),
+            &mut mod_chances(),
             &details("assault", false),
         )
         .unwrap()
@@ -1920,7 +1925,7 @@ mod tests {
             "FirstPrimaryWeapon",
             &mut bot_template(),
             "equipment-id",
-            &no_chances(),
+            &mut no_chances(),
             &details("assault", false),
         )
         .unwrap()
