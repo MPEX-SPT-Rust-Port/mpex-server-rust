@@ -9,20 +9,21 @@ name = "spt_native"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-base64 = "0.23"
-indexmap = { version = "2.14.0", features = ["serde"] }
-rand = "0.10"
-rand_xoshiro = "0.8"
-rayon = "1.12.0"
-rmp-serde = "=1.3.1"
-serde = { version = "1", features = ["derive"] }
+base64 = { version = "0.23", default-features = false, features = ["std", "simd-unsafe"] }
+indexmap = { version = "2.14.0", default-features = false, features = ["std", "serde"] }
+# `thread_rng` for `rand::rng()`; it pulls in `std`, `std_rng` and `sys_rng`.
+rand = { version = "0.10", default-features = false, features = ["thread_rng"] }
+rand_xoshiro = { version = "0.8", default-features = false }
+rayon = { version = "1.12.0", default-features = false }
+rmp-serde = { version = "=1.3.1", default-features = false }
+serde = { version = "1", default-features = false, features = ["std", "derive"] }
 # `preserve_order`: `serde_json::Map` keeps insertion order instead of sorting, which is what the C#
 # `Dictionary`/`[JsonExtensionData]` pair it stands in for does. Without it every untyped object -
 # `Item::location`, and every mod-added field replayed out of an `Extra` map - comes back alphabetised.
-serde_json = { version = "1", features = ["preserve_order"] }
-tokio = { version = "1", features = ["rt-multi-thread", "fs", "sync", "io-util", "macros"] }
-walkdir = "2"
-xxhash-rust = { version = "0.8", features = ["xxh3"] }
+serde_json = { version = "1", default-features = false, features = ["std", "preserve_order"] }
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "fs", "sync", "io-util", "macros"] }
+walkdir = { version = "2", default-features = false }
+xxhash-rust = { version = "0.8", default-features = false, features = ["xxh3"] }
 
 [dev-dependencies]
-tempfile = "3"
+tempfile = { version = "3", default-features = false, features = ["getrandom"] }

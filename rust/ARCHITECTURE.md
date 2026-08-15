@@ -8,11 +8,11 @@ It is a **port of C# server logic**, not a new subsystem: every module stands in
 Build coupling and cross-RID rules live in [CLAUDE.md](../CLAUDE.md); the boundary as seen from C# is in
 [ARCHITECTURE.md](../ARCHITECTURE.md) under *Native Rust layer*. This file covers what's inside the crate.
 
-Toolchain is pinned in `rust-toolchain.toml` (1.97.1, edition 2024). Dependencies are deliberately few:
+Toolchain is pinned in `rust-toolchain.toml` (1.97.1, edition 2024). Dependencies are:
 `serde`/`serde_json` (with `preserve_order`, so untyped maps keep C# `Dictionary` insertion order),
-`indexmap`, `rand`/`rand_xoshiro`, `rayon` (the bot batch loop only), `tokio`, `walkdir`, `xxhash-rust`,
-`base64` — plus `tempfile` as the only dev-dependency (the `verify` FFI tests need a real directory).
-`Cargo.lock` is committed.
+`rmp-serde` (the ragfair MessagePack envelope), `indexmap`, `rand`/`rand_xoshiro`, `rayon`, `tokio`,
+`walkdir`, `xxhash-rust`, `base64` — plus `tempfile` as the only dev-dependency (the `verify` FFI
+tests need a real directory). `Cargo.lock` is committed.
 
 Roughly 35k lines across 32 files, tests included. `src/bot/` is ~45% of that and
 `bot_equipment_mod_generator.rs` alone ~4.2k; `src/loot/` ~31%, `src/ragfair/` ~20%.
