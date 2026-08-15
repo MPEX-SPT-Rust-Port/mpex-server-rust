@@ -55,6 +55,9 @@ public static class SptNative
     private const int StatusOk = 0;
     private const int StatusError = 3;
 
+    // ffi.rs: a slice-less ragfair request named a stamp the native cache does not hold
+    private const int StatusStaleSlice = 4;
+
     // No CancellationToken: the native hash pass is a single bounded blocking call that cannot be
     // interrupted once in flight, so accepting a token would promise cancellation it can't deliver.
     public static Task<VerifyResult> VerifyDatabaseAsync(string sptDataDir)
@@ -217,6 +220,11 @@ public static class SptNative
             }
 
             var message = outPtr == null ? "no message" : Encoding.UTF8.GetString(outPtr, checked((int)outLen));
+            if (status == StatusStaleSlice)
+            {
+                throw new NativeStaleSliceException(message);
+            }
+
             if (status == StatusError)
             {
                 throw new InvalidOperationException($"spt_native {export} generation failed: {message}");
@@ -437,3 +445,9 @@ public static class SptNative
         }
     }
 }
+
+/// <summary>
+///     A slice-less ragfair request named a stamp the native cache does not hold. The caller
+///     self-heals by resending the request with the invariant slice included.
+/// </summary>
+internal sealed class NativeStaleSliceException(string message) : InvalidOperationException(message);

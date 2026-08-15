@@ -147,6 +147,26 @@ public class SptNativeRagfairWireTests
     }
 
     /// <summary>
+    /// The miss half of the cache gate: the native side keeps one slice slot, so a slice-less
+    /// request naming a stamp it has never stored must report itself distinctly rather than fail
+    /// as a generation error - that is what lets the caller self-heal by resending the slice.
+    /// </summary>
+    [Test]
+    public void ASliceLessRequestWithAnUnknownStampThrowsStaleSlice()
+    {
+        var request = RagfairPayloadProjection.BuildRequest(
+            invariant: null,
+            invariantStamp: long.MaxValue,
+            expiredOffers: null,
+            timestamp: 1_700_000_000,
+            offerCounterStart: 0,
+            testSeed: 1234
+        );
+
+        Assert.Throws<NativeStaleSliceException>(() => SptNative.GenerateDynamicOffers(request));
+    }
+
+    /// <summary>
     /// A mod-added field on a game-data object inside the payload must survive the round trip - the
     /// `[serde(flatten)] extra` contract that mirrors Ceciler's `[JsonExtensionData]`.
     /// </summary>

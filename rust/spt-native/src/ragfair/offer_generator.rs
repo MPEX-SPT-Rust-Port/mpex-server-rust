@@ -89,6 +89,7 @@ use crate::ragfair::server_helper::{
     calculate_dynamic_stack_count, get_dynamic_offer_currency, get_offer_count_by_base_type,
     is_item_valid_ragfair_item,
 };
+use crate::ragfair::slice_cache;
 
 /// `Models/Enums/OfferCreator.cs` — the wire never carries it; it is a call-site constant on the
 /// C# side too.
@@ -366,6 +367,14 @@ pub fn get_offer_end_time(
     }
 }
 
+/// What a dynamic-offers pass can fail with: a ported error, or a slice-less request naming a
+/// stamp this process has not stored — the C# caller answers the latter by resending the slice.
+#[derive(Debug)]
+pub enum RagfairError {
+    Loot(LootError),
+    StaleSlice,
+}
+
 /// `RagfairOfferGenerator.GenerateDynamicOffers` (`:293-324`) — one whole dynamic pass: the assort
 /// walk (or the expired offers handed in), then an offer batch per assort entry.
 ///
@@ -400,18 +409,17 @@ pub fn get_offer_end_time(
 ///
 /// # Errors
 ///
-/// Whatever the assort walk and the per-offer path propagate.
+/// [`RagfairError::Loot`] for whatever the assort walk and the per-offer path propagate, or
+/// [`RagfairError::StaleSlice`] when a slice-less request names a stamp the cache does not hold.
 pub fn generate_dynamic_offers(
     request: GenerateDynamicOffersRequest,
-) -> Result<DynamicOffersResult, LootError> {
+) -> Result<DynamicOffersResult, RagfairError> {
     let slice = match request.invariant {
-        Some(slice) => PreparedSlice::from(slice),
-        None => {
-            return Err(LootError::new("invariant slice required"));
-        }
+        Some(slice) => slice_cache::store(request.invariant_stamp, slice),
+        None => slice_cache::fetch(request.invariant_stamp).ok_or(RagfairError::StaleSlice)?,
     };
 
-    generate_with_slice(&slice, request.varying)
+    generate_with_slice(&slice, request.varying).map_err(RagfairError::Loot)
 }
 
 /// [`generate_dynamic_offers`] over an already-prepared invariant slice, which a cache can hand in
@@ -3047,8 +3055,21 @@ mod tests {
         }
     }
 
+    /// The batch pass with the cache stepped over: these tests pin generation, and the one static
+    /// slot is exercised in `slice_cache` and `ffi` instead of being clobbered from here.
+    fn generate(request: GenerateDynamicOffersRequest) -> Result<DynamicOffersResult, LootError> {
+        generate_with_slice(
+            &PreparedSlice::from(
+                request
+                    .invariant
+                    .expect("the fixture request carries a slice"),
+            ),
+            request.varying,
+        )
+    }
+
     fn offers_of(fixture: Fixture) -> DynamicOffersResult {
-        generate_dynamic_offers(request(fixture)).expect("the fixture is complete")
+        generate(request(fixture)).expect("the fixture is complete")
     }
 
     #[test]
@@ -3122,8 +3143,7 @@ mod tests {
         let mut request = request(fixture);
         request.varying.expired_offers = Some(vec![vec![item("expired_root", TOO_CHEAP_TPL)]]);
 
-        let result =
-            generate_dynamic_offers(request).expect("the expired root is in the items view");
+        let result = generate(request).expect("the expired root is in the items view");
 
         // The validity check was never reached, so the custom-blacklist arm never fired. Asserted
         // first: it is the sharper of the two, and a validity check that did run would reject the
@@ -3164,7 +3184,7 @@ mod tests {
         let mut request = request(Fixture::new());
         request.varying.offer_counter_start = 7;
 
-        let result = generate_dynamic_offers(request).expect("the fixture is complete");
+        let result = generate(request).expect("the fixture is complete");
 
         assert_eq!(
             result
@@ -3182,8 +3202,7 @@ mod tests {
         request.varying.expired_offers =
             Some(vec![vec![item("ghost", "tpl_nothing_has_ever_heard_of")]]);
 
-        let error =
-            generate_dynamic_offers(request).expect_err("the stack-count lookup is the C# throw");
+        let error = generate(request).expect_err("the stack-count lookup is the C# throw");
 
         assert!(
             error.message.contains("not found in db"),

@@ -13,7 +13,7 @@ use crate::loot::loot_generator::{
     get_sealed_weapon_case_loot,
 };
 use crate::ragfair::models::{DynamicOffersHeader, DynamicOffersResult};
-use crate::ragfair::offer_generator::generate_dynamic_offers;
+use crate::ragfair::offer_generator::{RagfairError, generate_dynamic_offers};
 use crate::runtime::runtime;
 use crate::verify;
 
@@ -22,6 +22,40 @@ pub const STATUS_BAD_ARGS: i32 = 1;
 pub const STATUS_PANIC: i32 = 2;
 /// Generation failed: the error message, not a result, is in the out-buffer.
 pub const STATUS_ERROR: i32 = 3;
+/// A slice-less ragfair request named a stamp this process has not cached; the caller resends.
+pub const STATUS_STALE_SLICE: i32 = 4;
+
+/// How a generator failure crosses the boundary: which status code, and what message buffer.
+pub trait FfiFailure {
+    fn status(&self) -> i32;
+    fn into_message(self) -> String;
+}
+
+impl FfiFailure for LootError {
+    fn status(&self) -> i32 {
+        STATUS_ERROR
+    }
+
+    fn into_message(self) -> String {
+        self.message
+    }
+}
+
+impl FfiFailure for RagfairError {
+    fn status(&self) -> i32 {
+        match self {
+            RagfairError::Loot(_) => STATUS_ERROR,
+            RagfairError::StaleSlice => STATUS_STALE_SLICE,
+        }
+    }
+
+    fn into_message(self) -> String {
+        match self {
+            RagfairError::Loot(error) => error.message,
+            RagfairError::StaleSlice => "no cached invariant slice for this stamp".to_string(),
+        }
+    }
+}
 
 #[unsafe(no_mangle)]
 pub extern "C" fn spt_native_abi_version() -> u32 {
@@ -115,16 +149,17 @@ where
 ///
 /// # Safety
 /// As documented on the exports below.
-unsafe fn run_generator_with<Request, Response>(
+unsafe fn run_generator_with<Request, Response, Error>(
     req_ptr: *const u8,
     req_len: usize,
     out_ptr: *mut *mut u8,
     out_len: *mut usize,
-    generate: fn(Request) -> Result<Response, LootError>,
+    generate: fn(Request) -> Result<Response, Error>,
     encode: fn(Response) -> Vec<u8>,
 ) -> i32
 where
     Request: DeserializeOwned,
+    Error: FfiFailure,
 {
     if req_ptr.is_null() || out_ptr.is_null() || out_len.is_null() {
         return STATUS_BAD_ARGS;
@@ -149,9 +184,10 @@ where
         }
         // Only the message survives: diagnostics gathered before the failure are dropped.
         Ok(Err(error)) => {
-            unsafe { write_buffer(error.message.into_bytes(), out_ptr, out_len) };
+            let status = error.status();
+            unsafe { write_buffer(error.into_message().into_bytes(), out_ptr, out_len) };
 
-            STATUS_ERROR
+            status
         }
         Err(_) => STATUS_PANIC,
     }
@@ -775,24 +811,49 @@ mod tests {
         )
     }
 
-    /// Every required `GenerateDynamicOffersRequest` member. The two price tables always know
+    /// Every required `InvariantSlice` member, braces included. The two price tables always know
     /// `SELLABLE_TPL`, which only matters when the items view carries it.
-    fn ragfair_request_with(items: &str, offer_item_count: &str) -> String {
+    fn ragfair_invariant(items: &str, offer_item_count: &str) -> String {
         let dynamic = ragfair_dynamic(offer_item_count);
         format!(
-            r#"{{"invariantStamp":0,
-            "varying":{{"timestamp":1700000000,"offerCounterStart":0}},
-            "invariant":{{"dynamic":{dynamic},
+            r#"{{"dynamic":{dynamic},
             "itemPresets":{{}},"defaultPresets":[],"defaultPresetsByTpl":{{}},"presetsByTpl":{{}},
             "fleaPrices":{{"{SELLABLE_TPL}":25000}},"handbookPrices":{{"{SELLABLE_TPL}":20000}},
             "highestTraderPrices":{{"{SELLABLE_TPL}":12000}},"configBlacklist":[],
             "seasonalEventActive":false,"seasonalItemTplBlacklist":[],
-            "pmcNamesUsec":["Deagle"],"pmcNamesBear":["Kirill"],"items":{items}}}}}"#
+            "pmcNamesUsec":["Deagle"],"pmcNamesBear":["Kirill"],"items":{items}}}"#
         )
+    }
+
+    /// The varying half, the same for every fixture here.
+    const RAGFAIR_VARYING: &str = r#""varying":{"timestamp":1700000000,"offerCounterStart":0}"#;
+
+    /// Every required `GenerateDynamicOffersRequest` member, slice included.
+    fn ragfair_request_with(items: &str, offer_item_count: &str) -> String {
+        let invariant = ragfair_invariant(items, offer_item_count);
+        format!(r#"{{"invariantStamp":0,{RAGFAIR_VARYING},"invariant":{invariant}}}"#)
+    }
+
+    /// The minimal request at an arbitrary stamp, with the slice sent or omitted — the two halves
+    /// of the cache gate.
+    fn ragfair_request_with_stamp(stamp: i64, include_slice: bool) -> String {
+        if !include_slice {
+            return format!(r#"{{"invariantStamp":{stamp},{RAGFAIR_VARYING}}}"#);
+        }
+        let invariant = ragfair_invariant("{}", r#"{"default":{"min":2,"max":5}}"#);
+
+        format!(r#"{{"invariantStamp":{stamp},{RAGFAIR_VARYING},"invariant":{invariant}}}"#)
     }
 
     /// The one tpl the offer path would accept, were it in the items view.
     const SELLABLE_TPL: &str = "bbbbbbbbbbbbbbbbbbbbbbbb";
+
+    /// Every dynamic-offers export call writes the one static slice slot, so they run one at a time.
+    fn cache_lock() -> std::sync::MutexGuard<'static, ()> {
+        crate::ragfair::slice_cache::tests::CACHE_TEST_LOCK
+            .lock()
+            .unwrap()
+    }
 
     fn ragfair_request() -> String {
         ragfair_request_with("{}", r#"{"default":{"min":2,"max":5}}"#)
@@ -845,6 +906,8 @@ mod tests {
 
     #[test]
     fn a_minimal_dynamic_offers_request_returns_an_empty_offer_list() {
+        // Every full send stores its slice, so this shares the one static slot with the cache test.
+        let _guard = cache_lock();
         // Empty items view and empty presets: the assort walk yields nothing, so no draws happen.
         let (status, out) =
             call_generate(spt_generate_dynamic_offers, ragfair_request().as_bytes());
@@ -870,6 +933,7 @@ mod tests {
 
     #[test]
     fn a_dynamic_offers_failure_returns_status_error_and_the_message() {
+        let _guard = cache_lock();
         // `offerItemCount` without a "default" entry is the unguarded C# dictionary miss: it
         // dereferences the null `MinMax` `GetValueOrDefault` hands back, so the message is the
         // null-reference one, not one naming the key.
@@ -890,6 +954,7 @@ mod tests {
     /// contract stage A must preserve.
     #[test]
     fn an_unseeded_expired_pass_keeps_assort_order_and_sequential_int_ids() {
+        let _guard = cache_lock();
         let expired: Vec<String> = (0..30)
             .map(|i| format!(r#"[{{"_id":"{i:024x}","_tpl":"{SELLABLE_TPL}"}}]"#))
             .collect();
@@ -928,6 +993,25 @@ mod tests {
                 "offer payload lost wire key {key}"
             );
         }
+    }
+
+    #[test]
+    fn ragfair_slice_less_request_hits_the_cache_or_reports_stale() {
+        let _guard = cache_lock();
+        // full send stores the slice under stamp 41
+        let full = ragfair_request_with_stamp(41, true);
+        let (status, _) = call_generate(spt_generate_dynamic_offers, full.as_bytes());
+        assert_eq!(status, STATUS_OK);
+
+        // slice-less send with the same stamp generates from the cache
+        let hit = ragfair_request_with_stamp(41, false);
+        let (status, _) = call_generate(spt_generate_dynamic_offers, hit.as_bytes());
+        assert_eq!(status, STATUS_OK);
+
+        // slice-less send with a different stamp is a stale-slice miss
+        let miss = ragfair_request_with_stamp(42, false);
+        let (status, _) = call_generate(spt_generate_dynamic_offers, miss.as_bytes());
+        assert_eq!(status, STATUS_STALE_SLICE);
     }
 
     #[test]

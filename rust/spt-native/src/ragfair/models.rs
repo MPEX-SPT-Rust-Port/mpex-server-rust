@@ -382,14 +382,15 @@ pub struct OfferRequirementWire {
     pub side: Option<i32>,
 }
 
+/// `pub` so `slice_cache`'s tests can build an [`InvariantSlice`] off the same fixtures.
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::*;
 
     /// `RagfairConfig.Dynamic` in full, including the three members the wire type leaves to
     /// `extra` (`purchasesAreFoundInRaid`, `expiredOfferThreshold`, `itemPriceOverrideRouble`) and
     /// one mod-added key.
-    const DYNAMIC_JSON: &str = r#"{
+    pub const DYNAMIC_JSON: &str = r#"{
         "purchasesAreFoundInRaid":true,
         "useTraderPriceForOffersIfHigher":true,
         "barter":{"chancePercent":50.0,"itemCountMin":1,"itemCountMax":3,
@@ -438,7 +439,7 @@ mod tests {
 
     /// Every member of the invariant slice but `dynamic`, which is spliced in from
     /// [`DYNAMIC_JSON`].
-    const INVARIANT_TAIL: &str = r#"
+    pub const INVARIANT_TAIL: &str = r#"
         "itemPresets":{"preset1":{"items":[{"_id":"aaaaaaaaaaaaaaaaaaaaaaaa",
             "_tpl":"bbbbbbbbbbbbbbbbbbbbbbbb"}],"id":"preset1","name":"AK",
             "encyclopedia":"bbbbbbbbbbbbbbbbbbbbbbbb"}},
