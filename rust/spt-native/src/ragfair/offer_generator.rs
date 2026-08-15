@@ -54,7 +54,7 @@
 //!   property reads as `0`. Every one of them needs a template that omits the property its own
 //!   branch selected on, which real data never does.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::time::Instant;
 
 use indexmap::IndexSet;
@@ -78,7 +78,8 @@ use crate::loot::random_util::{
 use crate::ragfair::assort_generator::generate_ragfair_assort_items;
 use crate::ragfair::models::{
     ArmorPlateBlacklistSettingsWire, BarterDetailsWire, DynamicOffersResult,
-    GenerateDynamicOffersRequest, OfferRequirementWire, RagfairOfferUserWire, RagfairOfferWire,
+    GenerateDynamicOffersRequest, OfferRequirementWire, PreparedSlice, RagfairOfferUserWire,
+    RagfairOfferWire, VaryingFields,
 };
 use crate::ragfair::price_service::{
     DOLLARS, EUROS, GP, ROUBLES, get_dynamic_offer_price_for_offer, get_flea_price_for_item,
@@ -403,48 +404,51 @@ pub fn get_offer_end_time(
 pub fn generate_dynamic_offers(
     request: GenerateDynamicOffersRequest,
 ) -> Result<DynamicOffersResult, LootError> {
-    let _seed_guard = request.test_seed.map(TestSeedGuard::install);
+    let slice = match request.invariant {
+        Some(slice) => PreparedSlice::from(slice),
+        None => {
+            return Err(LootError::new("invariant slice required"));
+        }
+    };
 
-    let GenerateDynamicOffersRequest {
+    generate_with_slice(&slice, request.varying)
+}
+
+/// [`generate_dynamic_offers`] over an already-prepared invariant slice, which a cache can hand in
+/// instead of the caller resending it.
+///
+/// # Errors
+///
+/// Whatever the assort walk and the per-offer path propagate.
+pub fn generate_with_slice(
+    slice: &PreparedSlice,
+    varying: VaryingFields,
+) -> Result<DynamicOffersResult, LootError> {
+    let _seed_guard = varying.test_seed.map(TestSeedGuard::install);
+
+    let VaryingFields {
         timestamp,
         offer_counter_start,
         expired_offers,
-        dynamic,
-        item_presets,
-        default_presets,
-        default_presets_by_tpl,
-        presets_by_tpl,
-        flea_prices,
-        handbook_prices,
-        highest_trader_prices,
-        config_blacklist,
-        seasonal_event_active,
-        seasonal_item_tpl_blacklist,
-        pmc_names_usec,
-        pmc_names_bear,
-        items,
         ..
-    } = request;
-    let config_blacklist: HashSet<String> = config_blacklist.into_iter().collect();
-    let seasonal_item_tpl_blacklist: HashSet<String> =
-        seasonal_item_tpl_blacklist.into_iter().collect();
+    } = varying;
 
     let mut ctx = RagfairContext {
-        items: &items,
-        dynamic: &dynamic,
-        item_presets: &item_presets,
-        default_presets: &default_presets,
-        default_presets_by_tpl: &default_presets_by_tpl,
-        presets_by_tpl: &presets_by_tpl,
-        flea_prices: &flea_prices,
-        handbook_prices: &handbook_prices,
-        highest_trader_prices: &highest_trader_prices,
-        config_blacklist: &config_blacklist,
-        seasonal_item_tpl_blacklist: &seasonal_item_tpl_blacklist,
-        pmc_names_usec: &pmc_names_usec,
-        pmc_names_bear: &pmc_names_bear,
+        items: &slice.items,
+        dynamic: &slice.dynamic,
+        item_presets: &slice.item_presets,
+        default_presets: &slice.default_presets,
+        default_presets_by_tpl: &slice.default_presets_by_tpl,
+        presets_by_tpl: &slice.presets_by_tpl,
+        flea_prices: &slice.flea_prices,
+        handbook_prices: &slice.handbook_prices,
+        highest_trader_prices: &slice.highest_trader_prices,
+        config_blacklist: &slice.config_blacklist,
+        seasonal_item_tpl_blacklist: &slice.seasonal_item_tpl_blacklist,
+        pmc_names_usec: &slice.pmc_names_usec,
+        pmc_names_bear: &slice.pmc_names_bear,
         timestamp,
-        seasonal_event_active,
+        seasonal_event_active: slice.seasonal_event_active,
         diagnostics: Vec::new(),
     };
 
@@ -1358,7 +1362,7 @@ mod tests {
     use crate::loot::item_helper::{ARMOR, BUILT_IN_INSERTS};
     use crate::loot::models::{ItemView, PresetView, Upd};
     use crate::loot::random_util::TestSeedGuard;
-    use crate::ragfair::models::{DynamicConfigWire, MinMaxIntWire};
+    use crate::ragfair::models::{DynamicConfigWire, InvariantSlice, MinMaxIntWire};
     use crate::ragfair::{NO_BLACKLIST, NO_DEFAULT_PRESETS};
 
     const SEED: u64 = 20260813;
@@ -2989,24 +2993,29 @@ mod tests {
     /// them, and no fixture offer is a weapon preset.
     fn request(fixture: Fixture) -> GenerateDynamicOffersRequest {
         GenerateDynamicOffersRequest {
-            test_seed: Some(SEED),
-            timestamp: OFFER_TIME,
-            offer_counter_start: 0,
-            expired_offers: None,
-            dynamic: fixture.dynamic,
-            item_presets: fixture.presets,
-            default_presets: Vec::new(),
-            default_presets_by_tpl: IndexMap::new(),
-            presets_by_tpl: fixture.preset_lists,
-            flea_prices: fixture.prices.clone(),
-            handbook_prices: fixture.prices.clone(),
-            highest_trader_prices: fixture.prices,
-            config_blacklist: fixture.blacklist.into_iter().collect(),
-            seasonal_event_active: false,
-            seasonal_item_tpl_blacklist: Vec::new(),
-            pmc_names_usec: fixture.names_usec,
-            pmc_names_bear: fixture.names_bear,
-            items: fixture.items,
+            invariant_stamp: 0,
+            invariant: Some(InvariantSlice {
+                dynamic: fixture.dynamic,
+                item_presets: fixture.presets,
+                default_presets: Vec::new(),
+                default_presets_by_tpl: IndexMap::new(),
+                presets_by_tpl: fixture.preset_lists,
+                flea_prices: fixture.prices.clone(),
+                handbook_prices: fixture.prices.clone(),
+                highest_trader_prices: fixture.prices,
+                config_blacklist: fixture.blacklist.into_iter().collect(),
+                seasonal_event_active: false,
+                seasonal_item_tpl_blacklist: Vec::new(),
+                pmc_names_usec: fixture.names_usec,
+                pmc_names_bear: fixture.names_bear,
+                items: fixture.items,
+            }),
+            varying: VaryingFields {
+                test_seed: Some(SEED),
+                timestamp: OFFER_TIME,
+                offer_counter_start: 0,
+                expired_offers: None,
+            },
         }
     }
 
@@ -3110,11 +3119,11 @@ mod tests {
             .offer_item_count
             .insert("default".to_owned(), fixed(3));
 
-        let result = generate_dynamic_offers(GenerateDynamicOffersRequest {
-            expired_offers: Some(vec![vec![item("expired_root", TOO_CHEAP_TPL)]]),
-            ..request(fixture)
-        })
-        .expect("the expired root is in the items view");
+        let mut request = request(fixture);
+        request.varying.expired_offers = Some(vec![vec![item("expired_root", TOO_CHEAP_TPL)]]);
+
+        let result =
+            generate_dynamic_offers(request).expect("the expired root is in the items view");
 
         // The validity check was never reached, so the custom-blacklist arm never fired. Asserted
         // first: it is the sharper of the two, and a validity check that did run would reject the
@@ -3152,11 +3161,10 @@ mod tests {
 
     #[test]
     fn offers_are_numbered_from_the_requested_counter_start() {
-        let result = generate_dynamic_offers(GenerateDynamicOffersRequest {
-            offer_counter_start: 7,
-            ..request(Fixture::new())
-        })
-        .expect("the fixture is complete");
+        let mut request = request(Fixture::new());
+        request.varying.offer_counter_start = 7;
+
+        let result = generate_dynamic_offers(request).expect("the fixture is complete");
 
         assert_eq!(
             result
@@ -3170,11 +3178,12 @@ mod tests {
 
     #[test]
     fn an_expired_offer_for_a_template_the_items_view_does_not_know_is_an_error() {
-        let error = generate_dynamic_offers(GenerateDynamicOffersRequest {
-            expired_offers: Some(vec![vec![item("ghost", "tpl_nothing_has_ever_heard_of")]]),
-            ..request(Fixture::new())
-        })
-        .expect_err("the stack-count lookup is the C# throw");
+        let mut request = request(Fixture::new());
+        request.varying.expired_offers =
+            Some(vec![vec![item("ghost", "tpl_nothing_has_ever_heard_of")]]);
+
+        let error =
+            generate_dynamic_offers(request).expect_err("the stack-count lookup is the C# throw");
 
         assert!(
             error.message.contains("not found in db"),

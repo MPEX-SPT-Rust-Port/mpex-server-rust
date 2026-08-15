@@ -22,11 +22,7 @@ namespace SPTarkov.Server.Core.Native.Ragfair;
 /// </summary>
 internal static class RagfairPayloadProjection
 {
-    internal static GenerateDynamicOffersRequest BuildRequest(
-        IEnumerable<List<Item>>? expiredOffers,
-        long timestamp,
-        int offerCounterStart,
-        ulong? testSeed,
+    internal static RagfairInvariantSlice BuildInvariantSlice(
         TemplateTable templateTable,
         HandbookHelper handbookHelper,
         TraderHelper traderHelper,
@@ -57,12 +53,8 @@ internal static class RagfairPayloadProjection
             }
         }
 
-        return new GenerateDynamicOffersRequest
+        return new RagfairInvariantSlice
         {
-            TestSeed = testSeed,
-            Timestamp = timestamp,
-            OfferCounterStart = offerCounterStart,
-            ExpiredOffers = expiredOffers,
             Dynamic = ragfairConfig.Dynamic,
             // The globals' map itself, keys included: the native side mirrors PresetHelper.IsPreset
             // and GetPreset, whose key domain is that map's keys, not each preset's own `_id`
@@ -82,6 +74,29 @@ internal static class RagfairPayloadProjection
             PmcNamesUsec = GatherPmcNamesOfLength(botTable, Sides.Usec.ToLowerInvariant(), botConfig.BotNameLengthLimit),
             PmcNamesBear = GatherPmcNamesOfLength(botTable, Sides.Bear.ToLowerInvariant(), botConfig.BotNameLengthLimit),
             Items = PayloadProjection.BuildItemsView(itemHelper.TemplateTable.Items),
+        };
+    }
+
+    internal static GenerateDynamicOffersRequest BuildRequest(
+        RagfairInvariantSlice? invariant,
+        long invariantStamp,
+        IEnumerable<List<Item>>? expiredOffers,
+        long timestamp,
+        int offerCounterStart,
+        ulong? testSeed
+    )
+    {
+        return new GenerateDynamicOffersRequest
+        {
+            InvariantStamp = invariantStamp,
+            Invariant = invariant,
+            Varying = new RagfairVaryingFields
+            {
+                TestSeed = testSeed,
+                Timestamp = timestamp,
+                OfferCounterStart = offerCounterStart,
+                ExpiredOffers = expiredOffers,
+            },
         };
     }
 

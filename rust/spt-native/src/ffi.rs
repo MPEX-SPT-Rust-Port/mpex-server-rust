@@ -378,7 +378,7 @@ mod tests {
         assert_eq!(spt_native_abi_version(), crate::ABI_VERSION);
         assert_eq!(
             crate::ABI_VERSION,
-            12,
+            13,
             "bump SptNative.ExpectedAbiVersion too"
         );
     }
@@ -780,12 +780,14 @@ mod tests {
     fn ragfair_request_with(items: &str, offer_item_count: &str) -> String {
         let dynamic = ragfair_dynamic(offer_item_count);
         format!(
-            r#"{{"timestamp":1700000000,"offerCounterStart":0,"dynamic":{dynamic},
+            r#"{{"invariantStamp":0,
+            "varying":{{"timestamp":1700000000,"offerCounterStart":0}},
+            "invariant":{{"dynamic":{dynamic},
             "itemPresets":{{}},"defaultPresets":[],"defaultPresetsByTpl":{{}},"presetsByTpl":{{}},
             "fleaPrices":{{"{SELLABLE_TPL}":25000}},"handbookPrices":{{"{SELLABLE_TPL}":20000}},
             "highestTraderPrices":{{"{SELLABLE_TPL}":12000}},"configBlacklist":[],
             "seasonalEventActive":false,"seasonalItemTplBlacklist":[],
-            "pmcNamesUsec":["Deagle"],"pmcNamesBear":["Kirill"],"items":{items}}}"#
+            "pmcNamesUsec":["Deagle"],"pmcNamesBear":["Kirill"],"items":{items}}}}}"#
         )
     }
 

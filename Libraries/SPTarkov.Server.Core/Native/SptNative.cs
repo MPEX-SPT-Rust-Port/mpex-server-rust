@@ -49,7 +49,7 @@ internal enum LootExport
 
 public static class SptNative
 {
-    private const uint ExpectedAbiVersion = 12;
+    private const uint ExpectedAbiVersion = 13;
 
     // ffi.rs
     private const int StatusOk = 0;

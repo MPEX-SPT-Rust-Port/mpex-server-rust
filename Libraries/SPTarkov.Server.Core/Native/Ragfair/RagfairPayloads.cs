@@ -25,6 +25,30 @@ namespace SPTarkov.Server.Core.Native.Ragfair;
 internal record GenerateDynamicOffersRequest
 {
     /// <summary>
+    ///     The <c>DatabaseMutationStamp</c> value the invariant slice was (or would be) built at.
+    ///     The native side stores the slice under this value and, on a slice-less request, serves
+    ///     its cached slice only when the stamps match.
+    /// </summary>
+    [JsonPropertyName("invariantStamp")]
+    public required long InvariantStamp { get; set; }
+
+    /// <summary>
+    ///     Null on a cache-hit send: the native side reuses the slice it stored under
+    ///     <see cref="InvariantStamp"/>. Always present until the cache gate lands.
+    /// </summary>
+    [JsonPropertyName("invariant")]
+    public RagfairInvariantSlice? Invariant { get; set; }
+
+    [JsonPropertyName("varying")]
+    public required RagfairVaryingFields Varying { get; set; }
+}
+
+/// <summary>
+/// The members that change every call - everything the projection does not read off the database.
+/// </summary>
+internal record RagfairVaryingFields
+{
+    /// <summary>
     /// Test-only: draws on the native side come from a seeded generator when set. Null - and
     /// therefore omitted from the wire JSON - on the production path.
     /// </summary>
@@ -51,7 +75,14 @@ internal record GenerateDynamicOffersRequest
     /// </summary>
     [JsonPropertyName("expiredOffers")]
     public IEnumerable<List<Item>>? ExpiredOffers { get; set; }
+}
 
+/// <summary>
+/// The call-invariant half of the request: the database, config and service projections, which only
+/// change when the database does.
+/// </summary>
+internal record RagfairInvariantSlice
+{
     /// <summary>
     /// <c>RagfairConfig.Dynamic</c>, the live object - mods mutate it at runtime and the native side
     /// has to see that.

@@ -222,20 +222,23 @@ public class RagfairBenchmarkTests
     private GenerateDynamicOffersRequest BuildRequest(List<List<Item>>? expiredOffers)
     {
         return RagfairPayloadProjection.BuildRequest(
+            RagfairPayloadProjection.BuildInvariantSlice(
+                _templateTable,
+                _handbookHelper,
+                _traderHelper,
+                _presetHelper,
+                _itemFilterService,
+                _seasonalEventService,
+                _botTable,
+                _itemHelper,
+                _botConfig,
+                _ragfairConfig
+            ),
+            0,
             expiredOffers,
             _timeUtil.GetTimeStamp(),
             0,
-            null,
-            _templateTable,
-            _handbookHelper,
-            _traderHelper,
-            _presetHelper,
-            _itemFilterService,
-            _seasonalEventService,
-            _botTable,
-            _itemHelper,
-            _botConfig,
-            _ragfairConfig
+            null
         );
     }
 

@@ -9,6 +9,8 @@
 //! `loot::models` rather than redeclared. There is no `ItemsView` type: the
 //! `IndexMap<String, ItemView>` *is* the view, which is what `loot::item_helper`'s helpers take.
 
+use std::collections::HashSet;
+
 use indexmap::{IndexMap, IndexSet};
 use serde::{Deserialize, Serialize};
 
@@ -20,6 +22,18 @@ type Extra = serde_json::Map<String, serde_json::Value>;
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GenerateDynamicOffersRequest {
+    /// The caller's `DatabaseMutationStamp` the invariant slice was (or would be) built at.
+    pub invariant_stamp: i64,
+    /// Absent on a slice-less send, where the native side reuses the slice it stored under
+    /// [`Self::invariant_stamp`]. Always present until the cache gate lands.
+    pub invariant: Option<InvariantSlice>,
+    pub varying: VaryingFields,
+}
+
+/// The members that change every call — everything not projected off the database.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaryingFields {
     /// Test-only: draws come from a seeded generator when set.
     pub test_seed: Option<u64>,
     /// `TimeUtil.GetTimeStamp()` taken once by the caller. Legacy re-reads the clock per offer
@@ -30,6 +44,13 @@ pub struct GenerateDynamicOffersRequest {
     /// `null` for a full pass; the cloned expired-offer item lists for a regeneration pass
     /// (`RagfairServer.cs:69-79`).
     pub expired_offers: Option<Vec<Vec<Item>>>,
+}
+
+/// The call-invariant half of the request: the database, config and service projections, which only
+/// change when the database does.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InvariantSlice {
     pub dynamic: DynamicConfigWire,
     /// `GlobalTable.ItemPresets` — `PresetHelper.IsPreset`/`GetPreset` read this map, and
     /// `GetAllPresets()` is its `Values` in insertion order.
@@ -62,6 +83,46 @@ pub struct GenerateDynamicOffersRequest {
     pub pmc_names_usec: Vec<String>,
     pub pmc_names_bear: Vec<String>,
     pub items: IndexMap<String, ItemView>,
+}
+
+/// [`InvariantSlice`] with the per-pass conversions already done, so a cached slice pays them once
+/// at store time instead of every call.
+pub struct PreparedSlice {
+    pub dynamic: DynamicConfigWire,
+    pub item_presets: IndexMap<String, PresetView>,
+    pub default_presets: Vec<PresetView>,
+    pub default_presets_by_tpl: IndexMap<String, PresetView>,
+    pub presets_by_tpl: IndexMap<String, Vec<PresetView>>,
+    pub flea_prices: IndexMap<String, f64>,
+    pub handbook_prices: IndexMap<String, f64>,
+    pub highest_trader_prices: IndexMap<String, f64>,
+    pub config_blacklist: HashSet<String>,
+    pub seasonal_event_active: bool,
+    pub seasonal_item_tpl_blacklist: HashSet<String>,
+    pub pmc_names_usec: Vec<String>,
+    pub pmc_names_bear: Vec<String>,
+    pub items: IndexMap<String, ItemView>,
+}
+
+impl From<InvariantSlice> for PreparedSlice {
+    fn from(slice: InvariantSlice) -> Self {
+        Self {
+            dynamic: slice.dynamic,
+            item_presets: slice.item_presets,
+            default_presets: slice.default_presets,
+            default_presets_by_tpl: slice.default_presets_by_tpl,
+            presets_by_tpl: slice.presets_by_tpl,
+            flea_prices: slice.flea_prices,
+            handbook_prices: slice.handbook_prices,
+            highest_trader_prices: slice.highest_trader_prices,
+            config_blacklist: slice.config_blacklist.into_iter().collect(),
+            seasonal_event_active: slice.seasonal_event_active,
+            seasonal_item_tpl_blacklist: slice.seasonal_item_tpl_blacklist.into_iter().collect(),
+            pmc_names_usec: slice.pmc_names_usec,
+            pmc_names_bear: slice.pmc_names_bear,
+            items: slice.items,
+        }
+    }
 }
 
 /// `Models/Spt/Config/RagfairConfig.cs:102-239` `Dynamic`, whole. Reuse the C# record's wire names.
@@ -375,8 +436,9 @@ mod tests {
         "modAddedDynamicField":42
     }"#;
 
-    /// Every member of the request but `dynamic`, which is spliced in from [`DYNAMIC_JSON`].
-    const REQUEST_TAIL: &str = r#"
+    /// Every member of the invariant slice but `dynamic`, which is spliced in from
+    /// [`DYNAMIC_JSON`].
+    const INVARIANT_TAIL: &str = r#"
         "itemPresets":{"preset1":{"items":[{"_id":"aaaaaaaaaaaaaaaaaaaaaaaa",
             "_tpl":"bbbbbbbbbbbbbbbbbbbbbbbb"}],"id":"preset1","name":"AK",
             "encyclopedia":"bbbbbbbbbbbbbbbbbbbbbbbb"}},
@@ -397,8 +459,12 @@ mod tests {
             "maxRepairResource":1200,"canSellOnRagfair":true}}
     "#;
 
-    fn request_json(head: &str) -> String {
-        format!("{{{head},\"dynamic\":{DYNAMIC_JSON},{REQUEST_TAIL}}}")
+    fn request_json(varying: &str) -> String {
+        format!(
+            "{{\"invariantStamp\":0,\
+             \"invariant\":{{\"dynamic\":{DYNAMIC_JSON},{INVARIANT_TAIL}}},\
+             \"varying\":{{{varying}}}}}"
+        )
     }
 
     #[test]
@@ -409,45 +475,53 @@ mod tests {
         );
         let parsed: GenerateDynamicOffersRequest = serde_json::from_str(&json).unwrap();
 
-        assert_eq!(parsed.test_seed, Some(42));
-        assert_eq!(parsed.timestamp, 1_700_000_000);
-        assert_eq!(parsed.offer_counter_start, 7);
+        assert_eq!(parsed.invariant_stamp, 0);
+        assert_eq!(parsed.varying.test_seed, Some(42));
+        assert_eq!(parsed.varying.timestamp, 1_700_000_000);
+        assert_eq!(parsed.varying.offer_counter_start, 7);
         assert_eq!(
-            parsed.expired_offers.as_ref().unwrap()[0][0].template,
+            parsed.varying.expired_offers.as_ref().unwrap()[0][0].template,
             "bbbbbbbbbbbbbbbbbbbbbbbb"
         );
+        let invariant = parsed.invariant.as_ref().unwrap();
         assert_eq!(
-            parsed.item_presets["preset1"].encyclopedia.as_deref(),
+            invariant.item_presets["preset1"].encyclopedia.as_deref(),
             Some("bbbbbbbbbbbbbbbbbbbbbbbb")
         );
-        assert_eq!(parsed.default_presets.len(), 1);
+        assert_eq!(invariant.default_presets.len(), 1);
         assert!(
-            parsed
+            invariant
                 .default_presets_by_tpl
                 .contains_key("bbbbbbbbbbbbbbbbbbbbbbbb")
         );
-        assert_eq!(parsed.presets_by_tpl["bbbbbbbbbbbbbbbbbbbbbbbb"].len(), 1);
+        assert_eq!(
+            invariant.presets_by_tpl["bbbbbbbbbbbbbbbbbbbbbbbb"].len(),
+            1
+        );
         // Insertion order is load-bearing: `GetFleaPricesAsArray` draws by index
         assert_eq!(
-            parsed.flea_prices.keys().collect::<Vec<_>>(),
+            invariant.flea_prices.keys().collect::<Vec<_>>(),
             vec!["bbbbbbbbbbbbbbbbbbbbbbbb", "cccccccccccccccccccccccc"]
         );
-        assert_eq!(parsed.handbook_prices["bbbbbbbbbbbbbbbbbbbbbbbb"], 20000.0);
         assert_eq!(
-            parsed.highest_trader_prices["bbbbbbbbbbbbbbbbbbbbbbbb"],
+            invariant.handbook_prices["bbbbbbbbbbbbbbbbbbbbbbbb"],
+            20000.0
+        );
+        assert_eq!(
+            invariant.highest_trader_prices["bbbbbbbbbbbbbbbbbbbbbbbb"],
             12000.0
         );
-        assert_eq!(parsed.config_blacklist, vec!["999999999999999999999999"]);
-        assert!(!parsed.seasonal_event_active);
+        assert_eq!(invariant.config_blacklist, vec!["999999999999999999999999"]);
+        assert!(!invariant.seasonal_event_active);
         assert_eq!(
-            parsed.seasonal_item_tpl_blacklist,
+            invariant.seasonal_item_tpl_blacklist,
             vec!["888888888888888888888888"]
         );
-        assert_eq!(parsed.pmc_names_usec, vec!["Deagle"]);
-        assert_eq!(parsed.pmc_names_bear, vec!["Kirill"]);
+        assert_eq!(invariant.pmc_names_usec, vec!["Deagle"]);
+        assert_eq!(invariant.pmc_names_bear, vec!["Kirill"]);
 
         // The four `ItemView` members this port added
-        let item = &parsed.items["bbbbbbbbbbbbbbbbbbbbbbbb"];
+        let item = &invariant.items["bbbbbbbbbbbbbbbbbbbbbbbb"];
         assert_eq!(item.durability, Some(100.0));
         assert_eq!(item.maximum_number_of_usage, Some(10));
         assert_eq!(item.max_repair_resource, Some(1200.0));
@@ -458,6 +532,8 @@ mod tests {
     fn dynamic_config_deserializes_every_nested_record() {
         let json = request_json(r#""testSeed":null,"timestamp":1,"offerCounterStart":0"#);
         let dynamic = serde_json::from_str::<GenerateDynamicOffersRequest>(&json)
+            .unwrap()
+            .invariant
             .unwrap()
             .dynamic;
 
@@ -593,8 +669,8 @@ mod tests {
         let json = request_json(r#""testSeed":null,"timestamp":1,"offerCounterStart":0"#);
         let parsed: GenerateDynamicOffersRequest = serde_json::from_str(&json).unwrap();
 
-        assert_eq!(parsed.test_seed, None);
-        assert!(parsed.expired_offers.is_none());
+        assert_eq!(parsed.varying.test_seed, None);
+        assert!(parsed.varying.expired_offers.is_none());
     }
 
     #[test]
@@ -607,12 +683,13 @@ mod tests {
         let parsed: GenerateDynamicOffersRequest = serde_json::from_str(&json).unwrap();
 
         // Config passthrough: members the wire type does not name stay reachable
-        assert_eq!(parsed.dynamic.extra["modAddedDynamicField"], 42);
-        assert_eq!(parsed.dynamic.extra["purchasesAreFoundInRaid"], true);
-        assert_eq!(parsed.dynamic.extra["expiredOfferThreshold"], 1500);
+        let dynamic = &parsed.invariant.as_ref().unwrap().dynamic;
+        assert_eq!(dynamic.extra["modAddedDynamicField"], 42);
+        assert_eq!(dynamic.extra["purchasesAreFoundInRaid"], true);
+        assert_eq!(dynamic.extra["expiredOfferThreshold"], 1500);
 
         // Game-data passthrough: an unknown item key survives back out through an offer
-        let items = parsed.expired_offers.unwrap().remove(0);
+        let items = parsed.varying.expired_offers.unwrap().remove(0);
         assert_eq!(items[0].extra["modFieldFromAMod"], 7);
         let out = serde_json::to_value(offer_with(items.clone())).unwrap();
         assert_eq!(out["items"][0]["modFieldFromAMod"], 7);

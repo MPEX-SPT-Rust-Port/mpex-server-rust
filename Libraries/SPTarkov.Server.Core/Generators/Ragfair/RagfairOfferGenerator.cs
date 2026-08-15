@@ -71,7 +71,7 @@ public class RagfairOfferGenerator(
     internal LootGenerationPath LastPathTaken { get; private set; }
 
     /// <summary>
-    ///     Test-only seed forwarded as <see cref="GenerateDynamicOffersRequest.TestSeed"/> on every
+    ///     Test-only seed forwarded as <see cref="RagfairVaryingFields.TestSeed"/> on every
     ///     native request.
     /// </summary>
     internal ulong? NativeTestSeed { get; set; }
@@ -380,20 +380,23 @@ public class RagfairOfferGenerator(
 
         var result = SptNative.GenerateDynamicOffers(
             RagfairPayloadProjection.BuildRequest(
+                RagfairPayloadProjection.BuildInvariantSlice(
+                    templateTable,
+                    handbookHelper,
+                    ragfairPriceService.TraderHelper,
+                    presetHelper,
+                    ragfairAssortGenerator.ItemFilterService,
+                    ragfairAssortGenerator.SeasonalEventService,
+                    botHelper.BotTable,
+                    itemHelper,
+                    botConfig,
+                    ragfairConfig
+                ),
+                0,
                 expiredOffers,
                 timeUtil.GetTimeStamp(),
                 OfferCounter,
-                NativeTestSeed,
-                templateTable,
-                handbookHelper,
-                ragfairPriceService.TraderHelper,
-                presetHelper,
-                ragfairAssortGenerator.ItemFilterService,
-                ragfairAssortGenerator.SeasonalEventService,
-                botHelper.BotTable,
-                itemHelper,
-                botConfig,
-                ragfairConfig
+                NativeTestSeed
             )
         );
 
