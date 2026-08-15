@@ -1223,6 +1223,7 @@ mod tests {
                 weapon_has_enhancement_chance_percent: 0.0,
                 repair_kit_weapon: &crate::bot::NO_BUFFS,
                 secure_container_ammo_stack_count: 0,
+                mod_pool_slot_order: &crate::bot::NO_MOD_POOL_ORDER,
                 is_night_time,
                 diagnostics: Vec::new(),
             }

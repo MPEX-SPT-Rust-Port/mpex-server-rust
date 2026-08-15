@@ -1373,6 +1373,7 @@ mod tests {
                 weapon_has_enhancement_chance_percent: self.enhancement_chance,
                 repair_kit_weapon: &self.repair_kit,
                 secure_container_ammo_stack_count: self.secure_container_ammo_stack_count,
+                mod_pool_slot_order: &crate::bot::NO_MOD_POOL_ORDER,
                 is_night_time: false,
                 diagnostics: Vec::new(),
             }

@@ -635,6 +635,11 @@ pub struct GenerateBotInventoryRequest {
     pub handbook_prices: IndexMap<String, f64>,
     /// The `TemplateItem` slice, flattened by the C# caller exactly as the loot envelopes take it.
     pub items: IndexMap<String, ItemView>,
+    /// The C# `BotEquipmentModPoolService` pools' slot-name enumeration order per template, as
+    /// indices into that template's projected `slots` array. `#[serde(default)]` so an absent
+    /// field means database order — today's behavior.
+    #[serde(default)]
+    pub mod_pool_slot_order: IndexMap<String, Vec<usize>>,
 }
 
 /// The 20 request members that do not vary between the bots of one wave — every database view,
@@ -667,6 +672,11 @@ pub struct SharedBotViewsWire {
     pub default_presets_by_tpl: IndexMap<String, String>,
     pub config_blacklist: std::collections::HashSet<String>,
     pub items: IndexMap<String, ItemView>,
+    /// The C# `BotEquipmentModPoolService` pools' slot-name enumeration order per template, as
+    /// indices into that template's projected `slots` array. `#[serde(default)]` so an absent
+    /// field means database order — today's behavior.
+    #[serde(default)]
+    pub mod_pool_slot_order: IndexMap<String, Vec<usize>>,
 }
 
 /// The six request members that do vary per bot. `template` is per-bot because

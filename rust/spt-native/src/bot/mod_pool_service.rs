@@ -51,7 +51,7 @@ pub fn get_mods_for_gear_slot(
         return IndexMap::new();
     }
 
-    derive_pool(ctx.items, item_tpl)
+    derive_pool(ctx.items, item_tpl, ctx.mod_pool_slot_order.get(item_tpl))
 }
 
 /// `BotEquipmentModPoolService.GetModsForWeaponSlot` (`:164-167`), against the pool
@@ -64,7 +64,7 @@ pub fn get_mods_for_weapon_slot(
         return IndexMap::new();
     }
 
-    derive_pool(ctx.items, item_tpl)
+    derive_pool(ctx.items, item_tpl, ctx.mod_pool_slot_order.get(item_tpl))
 }
 
 /// `BotEquipmentModPoolService.GetCompatibleModsForWeaponSlot` (`:135-147`) — the warning fires on
@@ -120,15 +120,21 @@ pub fn get_required_mods_for_weapon_slot(
 
 /// The per-item half of `GeneratePool` (`:53-119`): each slot with a non-empty first filter becomes
 /// an entry keyed by the slot name. Slots sharing a name merge, as C#'s `GetOrAdd` does.
+///
+/// `slot_order` is the C# service's enumeration order, projected as indices into `slots`
+/// (`modPoolSlotOrder`). Entries it names come first, in its order; anything it does not name
+/// keeps database order behind them — so no list, a partial list and a stale list all yield a
+/// deterministic pool, and no list at all is the pre-projection behavior byte for byte.
 fn derive_pool(
     items: &IndexMap<String, ItemView>,
     item_tpl: &str,
+    slot_order: Option<&Vec<usize>>,
 ) -> IndexMap<String, IndexSet<String>> {
-    let mut pool: IndexMap<String, IndexSet<String>> = IndexMap::new();
-
     let slots = get_item(items, item_tpl)
         .and_then(|item| item.slots.as_deref())
         .unwrap_or_default();
+
+    let mut pool: IndexMap<String, IndexSet<String>> = IndexMap::new();
 
     for slot in slots {
         // No mod items in whitelist, skip
@@ -142,7 +148,22 @@ fn derive_pool(
             .extend(compatible_mods.iter().cloned());
     }
 
-    pool
+    let Some(order) = slot_order else {
+        return pool;
+    };
+
+    let mut reordered: IndexMap<String, IndexSet<String>> = IndexMap::with_capacity(pool.len());
+    for &index in order {
+        let Some(name) = slots.get(index).and_then(|slot| slot.name.as_deref()) else {
+            continue;
+        };
+        if let Some(entry) = pool.shift_remove(name) {
+            reordered.insert(name.to_owned(), entry);
+        }
+    }
+    reordered.extend(pool);
+
+    reordered
 }
 
 /// The `templateTable.Items.Values.Where(...)` filter both `Generate*Pool` methods apply before
@@ -181,6 +202,7 @@ mod tests {
         durability: BotDurability,
         equipment: IndexMap<String, EquipmentFilters>,
         randomization: IndexMap<String, RandomisedResourceDetails>,
+        order: IndexMap<String, Vec<usize>>,
     }
 
     impl Fixture {
@@ -230,6 +252,7 @@ mod tests {
                 .unwrap(),
                 equipment: IndexMap::new(),
                 randomization: IndexMap::new(),
+                order: IndexMap::new(),
             }
         }
 
@@ -248,6 +271,7 @@ mod tests {
                 weapon_has_enhancement_chance_percent: 0.0,
                 repair_kit_weapon: &crate::bot::NO_BUFFS,
                 secure_container_ammo_stack_count: 0,
+                mod_pool_slot_order: &self.order,
                 is_night_time: false,
                 diagnostics: Vec::new(),
             }
@@ -372,5 +396,80 @@ mod tests {
             ctx.diagnostics[0].message.as_deref(),
             Some(format!("Slot: mod_stock not found for item: {WEAPON_TPL} in cache").as_str())
         );
+    }
+
+    /// WEAPON_TPL's pool in database order is [mod_magazine, mod_scope] (indices 0 and 1 of its
+    /// slots; index 2, mod_stock, has an empty filter and is not in the pool).
+    #[test]
+    fn a_projected_order_reorders_the_pool() {
+        let mut fixture = Fixture::new();
+        fixture.order.insert(WEAPON_TPL.to_owned(), vec![1, 0]);
+
+        let keys: Vec<String> = get_mods_for_weapon_slot(&fixture.ctx(), WEAPON_TPL)
+            .keys()
+            .cloned()
+            .collect();
+
+        assert_eq!(keys, ["mod_scope", "mod_magazine"]);
+    }
+
+    #[test]
+    fn a_partial_order_front_loads_the_named_slots_and_appends_the_rest_in_database_order() {
+        let mut fixture = Fixture::new();
+        fixture.order.insert(WEAPON_TPL.to_owned(), vec![1]);
+
+        let keys: Vec<String> = get_mods_for_weapon_slot(&fixture.ctx(), WEAPON_TPL)
+            .keys()
+            .cloned()
+            .collect();
+
+        assert_eq!(keys, ["mod_scope", "mod_magazine"]);
+    }
+
+    /// 9 is out of range and 2 is the empty-filter slot the pool never held — both are skipped
+    /// rather than panicking, so a stale projection degrades to a deterministic order.
+    #[test]
+    fn out_of_range_and_poolless_indices_are_skipped() {
+        let mut fixture = Fixture::new();
+        fixture
+            .order
+            .insert(WEAPON_TPL.to_owned(), vec![9, 2, 1, 0]);
+
+        let keys: Vec<String> = get_mods_for_weapon_slot(&fixture.ctx(), WEAPON_TPL)
+            .keys()
+            .cloned()
+            .collect();
+
+        assert_eq!(keys, ["mod_scope", "mod_magazine"]);
+    }
+
+    /// No entry for the tpl means database order — the pre-projection behavior, byte for byte,
+    /// which is what an old caller without the field still gets.
+    #[test]
+    fn no_order_keeps_database_order() {
+        let fixture = Fixture::new();
+
+        let keys: Vec<String> = get_mods_for_weapon_slot(&fixture.ctx(), WEAPON_TPL)
+            .keys()
+            .cloned()
+            .collect();
+
+        assert_eq!(keys, ["mod_magazine", "mod_scope"]);
+    }
+
+    /// The gear pool consults the same projected order.
+    #[test]
+    fn the_gear_pool_reorders_too() {
+        let mut fixture = Fixture::new();
+        fixture
+            .order
+            .insert(PLATE_CARRIER_TPL.to_owned(), vec![1, 0]);
+
+        let keys: Vec<String> = get_mods_for_gear_slot(&fixture.ctx(), PLATE_CARRIER_TPL)
+            .keys()
+            .cloned()
+            .collect();
+
+        assert_eq!(keys, ["back_plate", "front_plate"]);
     }
 }

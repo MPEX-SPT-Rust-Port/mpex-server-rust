@@ -189,6 +189,7 @@ pub fn generate_inventory(
         default_presets_by_tpl,
         config_blacklist,
         items,
+        mod_pool_slot_order,
     } = request;
 
     generate_one(
@@ -212,6 +213,7 @@ pub fn generate_inventory(
             default_presets_by_tpl,
             config_blacklist,
             items,
+            mod_pool_slot_order,
         },
         BotSliceWire {
             bot_id,
@@ -299,6 +301,7 @@ fn generate_one(
         default_presets_by_tpl,
         config_blacklist,
         items,
+        mod_pool_slot_order,
         ..
     } = shared;
 
@@ -311,6 +314,7 @@ fn generate_one(
 
     let mut ctx = BotContext {
         items,
+        mod_pool_slot_order,
         bosses,
         durability,
         equipment,
