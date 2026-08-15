@@ -149,17 +149,16 @@ public class BotParityTests
     /// the clamp is actually written - by GenerateAndAddEquipmentToBot on the legacy path and by
     /// ReplayRandomisationClamps on the native one - and asserts both wrote the same thing.
     ///
-    /// It deliberately does not compare the two inventories. The mod-pool enumeration order that
-    /// used to stop it is projected now (modPoolSlotOrder), but this case runs at seed 42, which
-    /// hits the residual divergence pinned by TheRemainingWeaponModSpawnDesyncIsPinned: one side
-    /// spawns a randomised weapon mod the other skips. That desync is pre-existing and unrelated to
-    /// enumeration order, so the clamp is all this case can assert until it is fixed.
+    /// With the mod-pool enumeration order projected (modPoolSlotOrder), the inventories compare
+    /// too - this case is the only one that covers the nighttime clamp path at a randomised level.
+    /// The seed is 1337 rather than 42 because seed 42 hits the residual weapon-mod spawn desync
+    /// pinned separately by TheRemainingWeaponModSpawnDesyncIsPinned.
     /// </summary>
     [Test]
     public void TheNighttimeRandomisationClampIsReplayedOnBothPaths()
     {
         const string role = "usec-at-night";
-        const ulong seed = 42;
+        const ulong seed = 1337;
 
         PreWarmLootCache(role);
 
@@ -185,6 +184,7 @@ public class BotParityTests
             // hole the other eight cases have
             Assert.That(native.Randomisation, Is.Not.EqualTo(beforeRun), "the clamp never fired, so this case proves nothing");
             Assert.That(native.Randomisation, Is.EqualTo(legacy.Randomisation), "clamp replay diverged from the legacy write");
+            LootJsonAssert.AssertEqual(legacy.Inventory, native.Inventory, "role=usec-at-night", seed);
         }
         finally
         {
