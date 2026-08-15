@@ -58,12 +58,13 @@ asserts the constant so the bump can't be forgotten.
 
 ## `src/verify.rs`
 
-`checks.dat` is base64-wrapped JSON (`Path`/`Hash` pairs) written by `SPTarkov.Server.Assets/build/PostBuild.cs`.
-Three properties are load-bearing:
+`checks.dat` is base64-wrapped JSON (`Path`/`Hash` pairs) written at Release build time by `generate` in this
+same module, via the `gen_checks` bin (`src/bin/gen_checks.rs`, invoked by the `PreBuildHashFile` target in
+`SPTarkov.Server.Assets.csproj`). Three properties of `verify` are load-bearing:
 
 - **Scope comes from the manifest, not the tree.** Only the top-level `SPT_Data` roots the manifest names
   (`configs/`, `database/`) are walked. The build relocates unhashed artifacts into the output `SPT_Data`
-  (satellite assemblies, admin-panel `wwwroot/`) and `PostBuild.cs` leaves `images/` and `checks.dat` out
+  (satellite assemblies, admin-panel `wwwroot/`) and `generate` leaves `images/` and `checks.dat` out
   deliberately — walking everything would fail on all of them.
 - **The check runs both directions.** Disk files are hashed against the manifest, and manifest entries with no
   walked file are reported as `missing_from_disk`, so a deletion (or a symlink the walk skips) can't pass.

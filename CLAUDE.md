@@ -30,9 +30,8 @@ would silently emit a host-triple library); `Build.props` maps the RID to a Rust
 `SPTarkov.Server.csproj` errors out for unmapped RIDs. Only `linux-x64` on Linux hosts is mapped — arm64 is not a
 supported target, and Docker builds accept only `TARGETARCH=amd64`.
 
-Release builds also regenerate `SPT_Data/checks.dat` by running `Libraries/SPTarkov.Server.Assets/build/PostBuild.cs`,
-which pulls `System.IO.Hashing` from NuGet — a Release build on a machine with an empty NuGet cache needs network
-access.
+Release builds also regenerate `SPT_Data/checks.dat` by running the `gen_checks` bin in `rust/spt-native`
+(`cargo run --bin gen_checks`), which shares the XXH3-128 implementation with the startup verifier.
 
 ## Architecture
 

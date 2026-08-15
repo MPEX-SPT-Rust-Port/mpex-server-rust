@@ -61,12 +61,13 @@ seeded-RNG parity at the primitive level (xoshiro256\*\*, twin known-answer test
   Rust re-derives it per call. A divergence in native's favour, but a divergence.
 - **`customMoneyTpls` are not projected to the ragfair native path** — offers priced in a mod-added
   currency go through the unrounded arm.
-- **No RNG sequence parity between paths** — same seed, different output. The shared RNG pins the
-  draw primitives, not the draw order. Full-output golden tests are still pending. Ragfair is the
-  one exception: `RagfairParityTests` holds six item classes × two seeds byte-equal after id
-  normalisation, plus forced barter and pack cases. Its sanctioned gaps are `intId` (a live C#
-  counter), minted `MongoId`s (outside the seeded stream on both sides) and `startTime`/`endTime`
-  (one batch timestamp natively vs a per-offer clock in legacy, so only the spread is compared).
+- **Golden-test parity is normalised, not raw-byte** — every family now has a full-output golden
+  gate (`LootParityTests` over all 13 loot-bearing maps, `BotParityTests` including level-20
+  randomised buckets and the nighttime clamp, `RewardLootParityTests` over all five reward entry
+  points, `RagfairParityTests`), all seeded and byte-equal after id normalisation. The sanctioned
+  gaps are minted `MongoId`s (outside the seeded stream on both sides) and, for ragfair only,
+  `intId` (a live C# counter) and `startTime`/`endTime` (one batch timestamp natively vs a
+  per-offer clock in legacy, so only the spread is compared).
 - **Patches on collaborators do not reach the native path** and do not flip to legacy — only the
   ported classes' own members are detected. Affected: `RandomUtil`, `ItemHelper`,
   `CounterTrackerHelper`, `BotGeneratorHelper`, `DurabilityLimitsHelper`, `RepairService.AddBuff`,
@@ -171,11 +172,7 @@ seeded-RNG parity at the primitive level (xoshiro256\*\*, twin known-answer test
 
 ## Roadmap
 
-1. Full-output golden tests (same seed, bit-identical output vs the legacy path as oracle) for the
-   loot and bot families; ragfair already has them (`RagfairParityTests`).
-2. `checks.dat` generate path in Rust (`todo/TODO.md` #8) — detached quick win, drops
-   `PostBuild.cs`'s `System.IO.Hashing` NuGet dependency.
-3. **Database mutation stamp, then a cached serialized request slice** — a per-call items-view
+1. **Database mutation stamp, then a cached serialized request slice** — a per-call items-view
    cache was considered and rejected: without a way to know when the database changed, a cache
    can't tell staleness, and mods mutate the database at runtime (guideline 3). One measured
    exception: the ragfair *regeneration* pass spends ~60% of its time building and serialising a
@@ -184,5 +181,5 @@ seeded-RNG parity at the primitive level (xoshiro256\*\*, twin known-answer test
    and it is the hard half**: a counter every mod-facing database mutation path bumps, so a cache
    can tell staleness. Do not cache first and add the stamp later — that is exactly the incorrect
    cache guideline 3 forbids.
-4. Later candidates, in `todo/TODO.md` order: repeatable quests, scav case rewards, weather, fence
+2. Later candidates, in `todo/TODO.md` order: repeatable quests, scav case rewards, weather, fence
    assorts, raid-time adjustment, ragfair linked-item table.
