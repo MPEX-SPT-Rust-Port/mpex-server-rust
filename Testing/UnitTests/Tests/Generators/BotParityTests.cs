@@ -94,15 +94,39 @@ public class BotParityTests
     }
 
     private static readonly string[] _randomisedRoles = ["usec-level20", "bear-level20"];
-    private static readonly ulong[] _randomisedPassingSeeds = [1337];
+    private static readonly ulong[] _randomisedPassingSeeds =
+    [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+        20,
+        42,
+        1337,
+    ];
     private static readonly ulong[] _randomisedDivergentSeeds = [42];
 
     /// <summary>
     /// The level-1 cases above sit below the pmc randomisation buckets, so they never route a mod
-    /// pool through BotEquipmentModPoolService. These two do - level 20 selects buckets that set
+    /// pool through BotEquipmentModPoolService. These do - level 20 selects buckets that set
     /// RandomisedArmorSlots and RandomisedWeaponModSlots - which is exactly the enumeration-order
-    /// seam the modPoolSlotOrder projection exists for. Seed 42 is pinned separately below: it hits
-    /// a residual divergence that has nothing to do with enumeration order.
+    /// seam the modPoolSlotOrder projection exists for, plus the two blacklist/spawn-chance seams
+    /// the wide seed set exists for.
     /// </summary>
     [Test]
     public void TheSameSeedGeneratesEquivalentInventoryAtRandomisedLevels(
@@ -126,9 +150,6 @@ public class BotParityTests
     /// that was fixed, the same divergence class reproduces at other seeds before the ordering fix,
     /// and HEAD's failing seed set is a strict subset of the pre-fix commit's.
     /// </summary>
-    [Ignore(
-        "pre-existing divergence: native and legacy desync on randomised weapon-mod spawn rolls (uncovered when the mod-pool order projection fixed the masking armor-plate ordering) - see RUST-ROADMAP.md"
-    )]
     [Test]
     public void TheRemainingWeaponModSpawnDesyncIsPinned(
         [ValueSource(nameof(_randomisedRoles))] string role,
