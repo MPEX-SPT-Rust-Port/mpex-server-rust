@@ -151,10 +151,16 @@ public class SptNativeBotWireTests
         Assert.That(_request.ModPoolSlotOrder.ContainsKey(weaponTpl), Is.True);
 
         var indices = _request.ModPoolSlotOrder[weaponTpl];
-        var slotCount = _request.Items[weaponTpl].Slots!.Count;
+        var slots = _request.Items[weaponTpl].Slots!;
         Assert.That(indices, Has.Count.GreaterThanOrEqualTo(2));
         Assert.That(indices, Is.Unique);
-        Assert.That(indices, Is.All.InRange(0, slotCount - 1));
+        Assert.That(indices, Is.All.InRange(0, slots.Count - 1));
+
+        // The order itself, which is the only thing the member exists to carry: resolving the
+        // indices back through the projected slots has to reproduce the pool's key sequence.
+        // `Keys` is a snapshot, so it is materialised once for a stable comparison
+        var poolKeys = DI.GetInstance().GetService<BotEquipmentModPoolService>().GetModsForWeaponSlot(weaponTpl).Keys.ToList();
+        Assert.That(indices.Select(index => slots[index].Name).ToList(), Is.EqualTo(poolKeys));
     }
 
     /// <summary>
