@@ -171,53 +171,18 @@ seeded-RNG parity at the primitive level (xoshiro256\*\*, twin known-answer test
 
 ## Roadmap
 
-1. ~~Mod-compatibility test gaps~~ — done, `ModCompatibilityTests` (`todo/TODO-TESTING.md`).
-2. ~~Ragfair offer + price generation~~ — done, `.superpowers/sdd/2026-08-13-ragfair-port/`
-   (`todo/TODO.md` #4). Native by default, 19/19 parity, still slower than legacy — see item 4.
-3. ~~Shared invalidation-aware items-view cache~~ — **retracted.** There is no database mutation
-   stamp, and mods mutate the database at runtime, so a cache cannot know when it is stale;
-   rebuilding the projection per call is the only correct choice until such a stamp exists
-   (guideline 3). It would also only have covered the ~20% build phase of the bot payload cost, and
-   ~1% of a ragfair full pass. **One exception, measured after the fact:** the ragfair
-   *regeneration* pass spends ~60% of its time building and serialising the 5.8 MB call-invariant
-   request slice, so it is the one caller where the cache would pay — see item 9, which still
-   requires the stamp first.
-4. ~~The two ragfair performance levers~~ — **done, gate missed.** Both shipped: the batch walk
-   fans across rayon when unseeded, and the response is a framed MessagePack envelope (ABI 10)
-   deserialised in parallel, plus a one-pass fresh-id offer copy. Full pass **1550 → 626 ms**
-   (2.48x), regeneration ~103 → 75 ms, and native allocation now under legacy's (219 vs 283 MB).
-   The 1.25x parity target was **missed at 1.47x** and the in-scope levers are exhausted; the
-   residual is C#-side binding of ~367k `Models` objects out of the response, not generation
-   (~85 ms) and not the projection (~13 ms). Figures and attribution: BENCHMARK.md § *Results —
-   ragfair offer generation*, effort record `.superpowers/sdd/2026-08-14-ragfair-native-parity/`.
-5. ~~`ConcurrentDictionary` mod-pool ordering divergence~~ — done: the C# enumeration order
-   crosses the FFI as per-template slot indices (`modPoolSlotOrder`, ABI 11), and Rust's
-   `derive_pool` draws in that order with database order as the total fallback. Level-15+ parity
-   pinned by `BotParityTests` (usec/bear at level 20, seeds 1-20 + 42 + 1337, plus the
-   nighttime case now comparing full inventories at 1337). Spec:
-   `docs/superpowers/specs/2026-08-15-mod-pool-order-projection-design.md`.
-6. Full-output golden tests (same seed, bit-identical output vs the legacy path as oracle) for the
+1. Full-output golden tests (same seed, bit-identical output vs the legacy path as oracle) for the
    loot and bot families; ragfair already has them (`RagfairParityTests`).
-7. ~~Randomised weapon-mod spawn desync~~ — done. Two independent native defects, both found by
-   the evidence in `docs/superpowers/notes/2026-08-15-weapon-mod-desync-preexistence-verification.md`
-   (the `mod_magazine` draw-count suspicion was wrong). **The blacklist level:**
-   `BotEquipmentModGenerator.cs:546` resolves the equipment blacklist with
-   `pmcProfile?.Info?.Level ?? 0`, which matches no `levelRange`, where the equipment path defaults
-   the same level to 1 — native projected one blacklist and used it for both, so the weapon-mod
-   path filtered mods legacy keeps; the request now carries both (ABI 12). **The spawn chances:**
-   `AdjustSlotSpawnChances` writes into the bot's `equipmentChances.WeaponModsChances` by reference,
-   so a chance forced on weapon 1 is still forced on weapon 2, where native cloned the map per
-   weapon — it now moves in and out of the weapon request the way `modPool` already did.
-   `BotParityTests` is green at level 20 for seeds 1-20 + 42 + 1337 on usec and bear; seed 42 —
-   where the desync was first pinned — sits in that matrix as the regression pin (the separate
-   `[Ignore]`d pin test became a duplicate and was deleted).
-8. `checks.dat` generate path in Rust (`todo/TODO.md` #12) — detached quick win, drops
+2. `checks.dat` generate path in Rust (`todo/TODO.md` #8) — detached quick win, drops
    `PostBuild.cs`'s `System.IO.Hashing` NuGet dependency.
-9. **Database mutation stamp, then a cached serialized request slice** — the sanctioned way to
-   reopen the request-side cache item 3 retracted, and the only lever left on the ragfair
-   regeneration pass (~60% of it is building and serialising a 5.8 MB slice that does not change
-   between calls). **The stamp is the precondition, and it is the hard half**: a counter every
-   mod-facing database mutation path bumps, so a cache can tell staleness. Do not cache first and
-   add the stamp later — that is exactly the incorrect cache guideline 3 forbids.
-10. Later candidates, in `todo/TODO.md` order: repeatable quests, scav case rewards, weather, fence
-    assorts, raid-time adjustment, ragfair linked-item table.
+3. **Database mutation stamp, then a cached serialized request slice** — a per-call items-view
+   cache was considered and rejected: without a way to know when the database changed, a cache
+   can't tell staleness, and mods mutate the database at runtime (guideline 3). One measured
+   exception: the ragfair *regeneration* pass spends ~60% of its time building and serialising a
+   5.8 MB call-invariant request slice that does not change between calls, so it is the one caller
+   where a cache would pay off once a staleness signal exists. **The stamp is the precondition,
+   and it is the hard half**: a counter every mod-facing database mutation path bumps, so a cache
+   can tell staleness. Do not cache first and add the stamp later — that is exactly the incorrect
+   cache guideline 3 forbids.
+4. Later candidates, in `todo/TODO.md` order: repeatable quests, scav case rewards, weather, fence
+   assorts, raid-time adjustment, ragfair linked-item table.
