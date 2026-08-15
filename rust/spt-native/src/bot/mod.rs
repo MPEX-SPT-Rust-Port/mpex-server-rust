@@ -60,7 +60,7 @@ pub struct BotContext<'a> {
     /// `GetBotEquipmentBlacklist(equipmentRole, playerLevel)`, resolved by the C# caller. The
     /// equipment path takes its blacklist as a parameter because the C# does.
     pub equipment_blacklist: &'a EquipmentFilterDetails,
-    /// The weapon path's own blacklist — it resolves one internally (`:544`) with the player level
+    /// The weapon path's own blacklist — it resolves one internally (`:546`) with the player level
     /// defaulted to 0 rather than 1, which matches no `levelRange`, so it is a different object
     /// from [`Self::equipment_blacklist`] and cannot be shared with the equipment path.
     pub weapon_mod_equipment_blacklist: &'a EquipmentFilterDetails,

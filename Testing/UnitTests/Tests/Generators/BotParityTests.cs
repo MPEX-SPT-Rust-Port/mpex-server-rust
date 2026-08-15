@@ -119,7 +119,6 @@ public class BotParityTests
         42,
         1337,
     ];
-    private static readonly ulong[] _randomisedDivergentSeeds = [42];
 
     /// <summary>
     /// The level-1 cases above sit below the pmc randomisation buckets, so they never route a mod
@@ -143,27 +142,6 @@ public class BotParityTests
     }
 
     /// <summary>
-    /// The seed the weapon-mod spawn desync was first pinned at, kept as its regression pin. Both
-    /// halves of that desync were native-only: the weapon-mod path resolved the equipment blacklist
-    /// at the wrong player level (BotEquipmentModGenerator.cs:546 defaults it to 0, not 1), and it
-    /// cloned the bot's weapon-mod spawn chances per weapon where C# aliases them, so a chance
-    /// forced on weapon 1 was lost for weapon 2. See RUST-ROADMAP.md roadmap item 7.
-    /// </summary>
-    [Test]
-    public void TheRemainingWeaponModSpawnDesyncIsPinned(
-        [ValueSource(nameof(_randomisedRoles))] string role,
-        [ValueSource(nameof(_randomisedDivergentSeeds))] ulong seed
-    )
-    {
-        PreWarmLootCache(role);
-
-        var native = Generate(role, seed, forceLegacy: false, LootGenerationPath.Native);
-        var legacy = Generate(role, seed, forceLegacy: true, LootGenerationPath.Legacy);
-
-        LootJsonAssert.AssertEqual(legacy.Inventory, native.Inventory, $"role={role}", seed);
-    }
-
-    /// <summary>
     /// The other eight cases run without a raid, so randomisationClamps always comes back empty and
     /// their clamp-equality assertion only proves both paths left the config alone. This one installs
     /// a nighttime raid on a role and level whose randomisation bucket carries NighttimeChanges, so
@@ -172,8 +150,8 @@ public class BotParityTests
     ///
     /// With the mod-pool enumeration order projected (modPoolSlotOrder), the inventories compare
     /// too - this case is the only one that covers the nighttime clamp path at a randomised level.
-    /// The seed is 1337 rather than 42 because seed 42 hits the residual weapon-mod spawn desync
-    /// pinned separately by TheRemainingWeaponModSpawnDesyncIsPinned.
+    /// The seed is 1337 only because that is where this case was first pinned; the weapon-mod spawn
+    /// desync that once excluded seed 42 is fixed (RUST-ROADMAP.md roadmap item 7).
     /// </summary>
     [Test]
     public void TheNighttimeRandomisationClampIsReplayedOnBothPaths()

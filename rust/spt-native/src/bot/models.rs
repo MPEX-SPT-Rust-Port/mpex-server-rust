@@ -625,7 +625,7 @@ pub struct GenerateBotInventoryRequest {
     /// (`BotInventoryGenerator.cs:583`, level defaulted to 1).
     pub equipment_blacklist: EquipmentFilterDetails,
     /// The same call as [`Self::equipment_blacklist`] but as the *weapon-mod* path resolves it
-    /// (`BotEquipmentModGenerator.cs:544`, level defaulted to **0**). Legacy is internally
+    /// (`BotEquipmentModGenerator.cs:546`, level defaulted to **0**). Legacy is internally
     /// inconsistent about that default and level 0 matches no `levelRange`, so the two blacklists
     /// differ and each path has to use its own.
     pub weapon_mod_equipment_blacklist: EquipmentFilterDetails,

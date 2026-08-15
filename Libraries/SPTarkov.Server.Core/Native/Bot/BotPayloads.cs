@@ -111,7 +111,7 @@ internal record GenerateBotInventoryRequest
 
     /// <summary>
     /// The same call as <see cref="EquipmentBlacklist"/>, resolved the way the weapon-mod path
-    /// resolves it: <c>BotEquipmentModGenerator.cs:544</c> defaults the player level to <b>0</b>
+    /// resolves it: <c>BotEquipmentModGenerator.cs:546</c> defaults the player level to <b>0</b>
     /// where the equipment path defaults it to 1, and level 0 matches no <c>levelRange</c>, so the
     /// two results differ. Legacy is internally inconsistent here and native has to be too.
     /// </summary>

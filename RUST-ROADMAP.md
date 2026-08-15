@@ -208,8 +208,9 @@ seeded-RNG parity at the primitive level (xoshiro256\*\*, twin known-answer test
    `AdjustSlotSpawnChances` writes into the bot's `equipmentChances.WeaponModsChances` by reference,
    so a chance forced on weapon 1 is still forced on weapon 2, where native cloned the map per
    weapon — it now moves in and out of the weapon request the way `modPool` already did.
-   `BotParityTests` is green at level 20 for seeds 1-20 + 42 + 1337 on usec and bear, and
-   `TheRemainingWeaponModSpawnDesyncIsPinned` is un-ignored as the regression pin.
+   `BotParityTests` is green at level 20 for seeds 1-20 + 42 + 1337 on usec and bear; seed 42 —
+   where the desync was first pinned — sits in that matrix as the regression pin (the separate
+   `[Ignore]`d pin test became a duplicate and was deleted).
 8. `checks.dat` generate path in Rust (`todo/TODO.md` #12) — detached quick win, drops
    `PostBuild.cs`'s `System.IO.Hashing` NuGet dependency.
 9. **Database mutation stamp, then a cached serialized request slice** — the sanctioned way to
