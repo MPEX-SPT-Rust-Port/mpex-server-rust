@@ -40,6 +40,52 @@ public class SeasonalEventService(
 {
     private bool _christmasEventActive;
 
+    private readonly DatabaseMutationStamp? _databaseMutationStamp;
+
+    /// <summary>
+    ///     The constructor the container uses: the frozen 4.1.2 one plus the mutation stamp
+    ///     <see cref="UpdateGlobalEvents"/> bumps — seasonal state feeds the native ragfair
+    ///     request slice and can flip at runtime via the force-event chat commands.
+    /// </summary>
+    public SeasonalEventService(
+        ISptLogger<SeasonalEventService> logger,
+        LocaleTable localeTable,
+        GlobalTable globalTable,
+        BotTable botTable,
+        LocationTable locationTable,
+        TimeUtil timeUtil,
+        GiftService giftService,
+        ServerLocalisationService serverLocalisationService,
+        ProfileHelper profileHelper,
+        HttpConfig httpConfig,
+        LocationConfig locationConfig,
+        QuestConfig questConfig,
+        SeasonalEventConfig seasonalEventConfig,
+        WeatherConfig weatherConfig,
+        RandomUtil randomUtil,
+        DatabaseMutationStamp databaseMutationStamp
+    )
+        : this(
+            logger,
+            localeTable,
+            globalTable,
+            botTable,
+            locationTable,
+            timeUtil,
+            giftService,
+            serverLocalisationService,
+            profileHelper,
+            httpConfig,
+            locationConfig,
+            questConfig,
+            seasonalEventConfig,
+            weatherConfig,
+            randomUtil
+        )
+    {
+        _databaseMutationStamp = databaseMutationStamp;
+    }
+
     protected readonly FrozenSet<MongoId> ChristmasEventItems =
     [
         ItemTpl.ARMOR_6B13_M_ASSAULT_ARMOR_CHRISTMAS_EDITION,
@@ -433,6 +479,8 @@ public class SeasonalEventService(
                 HandleModEvent(eventType, globalConfig);
                 break;
         }
+
+        _databaseMutationStamp?.Bump();
     }
 
     protected void ApplyHalloweenEvent(SeasonalEvent eventType, GlobalConfig globalConfig)

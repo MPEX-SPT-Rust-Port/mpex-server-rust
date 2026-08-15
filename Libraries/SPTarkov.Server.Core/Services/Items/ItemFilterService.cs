@@ -1,6 +1,7 @@
 using SPTarkov.DI.Annotations;
 using SPTarkov.Server.Core.Models.Common;
 using SPTarkov.Server.Core.Models.Spt.Config;
+using SPTarkov.Server.Core.Services.Server;
 
 namespace SPTarkov.Server.Core.Services.Items;
 
@@ -12,6 +13,18 @@ public class ItemFilterService(ItemConfig itemConfig)
 {
     protected readonly HashSet<MongoId> ItemBlacklistCache = [.. itemConfig.Blacklist];
     protected readonly HashSet<MongoId> LootableItemBlacklistCache = [.. itemConfig.LootableItemBlacklist];
+
+    private readonly DatabaseMutationStamp? _databaseMutationStamp;
+
+    /// <summary>
+    ///     The constructor the container uses: the frozen 4.1.2 one plus the mutation stamp the
+    ///     runtime blacklist additions bump. Additive and apicompat-verified.
+    /// </summary>
+    public ItemFilterService(ItemConfig itemConfig, DatabaseMutationStamp databaseMutationStamp)
+        : this(itemConfig)
+    {
+        _databaseMutationStamp = databaseMutationStamp;
+    }
 
     /// <summary>
     ///     Get an HashSet of items that should never be given as a reward to player
@@ -75,6 +88,7 @@ public class ItemFilterService(ItemConfig itemConfig)
     public void AddItemToLootableBlacklistCache(IEnumerable<MongoId> itemTplsToBlacklist)
     {
         LootableItemBlacklistCache.UnionWith(itemTplsToBlacklist);
+        _databaseMutationStamp?.Bump();
     }
 
     /// <summary>
@@ -94,6 +108,7 @@ public class ItemFilterService(ItemConfig itemConfig)
     public void AddItemToBlacklistCache(IEnumerable<MongoId> itemTplsToBlacklist)
     {
         ItemBlacklistCache.UnionWith(itemTplsToBlacklist);
+        _databaseMutationStamp?.Bump();
     }
 
     public bool IsItemBlacklisted(MongoId tpl)

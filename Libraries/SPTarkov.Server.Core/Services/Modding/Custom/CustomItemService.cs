@@ -10,6 +10,7 @@ using SPTarkov.Server.Core.Models.Spt.Config;
 using SPTarkov.Server.Core.Models.Spt.Mod;
 using SPTarkov.Server.Core.Models.Spt.Tables;
 using SPTarkov.Server.Core.Services.Items;
+using SPTarkov.Server.Core.Services.Server;
 using SPTarkov.Server.Core.Utils.Cloners;
 
 namespace SPTarkov.Server.Core.Services.Modding.Custom;
@@ -27,6 +28,30 @@ public class CustomItemService(
     ICloner cloner
 )
 {
+    private readonly DatabaseMutationStamp? _databaseMutationStamp;
+
+    /// <summary>
+    ///     The constructor the container uses: the frozen 4.1.2 one plus the mutation stamp item
+    ///     creation bumps — a custom item writes the items, handbook and flea price tables, all
+    ///     of which feed native request slices. Additive and apicompat-verified.
+    /// </summary>
+    public CustomItemService(
+        ISptLogger<CustomItemService> logger,
+        TemplateTable templateTable,
+        LocaleTable locales,
+        BotTable botTable,
+        ItemHelper itemHelper,
+        PmcConfig pmcConfig,
+        ItemBaseClassService itemBaseClassService,
+        ModItemCacheService modItemCacheService,
+        ICloner cloner,
+        DatabaseMutationStamp databaseMutationStamp
+    )
+        : this(logger, templateTable, locales, botTable, itemHelper, pmcConfig, itemBaseClassService, modItemCacheService, cloner)
+    {
+        _databaseMutationStamp = databaseMutationStamp;
+    }
+
     /// <summary>
     ///     Create a new item from a cloned item base <br />
     ///     WARNING - If no item id is supplied, an id will be generated, this id will be random every time you add an item and will not be the same on each subsequent server start <br />
@@ -66,6 +91,9 @@ public class CustomItemService(
         UpdateBaseItemPropertiesWithOverrides(newItemDetails.OverrideProperties, itemClone);
 
         AddToItemsDb(newItemId, itemClone);
+
+        // Bumped here, not at the return: the writes below can throw and still leave the items table mutated
+        _databaseMutationStamp?.Bump();
 
         if (newItemDetails.AddToHandbook)
         {
@@ -144,6 +172,9 @@ public class CustomItemService(
         }
 
         AddToItemsDb(newItem.Id, newItem);
+
+        // Bumped here, not at the return: the writes below can throw and still leave the items table mutated
+        _databaseMutationStamp?.Bump();
 
         if (newItemDetails.AddToHandbook)
         {
