@@ -36,8 +36,10 @@ seeded-RNG parity at the primitive level (xoshiro256\*\*, twin known-answer test
   weapon mod the other skips (e.g. `mod_mount_000` on the AK-74N), an RNG-stream desync in the
   randomised-mod draw path (suspect: the randomised `mod_magazine` draw-count path). Pre-existing —
   it was masked by the armor-plate ordering divergence (roadmap item 5) until that was fixed, and at
-  HEAD the failing seed set is a strict subset of the pre-fix commit's. Only affects roles that set
-  `randomisedArmorSlots`/`randomisedWeaponModSlots` (shipped: `pmc`, buckets 1-3, levels 15-100).
+  HEAD the failing seed set is a strict subset of the pre-fix commit's: in the isolation sweep (armor
+  randomisation removed, 20 seeds × 2 PMC roles) 6 of 40 role-seed pairs fail at HEAD vs 8 of 40
+  pre-fix. Only affects roles that set `randomisedArmorSlots`/`randomisedWeaponModSlots`
+  (shipped: `pmc`, buckets 1-3, levels 15-100).
   Pinned by the `[Ignore]`d `BotParityTests.TheRemainingWeaponModSpawnDesyncIsPinned` (usec/bear at
   level 20, seed 42). Workaround: `ForceLegacyBotGeneration`.
 - **Bot generation is tens of times slower per bot** — ~51-54 ms native vs ~1.2-1.4 ms legacy, for

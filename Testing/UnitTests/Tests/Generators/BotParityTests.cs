@@ -123,7 +123,8 @@ public class BotParityTests
     /// seeds still fail for an unrelated reason: one side spawns a randomised weapon mod the other
     /// skips (e.g. mod_mount_000 on the AK-74N), an RNG-stream desync in the randomised-mod draw
     /// path. Verified pre-existing - it was masked by the armor-plate ordering divergence until
-    /// that was fixed, and reproduces unchanged with the armor seam removed.
+    /// that was fixed, the same divergence class reproduces at other seeds before the ordering fix,
+    /// and HEAD's failing seed set is a strict subset of the pre-fix commit's.
     /// </summary>
     [Ignore(
         "pre-existing divergence: native and legacy desync on randomised weapon-mod spawn rolls (uncovered when the mod-pool order projection fixed the masking armor-plate ordering) - see RUST-ROADMAP.md"
