@@ -40,6 +40,7 @@ public class RagfairPathDispatchTests
     private RagfairOfferService _ragfairOfferService = default!;
     private RagfairConfig _ragfairConfig = default!;
     private TemplateTable _templateTable = default!;
+    private DatabaseMutationStamp _databaseMutationStamp = default!;
 
     private HashSet<MongoId> _idsBefore = [];
 
@@ -52,6 +53,7 @@ public class RagfairPathDispatchTests
         _ragfairOfferService = di.GetService<RagfairOfferService>();
         _ragfairConfig = di.GetService<RagfairConfig>();
         _templateTable = di.GetService<TemplateTable>();
+        _databaseMutationStamp = di.GetService<DatabaseMutationStamp>();
 
         di.GetService<SaveServer>().CreateProfile(new ProfileInfo { ProfileId = new MongoId() });
     }
@@ -157,10 +159,20 @@ public class RagfairPathDispatchTests
         var template = _templateTable.Items[tpl];
         var originalCanSell = template.Properties!.CanSellOnRagfair;
         var originalCustom = _ragfairConfig.Dynamic.Blacklist.Custom;
+        var originalEnableBsgList = _ragfairConfig.Dynamic.Blacklist.EnableBsgList;
 
         try
         {
             _ragfairConfig.Dynamic.Blacklist.Custom = [.. originalCustom, tpl];
+            // The BSG-list arm sits ahead of the custom arm and returns without reporting anything
+            // (server_helper.rs:158-167), so once the first pass has flipped the template the second
+            // pass would report nothing at all - and the guard below would be untested. Off, the
+            // custom arm re-reports the same template every pass, which is what puts the guard, not
+            // an empty rejection list, in charge of the second assertion
+            _ragfairConfig.Dynamic.Blacklist.EnableBsgList = false;
+            // the blacklist lives in the projected slice, so the cache has to be told it moved
+            _databaseMutationStamp.Bump();
+            var stampBefore = _databaseMutationStamp.Current;
             _ragfairOfferGenerator.NativeTestSeed = 42;
 
             // A full pass, not the expired path: the expired path never runs the validity check (:473)
@@ -168,12 +180,28 @@ public class RagfairPathDispatchTests
 
             Assert.That(_ragfairOfferGenerator.LastPathTaken, Is.EqualTo(LootGenerationPath.Native));
             Assert.That(template.Properties.CanSellOnRagfair, Is.False, "the CanSellOnRagfair replay did not reach the live template");
+
+            // A replay that actually flipped a value changed the projected slice
+            var stampAfterFlip = _databaseMutationStamp.Current;
+            Assert.That(stampAfterFlip, Is.GreaterThan(stampBefore), "the flip did not bump the mutation stamp");
+
+            // Nothing left to flip, so the guard keeps the second pass from invalidating the cache
+            _ragfairOfferGenerator.GenerateDynamicOffers();
+
+            Assert.That(
+                _databaseMutationStamp.Current,
+                Is.EqualTo(stampAfterFlip),
+                "an already-false template re-reported as rejected bumped the stamp anyway"
+            );
         }
         finally
         {
             template.Properties.CanSellOnRagfair = originalCanSell;
             _ragfairConfig.Dynamic.Blacklist.Custom = originalCustom;
+            _ragfairConfig.Dynamic.Blacklist.EnableBsgList = originalEnableBsgList;
             _ragfairOfferGenerator.NativeTestSeed = null;
+            // the restore above is a database write the native slice cache has to see
+            _databaseMutationStamp.Bump();
             PurgeAddedOffers();
         }
     }
@@ -284,7 +312,9 @@ public class RagfairPathDispatchTests
 
     private static object Construct(Type type, params object[] substitutes)
     {
-        var constructor = type.GetConstructors().Single();
+        // RagfairOfferGenerator carries the frozen 4.1.2 constructor plus the additive overload the
+        // container uses; take the widest, which is what DI would pick
+        var constructor = type.GetConstructors().MaxBy(candidate => candidate.GetParameters().Length)!;
         var arguments = constructor
             .GetParameters()
             .Select(parameter =>

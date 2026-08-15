@@ -18,6 +18,7 @@ using SPTarkov.Server.Core.Models.Eft.Common.Tables;
 using SPTarkov.Server.Core.Models.Eft.Ragfair;
 using SPTarkov.Server.Core.Models.Enums;
 using SPTarkov.Server.Core.Models.Spt.Config;
+using SPTarkov.Server.Core.Models.Spt.Mod;
 using SPTarkov.Server.Core.Models.Spt.Ragfair;
 using SPTarkov.Server.Core.Models.Spt.Tables;
 using SPTarkov.Server.Core.Native;
@@ -28,6 +29,7 @@ using SPTarkov.Server.Core.Services;
 using SPTarkov.Server.Core.Services.Commerce;
 using SPTarkov.Server.Core.Services.Locales;
 using SPTarkov.Server.Core.Services.Ragfair;
+using SPTarkov.Server.Core.Services.Server;
 using SPTarkov.Server.Core.Utils;
 using SPTarkov.Server.Core.Utils.Cloners;
 
@@ -61,6 +63,9 @@ public class RagfairOfferGenerator(
 {
     protected List<TplWithFleaPrice>? AllowedFleaPriceItemsForBarter;
 
+    private readonly DatabaseMutationStamp? _databaseMutationStamp;
+    private readonly IReadOnlyList<SptMod>? _loadedMods;
+
     /// Internal counter to ensure each offer created has a unique value for its intId property
     protected int OfferCounter;
 
@@ -75,6 +80,97 @@ public class RagfairOfferGenerator(
     ///     native request.
     /// </summary>
     internal ulong? NativeTestSeed { get; set; }
+
+    /// <summary>
+    ///     The native side caches the parsed invariant slice under the stamp value it was sent
+    ///     with; this is the stamp of the last slice it accepted, so an unchanged stamp can skip
+    ///     the slice entirely. Null until a slice is sent under an eligible cache. Internal set:
+    ///     the desync test seam.
+    /// </summary>
+    internal long? LastSentSliceStamp { get; set; }
+
+    /// <summary>
+    ///     Whether the most recent native send carried the invariant slice. Test seam.
+    /// </summary>
+    internal bool LastSendIncludedSlice { get; private set; }
+
+    /// <summary>
+    ///     The constructor the container uses: the frozen 4.1.2 one plus the mutation stamp and
+    ///     the loaded-mod list the request-slice cache eligibility gate reads. Additive and
+    ///     apicompat-verified.
+    /// </summary>
+    public RagfairOfferGenerator(
+        ISptLogger<RagfairOfferGenerator> logger,
+        TemplateTable templateTable,
+        TradersTable traderTable,
+        GlobalTable globalTable,
+        HashUtil hashUtil,
+        RandomUtil randomUtil,
+        TimeUtil timeUtil,
+        RagfairServerHelper ragfairServerHelper,
+        ProfileHelper profileHelper,
+        HandbookHelper handbookHelper,
+        BotHelper botHelper,
+        SaveServer saveServer,
+        PresetHelper presetHelper,
+        RagfairAssortGenerator ragfairAssortGenerator,
+        RagfairOfferService ragfairOfferService,
+        RagfairPriceService ragfairPriceService,
+        ServerLocalisationService localisationService,
+        PaymentHelper paymentHelper,
+        ItemHelper itemHelper,
+        BotConfig botConfig,
+        RagfairConfig ragfairConfig,
+        ICloner cloner,
+        DatabaseMutationStamp databaseMutationStamp,
+        IReadOnlyList<SptMod> loadedMods
+    )
+        : this(
+            logger,
+            templateTable,
+            traderTable,
+            globalTable,
+            hashUtil,
+            randomUtil,
+            timeUtil,
+            ragfairServerHelper,
+            profileHelper,
+            handbookHelper,
+            botHelper,
+            saveServer,
+            presetHelper,
+            ragfairAssortGenerator,
+            ragfairOfferService,
+            ragfairPriceService,
+            localisationService,
+            paymentHelper,
+            itemHelper,
+            botConfig,
+            ragfairConfig,
+            cloner
+        )
+    {
+        _databaseMutationStamp = databaseMutationStamp;
+        _loadedMods = loadedMods;
+    }
+
+    /// <summary>
+    ///     Whether a slice-less send is ever allowed: the stamp exists, the kill switch is off,
+    ///     and either no mods are loaded or the user vouched their mods don't write tables
+    ///     directly. A generator built on the frozen constructor has neither the stamp nor the
+    ///     mod list and never caches.
+    /// </summary>
+    private bool SliceCacheEligible()
+    {
+        // Both null together (the frozen constructor) - checking each keeps the trust flag from ever
+        // vouching for a mod list this instance was never handed
+        if (_databaseMutationStamp is null || _loadedMods is null || ragfairConfig.DisableNativeRequestCache)
+        {
+            return false;
+        }
+
+        return _loadedMods.Count == 0 || ragfairConfig.TrustNativeRequestCacheWithMods;
+    }
 
     /// <summary>
     ///     The 4.1.2 members a mod can Harmony-patch, across this class and the three collaborators
@@ -378,38 +474,48 @@ public class RagfairOfferGenerator(
 
         LastPathTaken = LootGenerationPath.Native;
 
-        var result = SptNative.GenerateDynamicOffers(
-            RagfairPayloadProjection.BuildRequest(
-                RagfairPayloadProjection.BuildInvariantSlice(
-                    templateTable,
-                    handbookHelper,
-                    ragfairPriceService.TraderHelper,
-                    presetHelper,
-                    ragfairAssortGenerator.ItemFilterService,
-                    ragfairAssortGenerator.SeasonalEventService,
-                    botHelper.BotTable,
-                    itemHelper,
-                    botConfig,
-                    ragfairConfig
-                ),
-                0,
-                expiredOffers,
-                timeUtil.GetTimeStamp(),
-                OfferCounter,
-                NativeTestSeed
-            )
-        );
+        var stamp = _databaseMutationStamp?.Current ?? 0;
+        var eligible = SliceCacheEligible();
+        var sendSlice = !eligible || LastSentSliceStamp != stamp;
+
+        FramedOffersResult result;
+        try
+        {
+            result = SptNative.GenerateDynamicOffers(BuildNativeRequest(sendSlice, stamp, expiredOffers));
+            LastSendIncludedSlice = sendSlice;
+        }
+        catch (NativeStaleSliceException)
+        {
+            // The native cache does not hold the slice this stamp names - resend it whole
+            result = SptNative.GenerateDynamicOffers(BuildNativeRequest(true, stamp, expiredOffers));
+            LastSendIncludedSlice = true;
+        }
+
+        LastSentSliceStamp = eligible ? stamp : null;
 
         PayloadProjection.ReplayDiagnostics(result.Diagnostics, logger, localisationService);
 
         // The native side decided these templates are unsellable and, unlike everything else it
-        // touched, that decision belongs to the live database (RagfairServerHelper.cs:61)
+        // touched, that decision belongs to the live database (RagfairServerHelper.cs:61). A write
+        // that actually flips a value changes the projected slice, so it bumps the stamp - guarded,
+        // or re-reported already-false templates would invalidate the cache every pass
+        var flippedCanSell = false;
         foreach (var tpl in result.RejectedCanSellTemplates)
         {
-            if (templateTable.Items.TryGetValue(tpl, out var template) && template.Properties is not null)
+            if (
+                templateTable.Items.TryGetValue(tpl, out var template)
+                && template.Properties is not null
+                && template.Properties.CanSellOnRagfair != false
+            )
             {
                 template.Properties.CanSellOnRagfair = false;
+                flippedCanSell = true;
             }
+        }
+
+        if (flippedCanSell)
+        {
+            _databaseMutationStamp?.Bump();
         }
 
         // Legacy inserts each offer as it creates it; the holder's live per-template cap runs the
@@ -421,6 +527,35 @@ public class RagfairOfferGenerator(
 
         // CreateOffer increments the counter per offer created, not per offer the holder accepted
         OfferCounter += result.Offers.Count;
+    }
+
+    /// <summary>
+    ///     One native request for this pass, with the invariant slice included only when the
+    ///     native cache cannot already be holding it.
+    /// </summary>
+    private GenerateDynamicOffersRequest BuildNativeRequest(bool sendSlice, long stamp, IEnumerable<List<Item>>? expiredOffers)
+    {
+        return RagfairPayloadProjection.BuildRequest(
+            sendSlice
+                ? RagfairPayloadProjection.BuildInvariantSlice(
+                    templateTable,
+                    handbookHelper,
+                    ragfairPriceService.TraderHelper,
+                    presetHelper,
+                    ragfairAssortGenerator.ItemFilterService,
+                    ragfairAssortGenerator.SeasonalEventService,
+                    botHelper.BotTable,
+                    itemHelper,
+                    botConfig,
+                    ragfairConfig
+                )
+                : null,
+            stamp,
+            expiredOffers,
+            timeUtil.GetTimeStamp(),
+            OfferCounter,
+            NativeTestSeed
+        );
     }
 
     /// <summary>

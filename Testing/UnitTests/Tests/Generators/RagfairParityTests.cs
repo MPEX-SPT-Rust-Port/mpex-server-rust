@@ -12,6 +12,7 @@ using SPTarkov.Server.Core.Models.Spt.Config;
 using SPTarkov.Server.Core.Models.Spt.Tables;
 using SPTarkov.Server.Core.Servers;
 using SPTarkov.Server.Core.Services.Ragfair;
+using SPTarkov.Server.Core.Services.Server;
 using SPTarkov.Server.Core.Utils;
 using SPTarkov.Server.Core.Utils.Cloners;
 using ProfileInfo = SPTarkov.Server.Core.Models.Eft.Profile.Info;
@@ -84,6 +85,7 @@ public class RagfairParityTests
     private PresetHelper _presetHelper = default!;
     private TimeUtil _timeUtil = default!;
     private ICloner _cloner = default!;
+    private DatabaseMutationStamp _databaseMutationStamp = default!;
 
     [OneTimeSetUp]
     public void OneTimeSetUp()
@@ -100,6 +102,7 @@ public class RagfairParityTests
         _presetHelper = di.GetService<PresetHelper>();
         _timeUtil = di.GetService<TimeUtil>();
         _cloner = di.GetService<ICloner>();
+        _databaseMutationStamp = di.GetService<DatabaseMutationStamp>();
 
         di.GetService<SaveServer>().CreateProfile(new ProfileInfo { ProfileId = new MongoId() });
     }
@@ -346,6 +349,11 @@ public class RagfairParityTests
                 _ragfairOfferGenerator.NativeTestSeed = seed;
             }
 
+            // Every write above lands in the projected invariant slice, and config is not one of the
+            // instrumented mutation paths - so this fixture stamps its own writes, which also keeps
+            // each pass on a full slice send exactly as it was before the cache existed
+            _databaseMutationStamp.Bump();
+
             _ragfairOfferGenerator.GenerateDynamicOffers([_cloner.Clone(itemWithChildren)!]);
 
             // Fail fast on silent fallback before comparing anything.
@@ -372,6 +380,8 @@ public class RagfairParityTests
             _randomUtil.RandomSource = originalSource;
             ProbabilityRandomSource.Current = originalProbabilitySource;
             _ragfairOfferGenerator.NativeTestSeed = null;
+            // the config restores above are slice writes too
+            _databaseMutationStamp.Bump();
         }
     }
 
@@ -420,7 +430,13 @@ public class RagfairParityTests
     /// reach it; it gets a positional placeholder here instead. <c>user.aid</c>, <c>user.nickname</c>
     /// and <c>user.rating</c> are seeded draws and are deliberately left alone.
     /// </summary>
-    private static string Canonicalise(string json)
+    /// <summary>
+    /// Drops the sanctioned per-run gaps so two offer documents compare: the live <c>intId</c>
+    /// counter, the wall-clock <c>startTime</c> (folded into <c>endTime</c> as a duration) and the
+    /// freshly minted seller id. Shared with <see cref="RagfairNativeSliceCacheTests"/>, which needs
+    /// the same normalisation to compare a full slice send against a cache hit.
+    /// </summary>
+    internal static string Canonicalise(string json)
     {
         var array = JsonNode.Parse(json)!.AsArray();
         for (var index = 0; index < array.Count; index++)
