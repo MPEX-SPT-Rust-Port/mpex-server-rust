@@ -10,7 +10,7 @@ The loot family, the bot family and dynamic ragfair offer generation are ported 
 default. Every ported class keeps its full 4.1.2 C# implementation as a **legacy path**, selected
 automatically when a mod hooks it or manually via a config flag. Twelve C-ABI exports (`src/ffi.rs`)
 carry it, JSON in and JSON out — except the ragfair response, which is a framed MessagePack
-envelope (ABI 11) the C# side parses in parallel.
+envelope (current ABI 11) the C# side parses in parallel.
 
 ## Working
 
