@@ -190,7 +190,7 @@ seeded-RNG parity at the primitive level (xoshiro256\*\*, twin known-answer test
    (guideline 3). It would also only have covered the ~20% build phase of the bot payload cost, and
    ~1% of a ragfair full pass. **One exception, measured after the fact:** the ragfair
    *regeneration* pass spends ~60% of its time building and serialising the 5.8 MB call-invariant
-   request slice, so it is the one caller where the cache would pay — see item 8, which still
+   request slice, so it is the one caller where the cache would pay — see item 9, which still
    requires the stamp first.
 4. ~~The two ragfair performance levers~~ — **done, gate missed.** Both shipped: the batch walk
    fans across rayon when unseeded, and the response is a framed MessagePack envelope (ABI 10)
@@ -209,13 +209,19 @@ seeded-RNG parity at the primitive level (xoshiro256\*\*, twin known-answer test
    `docs/superpowers/specs/2026-08-15-mod-pool-order-projection-design.md`.
 6. Full-output golden tests (same seed, bit-identical output vs the legacy path as oracle) for the
    loot and bot families; ragfair already has them (`RagfairParityTests`).
-7. `checks.dat` generate path in Rust (`todo/TODO.md` #12) — detached quick win, drops
+7. Randomised weapon-mod spawn desync (first *Broken* bullet above) — root-cause and fix the
+   RNG-stream desync so both paths draw the same randomised mods. Start from the evidence in
+   `docs/superpowers/notes/2026-08-15-weapon-mod-desync-preexistence-verification.md`; prime
+   suspect is the randomised `mod_magazine` draw-count path. Done means un-ignoring
+   `BotParityTests.TheRemainingWeaponModSpawnDesyncIsPinned` and widening the level-20 parity
+   seeds past 1337.
+8. `checks.dat` generate path in Rust (`todo/TODO.md` #12) — detached quick win, drops
    `PostBuild.cs`'s `System.IO.Hashing` NuGet dependency.
-8. **Database mutation stamp, then a cached serialized request slice** — the sanctioned way to
+9. **Database mutation stamp, then a cached serialized request slice** — the sanctioned way to
    reopen the request-side cache item 3 retracted, and the only lever left on the ragfair
    regeneration pass (~60% of it is building and serialising a 5.8 MB slice that does not change
    between calls). **The stamp is the precondition, and it is the hard half**: a counter every
    mod-facing database mutation path bumps, so a cache can tell staleness. Do not cache first and
    add the stamp later — that is exactly the incorrect cache guideline 3 forbids.
-9. Later candidates, in `todo/TODO.md` order: repeatable quests, scav case rewards, weather, fence
-   assorts, raid-time adjustment, ragfair linked-item table.
+10. Later candidates, in `todo/TODO.md` order: repeatable quests, scav case rewards, weather, fence
+    assorts, raid-time adjustment, ragfair linked-item table.
