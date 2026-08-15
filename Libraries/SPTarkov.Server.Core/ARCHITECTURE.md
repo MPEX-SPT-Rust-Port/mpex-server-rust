@@ -19,7 +19,7 @@ any `dotnet build` needs the Rust toolchain on `PATH`.
 |---|---:|---|
 | `Models/` | 437 | Data records. `Eft/` client wire contracts, `Spt/` server-internal, `Enums/`, `Common/` primitives |
 | `Helpers/` | 68 | Stateless computation (29 of them the `Dialogue/` chat-bot framework) |
-| `Services/` | 54 | Stateful, long-lived, cache-owning |
+| `Services/` | 55 | Stateful, long-lived, cache-owning |
 | `Routers/` | 50 | URL → callback dispatch (`Static/` 23, `ItemEvents/` 11, `Dynamic/` 7, `SaveLoad/` 4, `Serializers/` 2, root 3) |
 | `Utils/` | 43 | JSON layer (23), RNG, cloning, collections, IO, importers. Plus gitignored `ProgramStatics.Generated.cs` |
 | `Callbacks/` | 34 | HTTP entry point per domain |
@@ -30,7 +30,7 @@ any `dotnet build` needs the Rust toolchain on `PATH`.
 | `Exceptions/` | 13 | Typed exceptions (`Database/`, `Helpers/`, `Items/`) |
 | `Servers/` | 11 | HTTP, WebSocket, save, ragfair |
 | `DI/` | 8 | Router base classes + lifecycle interfaces |
-| `Native/` | 7 | C# side of the Rust FFI |
+| `Native/` | 10 | C# side of the Rust FFI |
 | `Constants/` | 5 | Id and slot-name constants |
 | `Loaders/` | 2 | `ConfigLoader`, `BundleLoader` |
 
@@ -129,7 +129,7 @@ DI) and hardcoded in `ConfigLoader` (pre-DI). A converter that configs need must
 
 Convention: **Services** hold state, **Helpers** don't, **Generators** create data.
 
-### `Services/` (54) — stateful, mostly singletons
+### `Services/` (55) — stateful, mostly singletons
 
 | Subfolder | Files | Owns |
 |---|---:|---|
@@ -139,7 +139,7 @@ Convention: **Services** hold state, **Helpers** don't, **Generators** create da
 | `Ragfair/` | 6 | Offers, prices, categories, linked items, required items, tax |
 | `Profile/` | 5 | Backup, creation, activity, `ProfileFixerService`, `ProfileMigrationService` |
 | `Modding/` | 5 | Custom item/quest registration, mod item cache, profile data access |
-| `Server/` | 4 | `PostDbLoadService` (post-import DB adjustments), `SeasonalEventService`, notifications, bundle hashes |
+| `Server/` | 5 | `PostDbLoadService` (post-import DB adjustments), `SeasonalEventService`, notifications, bundle hashes, `DatabaseMutationStamp` |
 | `Locales/` | 3 | `ServerLocalisationService` (server messages), `LocaleService` (client locales) |
 | `Items/`, `Hideout/`, `Hosted/`, `Image/` | 7 | Item blacklists/base classes, cultist circle + map markers, startup hosted service, image routing |
 
@@ -210,7 +210,7 @@ the template it copies — **do not delete it**, despite nothing referencing it 
 | Folder | Contents |
 |---|---|
 | `Servers/` | `HttpServer`, `WebSocketServer`, `SaveServer` (owns `user/profiles/`), `RagfairServer`; `Http/` listener + `RequestLogger`; `Ws/` connection and message handlers |
-| `Native/` | `NativeMethods` (`[LibraryImport]`), `SptNative` (safe wrapper), `Loot/` and `Bot/` payload + projection types. Contract details in the root ARCHITECTURE.md |
+| `Native/` | `NativeMethods` (`[LibraryImport]`), `SptNative` (safe wrapper), `Loot/`, `Bot/` and `Ragfair/` payload + projection types. The ragfair request's call-invariant half is skipped when `DatabaseMutationStamp` has not moved and no mods are loaded. Contract details in the root ARCHITECTURE.md |
 | `Migration/` | `IProfileMigration` / `AbstractProfileMigration` / context, versioned sets under `Migrations/3.11`, `4.0`, `4.1`, plus unversioned `Migrations/Fixes/` (7 corruption repairs) |
 | `Constants/` | `BodyPartContants` (typo is in the source), `ContainerConstants`, `RoleConstants`, `SideConstants`, `SlotConstants` |
 | `Exceptions/` | `Helpers/` (7, one per helper that throws), `Items/` (3, modded item/trader/clothing validation), `Database/` (3, incl. `DatabaseTablesAlreadySetException`) |

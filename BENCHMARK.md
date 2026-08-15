@@ -238,9 +238,10 @@ and `.AsParallel()` over a single element is the serial arm.
 
 ## Results — ragfair offer generation
 
-Recorded 2026-08-14, final figures on `df07d54` — the end of the native-parity effort
-(`.superpowers/sdd/2026-08-14-ragfair-native-parity/`). Same machine as the bot-generation figures
-above, **not** the machine the location-loot figures came from.
+Recorded 2026-08-15 on `6d975e4` — the stamp-gated invariant-slice cache
+(`.superpowers/sdd/2026-08-15-db-mutation-stamp-ragfair-slice-cache/`), re-measuring the figures the
+native-parity effort left on `df07d54`. Same machine as the bot-generation figures above, **not**
+the machine the location-loot figures came from.
 
 | | |
 |---|---|
@@ -257,7 +258,8 @@ every sellable template gets its offers — ~58k offers with full item trees, of
 per-template cap accepts ~24k. *Regeneration pass*: 1,400 cloned single-item lists (the configured
 `expiredOfferThreshold`), the shape
 `RagfairServer.ProcessExpiredFleaOffers` hands over. `RagfairPayloadProjection.BuildRequest` is
-timed on its own in a third phase per scenario.
+timed on its own in a third phase per scenario. A fourth scenario times the regeneration pass with
+the invariant-slice cache forced cold against the same pass left warm (see *The slice cache*).
 
 **The flea is already full when the timing starts.** The test harness runs every `IOnLoad`, so
 `RagfairCallbacks.OnLoadAsync` → `RagfairServer.Load()` has already generated a complete set of
@@ -271,16 +273,39 @@ below is unaffected; it does change what the offer column means (see below).
 
 | Scenario | Path | median | mean | min | max | offers accepted | alloc/run |
 |---|---|---|---|---|---|---|---|
-| full pass | native (rust) | **625.78 ms** | 703.63 ms | 614.24 ms | 872.36 ms | 24,387 | 219.3 MB |
-| full pass | legacy (C# 4.1.2) | 426.57 ms | 444.94 ms | 409.61 ms | 520.09 ms | 24,296 | 283.1 MB |
-| full pass | `BuildRequest` only | 13.39 ms | 14.18 ms | 8.79 ms | 20.48 ms | — | 7.1 MB |
-| regeneration | native (rust) | **74.59 ms** | 74.96 ms | 67.44 ms | 83.60 ms | 911 | 17.6 MB |
-| regeneration | legacy (C# 4.1.2) | 10.25 ms | 10.43 ms | 5.58 ms | 16.06 ms | 920 | 5.9 MB |
-| regeneration | `BuildRequest` only | 13.85 ms | 14.74 ms | 8.43 ms | 22.26 ms | — | 7.1 MB |
+| full pass | native (rust) | **670.63 ms** | 645.77 ms | 556.87 ms | 739.75 ms | 24,005 | 206.6 MB |
+| full pass | legacy (C# 4.1.2) | 460.29 ms | 471.43 ms | 432.00 ms | 540.32 ms | 24,276 | 283.3 MB |
+| full pass | `BuildRequest` only | 14.08 ms | 13.59 ms | 9.77 ms | 15.68 ms | — | 7.1 MB |
+| regeneration | native (rust) | **15.19 ms** | 15.31 ms | 10.91 ms | 21.54 ms | 867 | 5.2 MB |
+| regeneration | legacy (C# 4.1.2) | 9.92 ms | 9.60 ms | 5.46 ms | 13.86 ms | 859 | 5.9 MB |
+| regeneration | `BuildRequest` only | 12.90 ms | 13.79 ms | 8.44 ms | 18.70 ms | — | 7.1 MB |
+| regeneration | native, cache **cold** | 77.94 ms | 75.72 ms | 66.87 ms | 82.32 ms | 876 | 17.6 MB |
+| regeneration | native, cache **warm** | **11.46 ms** | 13.09 ms | 10.08 ms | 16.85 ms | 863 | 5.2 MB |
 
-Speedup on median wall clock: **0.68x** on the full pass (**1.47x slower**) and **0.14x** on the
-regeneration pass (**7.3x slower**). Projection share of the native median: **2.1%** (full pass),
-**18.6%** (regeneration).
+Speedup on median wall clock: **0.69x** on the full pass (**1.45x slower**) and **0.65x** on the
+regeneration pass (**1.53x slower**, was 7.3x slower before the slice cache). Projection share of
+the native median: **2.1%** (full pass), **84.9%** (regeneration) — the projection phase still
+builds the whole slice every time it is timed, so on a warm regeneration pass it now measures work
+the generation pass no longer does.
+
+### The slice cache
+
+The regeneration pass's cost was never generation, it was the 5.8 MB call-invariant request slice
+being rebuilt and re-serialised for a pass that only regenerates 1,400 offers. Since `6d975e4` the
+slice is sent only when `DatabaseMutationStamp` changed since the last send; the native side keeps
+the parsed copy keyed by that stamp, and the send is varying-fields-only otherwise. A hit skips
+the C# projection (both price maps over the whole items table, every preset, the items view), the
+MessagePack serialise of the result, and the native parse of it.
+
+| Regeneration pass | median | alloc/run |
+|---|---|---|
+| cache cold (stamp bumped before every run — the pre-`6d975e4` behaviour) | 77.94 ms | 17.6 MB |
+| **cache warm (the shipped path)** | **11.46 ms** | **5.2 MB** |
+
+**6.80x** on the median; warm is **14.7%** of cold, and warm allocates **0.30x** what cold does.
+The cold arm reproduces the old 74.59 ms baseline within noise, which is the check that the arms
+differ only in the cache. The full pass is unchanged — its slice is 2.1% of the pass, so caching it
+buys nothing there and the 670 ms figure is the same 626 ms measurement one run's spread later.
 
 The offer column is **offers accepted into an already-full flea**, not offers the path produced.
 The full pass *produces* ~58k offers — the framed response captured for the deserialize attribution
@@ -288,9 +313,9 @@ below held 58,137 frames — and `RagfairOfferHolder.AddOffer` drops a fake-play
 template is at its cap, which is what leaves ~24k. The cap is re-rolled per call
 (`RagfairServerHelper.GetOfferCountByBaseType` is a `RandomUtil.GetInt` over the configured range),
 so a full flea still admits whatever a high roll leaves room for. That is also why 1,400 distinct
-expired templates land as ~900 offers — the pre-filled holder, not anything about the run's own
+expired templates land as ~870 offers — the pre-filled holder, not anything about the run's own
 interleaving. Against an empty holder the same input would land as ~1,400. The two paths land
-within 0.5% of each other on the full pass, so both are doing the same amount of work.
+within ~1% of each other on the full pass, so both are doing the same amount of work.
 
 Wire volume, both encodings measured off the same generated batch (a captured 5.8 MB request run
 straight through `generate_dynamic_offers`, 57,842 offers, framed both ways by the crate's own
@@ -310,7 +335,7 @@ Offer counts differ between captures — 57,842 here, 58,137 in the attribution 
 nondeterministic (offer counts are per-template `RandomUtil.GetInt` rolls), so these are three
 captures of the same workload varying ~0.7% run to run, not three measurements of one number.
 
-Working set over the timed phase: native grows +467 MB on the full pass against the legacy path's
+Working set over the timed phase: native grows +443 MB on the full pass against the legacy path's
 +0 MB; peak RSS is process-wide and cumulative, so only the growth figures are comparable, and only
 within one invocation.
 
@@ -327,6 +352,7 @@ the **same run**. Ratio is native / legacy on the full pass; above 1.00x means n
 | C — MessagePack payloads, ABI 10 | `d076b39` | 719.39 ms | 441.66 ms | 1.63x | 75.67 ms | 10.78 ms | 358.3 MB |
 | C — reader allocation remediation | `a2acb6f` | 663.95 ms | 457.44 ms | 1.45x | 76.14 ms | 10.51 ms | 219.9 MB |
 | One-pass fresh-id offer items | `df07d54` | 625.78 ms | 426.57 ms | **1.47x** | 74.59 ms | 10.25 ms | 219.3 MB |
+| Stamp-gated slice cache | `6d975e4` | 670.63 ms | 460.29 ms | **1.45x** | **15.19 ms** | 9.92 ms | 206.6 MB |
 
 **Stage A** moved generation, not the pass: the `CreateOffersFromAssort` timer inside the native
 full pass fell from ~710 ms to 91–103 ms across the run's samples, while the full pass only fell
@@ -392,10 +418,10 @@ worse while both absolute numbers improve. Read the shipped server's real number
 figures and the *comparison* off either; the gate was evaluated in the fixture's own GC mode, for
 consistency with the baseline it was set against.
 
-**The regeneration pass is a different problem.** ~60% of it is building and serialising the 5.8 MB
-call-invariant request slice, against ~1% of a full pass — the one place where a request-side cache
-would pay. It needs a database mutation stamp first; see [RUST-ROADMAP.md](RUST-ROADMAP.md) roadmap
-#3 and #8.
+**The regeneration pass was a different problem, and it is fixed.** ~60% of it was building and
+serialising the 5.8 MB call-invariant request slice, against ~1% of a full pass — the one place
+where a request-side cache would pay. `DatabaseMutationStamp` and the native slice cache took it
+from 74.59 ms to **11.46 ms** warm; see *The slice cache* above.
 
 Ragfair-specific caveats, on top of the general ones below:
 
@@ -412,6 +438,9 @@ Ragfair-specific caveats, on top of the general ones below:
   milliseconds. Spread is now wide relative to the differences being measured (native full pass
   614-872 ms, and ±25 ms run-to-run on the median), so a change worth less than ~5% of the pass
   cannot be resolved here — use the `CreateOffersFromAssort` timer the native path logs instead.
+- **The plain native arms run with the cache warm.** Nothing bumps the stamp between runs, so only
+  the warmup pass sends the slice — which is what a real server does between mutations. The cold
+  arm exists to price that; do not read it as the default.
 - **Regeneration input is fixed.** The same 1,400 single-item lists every run, sampled from the head
   of the assort rather than from offers that actually expired. Real expired offers skew towards
   fast-selling templates and can carry item trees.

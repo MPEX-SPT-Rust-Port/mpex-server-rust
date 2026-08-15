@@ -10,7 +10,7 @@ The loot family, the bot family and dynamic ragfair offer generation are ported 
 default. Every ported class keeps its full 4.1.2 C# implementation as a **legacy path**, selected
 automatically when a mod hooks it or manually via a config flag. Twelve C-ABI exports (`src/ffi.rs`)
 carry it, JSON in and JSON out — except the ragfair response, which is a framed MessagePack
-envelope (current ABI 12) the C# side parses in parallel.
+envelope (current ABI 13) the C# side parses in parallel.
 
 ## Working
 
@@ -96,7 +96,8 @@ seeded-RNG parity at the primitive level (xoshiro256\*\*, twin known-answer test
    route to legacy so hooks fire with baseline semantics. Add a `forceLegacy...` config flag as the
    escape hatch for hooks detection can't see.
 3. **Project per call, never cache.** Payloads are rebuilt from the live database, configs and
-   services on every call — that is what keeps runtime mod mutations visible. Accept the cost.
+   services on every call — that is what keeps runtime mod mutations visible. Accept the cost. One
+   exception is in force, the ragfair invariant slice; see *Exceptions in force* for its terms.
 4. **RNG parity.** Both sides draw through the shared xoshiro256\*\* source behind test-only seams
    (`Utils/RandomSource.cs` / `random_util.rs`), pinned by twin known-answer tests. Production C#
    randomness stays bit-for-bit unchanged.
@@ -159,7 +160,7 @@ seeded-RNG parity at the primitive level (xoshiro256\*\*, twin known-answer test
   effect on `PARKED_RNG`, whose only consumer is the loot dynamic entry point, which never runs on
   a rayon worker.
 - **The ragfair response is a framed MessagePack envelope, not a JSON buffer.** One length-prefixed
-  frame per offer behind a header frame (since ABI **10**, encoding tag 1; current ABI is 12), which
+  frame per offer behind a header frame (since ABI **10**, encoding tag 1; current ABI is 13), which
   C# deserialises with `Parallel.For` over the frames straight out of the native buffer — no
   whole-response JSON document is ever materialised. Only the ragfair response uses it; every other
   export is still JSON in / JSON out.
@@ -169,17 +170,28 @@ seeded-RNG parity at the primitive level (xoshiro256\*\*, twin known-answer test
 - **One piece of state is replayed after the ragfair call**: `rejectedCanSellTemplates` sets
   `CanSellOnRagfair = false` on the live template table. The `AddOffer` insert loop, the holder's
   per-template cap and the `OfferCounter` advance all stay C#.
+- **The ragfair invariant slice is cached natively — the one exception to guideline 3.**
+  `DatabaseMutationStamp` is a monotonic counter bumped from four instrumented mutation paths:
+  `SeasonalEventService.UpdateGlobalEvents`, `ItemFilterService`'s two blacklist `Add*` methods,
+  `CustomItemService`'s two `Create*` methods, plus a guarded replay bump in
+  `RagfairOfferGenerator` when `CanSellOnRagfair` actually flips true→false. **A mod writing an
+  injected table's dictionaries directly is invisible to the stamp by design** — instrumenting
+  every write is not possible, so the eligibility gate carries that weight instead: the cache is
+  used only when no mods are loaded, with `RagfairConfig.TrustNativeRequestCacheWithMods` as the
+  opt-in for mod setups known not to mutate, and `RagfairConfig.DisableNativeRequestCache` as the
+  kill switch. Every other payload in the crate is still projected per call.
+- **The ragfair request is `{invariantStamp, invariant?, varying}` (ABI 13).** The invariant half is
+  sent only when the stamp moved; the native side keeps the parsed slice keyed by that stamp. A
+  slice-less request whose stamp the cache does not hold returns `STATUS_STALE_SLICE` (4), which
+  surfaces as `NativeStaleSliceException` and self-heals with one full-send retry — so a lost cache
+  costs one pass's projection, never a wrong result. Warm regeneration pass: 11.46 ms against
+  77.94 ms cold ([BENCHMARK.md](BENCHMARK.md) § *The slice cache*).
+- **Known ceiling: runtime config edits are slice inputs the stamp does not watch.**
+  `ragfairConfig.Dynamic` rides in the invariant slice, and nothing bumps the stamp when a config
+  object is mutated. No production path writes it at runtime today; test fixtures that mutate
+  config bump the stamp manually. Instrument the config objects if that ever changes.
 
 ## Roadmap
 
-1. **Database mutation stamp, then a cached serialized request slice** — a per-call items-view
-   cache was considered and rejected: without a way to know when the database changed, a cache
-   can't tell staleness, and mods mutate the database at runtime (guideline 3). One measured
-   exception: the ragfair *regeneration* pass spends ~60% of its time building and serialising a
-   5.8 MB call-invariant request slice that does not change between calls, so it is the one caller
-   where a cache would pay off once a staleness signal exists. **The stamp is the precondition,
-   and it is the hard half**: a counter every mod-facing database mutation path bumps, so a cache
-   can tell staleness. Do not cache first and add the stamp later — that is exactly the incorrect
-   cache guideline 3 forbids.
-2. Later candidates, in `todo/TODO.md` order: repeatable quests, scav case rewards, weather, fence
+1. Later candidates, in `todo/TODO.md` order: repeatable quests, scav case rewards, weather, fence
    assorts, raid-time adjustment, ragfair linked-item table.

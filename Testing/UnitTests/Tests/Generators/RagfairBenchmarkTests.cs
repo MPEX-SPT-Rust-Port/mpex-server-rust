@@ -52,6 +52,7 @@ public class RagfairBenchmarkTests
     private ItemHelper _itemHelper = default!;
     private BotConfig _botConfig = default!;
     private TimeUtil _timeUtil = default!;
+    private DatabaseMutationStamp _databaseMutationStamp = default!;
 
     /// <summary>
     /// The regeneration workload: one cloned single-item list per expired offer, at the configured
@@ -87,6 +88,7 @@ public class RagfairBenchmarkTests
         _itemHelper = di.GetService<ItemHelper>();
         _botConfig = di.GetService<BotConfig>();
         _timeUtil = di.GetService<TimeUtil>();
+        _databaseMutationStamp = di.GetService<DatabaseMutationStamp>();
 
         _preExistingOfferIds = _offerService.GetOffers().Select(offer => offer.Id).ToHashSet();
 
@@ -107,6 +109,29 @@ public class RagfairBenchmarkTests
 
         RunScenario("full pass", null);
         RunScenario("regeneration pass", _expiredOffers);
+        RunSliceCacheScenario();
+    }
+
+    /// <summary>
+    /// What the stamp-gated invariant-slice cache buys on the regeneration pass. Cold bumps
+    /// <see cref="DatabaseMutationStamp"/> before every run, so every send projects and serialises
+    /// the whole invariant slice; warm leaves the stamp alone, so the send carries the varying
+    /// fields only and the native side reuses its already-parsed copy.
+    /// </summary>
+    private void RunSliceCacheScenario()
+    {
+        var cold = Measure(forceLegacy: false, LootGenerationPath.Native, _expiredOffers, () => _databaseMutationStamp.Bump());
+        Assert.That(_offerGenerator.LastSendIncludedSlice, Is.True, "the cold arm must send the slice on every pass");
+
+        var warm = Measure(forceLegacy: false, LootGenerationPath.Native, _expiredOffers);
+        Assert.That(_offerGenerator.LastSendIncludedSlice, Is.False, "the warm arm must hit the native slice cache");
+
+        Report("regeneration pass cache cold", cold);
+        Report("regeneration pass cache warm", warm);
+        TestContext.Out.WriteLine(
+            $"{"slice cache", -20} speedup (median cold / median warm): {Median(cold.Timings) / Median(warm.Timings):F2}x  "
+                + $"warm share of cold median: {Median(warm.Timings) / Median(cold.Timings) * 100:F1}%"
+        );
     }
 
     private void RunScenario(string scenario, List<List<Item>>? expiredOffers)
@@ -124,7 +149,8 @@ public class RagfairBenchmarkTests
         );
     }
 
-    private RunStats Measure(bool forceLegacy, LootGenerationPath expected, List<List<Item>>? expiredOffers)
+    /// <param name="beforeEachRun"> Runs outside the timed region, before every warmup and timed run </param>
+    private RunStats Measure(bool forceLegacy, LootGenerationPath expected, List<List<Item>>? expiredOffers, Action? beforeEachRun = null)
     {
         var original = _ragfairConfig.ForceLegacyRagfairGeneration;
         _ragfairConfig.ForceLegacyRagfairGeneration = forceLegacy;
@@ -136,6 +162,7 @@ public class RagfairBenchmarkTests
             // JIT, the native library load and the first lazy-load deserialise are not measured
             for (var run = 0; run < WarmupRuns; run++)
             {
+                beforeEachRun?.Invoke();
                 GenerateAndPurge(expiredOffers);
             }
 
@@ -152,6 +179,8 @@ public class RagfairBenchmarkTests
 
             for (var run = 0; run < TimedRuns; run++)
             {
+                beforeEachRun?.Invoke();
+
                 var stopwatch = Stopwatch.StartNew();
                 _offerGenerator.GenerateDynamicOffers(expiredOffers);
                 stopwatch.Stop();

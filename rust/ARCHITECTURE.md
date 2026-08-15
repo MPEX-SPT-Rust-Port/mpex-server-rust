@@ -21,7 +21,7 @@ Roughly 35k lines across 32 files, tests included. `src/bot/` is ~45% of that an
 
 | Path | Role |
 |---|---|
-| `src/lib.rs` | Module roots and `ABI_VERSION` (currently 12; must equal `SptNative.ExpectedAbiVersion`) |
+| `src/lib.rs` | Module roots and `ABI_VERSION` (currently 13; must equal `SptNative.ExpectedAbiVersion`) |
 | `src/ffi.rs` | The C-ABI surface. The **only** module containing `unsafe` |
 | `src/runtime.rs` | Process-wide multi-thread tokio runtime, `OnceLock`-built. Used only by `verify` |
 | `src/verify.rs` | Hashes `SPT_Data` with XXH3-128 and diffs it against `checks.dat` |
@@ -44,7 +44,12 @@ C# SptNative → spt_generate_* (JSON in)
 - `run_generator` is the shared body of the nine generation exports. `spt_verify_database` is separate
   because it blocks on the tokio runtime.
 - Status codes: `STATUS_OK` 0, `STATUS_BAD_ARGS` 1 (null pointer, bad UTF-8, unparseable JSON),
-  `STATUS_PANIC` 2, `STATUS_ERROR` 3.
+  `STATUS_PANIC` 2, `STATUS_ERROR` 3, `STATUS_STALE_SLICE` 4 (ragfair only — see below).
+- **The ragfair request has a cached half.** It arrives as `{invariantStamp, invariant?, varying}`;
+  `src/ragfair/slice_cache.rs` holds the last parsed invariant slice under the stamp it came with,
+  so a repeat pass can omit it. A slice-less request whose stamp the cache does not hold returns
+  `STATUS_STALE_SLICE` and the C# caller retries once with the slice included. It is the only
+  request data the crate holds across calls; every other payload is still projected per call.
 - **A buffer is written on failure too** — the parse error or the `LootError` message. Ownership is decided by
   the out-pointer being non-null, never by the status code. `spt_verify_database`'s free-on-success-only shape
   must not be copied into the generators.
