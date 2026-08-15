@@ -67,6 +67,7 @@ public class SptNativeBotWireTests
             di.GetService<WeatherHelper>(),
             di.GetService<BotGeneratorHelper>(),
             di.GetService<BotEquipmentFilterService>(),
+            di.GetService<BotEquipmentModPoolService>(),
             di.GetService<BotLootCacheService>(),
             di.GetService<PresetHelper>(),
             di.GetService<ItemFilterService>(),
@@ -133,6 +134,27 @@ public class SptNativeBotWireTests
         var rig = _request.Items[new MongoId("545cdae64bdc2d39198b4568")];
         Assert.That(rig.Grids, Is.Not.Null.And.Not.Empty);
         Assert.That(rig.Grids![0].CellsH, Is.Not.Null);
+    }
+
+    /// <summary>
+    /// The mod-pool slot order rides the request so the native side can draw randomised mod slots
+    /// in <c>BotEquipmentModPoolService</c>'s enumeration order. Indices point into the template's
+    /// projected <c>slots</c> array, so each must be in range and unique.
+    /// </summary>
+    [Test]
+    public void ModPoolSlotOrderIsProjectedAsSlotIndices()
+    {
+        // AK-74N again: a weapon whose pool holds several named slots, so it must carry an order
+        var weaponTpl = new MongoId("5644bd2b4bdc2d3b4c8b4572");
+
+        Assert.That(_request.ModPoolSlotOrder, Is.Not.Empty);
+        Assert.That(_request.ModPoolSlotOrder.ContainsKey(weaponTpl), Is.True);
+
+        var indices = _request.ModPoolSlotOrder[weaponTpl];
+        var slotCount = _request.Items[weaponTpl].Slots!.Count;
+        Assert.That(indices, Has.Count.GreaterThanOrEqualTo(2));
+        Assert.That(indices, Is.Unique);
+        Assert.That(indices, Is.All.InRange(0, slotCount - 1));
     }
 
     /// <summary>

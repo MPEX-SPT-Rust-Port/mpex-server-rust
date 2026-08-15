@@ -37,6 +37,7 @@ internal static class BotPayloadProjection
         WeatherHelper weatherHelper,
         BotGeneratorHelper botGeneratorHelper,
         BotEquipmentFilterService botEquipmentFilterService,
+        BotEquipmentModPoolService botEquipmentModPoolService,
         BotLootCacheService botLootCacheService,
         PresetHelper presetHelper,
         ItemFilterService itemFilterService,
@@ -119,6 +120,7 @@ internal static class BotPayloadProjection
             ConfigBlacklist = itemFilterService.GetBlacklistedItems(),
             HandbookPrices = BuildHandbookPrices(lootPools, handbookHelper),
             Items = PayloadProjection.BuildItemsView(itemHelper.TemplateTable.Items),
+            ModPoolSlotOrder = BuildModPoolSlotOrder(botEquipmentModPoolService, itemHelper.TemplateTable.Items),
         };
     }
 
@@ -135,6 +137,7 @@ internal static class BotPayloadProjection
         WeatherHelper weatherHelper,
         BotGeneratorHelper botGeneratorHelper,
         BotEquipmentFilterService botEquipmentFilterService,
+        BotEquipmentModPoolService botEquipmentModPoolService,
         PresetHelper presetHelper,
         ItemFilterService itemFilterService,
         ItemHelper itemHelper,
@@ -174,6 +177,7 @@ internal static class BotPayloadProjection
             DefaultPresetsByTpl = ToDefaultPresetIds(presetHelper.GetDefaultPresetByTpl()),
             ConfigBlacklist = itemFilterService.GetBlacklistedItems(),
             Items = PayloadProjection.BuildItemsView(itemHelper.TemplateTable.Items),
+            ModPoolSlotOrder = BuildModPoolSlotOrder(botEquipmentModPoolService, itemHelper.TemplateTable.Items),
         };
     }
 
@@ -303,6 +307,64 @@ internal static class BotPayloadProjection
         }
 
         return prices;
+    }
+
+    /// <summary>
+    /// The slot-name enumeration order of <c>BotEquipmentModPoolService</c>'s pools, per template,
+    /// as indices into the template's slots (the projected <c>slots</c> array is a 1:1
+    /// <c>Select</c> of <c>Properties.Slots</c>, so the indices line up). Both consumers freeze
+    /// the ConcurrentDictionary's order with <c>ToDictionary</c> before the draw loops walk it, so
+    /// enumerating the dictionary here reads exactly the order the native side must draw in. A
+    /// template present in both pools has the same inner-dictionary construction history in each -
+    /// same slots, same insertion sequence, same comparer - so one map serves both.
+    /// </summary>
+    private static Dictionary<MongoId, List<int>> BuildModPoolSlotOrder(
+        BotEquipmentModPoolService botEquipmentModPoolService,
+        Dictionary<MongoId, TemplateItem> templates
+    )
+    {
+        var order = new Dictionary<MongoId, List<int>>();
+
+        foreach (var (tpl, template) in templates)
+        {
+            var pool = botEquipmentModPoolService.GetModsForGearSlot(tpl);
+            if (pool.IsEmpty)
+            {
+                pool = botEquipmentModPoolService.GetModsForWeaponSlot(tpl);
+            }
+
+            // Order cannot matter below two slot names, and a pool that size subsumes the
+            // "template has two or more slots" check
+            if (pool.Count < 2)
+            {
+                continue;
+            }
+
+            // `Properties.Slots` is an IEnumerable, so it has to be materialised to be indexed
+            var slots = template.Properties?.Slots?.ToList();
+            if (slots is null)
+            {
+                continue;
+            }
+
+            var indices = new List<int>(pool.Count);
+            foreach (var (slotName, _) in pool)
+            {
+                // First occurrence, matching the GetOrAdd merge of same-named slots
+                for (var index = 0; index < slots.Count; index++)
+                {
+                    if (slots[index].Name == slotName)
+                    {
+                        indices.Add(index);
+                        break;
+                    }
+                }
+            }
+
+            order[tpl] = indices;
+        }
+
+        return order;
     }
 
     private static IEnumerable<Dictionary<MongoId, double>> EnumeratePools(BotLootCache lootPools)

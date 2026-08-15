@@ -224,6 +224,7 @@ public class BotInventoryGenerator(
                 weatherHelper,
                 botGeneratorHelper,
                 botEquipmentFilterService,
+                botEquipmentModPoolService,
                 botLootGenerator.BotLootCacheService,
                 botEquipmentModGenerator.PresetHelper,
                 botEquipmentModGenerator.ItemFilterService,

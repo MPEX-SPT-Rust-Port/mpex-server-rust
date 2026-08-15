@@ -148,6 +148,15 @@ internal record GenerateBotInventoryRequest
     /// <inheritdoc cref="LootCommon.ItemsView"/>
     [JsonPropertyName("items")]
     public required Dictionary<MongoId, ItemView> Items { get; set; }
+
+    /// <summary>
+    /// <c>BotEquipmentModPoolService</c>'s pools' slot-name enumeration order per template, as
+    /// indices into that template's <see cref="ItemView.Slots"/>. Only templates whose pool holds
+    /// two or more slot names are listed - order cannot matter below two. Membership stays derived
+    /// on the native side; this carries order alone.
+    /// </summary>
+    [JsonPropertyName("modPoolSlotOrder")]
+    public required Dictionary<MongoId, List<int>> ModPoolSlotOrder { get; set; }
 }
 
 /// <summary>
@@ -230,6 +239,10 @@ internal record SharedBotViews
     /// <inheritdoc cref="LootCommon.ItemsView"/>
     [JsonPropertyName("items")]
     public required Dictionary<MongoId, ItemView> Items { get; set; }
+
+    /// <inheritdoc cref="GenerateBotInventoryRequest.ModPoolSlotOrder"/>
+    [JsonPropertyName("modPoolSlotOrder")]
+    public required Dictionary<MongoId, List<int>> ModPoolSlotOrder { get; set; }
 }
 
 /// <summary>

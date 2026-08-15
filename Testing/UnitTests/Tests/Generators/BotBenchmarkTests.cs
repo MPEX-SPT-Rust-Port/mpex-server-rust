@@ -51,6 +51,7 @@ public class BotBenchmarkTests
     private WeatherHelper _weatherHelper = default!;
     private ProfileActivityService _profileActivityService = default!;
     private BotEquipmentFilterService _botEquipmentFilterService = default!;
+    private BotEquipmentModPoolService _botEquipmentModPoolService = default!;
     private BotInventoryContainerService _botInventoryContainerService = default!;
     private BotConfig _botConfig = default!;
     private PmcConfig _pmcConfig = default!;
@@ -74,6 +75,7 @@ public class BotBenchmarkTests
         _weatherHelper = di.GetService<WeatherHelper>();
         _profileActivityService = di.GetService<ProfileActivityService>();
         _botEquipmentFilterService = di.GetService<BotEquipmentFilterService>();
+        _botEquipmentModPoolService = di.GetService<BotEquipmentModPoolService>();
         _botInventoryContainerService = di.GetService<BotInventoryContainerService>();
         _botConfig = di.GetService<BotConfig>();
         _pmcConfig = di.GetService<PmcConfig>();
@@ -197,6 +199,7 @@ public class BotBenchmarkTests
             _weatherHelper,
             _botGeneratorHelper,
             _botEquipmentFilterService,
+            _botEquipmentModPoolService,
             _botLootGenerator.BotLootCacheService,
             _botEquipmentModGenerator.PresetHelper,
             _botEquipmentModGenerator.ItemFilterService,
