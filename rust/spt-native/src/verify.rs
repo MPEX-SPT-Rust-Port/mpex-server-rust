@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 struct ManifestEntry {
     #[serde(rename = "Path")]
     path: String,
@@ -33,7 +33,7 @@ fn relative_key(spt_data: &Path, path: &Path) -> Option<String> {
 // derived from the manifest instead of walking all of SPT_Data because the build relocates
 // unhashed artifacts into the output SPT_Data (satellite assemblies under dotnet/, admin-panel
 // static assets under wwwroot/ — see RelocateSatelliteAssemblies in SPTarkov.Server.csproj),
-// and PostBuild.cs deliberately leaves images/ and checks.dat out of the manifest.
+// and generate() deliberately leaves images/ and checks.dat out of the manifest.
 pub fn collect_files(
     spt_data: &Path,
     manifest: &HashMap<String, String>,
@@ -132,6 +132,62 @@ pub async fn verify(spt_data: PathBuf) -> VerifyReport {
         failures,
         checked,
     }
+}
+
+pub struct GeneratedManifest {
+    pub base64: String,
+    pub hashed: usize,
+}
+
+// The generate counterpart to `verify`, replacing PostBuild.cs: walk all of SPT_Data except
+// `images/` and any `checks.dat` (the same exclusions the C# generator applied), hash each file,
+// and emit the base64-wrapped JSON manifest `parse_manifest` reads back.
+pub async fn generate(spt_data: PathBuf) -> Result<GeneratedManifest, String> {
+    use base64::Engine;
+    use std::sync::Arc;
+
+    let images = spt_data.join("images");
+    let mut files = Vec::new();
+    for entry in walkdir::WalkDir::new(&spt_data).into_iter().flatten() {
+        if !entry.file_type().is_file()
+            || entry.path().starts_with(&images)
+            || entry.file_name().eq_ignore_ascii_case("checks.dat")
+        {
+            continue;
+        }
+        if let Some(key) = relative_key(&spt_data, entry.path()) {
+            files.push((entry.path().to_path_buf(), key));
+        }
+    }
+    if files.is_empty() {
+        return Err(format!("no files to hash under {}", spt_data.display()));
+    }
+
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_HASHES));
+    let mut tasks = tokio::task::JoinSet::new();
+    for (path, key) in files {
+        let semaphore = Arc::clone(&semaphore);
+        tasks.spawn(async move {
+            let _permit = semaphore.acquire_owned().await.expect("semaphore closed");
+            match xxh3_file(&path).await {
+                Ok(hash) => Ok(ManifestEntry { path: key, hash }),
+                Err(e) => Err(format!("cannot hash {}: {e}", path.display())),
+            }
+        });
+    }
+
+    let mut entries: Vec<ManifestEntry> = tasks
+        .join_all()
+        .await
+        .into_iter()
+        .collect::<Result<_, _>>()?;
+    entries.sort_by(|a, b| a.path.cmp(&b.path));
+    let hashed = entries.len();
+
+    let json =
+        serde_json::to_string(&entries).map_err(|e| format!("cannot serialize manifest: {e}"))?;
+    let base64 = base64::engine::general_purpose::STANDARD.encode(json.as_bytes());
+    Ok(GeneratedManifest { base64, hashed })
 }
 
 async fn check_one(
@@ -426,6 +482,46 @@ mod tests {
             report.failures[0].reason,
             "manifest_unreadable: manifest is empty"
         );
+    }
+
+    #[tokio::test]
+    async fn generated_manifest_round_trips_through_verify() {
+        let dir = TempDir::new().unwrap();
+        touch(dir.path(), "database/globals.json");
+        touch(dir.path(), "configs/core.json");
+        touch(dir.path(), "images/icon.png");
+        fs::write(dir.path().join("checks.dat"), b"stale").unwrap();
+
+        let generated = generate(dir.path().to_path_buf()).await.unwrap();
+        assert_eq!(generated.hashed, 2);
+        fs::write(dir.path().join("checks.dat"), &generated.base64).unwrap();
+
+        let manifest = parse_manifest(generated.base64.as_bytes()).unwrap();
+        assert_eq!(
+            manifest.get("database/globals.json").map(String::as_str),
+            Some(xxh3_hex(b"{}").as_str())
+        );
+        assert!(!manifest.keys().any(|k| k.starts_with("images/")));
+        assert!(!manifest.contains_key("checks.dat"));
+
+        let report = verify(dir.path().to_path_buf()).await;
+        assert!(
+            report.ok,
+            "failures: {:?}",
+            report
+                .failures
+                .iter()
+                .map(|f| (&f.path, &f.reason))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(report.checked, 2);
+    }
+
+    #[tokio::test]
+    async fn generating_an_empty_tree_fails_instead_of_writing_an_empty_manifest() {
+        // verify rejects an empty manifest, so generating one must fail loudly at build time too.
+        let dir = TempDir::new().unwrap();
+        assert!(generate(dir.path().to_path_buf()).await.is_err());
     }
 
     #[tokio::test]
