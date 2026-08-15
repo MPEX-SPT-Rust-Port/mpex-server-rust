@@ -93,6 +93,29 @@ public class BotParityTests
         );
     }
 
+    private static readonly string[] _randomisedRoles = ["usec-level20", "bear-level20"];
+
+    /// <summary>
+    /// The level-1 cases above sit below the pmc randomisation buckets, so they never route a mod
+    /// pool through BotEquipmentModPoolService. These two do - level 20 selects buckets that set
+    /// RandomisedArmorSlots and RandomisedWeaponModSlots - which is exactly the enumeration-order
+    /// seam the modPoolSlotOrder projection exists for.
+    /// </summary>
+    [Ignore("fails until the mod-pool enumeration order is projected - docs/superpowers/specs/2026-08-15-mod-pool-order-projection-design.md")]
+    [Test]
+    public void TheSameSeedGeneratesEquivalentInventoryAtRandomisedLevels(
+        [ValueSource(nameof(_randomisedRoles))] string role,
+        [ValueSource(nameof(_seeds))] ulong seed
+    )
+    {
+        PreWarmLootCache(role);
+
+        var native = Generate(role, seed, forceLegacy: false, LootGenerationPath.Native);
+        var legacy = Generate(role, seed, forceLegacy: true, LootGenerationPath.Legacy);
+
+        LootJsonAssert.AssertEqual(legacy.Inventory, native.Inventory, $"role={role}", seed);
+    }
+
     /// <summary>
     /// The other eight cases run without a raid, so randomisationClamps always comes back empty and
     /// their clamp-equality assertion only proves both paths left the config alone. This one installs
@@ -272,6 +295,29 @@ public class BotParityTests
                 BotLevel = 20,
                 IsPmc = true,
             },
+            // Daytime twins of the nighttime case: levels inside the pmc randomisation buckets
+            // (15+) that set RandomisedArmorSlots and RandomisedWeaponModSlots, which route the
+            // armor and weapon mod pools through BotEquipmentModPoolService's enumeration order
+            "usec-level20" => new BotGenerationDetails
+            {
+                Role = "pmcUSEC",
+                RoleLowercase = "pmcusec",
+                Side = "Usec",
+                BotDifficulty = "normal",
+                GameVersion = "standard",
+                BotLevel = 20,
+                IsPmc = true,
+            },
+            "bear-level20" => new BotGenerationDetails
+            {
+                Role = "pmcBEAR",
+                RoleLowercase = "pmcbear",
+                Side = "Bear",
+                BotDifficulty = "normal",
+                GameVersion = "standard",
+                BotLevel = 20,
+                IsPmc = true,
+            },
             "assault-as-playerscav" => new BotGenerationDetails
             {
                 Role = "assault",
@@ -291,6 +337,8 @@ public class BotParityTests
         {
             "assault-as-playerscav" => "assault",
             "usec-at-night" => "usec",
+            "usec-level20" => "usec",
+            "bear-level20" => "bear",
             _ => role,
         };
         var template = _cloner.Clone(_botTable.Types[templateKey])!;
