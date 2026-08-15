@@ -378,7 +378,7 @@ mod tests {
         assert_eq!(spt_native_abi_version(), crate::ABI_VERSION);
         assert_eq!(
             crate::ABI_VERSION,
-            11,
+            12,
             "bump SptNative.ExpectedAbiVersion too"
         );
     }
@@ -685,6 +685,7 @@ mod tests {
             "repairKitWeapon":{{"rarityWeight":{{}},"bonusTypeWeight":{{}},"Common":{{}},
                 "Rare":{{}}}},
             "equipmentBlacklist":{{}},
+            "weaponModEquipmentBlacklist":{{}},
             "lootPools":{{}},
             "itemPresets":{{}},
             "defaultPresetsByTpl":{{}},

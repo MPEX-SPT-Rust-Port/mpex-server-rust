@@ -751,7 +751,7 @@ pub fn generate_mods_for_weapon(
     // Copied out so the views stay readable while `ctx` is borrowed mutably for diagnostics.
     let items = ctx.items;
     let equipment = ctx.equipment;
-    let bot_equip_blacklist = ctx.equipment_blacklist;
+    let bot_equip_blacklist = ctx.weapon_mod_equipment_blacklist;
 
     let parent_template = get_item(items, &request.parent_template);
     let parent_name = parent_template
@@ -2621,6 +2621,7 @@ mod tests {
                 item_blacklist: &self.item_blacklist,
                 default_presets_by_tpl: &self.default_presets_by_tpl,
                 equipment_blacklist: &crate::bot::NO_EQUIP_BLACKLIST,
+                weapon_mod_equipment_blacklist: &crate::bot::NO_EQUIP_BLACKLIST,
                 low_profile_gas_block_tpls: &crate::bot::NO_BLACKLIST,
                 item_presets: &self.item_presets,
                 weapon_has_enhancement_chance_percent: 0.0,
@@ -3402,6 +3403,7 @@ mod tests {
                     default_presets_by_tpl: &self.default_presets_by_tpl,
                     item_presets: &self.item_presets,
                     equipment_blacklist: &self.equipment_blacklist,
+                    weapon_mod_equipment_blacklist: &self.equipment_blacklist,
                     low_profile_gas_block_tpls: &self.low_profile_gas_block_tpls,
                     weapon_has_enhancement_chance_percent: 0.0,
                     repair_kit_weapon: &crate::bot::NO_BUFFS,

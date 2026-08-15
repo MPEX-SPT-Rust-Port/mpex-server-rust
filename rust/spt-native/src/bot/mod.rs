@@ -58,9 +58,12 @@ pub struct BotContext<'a> {
     /// item matches the weapon tpl, so the map has to stay ordered.
     pub item_presets: &'a IndexMap<String, PresetView>,
     /// `GetBotEquipmentBlacklist(equipmentRole, playerLevel)`, resolved by the C# caller. The
-    /// equipment path takes its blacklist as a parameter because the C# does; the weapon path
-    /// resolves it internally (`:528`), so it rides here.
+    /// equipment path takes its blacklist as a parameter because the C# does.
     pub equipment_blacklist: &'a EquipmentFilterDetails,
+    /// The weapon path's own blacklist — it resolves one internally (`:544`) with the player level
+    /// defaulted to 0 rather than 1, which matches no `levelRange`, so it is a different object
+    /// from [`Self::equipment_blacklist`] and cannot be shared with the equipment path.
+    pub weapon_mod_equipment_blacklist: &'a EquipmentFilterDetails,
     /// `BotConfig.LowProfileGasBlockTpls` — membership tests only (`:1063`, `:1072`).
     pub low_profile_gas_block_tpls: &'a HashSet<String>,
     /// `PmcConfig.WeaponHasEnhancementChancePercent` — the gate on `RepairService.AddBuff`

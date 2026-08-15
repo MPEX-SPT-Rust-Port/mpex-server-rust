@@ -266,6 +266,7 @@ mod tests {
                 item_blacklist: &crate::bot::NO_BLACKLIST,
                 default_presets_by_tpl: &crate::bot::NO_DEFAULT_PRESETS,
                 equipment_blacklist: &crate::bot::NO_EQUIP_BLACKLIST,
+                weapon_mod_equipment_blacklist: &crate::bot::NO_EQUIP_BLACKLIST,
                 low_profile_gas_block_tpls: &crate::bot::NO_BLACKLIST,
                 item_presets: &crate::bot::NO_PRESETS,
                 weapon_has_enhancement_chance_percent: 0.0,

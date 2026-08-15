@@ -51,7 +51,11 @@ internal static class BotPayloadProjection
     {
         // BotInventoryGenerator.cs:260 - the `?? 1` is what a session with no profile lands on, and
         // it is the level the equipment blacklist is resolved with at :583
-        var generatingPlayerLevel = profileHelper.GetPmcProfile(sessionId)?.Info?.Level ?? 1;
+        var pmcProfile = profileHelper.GetPmcProfile(sessionId);
+        var generatingPlayerLevel = pmcProfile?.Info?.Level ?? 1;
+        // BotEquipmentModGenerator.cs:546 defaults the very same level to 0 instead, which matches
+        // no levelRange, so the weapon-mod path gets a blacklist of its own
+        var weaponModPlayerLevel = pmcProfile?.Info?.Level ?? 0;
         var equipmentRole = botGeneratorHelper.GetBotEquipmentRole(botGenerationDetails.RoleLowercase);
 
         // BotInventoryGenerator.cs:192-196 - no raid means day
@@ -114,6 +118,8 @@ internal static class BotPayloadProjection
             RepairKitWeapon = repairConfig.RepairKit.Weapon,
             EquipmentBlacklist =
                 botEquipmentFilterService.GetBotEquipmentBlacklist(equipmentRole, generatingPlayerLevel) ?? new EquipmentFilterDetails(),
+            WeaponModEquipmentBlacklist =
+                botEquipmentFilterService.GetBotEquipmentBlacklist(equipmentRole, weaponModPlayerLevel) ?? new EquipmentFilterDetails(),
             LootPools = lootPools,
             ItemPresets = presets,
             DefaultPresetsByTpl = ToDefaultPresetIds(presetHelper.GetDefaultPresetByTpl()),
@@ -147,7 +153,9 @@ internal static class BotPayloadProjection
         RepairConfig repairConfig
     )
     {
-        var generatingPlayerLevel = profileHelper.GetPmcProfile(sessionId)?.Info?.Level ?? 1;
+        var pmcProfile = profileHelper.GetPmcProfile(sessionId);
+        var generatingPlayerLevel = pmcProfile?.Info?.Level ?? 1;
+        var weaponModPlayerLevel = pmcProfile?.Info?.Level ?? 0;
         var equipmentRole = botGeneratorHelper.GetBotEquipmentRole(roleLowercase);
 
         var raidConfig = profileActivityService.GetProfileActivityRaidData(sessionId)?.RaidConfiguration;
@@ -173,6 +181,8 @@ internal static class BotPayloadProjection
             RepairKitWeapon = repairConfig.RepairKit.Weapon,
             EquipmentBlacklist =
                 botEquipmentFilterService.GetBotEquipmentBlacklist(equipmentRole, generatingPlayerLevel) ?? new EquipmentFilterDetails(),
+            WeaponModEquipmentBlacklist =
+                botEquipmentFilterService.GetBotEquipmentBlacklist(equipmentRole, weaponModPlayerLevel) ?? new EquipmentFilterDetails(),
             ItemPresets = presets,
             DefaultPresetsByTpl = ToDefaultPresetIds(presetHelper.GetDefaultPresetByTpl()),
             ConfigBlacklist = itemFilterService.GetBlacklistedItems(),

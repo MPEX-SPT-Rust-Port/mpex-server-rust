@@ -596,8 +596,8 @@ pub struct GenerateBotInventoryRequest {
     pub details: BotGenerationDetailsWire,
     pub template: BotTemplateWire,
     /// Hoisted live state — `PlayerProfile.Info.Level` (`BotInventoryGenerator.cs:228`). Read only
-    /// C#-side, to resolve [`Self::equipment_blacklist`]; see
-    /// [`crate::bot::bot_inventory_generator`].
+    /// C#-side, to resolve [`Self::equipment_blacklist`] and
+    /// [`Self::weapon_mod_equipment_blacklist`]; see [`crate::bot::bot_inventory_generator`].
     pub generating_player_level: i32,
     /// Hoisted live state — `RaidTime`/`WeatherHelper.IsNightTime`.
     pub is_night_time: bool,
@@ -621,8 +621,14 @@ pub struct GenerateBotInventoryRequest {
     pub pmc_config: PmcConfigWire,
     /// `RepairConfig.RepairKit.Weapon`.
     pub repair_kit_weapon: crate::bot::repair_service::BonusSettings,
-    /// `GetBotEquipmentBlacklist(role, level)` result.
+    /// `GetBotEquipmentBlacklist(role, level)` result, as the equipment path resolves it
+    /// (`BotInventoryGenerator.cs:583`, level defaulted to 1).
     pub equipment_blacklist: EquipmentFilterDetails,
+    /// The same call as [`Self::equipment_blacklist`] but as the *weapon-mod* path resolves it
+    /// (`BotEquipmentModGenerator.cs:544`, level defaulted to **0**). Legacy is internally
+    /// inconsistent about that default and level 0 matches no `levelRange`, so the two blacklists
+    /// differ and each path has to use its own.
+    pub weapon_mod_equipment_blacklist: EquipmentFilterDetails,
     /// The 13 resolved `BotLootCacheService` pools.
     pub loot_pools: BotLootCacheWire,
     /// `GlobalTable.ItemPresets`, keyed by preset id. Also the map `PresetHelper.GetPreset(id)`
@@ -666,6 +672,8 @@ pub struct SharedBotViewsWire {
     pub pmc_config: PmcConfigWire,
     pub repair_kit_weapon: crate::bot::repair_service::BonusSettings,
     pub equipment_blacklist: EquipmentFilterDetails,
+    /// See [`GenerateBotInventoryRequest::weapon_mod_equipment_blacklist`].
+    pub weapon_mod_equipment_blacklist: EquipmentFilterDetails,
     pub item_presets: IndexMap<String, PresetView>,
     /// Keyed by tpl, valued by the default preset's own id - resolve through
     /// [`Self::item_presets`], which is the map `PresetHelper` resolves every default out of.
@@ -829,6 +837,7 @@ mod tests {
             "weaponHasEnhancementChancePercent":25},
         "repairKitWeapon":{"rarityWeight":{},"bonusTypeWeight":{},"Common":{},"Rare":{}},
         "equipmentBlacklist":{"equipment":{"Headwear":["aaaaaaaaaaaaaaaaaaaaaaa9"]}},
+        "weaponModEquipmentBlacklist":{},
         "lootPools":{"backpackLoot":{"aaaaaaaaaaaaaaaaaaaaaab1":4}},
         "itemPresets":{"p1":{"id":"p1","items":[]},"p2":{"id":"p2","items":[]}},
         "defaultPresetsByTpl":{"aaaaaaaaaaaaaaaaaaaaaab2":"p2"},

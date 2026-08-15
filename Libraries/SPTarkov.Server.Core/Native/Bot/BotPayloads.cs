@@ -110,6 +110,15 @@ internal record GenerateBotInventoryRequest
     public required EquipmentFilterDetails EquipmentBlacklist { get; set; }
 
     /// <summary>
+    /// The same call as <see cref="EquipmentBlacklist"/>, resolved the way the weapon-mod path
+    /// resolves it: <c>BotEquipmentModGenerator.cs:544</c> defaults the player level to <b>0</b>
+    /// where the equipment path defaults it to 1, and level 0 matches no <c>levelRange</c>, so the
+    /// two results differ. Legacy is internally inconsistent here and native has to be too.
+    /// </summary>
+    [JsonPropertyName("weaponModEquipmentBlacklist")]
+    public required EquipmentFilterDetails WeaponModEquipmentBlacklist { get; set; }
+
+    /// <summary>
     /// The resolved <c>BotLootCacheService</c> pools.
     /// </summary>
     [JsonPropertyName("lootPools")]
@@ -225,6 +234,10 @@ internal record SharedBotViews
 
     [JsonPropertyName("equipmentBlacklist")]
     public required EquipmentFilterDetails EquipmentBlacklist { get; set; }
+
+    /// <inheritdoc cref="GenerateBotInventoryRequest.WeaponModEquipmentBlacklist"/>
+    [JsonPropertyName("weaponModEquipmentBlacklist")]
+    public required EquipmentFilterDetails WeaponModEquipmentBlacklist { get; set; }
 
     [JsonPropertyName("itemPresets")]
     public required Dictionary<MongoId, PresetView> ItemPresets { get; set; }
