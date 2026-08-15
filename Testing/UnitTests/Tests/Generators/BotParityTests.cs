@@ -143,12 +143,11 @@ public class BotParityTests
     }
 
     /// <summary>
-    /// The mod-pool enumeration order is projected and verified by the passing cases above. These
-    /// seeds still fail for an unrelated reason: one side spawns a randomised weapon mod the other
-    /// skips (e.g. mod_mount_000 on the AK-74N), an RNG-stream desync in the randomised-mod draw
-    /// path. Verified pre-existing - it was masked by the armor-plate ordering divergence until
-    /// that was fixed, the same divergence class reproduces at other seeds before the ordering fix,
-    /// and HEAD's failing seed set is a strict subset of the pre-fix commit's.
+    /// The seed the weapon-mod spawn desync was first pinned at, kept as its regression pin. Both
+    /// halves of that desync were native-only: the weapon-mod path resolved the equipment blacklist
+    /// at the wrong player level (BotEquipmentModGenerator.cs:546 defaults it to 0, not 1), and it
+    /// cloned the bot's weapon-mod spawn chances per weapon where C# aliases them, so a chance
+    /// forced on weapon 1 was lost for weapon 2. See RUST-ROADMAP.md roadmap item 7.
     /// </summary>
     [Test]
     public void TheRemainingWeaponModSpawnDesyncIsPinned(
