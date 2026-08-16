@@ -32,6 +32,13 @@
   <ItemGroup>
     <InternalsVisibleTo Include="UnitTests" />
   </ItemGroup>
+  <ItemGroup>
+    <!-- Facade emitted by BuildSpectreFacade in SPTarkov.Common; see the note in Build.props. -->
+    <Reference Include="Spectre.Console.Ansi">
+      <HintPath>$(SpectreFacadePath)</HintPath>
+      <Private>true</Private>
+    </Reference>
+  </ItemGroup>
   <Target Name="AfterEverythingDone" AfterTargets="PostBuildEvent">
     <!-- Run ExtensionData patch -->
     <Exec

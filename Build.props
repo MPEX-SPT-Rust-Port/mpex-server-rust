@@ -36,18 +36,14 @@
       ISptLogger<T>, SptLogMessage, ClientLogRequest and Watermark.Draw. Colours are accepted and
       discarded - the logger emits plain text.
 
-      The reference lives here because plain <Reference> items are not transitive: every project that
-      names Color needs it. Only SPTarkov.Common emits the DLL (BuildSpectreFacade), and it builds
-      first as a project dependency, so consumers always resolve against an existing file.
+      Only the path lives here. The <Reference> itself sits in each of the five projects that name
+      Color, because plain <Reference> items are not transitive and every one of those five has a
+      ProjectReference chain to SPTarkov.Common, which emits the DLL - so the file always exists by
+      the time they resolve. Adding it here instead would hand it to SPTarkov.DI and
+      SPTarkov.Reflection, which have no such chain and would race the emit.
     -->
   <PropertyGroup>
     <SpectreFacadeDir>$(MSBuildThisFileDirectory)rust</SpectreFacadeDir>
     <SpectreFacadePath>$(SpectreFacadeDir)/target/spectre-facade/Spectre.Console.Ansi.dll</SpectreFacadePath>
   </PropertyGroup>
-  <ItemGroup>
-    <Reference Include="Spectre.Console.Ansi">
-      <HintPath>$(SpectreFacadePath)</HintPath>
-      <Private>true</Private>
-    </Reference>
-  </ItemGroup>
 </Project>

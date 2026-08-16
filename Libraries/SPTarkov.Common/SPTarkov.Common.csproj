@@ -26,6 +26,13 @@
   <ItemGroup>
     <None Include="..\..\LICENSE" Pack="true" Visible="false" PackagePath="" />
   </ItemGroup>
+  <ItemGroup>
+    <!-- Facade emitted by BuildSpectreFacade in SPTarkov.Common; see the note in Build.props. -->
+    <Reference Include="Spectre.Console.Ansi">
+      <HintPath>$(SpectreFacadePath)</HintPath>
+      <Private>true</Private>
+    </Reference>
+  </ItemGroup>
   <!-- Emits the Spectre.Console.Ansi facade; see the note in Build.props. -->
   <Target
     Name="BuildSpectreFacade"
