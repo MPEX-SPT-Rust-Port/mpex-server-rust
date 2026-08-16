@@ -7,7 +7,7 @@ namespace SPTarkov.Common.Native;
 /// SPTarkov.Server.Core: SetDllImportResolver registers per assembly, so Core's registration never
 /// covers imports declared here. Keep the resolver bodies identical.
 /// </summary>
-internal static unsafe partial class NativeMethods
+internal static partial class NativeMethods
 {
     private const string LibraryName = "spt_native";
 
@@ -38,23 +38,23 @@ internal static unsafe partial class NativeMethods
 
     [LibraryImport(LibraryName, EntryPoint = "spt_log_open")]
     internal static partial int LogOpen(
-        byte* dirUtf8,
+        ReadOnlySpan<byte> dirUtf8,
         nuint dirLen,
-        byte* patternUtf8,
+        ReadOnlySpan<byte> patternUtf8,
         nuint patternLen,
         uint maxFileSizeMb,
         uint maxRollingFiles,
-        nint* outHandle,
-        byte** outPtr,
-        nuint* outLen
+        out nint outHandle,
+        out nint outPtr,
+        out nuint outLen
     );
 
     [LibraryImport(LibraryName, EntryPoint = "spt_log_write")]
-    internal static partial int LogWrite(nint handle, byte* lineUtf8, nuint lineLen);
+    internal static partial int LogWrite(nint handle, ReadOnlySpan<byte> lineUtf8, nuint lineLen);
 
     [LibraryImport(LibraryName, EntryPoint = "spt_log_close")]
     internal static partial int LogClose(nint handle);
 
     [LibraryImport(LibraryName, EntryPoint = "spt_buf_free")]
-    internal static partial void BufFree(byte* ptr, nuint len);
+    internal static partial void BufFree(nint ptr, nuint len);
 }

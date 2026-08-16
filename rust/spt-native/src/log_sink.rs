@@ -22,7 +22,7 @@ use std::thread::JoinHandle;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// A handle to one log file's writer thread. Lines are handed over a channel, so a logging call
-/// on a request thread costs a send and never touches the filesystem.
+/// on a request thread never blocks on the writer thread's filesystem work.
 pub struct FileSink {
     sender: Option<SyncSender<Vec<u8>>>,
     worker: Option<JoinHandle<()>>,

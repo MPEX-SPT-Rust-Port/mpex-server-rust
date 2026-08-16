@@ -13,7 +13,10 @@
     <IsPackable>true</IsPackable>
     <NoDefaultLaunchSettingsFile>true</NoDefaultLaunchSettingsFile>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
-    <!-- LibraryImport generates unsafe marshalling for the spt_native log sink imports. -->
+    <!--
+        Required by the [LibraryImport] source generator, which emits unsafe marshalling stubs and
+        fails the build without it (SYSLIB1062). No hand-written code in this project is unsafe.
+    -->
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
   <ItemGroup>

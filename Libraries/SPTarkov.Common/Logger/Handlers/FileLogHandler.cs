@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using System.Text;
 using SPTarkov.Common.Models.Logging;
 using SPTarkov.Common.Native;
@@ -6,8 +7,8 @@ namespace SPTarkov.Common.Logger.Handlers;
 
 /// <summary>
 /// Writes formatted lines to spt_native's file sink, which owns the file handle, the day/size
-/// rolling and the retention sweep. Each configured target gets one sink, and one writer thread
-/// behind it, so a log call costs a channel send rather than a filesystem write.
+/// rolling and the archive cap in one place. Each configured target gets one sink, and one writer
+/// thread behind it.
 /// </summary>
 internal sealed class FileLogHandler : BaseLogHandler
 {
@@ -55,23 +56,17 @@ internal sealed class FileLogHandler : BaseLogHandler
                 return;
             }
 
-            unsafe
+            if (NativeMethods.LogWrite(sink, line, (nuint)line.Length) != StatusOk)
             {
-                fixed (byte* linePtr = line)
-                {
-                    if (NativeMethods.LogWrite(sink, linePtr, (nuint)line.Length) != StatusOk)
-                    {
-                        // A panic crossing the FFI boundary poisons the sink; disable it rather
-                        // than calling into it again on every line.
-                        NativeMethods.LogClose(sink);
-                        _sinks[SinkKey(config)] = 0;
+                // A panic crossing the FFI boundary poisons the sink; disable it rather
+                // than calling into it again on every line.
+                NativeMethods.LogClose(sink);
+                _sinks[SinkKey(config)] = 0;
 
-                        Console.Error.WriteLine(
-                            $"The native log sink for '{Path.Combine(config.FilePath, config.FilePattern)}' failed. "
-                                + "File logging for this target is disabled."
-                        );
-                    }
-                }
+                Console.Error.WriteLine(
+                    $"The native log sink for '{Path.Combine(config.FilePath, config.FilePattern)}' failed. "
+                        + "File logging for this target is disabled."
+                );
             }
         }
     }
@@ -100,33 +95,31 @@ internal sealed class FileLogHandler : BaseLogHandler
         return $"{config.FilePath}|{config.FilePattern}|{config.MaxFileSizeMb}|{config.MaxRollingFiles}";
     }
 
-    private static unsafe nint OpenSink(FileSptLoggerReference config)
+    private static nint OpenSink(FileSptLoggerReference config)
     {
         var directory = Encoding.UTF8.GetBytes(config.FilePath);
         var pattern = Encoding.UTF8.GetBytes(config.FilePattern);
 
+        // Initialised rather than left to the out params: the catch below returns before they are
+        // assigned, and initialisers keep definite-assignment analysis out of the question.
         nint handle = 0;
-        byte* messagePtr = null;
+        nint messagePtr = 0;
         nuint messageLen = 0;
         int status;
 
         try
         {
-            fixed (byte* directoryPtr = directory)
-            fixed (byte* patternPtr = pattern)
-            {
-                status = NativeMethods.LogOpen(
-                    directoryPtr,
-                    (nuint)directory.Length,
-                    patternPtr,
-                    (nuint)pattern.Length,
-                    (uint)config.MaxFileSizeMb,
-                    (uint)config.MaxRollingFiles,
-                    &handle,
-                    &messagePtr,
-                    &messageLen
-                );
-            }
+            status = NativeMethods.LogOpen(
+                directory,
+                (nuint)directory.Length,
+                pattern,
+                (nuint)pattern.Length,
+                (uint)config.MaxFileSizeMb,
+                (uint)config.MaxRollingFiles,
+                out handle,
+                out messagePtr,
+                out messageLen
+            );
         }
         catch (Exception exception) when (exception is DllNotFoundException or EntryPointNotFoundException)
         {
@@ -151,7 +144,9 @@ internal sealed class FileLogHandler : BaseLogHandler
         try
         {
             // The logger cannot report its own failure through itself, so this goes to stderr.
-            var message = messagePtr == null ? $"internal status {status}" : Encoding.UTF8.GetString(messagePtr, checked((int)messageLen));
+            // Marshal.PtrToStringUTF8 is the safe read here - a ReadOnlySpan<byte> over a raw
+            // pointer would need the unsafe flag this task exists to remove.
+            var message = messagePtr == 0 ? $"internal status {status}" : Marshal.PtrToStringUTF8(messagePtr, checked((int)messageLen));
 
             Console.Error.WriteLine(
                 $"Failed to open log file '{Path.Combine(config.FilePath, config.FilePattern)}': {message}. File logging for this target is disabled."
@@ -184,8 +179,6 @@ internal sealed class FileLogHandler : BaseLogHandler
                 }
             }
         }
-
-        GC.SuppressFinalize(this);
 
         return ValueTask.CompletedTask;
     }
