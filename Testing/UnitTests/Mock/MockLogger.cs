@@ -63,11 +63,6 @@ public class MockLogger<T> : ISptLogger<T>, ILogger<T>
         throw new NotImplementedException();
     }
 
-    public void LogWithColor(string data, Exception? ex = null, Color? textColor = null, Color? backgroundColor = null)
-    {
-        Console.WriteLine(data);
-    }
-
     public void WriteToLogFile(object body)
     {
         Console.WriteLine(body);

@@ -101,6 +101,9 @@ public static partial class ProgramStatics
         return BuildTime;
     }
 
+    /// <summary>
+    /// Retained for 4.1.2 mod compatibility. The watermark no longer renders in colour.
+    /// </summary>
     public static Color BUILD_TEXT_COLOR()
     {
         return BuildType switch

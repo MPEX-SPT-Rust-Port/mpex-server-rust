@@ -30,4 +30,24 @@
   <PropertyGroup Condition="$([MSBuild]::IsOSPlatform('Linux'))">
     <SptNativeTargetTriple Condition="'$(SptNativeRid)' == 'linux-x64'">x86_64-unknown-linux-gnu</SptNativeTargetTriple>
   </PropertyGroup>
+  <!--
+      Spectre.Console.Ansi is a facade emitted by rust/spectre-facade, not the real package. It exists
+      only so compiled 4.1.2 mods can still bind Spectre.Console.Color, which is frozen into
+      ISptLogger<T>, SptLogMessage, ClientLogRequest and Watermark.Draw. Colours are accepted and
+      discarded - the logger emits plain text.
+
+      The reference lives here because plain <Reference> items are not transitive: every project that
+      names Color needs it. Only SPTarkov.Common emits the DLL (BuildSpectreFacade), and it builds
+      first as a project dependency, so consumers always resolve against an existing file.
+    -->
+  <PropertyGroup>
+    <SpectreFacadeDir>$(MSBuildThisFileDirectory)rust</SpectreFacadeDir>
+    <SpectreFacadePath>$(SpectreFacadeDir)/target/spectre-facade/Spectre.Console.Ansi.dll</SpectreFacadePath>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="Spectre.Console.Ansi">
+      <HintPath>$(SpectreFacadePath)</HintPath>
+      <Private>true</Private>
+    </Reference>
+  </ItemGroup>
 </Project>
