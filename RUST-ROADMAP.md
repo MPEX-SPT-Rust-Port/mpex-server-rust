@@ -8,9 +8,11 @@ internals see [rust/ARCHITECTURE.md](rust/ARCHITECTURE.md); for the C# side of t
 
 The loot family, the bot family, dynamic ragfair offer generation and the repeatable-quest family are
 ported and run natively by default. Every ported class keeps its full 4.1.2 C# implementation as a
-**legacy path**, selected automatically when a mod hooks it or manually via a config flag. Thirteen
-C-ABI exports (`src/ffi.rs`) carry it, JSON in and JSON out — except the ragfair response, which is a
-framed MessagePack envelope (current ABI 14) the C# side parses in parallel.
+**legacy path**, selected automatically when a mod hooks it or manually via a config flag. The log
+pipeline is ported too, and has no legacy path: `SPTLoggerDispatcher` hands every line to the crate.
+Sixteen C-ABI exports (`src/ffi.rs`) carry all of it, JSON in and JSON out — except the ragfair
+response, which is a framed MessagePack envelope, and the three log exports, which pass the fields
+of one line directly (current ABI 15).
 
 ## Working
 
@@ -26,6 +28,7 @@ framed MessagePack envelope (current ABI 14) the C# side parses in parallel.
 | A whole bot wave in one call — shared views on the wire once, rayon-parallel per bot, one `{result \| error}` envelope each | `BotWaveBatcher.TryGenerateWave`, from `BotController.GenerateBotWave` | `spt_generate_bot_inventory_batch` |
 | A batch of dynamic flea offers (assort walk, pricing, barter schemes) | `RagfairOfferGenerator.GenerateDynamicOffers` | `spt_generate_dynamic_offers` |
 | Repeatable quests (all four types + rewards) | `*QuestGenerator.Generate` | `spt_generate_repeatable_quest` |
+| The whole log pipeline — filters, level gates, per-target formatting, console + file sinks | `SPTLoggerDispatcher.Log` | `spt_logger_init`, `spt_log_emit`, `spt_logger_close` |
 
 Also working: mod-added fields on game data survive the round trip (`#[serde(flatten)] extra` maps
 mirroring Ceciler's `[JsonExtensionData]`); native log lines are replayed through the C# logger;

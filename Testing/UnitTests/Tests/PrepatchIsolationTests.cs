@@ -24,8 +24,8 @@ public class PrepatchIsolationTests
     {
         AssertDoesNotPullWebIn(
             AddSptLoggerFrom,
-            $"building the early logger loaded {WebAssemblyName}; the log handler scan is reaching outside the "
-                + "assembly that declares ILogHandler again"
+            $"building the early logger loaded {WebAssemblyName}; AddSptLogger (sptLogger.json load, native "
+                + "LoggerInit, logger registrations) is reaching outside SPTarkov.Common again"
         );
     }
 

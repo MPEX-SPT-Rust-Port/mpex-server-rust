@@ -14,7 +14,7 @@ Toolchain is pinned in `rust-toolchain.toml` (1.97.1, edition 2024). Dependencie
 `walkdir`, `xxhash-rust`, `base64` — plus `tempfile` as the only dev-dependency (the `verify` FFI
 tests need a real directory). `Cargo.lock` is committed.
 
-Roughly 43k lines across 44 files, tests included. `src/bot/` is ~38% of that and
+Roughly 45k lines across 46 files, tests included. `src/bot/` is ~37% of that and
 `bot_equipment_mod_generator.rs` alone ~4.2k; `src/loot/` ~27%, `src/ragfair/` ~17%,
 `src/quest/` ~13%.
 
@@ -22,10 +22,12 @@ Roughly 43k lines across 44 files, tests included. `src/bot/` is ~38% of that an
 
 | Path | Role |
 |---|---|
-| `src/lib.rs` | Module roots and `ABI_VERSION` (currently 14; must equal `SptNative.ExpectedAbiVersion`) |
+| `src/lib.rs` | Module roots and `ABI_VERSION` (currently 15; must equal `SptNative.ExpectedAbiVersion`) |
 | `src/ffi.rs` | The C-ABI surface. The **only** module containing `unsafe` |
 | `src/runtime.rs` | Process-wide multi-thread tokio runtime, `OnceLock`-built. Used only by `verify` |
 | `src/verify.rs` | Hashes `SPT_Data` with XXH3-128 and diffs it against `checks.dat` |
+| `src/logger.rs` | The log pipeline: `sptLogger.json`, filters, level gates, per-target formatting |
+| `src/log_sink.rs` | Where a formatted line lands: the console writer, and the file writer with its rotation and archiving |
 | `src/loot/` | Location loot (static containers, loose loot) and reward loot (airdrops, cases, containers) |
 | `src/bot/` | One bot's entire inventory: equipment, mods, weapons, magazines, loot |
 | `src/ragfair/` | One batch of dynamic flea offers: the assort walk, pricing, barter schemes, the offers |
@@ -33,8 +35,10 @@ Roughly 43k lines across 44 files, tests included. `src/bot/` is ~38% of that an
 
 ## FFI boundary (`ffi.rs`)
 
-Thirteen `extern "C"` exports. Two are trivial (`spt_native_abi_version`, `spt_buf_free`); the other eleven take a
-UTF-8 JSON request and hand back a heap buffer the caller releases with `spt_buf_free`.
+Sixteen `extern "C"` exports. Two are trivial (`spt_native_abi_version`, `spt_buf_free`); eleven take a
+UTF-8 JSON request and hand back a heap buffer the caller releases with `spt_buf_free`; the last three are the
+log pipeline (`spt_logger_init`, `spt_log_emit`, `spt_logger_close`), which pass one line's fields directly
+rather than a JSON document — see *The log pipeline* below.
 
 ```
 C# SptNative → spt_generate_* (JSON in)
@@ -89,6 +93,19 @@ same module, via the `gen_checks` bin (`src/bin/gen_checks.rs`, invoked by the `
 
 Hashing fans out over the runtime through a `JoinSet` capped at `MAX_CONCURRENT_HASHES` (32). The result is a
 `VerifyReport { ok, failures, checked }`.
+
+## The log pipeline (`src/logger.rs`, `src/log_sink.rs`)
+
+The one ported family with **no legacy path**: C# no longer has log handlers at all. `spt_logger_init` parses
+the raw `sptLogger.json` bytes once per process (idempotent, so a prepatcher's second managed copy is a
+no-op); `SPTLoggerDispatcher.Log` then hands each line's fields across `spt_log_emit`, and the crate owns
+filter matching, the level gate, per-target format expansion and the sinks. `spt_logger_close` drains them.
+
+Two rules the C# side depends on: **logging never fails the server** — a bad config or a broken library is one
+stderr notice and every later emit is a silent no-op — and **an emit never blocks on I/O**, because each file
+gets a background writer thread fed over a bounded channel that drops lines rather than growing without limit.
+`log_sink.rs` also owns rotation and the archive cap — one owner for both, so the cap is enforced at the
+rotation rather than on a timer.
 
 ## `src/loot/`
 
@@ -164,7 +181,8 @@ These are what keep the port correct; break one and output silently diverges fro
   discards. The loot family documents each draw inline at its call site instead, against the C# line. Adding,
   removing, or reordering a draw desynchronises the whole sequence, so a "harmless" early-out that skips a roll
   is a bug.
-- **No logging, and one rule for throws.** C# `ISptLogger` calls become `Diagnostic` values the caller replays
+- **The generator families never log, and have one rule for throws.** They do not reach for the log pipeline
+  above; C# `ISptLogger` calls become `Diagnostic` values the caller replays
   through its own logger. A C# *return-null-and-log* path is ported as a `Diagnostic` plus `None`, in every
   family. A C#-*sanctioned* `throw` is ported one of two ways, by family: loot, bot and ragfair return it as a
   `LootError` (so does an unguarded null deref they would have NRE'd on); the quest family panics at the throw
