@@ -2,7 +2,11 @@
 //! matching, format expansion, and the console/file sinks. C# builds an `SptLogMessage` and hands
 //! it across `spt_log_emit`; everything downstream lives here.
 
-use crate::log_sink::civil_from_days;
+use std::io::Write as _;
+use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
+use std::thread::JoinHandle;
+
+use crate::log_sink::{FileSink, civil_from_days};
 use serde::Deserialize;
 
 /// Mirrors Microsoft.Extensions.Logging.LogLevel: the declaration order is the numeric order the
@@ -295,6 +299,163 @@ pub fn should_emit(
     record_level >= level
 }
 
+/// Console lines queued before writes start being dropped; same policy as the file sink's queue.
+const CONSOLE_QUEUE_CAPACITY: usize = 8192;
+
+/// Stdout twin of `FileSink`: a writer thread behind a bounded channel, so a blocked terminal
+/// stalls the writer thread, not the logging call.
+struct ConsoleSink {
+    sender: Option<SyncSender<Vec<u8>>>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl ConsoleSink {
+    fn open() -> std::io::Result<ConsoleSink> {
+        let (sender, receiver) = sync_channel::<Vec<u8>>(CONSOLE_QUEUE_CAPACITY);
+        let worker = std::thread::Builder::new()
+            .name("spt-log-console".to_owned())
+            .spawn(move || console_run(&receiver))?;
+
+        Ok(ConsoleSink {
+            sender: Some(sender),
+            worker: Some(worker),
+        })
+    }
+
+    fn write(&self, line: Vec<u8>) {
+        if let Some(sender) = &self.sender {
+            let _ = sender.try_send(line);
+        }
+    }
+
+    fn close(mut self) {
+        drop(self.sender.take());
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+/// Drains bursts the same way the file writer does: block for one line, drain the backlog, one
+/// flush per burst.
+fn console_run(receiver: &Receiver<Vec<u8>>) {
+    let stdout = std::io::stdout();
+
+    while let Ok(first) = receiver.recv() {
+        let mut out = stdout.lock();
+        let _ = out.write_all(&first);
+        let _ = out.write_all(b"\n");
+        while let Ok(next) = receiver.try_recv() {
+            let _ = out.write_all(&next);
+            let _ = out.write_all(b"\n");
+        }
+        let _ = out.flush();
+    }
+}
+
+enum Sink {
+    File(FileSink),
+    Console(ConsoleSink),
+}
+
+struct LoggerEntry {
+    level: LogLevel,
+    filters: Vec<CompiledFilter>,
+    tokens: Vec<FormatToken>,
+    sink: Sink,
+}
+
+/// The whole pipeline: what `SPTLoggerDispatcher` + the handlers were on the C# side.
+pub struct Logger {
+    entries: Vec<LoggerEntry>,
+}
+
+impl Logger {
+    /// Parses the raw `sptLogger.json` bytes and opens every sink. Unparseable JSON is the only
+    /// fatal error; a file target that cannot be opened is reported to stderr and skipped, the
+    /// same per-target disable the C# `FileLogHandler` applied.
+    pub fn from_json(bytes: &[u8]) -> Result<Logger, String> {
+        let config: SptLoggerConfiguration =
+            serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
+
+        let mut entries = Vec::new();
+        for reference in config.loggers {
+            let (level, format, filters, sink) = match reference {
+                SptLoggerReference::File {
+                    log_level,
+                    format,
+                    filters,
+                    file_path,
+                    file_pattern,
+                    max_file_size_mb,
+                    max_rolling_files,
+                } => {
+                    match FileSink::open(
+                        &file_path,
+                        &file_pattern,
+                        max_file_size_mb,
+                        max_rolling_files,
+                    ) {
+                        Ok(sink) => (log_level, format, filters, Sink::File(sink)),
+                        Err(error) => {
+                            eprintln!(
+                                "Failed to open log file '{file_path}{file_pattern}': {error}. File logging for this target is disabled."
+                            );
+                            continue;
+                        }
+                    }
+                }
+                SptLoggerReference::Console {
+                    log_level,
+                    format,
+                    filters,
+                } => match ConsoleSink::open() {
+                    Ok(sink) => (log_level, format, filters, Sink::Console(sink)),
+                    Err(error) => {
+                        eprintln!(
+                            "Failed to start the console log writer: {error}. Console logging is disabled."
+                        );
+                        continue;
+                    }
+                },
+            };
+
+            entries.push(LoggerEntry {
+                level,
+                filters: filters.iter().map(CompiledFilter::compile).collect(),
+                tokens: compile_format(&format),
+                sink,
+            });
+        }
+
+        Ok(Logger { entries })
+    }
+
+    pub fn emit(&self, record: &LogRecord) {
+        for entry in &self.entries {
+            if !should_emit(entry.level, &entry.filters, record.level, record.category) {
+                continue;
+            }
+
+            let line = render(&entry.tokens, record).into_bytes();
+            match &entry.sink {
+                Sink::File(sink) => sink.write(line),
+                Sink::Console(sink) => sink.write(line),
+            }
+        }
+    }
+
+    /// Flushes and joins every writer thread.
+    pub fn close(self) {
+        for entry in self.entries {
+            match entry.sink {
+                Sink::File(sink) => sink.close(),
+                Sink::Console(sink) => sink.close(),
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -550,6 +711,61 @@ mod tests {
             filter(SptLoggerFilterType::Exclude, ".*App", MatchingType::Regex),
         ];
         assert!(!should_emit(level, &both, LogLevel::Error, cat));
+    }
+
+    fn file_config(dir: &std::path::Path, level: &str, filters: &str) -> String {
+        format!(
+            r#"{{ "loggers": [ {{ "type": "File", "logLevel": "{level}",
+                "format": "[%level%] %message%", "filePath": {path:?}, "filePattern": "test.log",
+                "maxFileSizeMB": 10, "maxRollingFiles": 10, "filters": [{filters}] }} ] }}"#,
+            path = dir.display().to_string(),
+        )
+    }
+
+    #[test]
+    fn emit_writes_matching_lines_and_drops_filtered_ones() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let config = file_config(
+            dir.path(),
+            "Information",
+            r#"{ "type": "Exclude", "name": "Noise.*", "matchingType": "Regex" }"#,
+        );
+        let logger = Logger::from_json(config.as_bytes()).unwrap();
+
+        logger.emit(&LogRecord {
+            level: LogLevel::Information,
+            ..record("App", "kept")
+        });
+        logger.emit(&LogRecord {
+            level: LogLevel::Debug,
+            ..record("App", "below level")
+        });
+        logger.emit(&LogRecord {
+            level: LogLevel::Error,
+            ..record("Noise.Chatter", "excluded")
+        });
+        logger.close();
+
+        let contents = std::fs::read_to_string(dir.path().join("test.log")).unwrap();
+        assert_eq!(contents, "[Information] kept\n");
+    }
+
+    #[test]
+    fn from_json_rejects_garbage() {
+        assert!(Logger::from_json(b"not json").is_err());
+    }
+
+    #[test]
+    fn an_unopenable_file_target_is_skipped_not_fatal() {
+        let dir = tempfile::TempDir::new().unwrap();
+        // A file where the log directory should be makes FileSink::open fail.
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, "not a directory").unwrap();
+        let config = file_config(&blocker.join("logs"), "Information", "");
+
+        let logger = Logger::from_json(config.as_bytes()).unwrap();
+        logger.emit(&record("App", "goes nowhere, must not panic"));
+        logger.close();
     }
 
     #[test]
