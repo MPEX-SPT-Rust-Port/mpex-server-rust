@@ -302,7 +302,10 @@ MessagePack serialise of the result, and the native parse of it.
 | cache cold (stamp bumped before every run — the pre-`6d975e4` behaviour) | 77.94 ms | 17.6 MB |
 | **cache warm (the shipped path)** | **11.46 ms** | **5.2 MB** |
 
-**6.80x** on the median; warm is **14.7%** of cold, and warm allocates **0.30x** what cold does.
+**6.80x** on the median; warm is **14.7%** of cold, and warm allocates **0.30x** what cold does. The
+`regeneration | native (rust)` row above (15.19 ms) and this warm row (11.46 ms) are the same
+configuration measured in two different phases of the same run — the gap between them is run-to-run
+spread on a ~12 ms pass, not a difference in what was measured.
 The cold arm reproduces the old 74.59 ms baseline within noise, which is the check that the arms
 differ only in the cache. The full pass is unchanged — its slice is 2.1% of the pass, so caching it
 buys nothing there and the 670 ms figure is the same 626 ms measurement one run's spread later.
@@ -438,9 +441,9 @@ Ragfair-specific caveats, on top of the general ones below:
   milliseconds. Spread is now wide relative to the differences being measured (native full pass
   614-872 ms, and ±25 ms run-to-run on the median), so a change worth less than ~5% of the pass
   cannot be resolved here — use the `CreateOffersFromAssort` timer the native path logs instead.
-- **The plain native arms run with the cache warm.** Nothing bumps the stamp between runs, so only
-  the warmup pass sends the slice — which is what a real server does between mutations. The cold
-  arm exists to price that; do not read it as the default.
+- **The plain native arms run with the cache warm.** Nothing bumps the stamp between runs, so after
+  the cold arm every timed pass is a cache hit — which is what a real server does between mutations.
+  The cold arm exists to price the miss; do not read it as the default.
 - **Regeneration input is fixed.** The same 1,400 single-item lists every run, sampled from the head
   of the assort rather than from offers that actually expired. Real expired offers skew towards
   fast-selling templates and can carry item trees.

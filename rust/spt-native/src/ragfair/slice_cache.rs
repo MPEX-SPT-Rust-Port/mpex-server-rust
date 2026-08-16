@@ -1,6 +1,10 @@
 //! The one process-lifetime cache in the crate: the parsed ragfair invariant slice, keyed by the
 //! caller's `DatabaseMutationStamp` value. Single sequential caller (the C# generator singleton),
 //! so the mutex is uncontended; `Arc` lets a hit generate without holding the lock.
+//!
+//! The slot key is the stamp alone, with no producer identity, so every caller that stores under a
+//! stamp must have projected from the same live database; a second generator instance re-keying the
+//! slot costs a stale-miss retry, never a wrong slice.
 
 use std::sync::{Arc, Mutex};
 

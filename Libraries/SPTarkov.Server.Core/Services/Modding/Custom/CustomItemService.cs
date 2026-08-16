@@ -92,58 +92,71 @@ public class CustomItemService(
 
         AddToItemsDb(newItemId, itemClone);
 
-        // Bumped here, not at the return: the writes below can throw and still leave the items table mutated
-        _databaseMutationStamp?.Bump();
-
-        if (newItemDetails.AddToHandbook)
+        // One bump in a finally, after the first write rather than at the return: the items table is
+        // already mutated by the time we get here, and the handbook and flea price writes below feed
+        // the same native slice. Any of them can throw after mutating, so the stamp has to move on the
+        // unwind as well as on success - a reader that cached a slice under the old stamp would
+        // otherwise keep it forever
+        try
         {
-            if (newItemDetails.HandbookParentId is null)
+            if (newItemDetails.AddToHandbook)
             {
-                throw new InvalidOperationException($"{nameof(newItemDetails.HandbookParentId)} is null while trying to add to handbook!");
+                if (newItemDetails.HandbookParentId is null)
+                {
+                    throw new InvalidOperationException(
+                        $"{nameof(newItemDetails.HandbookParentId)} is null while trying to add to handbook!"
+                    );
+                }
+
+                AddToHandbookDb(newItemId, newItemDetails.HandbookParentId, newItemDetails.HandbookPriceRoubles);
             }
 
-            AddToHandbookDb(newItemId, newItemDetails.HandbookParentId, newItemDetails.HandbookPriceRoubles);
-        }
+            AddToLocaleDbs(newItemDetails.Locales, newItemId);
 
-        AddToLocaleDbs(newItemDetails.Locales, newItemId);
-
-        if (newItemDetails.AddToFleaPriceDb)
-        {
-            if (newItemDetails.FleaPriceRoubles is null or <= 0)
+            if (newItemDetails.AddToFleaPriceDb)
             {
-                throw new InvalidOperationException($"{nameof(newItemDetails.FleaPriceRoubles)} is null or 0 while trying to add to flea!");
+                if (newItemDetails.FleaPriceRoubles is null or <= 0)
+                {
+                    throw new InvalidOperationException(
+                        $"{nameof(newItemDetails.FleaPriceRoubles)} is null or 0 while trying to add to flea!"
+                    );
+                }
+
+                AddToFleaPriceDb(newItemId, newItemDetails.FleaPriceRoubles);
+            }
+            else
+            {
+                // Prevent item with no flea entry being added to pmc loot
+                pmcConfig.GlobalLootBlacklist.Add(newItemId);
             }
 
-            AddToFleaPriceDb(newItemId, newItemDetails.FleaPriceRoubles);
-        }
-        else
-        {
-            // Prevent item with no flea entry being added to pmc loot
-            pmcConfig.GlobalLootBlacklist.Add(newItemId);
-        }
+            itemBaseClassService.AddItemToCache(newItemId);
 
-        itemBaseClassService.AddItemToCache(newItemId);
+            if (newItemDetails.AddToWeaponShelf && itemHelper.IsOfBaseclass(itemClone.Id, BaseClasses.WEAPON))
+            {
+                AddToWeaponShelf(newItemId);
+            }
 
-        if (newItemDetails.AddToWeaponShelf && itemHelper.IsOfBaseclass(itemClone.Id, BaseClasses.WEAPON))
-        {
-            AddToWeaponShelf(newItemId);
-        }
+            if (callingAssembly is not null)
+            {
+                modItemCacheService.AddModItem(callingAssembly, newItemId);
+            }
+            else
+            {
+                modItemCacheService.AddModItem(Assembly.GetCallingAssembly(), newItemId);
+            }
 
-        if (callingAssembly is not null)
-        {
-            modItemCacheService.AddModItem(callingAssembly, newItemId);
+            return new CreateItemResult
+            {
+                Errors = [],
+                Success = true,
+                ItemId = newItemId,
+            };
         }
-        else
+        finally
         {
-            modItemCacheService.AddModItem(Assembly.GetCallingAssembly(), newItemId);
+            _databaseMutationStamp?.Bump();
         }
-
-        return new CreateItemResult
-        {
-            Errors = [],
-            Success = true,
-            ItemId = newItemId,
-        };
     }
 
     /// <summary>
@@ -173,58 +186,71 @@ public class CustomItemService(
 
         AddToItemsDb(newItem.Id, newItem);
 
-        // Bumped here, not at the return: the writes below can throw and still leave the items table mutated
-        _databaseMutationStamp?.Bump();
-
-        if (newItemDetails.AddToHandbook)
+        // One bump in a finally, after the first write rather than at the return: the items table is
+        // already mutated by the time we get here, and the handbook and flea price writes below feed
+        // the same native slice. Any of them can throw after mutating, so the stamp has to move on the
+        // unwind as well as on success - a reader that cached a slice under the old stamp would
+        // otherwise keep it forever
+        try
         {
-            if (newItemDetails.HandbookParentId is null)
+            if (newItemDetails.AddToHandbook)
             {
-                throw new InvalidOperationException($"{nameof(newItemDetails.HandbookParentId)} is null while trying to add to handbook!");
+                if (newItemDetails.HandbookParentId is null)
+                {
+                    throw new InvalidOperationException(
+                        $"{nameof(newItemDetails.HandbookParentId)} is null while trying to add to handbook!"
+                    );
+                }
+
+                AddToHandbookDb(newItem.Id, newItemDetails.HandbookParentId, newItemDetails.HandbookPriceRoubles);
             }
 
-            AddToHandbookDb(newItem.Id, newItemDetails.HandbookParentId, newItemDetails.HandbookPriceRoubles);
-        }
+            AddToLocaleDbs(newItemDetails.Locales, newItem.Id);
 
-        AddToLocaleDbs(newItemDetails.Locales, newItem.Id);
-
-        if (newItemDetails.AddToFleaPriceDb)
-        {
-            if (newItemDetails.FleaPriceRoubles is null or <= 0)
+            if (newItemDetails.AddToFleaPriceDb)
             {
-                throw new InvalidOperationException($"{nameof(newItemDetails.FleaPriceRoubles)} is null or 0 while trying to add to flea!");
+                if (newItemDetails.FleaPriceRoubles is null or <= 0)
+                {
+                    throw new InvalidOperationException(
+                        $"{nameof(newItemDetails.FleaPriceRoubles)} is null or 0 while trying to add to flea!"
+                    );
+                }
+
+                AddToFleaPriceDb(newItem.Id, newItemDetails.FleaPriceRoubles);
+            }
+            else
+            {
+                // Prevent item with no flea entry being added to pmc loot
+                pmcConfig.GlobalLootBlacklist.Add(newItem.Id);
             }
 
-            AddToFleaPriceDb(newItem.Id, newItemDetails.FleaPriceRoubles);
-        }
-        else
-        {
-            // Prevent item with no flea entry being added to pmc loot
-            pmcConfig.GlobalLootBlacklist.Add(newItem.Id);
-        }
+            itemBaseClassService.AddItemToCache(newItem.Id);
 
-        itemBaseClassService.AddItemToCache(newItem.Id);
+            if (newItemDetails.AddToWeaponShelf && itemHelper.IsOfBaseclass(newItem.Id, BaseClasses.WEAPON))
+            {
+                AddToWeaponShelf(newItem.Id);
+            }
 
-        if (newItemDetails.AddToWeaponShelf && itemHelper.IsOfBaseclass(newItem.Id, BaseClasses.WEAPON))
-        {
-            AddToWeaponShelf(newItem.Id);
-        }
+            if (callingAssembly is not null)
+            {
+                modItemCacheService.AddModItem(callingAssembly, newItem.Id);
+            }
+            else
+            {
+                modItemCacheService.AddModItem(Assembly.GetCallingAssembly(), newItem.Id);
+            }
 
-        if (callingAssembly is not null)
-        {
-            modItemCacheService.AddModItem(callingAssembly, newItem.Id);
+            return new CreateItemResult
+            {
+                Errors = [],
+                Success = true,
+                ItemId = newItemDetails.NewItem.Id,
+            };
         }
-        else
+        finally
         {
-            modItemCacheService.AddModItem(Assembly.GetCallingAssembly(), newItem.Id);
+            _databaseMutationStamp?.Bump();
         }
-
-        return new CreateItemResult
-        {
-            Errors = [],
-            Success = true,
-            ItemId = newItemDetails.NewItem.Id,
-        };
     }
 
     /// <summary>

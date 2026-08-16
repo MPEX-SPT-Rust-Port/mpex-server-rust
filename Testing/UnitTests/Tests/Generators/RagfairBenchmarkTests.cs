@@ -26,7 +26,9 @@ namespace UnitTests.Tests.Generators;
 /// payload matters twice over - <see cref="RagfairPayloadProjection.BuildRequest"/> is timed on its
 /// own as well: that number is the floor under the native path, and the share it takes of it bounds
 /// what any projection-side fix could buy. Run in Release; the cargo dev profile makes Debug
-/// numbers meaningless.
+/// numbers meaningless. The "already-populated flea" premise the numbers are read against depends on
+/// this fixture running before the fixtures that clear the shared holder - alphabetical order
+/// currently guarantees it.
 /// </summary>
 [TestFixture]
 [Explicit("benchmark, run on demand in Release")]

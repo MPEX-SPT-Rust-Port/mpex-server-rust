@@ -429,12 +429,10 @@ public class RagfairParityTests
     /// <see cref="LootIdNormalizer"/> - which only maps values it saw under an <c>_id</c> - cannot
     /// reach it; it gets a positional placeholder here instead. <c>user.aid</c>, <c>user.nickname</c>
     /// and <c>user.rating</c> are seeded draws and are deliberately left alone.
-    /// </summary>
-    /// <summary>
-    /// Drops the sanctioned per-run gaps so two offer documents compare: the live <c>intId</c>
-    /// counter, the wall-clock <c>startTime</c> (folded into <c>endTime</c> as a duration) and the
-    /// freshly minted seller id. Shared with <see cref="RagfairNativeSliceCacheTests"/>, which needs
-    /// the same normalisation to compare a full slice send against a cache hit.
+    /// <para>
+    /// Shared with <see cref="RagfairNativeSliceCacheTests"/>, which needs the same normalisation to
+    /// compare a full slice send against a cache hit.
+    /// </para>
     /// </summary>
     internal static string Canonicalise(string json)
     {

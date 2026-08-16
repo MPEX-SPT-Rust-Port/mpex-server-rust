@@ -236,6 +236,30 @@ public class RagfairNativeSliceCacheTests
         Assert.That(modded.LastSendIncludedSlice, Is.True, "a loaded mod without the trust flag disables the cache");
     }
 
+    [Test]
+    public void TheTrustFlagKeepsTheCacheLiveWithModsLoaded()
+    {
+        var di = DI.GetInstance();
+        var modded = BuildWithOverloadConstructor(di, new SptMod[] { null! });
+        modded.NativeTestSeed = 424242;
+
+        // Not a slice input, so no bump is owed on the way back out
+        _ragfairConfig.TrustNativeRequestCacheWithMods = true;
+        try
+        {
+            _stamp.Bump(); // force a full send first
+            modded.GenerateDynamicOffers();
+            ClearOffers();
+            modded.GenerateDynamicOffers();
+
+            Assert.That(modded.LastSendIncludedSlice, Is.False, "the trust flag should keep the cache live despite the mod");
+        }
+        finally
+        {
+            _ragfairConfig.TrustNativeRequestCacheWithMods = false;
+        }
+    }
+
     /// <summary>
     /// One expired-offer regeneration pass, normalized for comparison. The holder is empty (SetUp
     /// cleared it) and the offer is removed again afterwards, so neither pass pays a per-template
