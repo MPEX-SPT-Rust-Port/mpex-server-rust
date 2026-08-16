@@ -6,11 +6,11 @@ plain `dotnet test` never runs them:
 
 | Fixture | Measures |
 |---|---|
-| `LootBenchmarkTests.cs` | location loot — wall clock, allocation, peak RSS |
-| `RewardLootBenchmarkTests.cs` | airdrop loot — wall clock; numbers recorded in the reward-loot section of [ARCHITECTURE.md](ARCHITECTURE.md), not here |
-| `BotBenchmarkTests.cs` | one bot's inventory — wall clock, with the payload projection timed separately |
-| `RagfairBenchmarkTests.cs` | a dynamic flea offer pass — wall clock, with the payload projection timed separately |
-| `RepeatableQuestBenchmarkTests.cs` | one repeatable quest of each type — wall clock, native measured with the invariant slice cold and warm, with the slice projection timed separately |
+| `LootBenchmarkTests.cs` | location loot — elapsed time per call, allocation, peak RSS |
+| `RewardLootBenchmarkTests.cs` | airdrop loot — elapsed time per call; numbers recorded in the reward-loot section of [ARCHITECTURE.md](ARCHITECTURE.md), not here |
+| `BotBenchmarkTests.cs` | one bot's inventory — elapsed time per bot, with the payload projection timed separately |
+| `RagfairBenchmarkTests.cs` | a dynamic flea offer pass — elapsed time per pass, with the payload projection timed separately |
+| `RepeatableQuestBenchmarkTests.cs` | one repeatable quest of each type — elapsed time per quest, native measured with the invariant slice cold and warm, with the slice projection timed separately |
 
 There are no `cargo bench` targets. `Containerfile.dev` mentions `cargo bench` as a toolchain
 capability, not as a suite that exists.
@@ -22,7 +22,7 @@ Release only — the cargo dev profile makes Debug numbers meaningless.
 ```bash
 scripts/decompress-assets.sh    # once, if SPT_Data/database/locations/*/looseLoot.json is missing
 
-# head-to-head wall clock and allocation
+# head-to-head elapsed time per call and allocation
 dotnet test -c Release --filter "FullyQualifiedName~LootBenchmarkTests.NativeVersusLegacyCSharp" \
   --logger "console;verbosity=detailed"
 
@@ -69,25 +69,25 @@ instead of failing.
 **Sampling.** 2 warmup runs (JIT, the native library load, the first lazy-load deserialise), then 20
 timed runs. `Stopwatch` per run. The heap is settled with a full `GC.Collect()` /
 `WaitForPendingFinalizers()` / `GC.Collect()` once before the timed phase and never between timed
-runs — collecting inside the phase would distort the wall clock the fixture exists to measure.
-Median is the headline figure; mean, min and max are reported alongside because run-to-run spread is
-wide (see Caveats).
+runs — collecting inside the phase would distort the per-call elapsed time the fixture exists to
+measure. Median is the headline figure; mean, min and max are reported alongside because run-to-run
+spread is wide (see Caveats).
 
 **Allocation.** `GC.GetTotalAllocatedBytes(precise: true)` across the phase, divided by run count.
 This is managed allocation only. Whatever the native side allocates on the Rust heap never reaches
-the GC, so on the native path this figure understates real memory traffic by design — peak RSS is
-the only number that sees both sides.
+the GC, so on the native path this figure does not include it — peak RSS is the only number that
+sees both sides.
 
 **Peak RSS needs its own process.** `Environment.WorkingSet` is process-wide, and the managed heap
 does not hand pages back to the OS. Whichever path runs second inherits everything the first left
-resident, so its absolute peak is meaningless. That is why `NativePeakWorkingSet` and
+resident, so its absolute peak reflects both paths combined. That is why `NativePeakWorkingSet` and
 `LegacyPeakWorkingSet` are separate tests meant to be run one per `dotnet test` invocation and
 compared only against each other. Inside the head-to-head test the comparable figure is
 `WorkingSetGrowthMb` (growth over that phase), not the absolute peak.
 
 **Binary sizes** are reported from `AppContext.BaseDirectory` at the end of the head-to-head run.
 The legacy C# path still ships inside `SPTarkov.Server.Core.dll` — it is the frozen mod contract —
-so the native library is additive on disk today, not a saving.
+so the native library is additive on disk.
 
 ## Results — location loot
 
@@ -103,16 +103,14 @@ Recorded 2026-08-12 on `e7cb120` plus the working-tree bump of `rand` 0.9 → 0.
 | rustc | 1.97.1 |
 | Configuration | Release, `bigmap`, n=20 after 2 warmups |
 
-### Wall clock and allocation
+### Elapsed time per call and allocation
 
 | Path | median | mean | min | max | alloc/run | GC gen0/1/2 |
 |---|---|---|---|---|---|---|
 | native (rust) | **333.23 ms** | 341.91 ms | 308.92 ms | 423.43 ms | 100.5 MB | 11/10/6 |
 | legacy (C# 4.1.2) | 871.17 ms | 864.28 ms | 712.36 ms | 1005.25 ms | 315.1 MB | 147/141/16 |
 
-Speedup on median wall clock: **2.61x**. Managed allocation: **3.14x** less. The GC counts are the
-sharper signal — the native path triggers 11 gen0 collections over the phase against the legacy
-path's 147.
+Speedup on median elapsed time per call: **2.61x**. Managed allocation: **3.14x** less.
 
 ### Peak working set
 
@@ -123,9 +121,9 @@ Separate `dotnet test` invocations, as above.
 | native (rust) | 1456 MB | 1445 MB | 327 MB | 100.2 MB |
 | legacy (C# 4.1.2) | 1185 MB | 941 MB | 382 MB | 314.3 MB |
 
-Native trades roughly 270 MB of peak RSS for the speed. Those pages are the Rust heap: invisible to
-the GC, which is also why native's settled RSS barely drops after a forced collection while the
-legacy path's falls by ~240 MB. This is the shape the design predicts, not a regression.
+Native peak RSS is ~270 MB higher than legacy's. Native's settled RSS barely drops after a forced
+collection because those pages are the Rust heap, invisible to the GC; the legacy path's settled RSS
+falls by ~240 MB after the same collection.
 
 ### Binary sizes
 
@@ -137,8 +135,8 @@ legacy path's falls by ~240 MB. This is the shape the design predicts, not a reg
 ## Results — bot generation
 
 Recorded 2026-08-13 on `94fe128` plus the working-tree fix to the projection phase's timed region.
-**Different machine from the location-loot figures above — the two result sets are not comparable to
-each other.**
+Different machine from the location-loot figures above — the two result sets are not comparable to
+each other.
 
 | | |
 |---|---|
@@ -153,8 +151,7 @@ each other.**
 and loot — on the live shipped database, for `assault` and for a level-1 `pmcUSEC`. The template
 clone and `BotEquipmentFilterService.FilterBotEquipment` are rebuilt outside the stopwatch for every
 run, because the legacy path mutates the template it is handed. `BotPayloadProjection.BuildRequest`
-is timed on its own in a third phase — with the same hoisting, so the clone is not counted twice: it
-is the fixed per-call payload cost, and its share bounds what any projection-side fix could buy back.
+is timed on its own in a third phase, with the same hoisting so the clone is not counted twice.
 
 | Role | Path | median | mean | min | max |
 |---|---|---|---|---|---|
@@ -165,57 +162,44 @@ is the fixed per-call payload cost, and its share bounds what any projection-sid
 | usec | legacy (C# 4.1.2) | 1.20 ms | 1.59 ms | 0.82 ms | 5.22 ms |
 | usec | `BuildRequest` only | 5.09 ms | 5.41 ms | 4.83 ms | 8.14 ms |
 
-Speedup on median wall clock: **0.02x** for both roles — the native path is tens of times slower per
-bot. Projection share of the native median: **11.2%** (assault), **9.4%** (usec).
+Speedup on median elapsed time per bot: **0.02x** for both roles. Projection share of the native median:
+**11.2%** (assault), **9.4%** (usec).
 
-**The assault-vs-usec gap is measurement order, not role.** Whichever role is timed first pays
-roughly 40 ms of extra serialise time against a still-growing heap; reverse the order and the two
-figures swap. Steady state is ~51-54 ms per bot for both roles, so the per-role reading of the table
-above — and any single ratio derived from it — is an artifact of the harness.
+**Measurement order.** Whichever role is timed first pays roughly 40 ms of extra serialise time
+against a still-growing heap; reversing the order swaps the two figures. Steady state is ~51-54 ms
+per bot for both roles.
 
-The shape is the reward-loot result made worse. A 4.1.2 bot is one or two milliseconds of work, and
-the native path pays a fixed cost per bot to hand the whole items table across the boundary: 4,673
-`ItemView`s plus ~5,000 nested slot/grid/cartridge/chamber views (~9.7k objects), and every global
-preset. A phase-by-phase split of a ~51 ms bot reads: `BuildRequest` 10.3 ms, C# serialise 21.6 ms,
-Rust deserialise 14.9 ms, **Rust generation 2.9 ms**, FFI plus result deserialise ~1.4 ms — so
-**~92% of the cost is payload transport**, not generation, and no projection-side fix reaches more
-than the build phase's fifth of it.
+A phase-by-phase split of a ~51 ms bot: `BuildRequest` 10.3 ms, C# serialise 21.6 ms, Rust
+deserialise 14.9 ms, Rust generation 2.9 ms, FFI plus result deserialise ~1.4 ms. The native path
+hands the whole items table across the boundary per bot: 4,673 `ItemView`s plus ~5,000 nested
+slot/grid/cartridge/chamber views (~9.7k objects), and every global preset. Payload transport is
+~92% of the per-bot cost, generation ~5.7%.
 
-That is what the batched wave path attacks: `BotWaveBatcher` sends the shared views once per wave
-instead of once per bot, so a wave of N divides ~95.7% of the request between N bots. Measured
-against the baseline production actually runs — `BotController.GenerateBotWave`'s `.AsParallel()`
-per-bot loop — a **single-threaded** batch was worth **~1.7x** at the median wave of 10 (12.5 → 7.3
-ms/bot) and **~2.4-2.5x** at `assault`'s real wave of 45 (13.2 → 5.2-5.5 ms/bot). Those are the
-pre-rayon readings, kept for comparison. The batch loop now runs under rayon, and the measured
-figures in the next section come out slightly *above* those batch times — **1.9-2.2x** at wave 45 and
-**~1.5x** at wave 10 — so treat the ratios in this paragraph as the historical single-threaded
-reading, not the current one. `BotBatchTests.WaveCostPerBot` reports the serial, parallel and batched
-arms together so the sequential-baseline ratio cannot be quoted alone again. Two payload trims landed
-alongside it — sixteen always-default item members (−640 KB / −13.8% on `assault`, −13.3% on
-`pmcUSEC`) and `slots[].required` (−49 KB), taking the `pmcUSEC` request the size guards measure to
-~4.18 MB — worth ~4-6% on the per-bot path and ~0% batched, since the batch already divides the
-block they shrink.
+`BotWaveBatcher` sends the shared views once per wave instead of once per bot, so a wave of N
+divides most of the request between N bots. Against the `.AsParallel()` per-bot loop
+(`BotController.GenerateBotWave`, the baseline production runs), a single-threaded batch measured
+**~1.7x** at wave 10 (12.5 → 7.3 ms/bot) and **~2.4-2.5x** at wave 45 (13.2 → 5.2-5.5 ms/bot).
+Under rayon the batch loop measures **1.9-2.2x** at wave 45 and **~1.5x** at wave 10.
+`BotBatchTests.WaveCostPerBot` reports the serial, parallel and batched arms together. Two payload
+trims: sixteen always-default item members (−640 KB / −13.8% on `assault`, −13.3% on `pmcUSEC`) and
+`slots[].required` (−49 KB), taking the `pmcUSEC` request to ~4.18 MB — ~4-6% on the per-bot path,
+~0% batched (the batch already divides the block they shrink).
 
 Bot-specific caveats, on top of the general ones below:
 
 - **Two roles, one level, one difficulty.** `assault` and level-1 `pmcUSEC`, `normal`, `standard`
-  game version. Bots differ enormously in how much they generate; a boss or a high-level PMC is not
-  measured. The absolute native cost is dominated by the fixed payload, so it should move less
-  between roles than the legacy figure does.
-- **No allocation or RSS figures.** Only wall clock. The native path allocates ~9.7k view objects per
-  bot on the managed heap before serialising them, so its GC pressure is by construction far worse
-  than the legacy path's — unmeasured here.
+  game version. A boss or a high-level PMC is not measured.
+- **No allocation or RSS figures.** Only elapsed time per bot. The native path allocates ~9.7k view objects
+  per bot on the managed heap before serialising them; this is unmeasured here.
 - **The legacy figures include a warm `BotLootCacheService`.** Hydration happens during the warmup
   runs. A cold first bot of a role costs more on both paths.
 
 ### Batched wave, rayon batch loop — measured
 
 Recorded 2026-08-14 on `aa733a7`, same machine and environment table as the bot-generation figures
-above (AMD Ryzen 5 5600H, 6C/12T; Release; .NET SDK 10.0.110; rustc 1.97.1), so the same caveats
-apply — one machine, `assault`, warm caches, wall clock only. Source: `BotBatchTests.WaveCostPerBot`
-(`[Explicit]`, `dotnet test -c Release --filter "Name=WaveCostPerBot"`), medians of 5 runs per arm
-per wave. Two independent invocations of the whole test are reported, because the spread between
-them is the honest error bar on any single figure here.
+above (AMD Ryzen 5 5600H, 6C/12T; Release; .NET SDK 10.0.110; rustc 1.97.1). Source:
+`BotBatchTests.WaveCostPerBot` (`[Explicit]`, `dotnet test -c Release --filter "Name=WaveCostPerBot"`),
+medians of 5 runs per arm per wave. Two independent invocations of the whole test are reported.
 
 | wave | serial per-bot | `.AsParallel()` per-bot | batched (rayon) | batched vs parallel | pre-rayon batched |
 |---|---|---|---|---|---|
@@ -228,25 +212,15 @@ them is the honest error bar on any single figure here.
 All figures are ms per bot. Request bytes per bot over the same waves: 3.78 MiB single-bot, against
 0.30 (wave 45), 0.40 (20), 0.58 (10), 0.94 (5), 3.78 (1) MiB batched.
 
-**Rayon did not move the batched number.** 5.73/6.22 ms/bot at wave 45 against a pre-rayon 5.2-5.5,
-and 7.63/7.85 at wave 10 against a pre-rayon 7.3 — the parallel batch is at best level with the
-single-threaded batch it replaced, and both readings sit slightly above it. That is what the ~92%
-transport share predicts: rayon parallelises the ~3 ms of generation inside a ~6 ms/bot batch, while
-the serialise/deserialise around it stays single-threaded on the C# side and does not shrink. The
-batch's win over production's `.AsParallel()` per-bot loop is amortising the shared block, not
-parallelism — it was already won before rayon. Rayon's value is therefore a ceiling on wave sizes and
-bot kinds that generate more than `assault` does, not a gain visible here; it is kept because it
-costs nothing measurable, not because this table justifies it.
-
-Wave 1 is the degenerate case and reads as expected: a one-bot batch is a one-bot request, `1.01x`,
-and `.AsParallel()` over a single element is the serial arm.
+Rayon's batched figures (5.73/6.22 ms/bot at wave 45, 7.63/7.85 at wave 10) sit slightly above the
+pre-rayon single-threaded batch (5.2-5.5 ms, 7.3 ms) at the same waves.
 
 ## Results — ragfair offer generation
 
 Recorded 2026-08-15 on `6d975e4` — the stamp-gated invariant-slice cache
 (`.superpowers/sdd/2026-08-15-db-mutation-stamp-ragfair-slice-cache/`), re-measuring the figures the
-native-parity effort left on `df07d54`. Same machine as the bot-generation figures above, **not**
-the machine the location-loot figures came from.
+native-parity effort left on `df07d54`. Same machine as the bot-generation figures above, not the
+machine the location-loot figures came from.
 
 | | |
 |---|---|
@@ -261,20 +235,19 @@ the machine the location-loot figures came from.
 the two the server actually makes. *Full pass*: no expired offers, so the assort is generated and
 every sellable template gets its offers — ~58k offers with full item trees, of which the holder's
 per-template cap accepts ~24k. *Regeneration pass*: 1,400 cloned single-item lists (the configured
-`expiredOfferThreshold`), the shape
-`RagfairServer.ProcessExpiredFleaOffers` hands over. `RagfairPayloadProjection.BuildRequest` is
-timed on its own in a third phase per scenario. A fourth scenario times the regeneration pass with
-the invariant-slice cache forced cold against the same pass left warm (see *The slice cache*).
+`expiredOfferThreshold`), the shape `RagfairServer.ProcessExpiredFleaOffers` hands over.
+`RagfairPayloadProjection.BuildRequest` is timed on its own in a third phase per scenario. A fourth
+scenario times the regeneration pass with the invariant-slice cache forced cold against the same
+pass left warm (see *The slice cache*).
 
-**The flea is already full when the timing starts.** The test harness runs every `IOnLoad`, so
-`RagfairCallbacks.OnLoadAsync` → `RagfairServer.Load()` has already generated a complete set of
-dynamic offers into the holder before the fixture takes its baseline snapshot. The fixture removes
-everything each run adds, outside the stopwatch, but deliberately preserves that pre-existing set —
-so every timed run is a pass over an *already-populated* flea, on both paths. That is the state the
-`ProcessExpiredFleaOffers` call runs in for real, and it is symmetric across paths, so the verdict
-below is unaffected; it does change what the offer column means (see below).
+**Pre-populated flea.** The test harness runs every `IOnLoad`, so `RagfairCallbacks.OnLoadAsync` →
+`RagfairServer.Load()` has already generated a complete set of dynamic offers into the holder before
+the fixture takes its baseline snapshot. The fixture removes everything each run adds, outside the
+stopwatch, but preserves that pre-existing set, so every timed run is a pass over an
+already-populated flea, on both paths. This is symmetric across paths; it affects what the offer
+column means (see below).
 
-### Wall clock
+### Elapsed time per pass
 
 | Scenario | Path | median | mean | min | max | offers accepted | alloc/run |
 |---|---|---|---|---|---|---|---|
@@ -287,20 +260,20 @@ below is unaffected; it does change what the offer column means (see below).
 | regeneration | native, cache **cold** | 77.94 ms | 75.72 ms | 66.87 ms | 82.32 ms | 876 | 17.6 MB |
 | regeneration | native, cache **warm** | **11.46 ms** | 13.09 ms | 10.08 ms | 16.85 ms | 863 | 5.2 MB |
 
-Speedup on median wall clock: **0.69x** on the full pass (**1.45x slower**) and **0.65x** on the
+Speedup on median elapsed time per pass: **0.69x** on the full pass (**1.45x slower**) and **0.65x** on the
 regeneration pass (**1.53x slower**, was 7.3x slower before the slice cache). Projection share of
-the native median: **2.1%** (full pass), **84.9%** (regeneration) — the projection phase still
-builds the whole slice every time it is timed, so on a warm regeneration pass it now measures work
-the generation pass no longer does.
+the native median: **2.1%** (full pass), **84.9%** (regeneration) — the projection phase builds the
+whole slice every time it is timed, so on a warm regeneration pass it measures work the generation
+pass no longer does.
 
 ### The slice cache
 
-The regeneration pass's cost was never generation, it was the 5.8 MB call-invariant request slice
-being rebuilt and re-serialised for a pass that only regenerates 1,400 offers. Since `6d975e4` the
-slice is sent only when `DatabaseMutationStamp` changed since the last send; the native side keeps
-the parsed copy keyed by that stamp, and the send is varying-fields-only otherwise. A hit skips
-the C# projection (both price maps over the whole items table, every preset, the items view), the
-MessagePack serialise of the result, and the native parse of it.
+The regeneration pass's cost was the 5.8 MB call-invariant request slice being rebuilt and
+re-serialised for a pass that only regenerates 1,400 offers. Since `6d975e4` the slice is sent only
+when `DatabaseMutationStamp` changed since the last send; the native side keeps the parsed copy keyed
+by that stamp, and the send is varying-fields-only otherwise. A hit skips the C# projection (both
+price maps over the whole items table, every preset, the items view), the MessagePack serialise of
+the result, and the native parse of it.
 
 | Regeneration pass | median | alloc/run |
 |---|---|---|
@@ -308,22 +281,20 @@ MessagePack serialise of the result, and the native parse of it.
 | **cache warm (the shipped path)** | **11.46 ms** | **5.2 MB** |
 
 **6.80x** on the median; warm is **14.7%** of cold, and warm allocates **0.30x** what cold does. The
-`regeneration | native (rust)` row above (15.19 ms) and this warm row (11.46 ms) are the same
-configuration measured in two different phases of the same run — the gap between them is run-to-run
-spread on a ~12 ms pass, not a difference in what was measured.
-The cold arm reproduces the old 74.59 ms baseline within noise, which is the check that the arms
-differ only in the cache. The full pass is unchanged — its slice is 2.1% of the pass, so caching it
-buys nothing there and the 670 ms figure is the same 626 ms measurement one run's spread later.
+`regeneration | native (rust)` row above (15.19 ms) and this warm row (11.46 ms) measure the same
+configuration in two different phases of the same run; the difference is run-to-run spread on a
+~12 ms pass. The cold arm reproduces the old 74.59 ms baseline within noise. The full pass is
+unchanged — its slice is 2.1% of the pass — and its 670 ms figure is the same 626 ms measurement one
+run's spread later.
 
-The offer column is **offers accepted into an already-full flea**, not offers the path produced.
-The full pass *produces* ~58k offers — the framed response captured for the deserialize attribution
-below held 58,137 frames — and `RagfairOfferHolder.AddOffer` drops a fake-player offer once that
-template is at its cap, which is what leaves ~24k. The cap is re-rolled per call
-(`RagfairServerHelper.GetOfferCountByBaseType` is a `RandomUtil.GetInt` over the configured range),
-so a full flea still admits whatever a high roll leaves room for. That is also why 1,400 distinct
-expired templates land as ~870 offers — the pre-filled holder, not anything about the run's own
-interleaving. Against an empty holder the same input would land as ~1,400. The two paths land
-within ~1% of each other on the full pass, so both are doing the same amount of work.
+The offer column is **offers accepted into an already-full flea**, not offers the path produced. The
+full pass *produces* ~58k offers — the framed response captured for the deserialize attribution below
+held 58,137 frames — and `RagfairOfferHolder.AddOffer` drops a fake-player offer once that template
+is at its cap, which is what leaves ~24k. The cap is re-rolled per call
+(`RagfairServerHelper.GetOfferCountByBaseType` is a `RandomUtil.GetInt` over the configured range).
+1,400 distinct expired templates land as ~870 offers because of the pre-filled holder; against an
+empty holder the same input would land as ~1,400. The two paths land within ~1% of each other on the
+full pass.
 
 Wire volume, both encodings measured off the same generated batch (a captured 5.8 MB request run
 straight through `generate_dynamic_offers`, 57,842 offers, framed both ways by the crate's own
@@ -339,18 +310,18 @@ this response is the *stage B* capture taken through the C# path for the deseria
 (58,137 frames); it and the 43.2 MB above are the same encoding measured on two different passes.
 
 Offer counts differ between captures — 57,842 here, 58,137 in the attribution capture, 58,558
-`RagfairOffer`/nickname instances in its type census. A production pass is unseeded and therefore
-nondeterministic (offer counts are per-template `RandomUtil.GetInt` rolls), so these are three
-captures of the same workload varying ~0.7% run to run, not three measurements of one number.
+`RagfairOffer`/nickname instances in its type census. A production pass is unseeded (offer counts are
+per-template `RandomUtil.GetInt` rolls), so these are three captures of the same workload varying
+~0.7% run to run.
 
 Working set over the timed phase: native grows +443 MB on the full pass against the legacy path's
 +0 MB; peak RSS is process-wide and cumulative, so only the growth figures are comparable, and only
 within one invocation.
 
-### Checkpoint series — what the native-parity effort bought
+### Checkpoint series — native-parity effort
 
-Each row is one `RagfairBenchmarkTests` invocation, medians, same machine, native and legacy from
-the **same run**. Ratio is native / legacy on the full pass; above 1.00x means native is slower.
+Each row is one `RagfairBenchmarkTests` invocation, medians, same machine, native and legacy from the
+same run. Ratio is native / legacy on the full pass; above 1.00x means native is slower.
 
 | Stage | Commit | Full pass native | Full pass legacy | Ratio | Regen native | Regen legacy | Alloc/run native |
 |---|---|---|---|---|---|---|---|
@@ -362,58 +333,42 @@ the **same run**. Ratio is native / legacy on the full pass; above 1.00x means n
 | One-pass fresh-id offer items | `df07d54` | 625.78 ms | 426.57 ms | **1.47x** | 74.59 ms | 10.25 ms | 219.3 MB |
 | Stamp-gated slice cache | `6d975e4` | 670.63 ms | 460.29 ms | **1.45x** | **15.19 ms** | 9.92 ms | 206.6 MB |
 
-**Stage A** moved generation, not the pass: the `CreateOffersFromAssort` timer inside the native
-full pass fell from ~710 ms to 91–103 ms across the run's samples, while the full pass only fell
-1550 → 885 ms. Everything after that is transport work.
+**Stage A:** the `CreateOffersFromAssort` timer inside the native full pass fell from ~710 ms to
+91–103 ms across the run's samples; the full pass fell 1550 → 885 ms.
 
-**Stage C regressed on arrival** — 676.12 → 719.39 ms with native alloc/run up 208.4 → 358.3 MB
-(+72%) at a flat offer count, reproduced back-to-back. The cost was in the C# reader, not the
-codec: a `ToArray` copy per frame, a fresh `Utf8JsonWriter` pair per transcoded value, a reflection
-`GetValue` per item, and ~2M `ReadString` map-key allocations per pass. Removing all four
-(`a2acb6f`) brought it to 663.95 ms / 219.9 MB — msgpack then beat the stage B JSON frames it
-replaced, by 12 ms, at +11.5 MB.
+**Stage C:** 676.12 → 719.39 ms, native alloc/run 208.4 → 358.3 MB (+72%) at a flat offer count,
+reproduced back-to-back. Traced to the C# reader: a `ToArray` copy per frame, a fresh
+`Utf8JsonWriter` pair per transcoded value, a reflection `GetValue` per item, and ~2M `ReadString`
+map-key allocations per pass. Removing all four (`a2acb6f`): 663.95 ms / 219.9 MB.
 
-**The one-pass fresh-id change is real but small.** Full-pass medians cannot resolve it: run-to-run
-spread on the native median is ±25 ms, and an A/B with the change stashed and unstashed read
-1.46x/1.46x before against 1.47x/1.53x after. The finer instrument is the `CreateOffersFromAssort`
-timer, which measures only the leg the change touches — median 92 → 85 ms, **~8% off a ~92 ms
-generation leg**, which is ~1% of a transport-bound pass.
+**One-pass fresh-id change:** full-pass medians have ±25 ms run-to-run spread; an A/B with the change
+stashed and unstashed read 1.46x/1.46x before against 1.47x/1.53x after. The `CreateOffersFromAssort`
+timer, which measures only the leg the change touches: median 92 → 85 ms.
 
-### The 1.25x parity gate — MISSED
+### Full-pass residual breakdown
 
-The effort's success criterion was a native full-pass median at or under **1.25x** the same-run
-legacy median. The final state is **1.47x** (625.78 / 426.57; the bar was 533.2 ms), and the
-preceding checkpoint was 1.45x. **The gate is missed and every in-scope lever is spent.**
+Final checkpoint ratio: **1.47x** (625.78 / 426.57 ms); preceding checkpoint: 1.45x.
 
-What was achieved instead: the full pass went **1550 → 626 ms, a 2.48x improvement** on the native
-path, and native allocation fell below legacy's (219 MB vs 283 MB). Native is now within ~200 ms of
-legacy rather than a second behind it, but it is still behind it.
+Full pass native: 1550 → 626 ms across the checkpoint series (2.48x). Native allocation: 219 MB vs
+legacy's 283 MB.
 
-Where the residual sits, measured rather than assumed:
+Phase breakdown of the residual, measured at real per-pass counts:
 
-- **Not generation.** The Rust half is ~85 ms of a ~626 ms pass.
-- **Not the payload projection.** `BuildRequest` is 13 ms, ~2% of the full pass.
-- **Not converter taxes.** Timed at their real per-pass instance counts against the shipped
-  `Parallel.For` deserialize (~305 ms, 41.4 MB / 58,137 frames): the Ceciler-injected
-  `[JsonExtensionData]` dictionary is **3.4 ms**, `MongoId`'s ctor validation over 425,550 ids is
-  **11.1 ms**, and `string.Intern` on 58,558 nicknames is **15.1 ms** — ~30 ms all together, 15x
-  under the 50 ms bar that would have justified changing the injected property. (The 3.4 ms is the
+- Rust generation: ~85 ms of the ~626 ms pass.
+- `BuildRequest`: 13 ms (~2%).
+- Converter taxes against the shipped `Parallel.For` deserialize (~305 ms, 41.4 MB / 58,137 frames):
+  Ceciler-injected `[JsonExtensionData]` dictionary 3.4 ms, `MongoId` ctor validation over 425,550
+  ids 11.1 ms, `string.Intern` on 58,558 nicknames 15.1 ms — ~30 ms combined. (The 3.4 ms is the
   dictionaries' allocation cost measured in isolation, not System.Text.Json's metadata overhead for
   them.)
-- **It is C#-side response binding plus GC.** The pass materialises **366,851** `Models` instances
-  (`Item` 83,292, `Upd` 60,325, `RagfairOffer`/`OfferRequirement`/`RagfairOfferUser` 58,558 each,
-  `UpdRepairable` 43,300, tail 4,260). After the ~30 ms of taxes above, the remaining ~275 ms is
-  System.Text.Json binding those objects, which no converter-level change reaches. Legacy has no
-  equivalent leg at all — it never crosses a wire. (That ~305 ms leg is larger than the ~199 ms
-  native is behind legacy; the two do not subtract, because the rest of the native pass is cheaper
-  than the C# work legacy does in its place. Removing the leg entirely would put native ahead.)
+- Remaining ~275 ms: System.Text.Json binding of 366,851 `Models` instances (`Item` 83,292, `Upd`
+  60,325, `RagfairOffer`/`OfferRequirement`/`RagfairOfferUser` 58,558 each, `UpdRepairable` 43,300,
+  tail 4,260). Legacy has no equivalent leg — it never crosses a wire.
 
-**The fixture runs workstation GC; the shipped server does not.**
-`<ServerGarbageCollection>true</ServerGarbageCollection>` is set on `SPTarkov.Server.csproj` only,
-not on `UnitTests.csproj`, so at ~220 MB per pass the fixture's parallel deserialize is
-GC-throttled — single-threaded deserialize (268.6 ms) actually beat the `Parallel.For` one
-(304.8 ms) in the attribution run. Re-running the whole benchmark with `DOTNET_gcServer=1` on the
-same commit and machine moves **both** sides, so the verdict does not change:
+**GC mode.** `<ServerGarbageCollection>true</ServerGarbageCollection>` is set on
+`SPTarkov.Server.csproj` only, not on `UnitTests.csproj`; at ~220 MB per pass the fixture's parallel
+deserialize is GC-throttled — single-threaded deserialize (268.6 ms) beat the `Parallel.For` one
+(304.8 ms) in the attribution run. Same commit and machine with `DOTNET_gcServer=1`:
 
 ```
 full pass native (rust)     median=558.95 ms  min=417.63  alloc/run=209.1 MB
@@ -421,49 +376,39 @@ full pass legacy (C# 4.1.2) median=329.51 ms  min=300.32  alloc/run=282.6 MB
                             ratio 1.70x (vs 1.53x under workstation GC at the same commit)
 ```
 
-Server GC takes ~117 ms off native and ~113 ms off legacy — the ratio is unchanged to slightly
-worse while both absolute numbers improve. Read the shipped server's real numbers off the server-GC
-figures and the *comparison* off either; the gate was evaluated in the fixture's own GC mode, for
-consistency with the baseline it was set against.
+Server GC takes ~117 ms off native and ~113 ms off legacy. The checkpoint series above was measured
+in the fixture's own (workstation) GC mode, for consistency with the baseline it was compared
+against.
 
-**The regeneration pass was a different problem, and it is fixed.** ~60% of it was building and
-serialising the 5.8 MB call-invariant request slice, against ~1% of a full pass — the one place
-where a request-side cache would pay. `DatabaseMutationStamp` and the native slice cache took it
-from 74.59 ms to **11.46 ms** warm; see *The slice cache* above.
+Regeneration pass: 74.59 ms → 11.46 ms warm via the slice cache (see *The slice cache* above); ~60%
+of the pre-cache cost was building and serialising the 5.8 MB call-invariant request slice, against
+~1% of a full pass.
 
 Ragfair-specific caveats, on top of the general ones below:
 
-- **The legacy path is parallel, and so is the native path now.** `GenerateDynamicOffersLegacy`
-  fans one `Task.Factory.StartNew` per assort entry across the thread pool; since `5fefd61` the
-  native side fans the unseeded batch walk across rayon (seeded runs stay sequential for parity),
-  and the C# side deserialises the response frames with `Parallel.For`. Both paths are using the
-  12 threads.
+- **Both paths are parallel.** `GenerateDynamicOffersLegacy` fans one `Task.Factory.StartNew` per
+  assort entry across the thread pool; since `5fefd61` the native side fans the unseeded batch walk
+  across rayon (seeded runs stay sequential for parity), and the C# side deserialises the response
+  frames with `Parallel.For`. Both paths use the 12 threads.
 - **Every timed run works on a pre-filled flea** (see Workload). Both paths pay the holder's
-  per-template cap checks against a full `_fakePlayerOffers` index, so the absolute numbers include
-  work an empty-flea pass would not do — but symmetrically, and this is the state the real
-  regeneration pass runs in.
+  per-template cap checks against a full `_fakePlayerOffers` index.
 - **n=5 after 1 warmup**, not the 20 the other fixtures use — a full pass is seconds, not
-  milliseconds. Spread is now wide relative to the differences being measured (native full pass
-  614-872 ms, and ±25 ms run-to-run on the median), so a change worth less than ~5% of the pass
-  cannot be resolved here — use the `CreateOffersFromAssort` timer the native path logs instead.
+  milliseconds. Native full pass spread is 614-872 ms, ±25 ms run-to-run on the median; changes
+  under ~5% of the pass cannot be resolved here — use the `CreateOffersFromAssort` timer the native
+  path logs instead.
 - **The plain native arms run with the cache warm.** Nothing bumps the stamp between runs, so after
-  the cold arm every timed pass is a cache hit — which is what a real server does between mutations.
-  The cold arm exists to price the miss; do not read it as the default.
+  the cold arm every timed pass is a cache hit.
 - **Regeneration input is fixed.** The same 1,400 single-item lists every run, sampled from the head
-  of the assort rather than from offers that actually expired. Real expired offers skew towards
-  fast-selling templates and can carry item trees.
+  of the assort rather than from offers that actually expired.
 - **First-call effects are warmed away.** One warmup per phase covers JIT, the native library load
-  and the assort generation's first pass. The server's real first flea pass at startup costs more on
-  both paths.
-- **Native is measured first in each scenario**, so the legacy phase inherits a warmer process (and
-  a heap already grown to the native path's high-water mark). That biases mildly *against* native —
-  it does not account for the remaining 1.47x, but the gap is not smaller than measured.
+  and the assort generation's first pass.
+- **Native is measured first in each scenario**, so the legacy phase inherits a warmer process and a
+  heap already grown to the native path's high-water mark.
 
 ## Results — repeatable quest generation
 
 Recorded 2026-08-16 on `b0a3e27` plus the working-tree fixture that produced them. Same machine as
-the bot-generation and ragfair figures above, **not** the machine the location-loot figures came
-from.
+the bot-generation and ragfair figures above, not the machine the location-loot figures came from.
 
 | | |
 |---|---|
@@ -477,7 +422,7 @@ from.
 **Workload.** One `Generate` call per quest type — `Elimination`, `Completion`, `Exploration`,
 `Pickup` — on the live shipped database, at the midpoint of the second shipped level band for that
 type, for the first trader whitelisted for it, unseeded the way production runs. The
-`QuestTypePool` the controller builds is rebuilt per run *outside* the stopwatch, because the
+`QuestTypePool` the controller builds is rebuilt per run outside the stopwatch, because the
 generators consume the pool they are handed.
 
 **Three arms per type**, all asserted rather than assumed — the fixture checks `LastPathTaken` and
@@ -492,9 +437,9 @@ generators consume the pool they are handed.
 
 A fourth phase times `BuildInvariantSlice()` on its own.
 
-### Wall clock
+### Elapsed time per quest
 
-Two full invocations of the fixture; the second median is the honest error bar on the first.
+Two full invocations of the fixture; the second median is the error bar on the first.
 
 | Type | Arm | median | median (2nd run) | mean | min | max | alloc/run |
 |---|---|---|---|---|---|---|---|
@@ -512,23 +457,22 @@ Two full invocations of the fixture; the second median is the honest error bar o
 | Pickup | **native, slice warm** | **3.20 ms** | 3.20 ms | 3.26 ms | 3.14 ms | 4.00 ms | 0.0 MB |
 | — | `BuildInvariantSlice` only | 9.50 ms | 9.75 ms | 11.09 ms | 6.51 ms | 21.66 ms | 6.8 MB |
 
-Speedup on median wall clock, legacy against the warm native path — the pairing a stock server runs:
+Speedup on median elapsed time per quest, legacy against the warm native path — the pairing a stock
+server runs:
 
-| Type | speedup | reading |
+| Type | speedup (run 1 / run 2) | other data points |
 |---|---|---|
-| Elimination | **4.62x / 4.95x** | native is 4-5x faster (a third invocation read 6.24x, see below) |
-| Completion | **0.32x / 0.32x** | native is ~3.1x slower |
-| Exploration | 0.94x / 0.94x | level, native ~0.2 ms behind |
-| Pickup | 0.91x / 0.88x | level, native ~0.3 ms behind |
+| Elimination | **4.62x / 4.95x** | third invocation: 6.24x |
+| Completion | **0.32x / 0.32x** | |
+| Exploration | 0.94x / 0.94x | |
+| Pickup | 0.91x / 0.88x | |
 
-Exploration and Pickup are the floor showing through: a warm native call costs ~3.2 ms whatever it
-generates, and those two quests are ~2.9 ms of C# work, so the native path spends its whole budget
-on the varying half of the request and the FFI round trip and comes out a fraction of a millisecond
-behind. Elimination is where the port pays — 15-17 ms of C# against the same ~3.4 ms floor.
+A warm native call costs ~3.2 ms regardless of quest type. Exploration and Pickup generate ~2.9 ms of
+C# work in the legacy path; Elimination generates 15-17 ms; Completion generates 20-22 ms.
 
 ### The slice, and what a C#-side memo could buy
 
-The cost of sending the invariant slice is the cold median minus the warm median, per send:
+Cost of sending the invariant slice, cold median minus warm median, per send:
 
 | Type | cold − warm (run 1 / run 2) |
 |---|---|
@@ -537,75 +481,54 @@ The cost of sending the invariant slice is the cold median minus the warm median
 | Exploration | 42.78 / 43.44 ms |
 | Pickup | 42.18 / 42.49 ms |
 
-**A full send costs ~43 ms and ~10.6 MB of managed allocation, every call.** That is what a modded
-server pays per repeatable quest, and it is the same figure for every quest type — the slice does not
-depend on which one is being generated.
+A full send costs ~43 ms and ~10.6 MB of managed allocation per call, the same figure across quest
+types.
 
-Of that ~43 ms, **`BuildInvariantSlice()` is 9.50 / 9.75 ms** (6.8 MB of the 10.6 MB): both price
-maps over the whole items table, the items view, every default weapon preset, and the boss spawns
-and extracts of every location. The remaining **~33 ms and ~3.8 MB is the serialise of the built
-slice plus the native side's parse of it**, neither of which a C#-side cache of the *object* reaches
-— the request is serialised whole, invariant and varying together.
+Of that ~43 ms, `BuildInvariantSlice()` is **9.50 / 9.75 ms** (6.8 MB of the 10.6 MB): both price
+maps over the whole items table, the items view, every default weapon preset, and the boss spawns and
+extracts of every location. The remaining ~33 ms and ~3.8 MB is the serialise of the built slice plus
+the native side's parse of it — the request is serialised whole, invariant and varying together.
 
-So a stamp-keyed C#-side memo of the built slice would remove **~10 ms of a ~43 ms cost — under a
-quarter of it — and only for servers that are ineligible for the native cache in the first place**.
-A stock server pays none of this. That is the measurement the memo was ruled out on, and it holds:
-the expensive half is on the wire, not in the projection.
+A stamp-keyed C#-side memo of the built slice would remove `BuildInvariantSlice()`'s ~10 ms out of
+the ~43 ms full-send cost, for servers ineligible for the native cache (mods loaded without
+`TrustNativeRequestCacheWithMods`). A stock server pays none of this.
 
-### The honest verdict
+### Modded-server cold-path ratios
 
-**On a stock server the port is a win on the type that costs anything and a wash on two others —
-and a loss on Completion.** Completion's warm native call is 67.5 ms against legacy's 21.6 ms. That
-is not transport: its cold-minus-warm gap (~44 ms) is the same as every other type's, so the extra
-~64 ms sits *inside* the native call, after the slice is already parsed. This is the mirror image of
-the bot and ragfair results, where the residual was payload transport and generation was a few
-milliseconds.
+Cold (slice sent every call) against legacy: Completion 5.2x slower, Elimination ~2.9x slower (using
+the corrected ~46 ms cold figure, not the 87 ms median in the table), Exploration and Pickup ~15x
+slower.
 
-**On a modded server the native path loses on every type** — cold against legacy is 5.2x slower on
-Completion, ~2.9x on Elimination (against its corrected ~46 ms cold, not the 87 ms median in the
-table) and ~15x on Exploration and Pickup, because ~43 ms of fixed slice cost lands on a 3-22 ms
-quest. That is the cost of a mod being *loaded*; a mod that Harmony-patches
-any frozen 4.1.2 member, or substitutes a collaborator, already forces the legacy path and pays
-none of it.
-
-The unprofiled candidate is the per-tpl work Completion does over the *whole* items table twice
-(`get_items_to_retrieve_pool` → `is_valid_reward_item`, then the reward pass): `is_of_baseclasses`
-walks a template's parent chain on every call with no cache, where the C# path reads
-`ItemBaseClassService`'s prebuilt one. Nothing here proves that — it is a place to look, not a
-finding.
+Completion's warm call is 67.5 ms against legacy's 21.6 ms; its cold-minus-warm gap (~44 ms) matches
+the other types', so the difference sits inside the native call after the slice is already parsed.
 
 Repeatable-quest-specific caveats, on top of the general ones below:
 
 - **The Elimination cold arm reads ~40 ms high, and it is measurement order.** It is the first
   native phase in the process; its per-run timings sit at 78-107 ms and fall to 60 and 45 ms on the
-  last two runs, and its min (43.8 ms) matches the steady cold median of the other three types.
-  Read Elimination's cold cost as ~46 ms like the rest, and its 87 ms median — and the 84 ms slice
-  figure derived from it — as the first native phase paying for heap growth. Same artifact as the
-  bot fixture's assault-vs-usec gap.
+  last two runs, and its min (43.8 ms) matches the steady cold median of the other three types. Read
+  Elimination's cold cost as ~46 ms like the rest.
 - **The Completion legacy arm's mean is not its cost.** Its first three timed runs are 96, 64 and 54
-  ms against a steady ~21 ms: two warmups do not fully hydrate the caches its reward pass hits. The
-  median (21.6 ms) is unaffected, which is why the median is the headline everywhere here.
+  ms against a steady ~21 ms. The median (21.6 ms) is unaffected.
 - **The Elimination legacy median moves between invocations** — 15.60, 16.69 and 21.25 ms over three
   runs, each tight within itself (±3 ms). The warm native arm does not move at all (3.38 / 3.38 /
-  3.40 ms), so the Elimination speedup is a **4.6-6.2x** band, not the 4.62x the first table row
+  3.40 ms), so the Elimination speedup is a **4.6-6.2x** band, not just the 4.62x the first table row
   reads.
 - **One band, one trader, unseeded.** The midpoint of the second shipped level band and the first
-  whitelisted trader per type. Repeatable quests vary with both, and an unseeded run draws a
-  different quest every time — the spread columns include that variation.
+  whitelisted trader per type. An unseeded run draws a different quest every time; the spread columns
+  include that variation.
 - **No RSS figures**, and the warm arms' allocation rounds to 0.0-0.1 MB, so treat those as "under
-  100 KB" rather than as measurements. `alloc/run` also includes each iteration's `BuildPool()` -
-  itself under ~100 KB, and it cancels out of the cold-minus-warm delta, which is where the slice's
-  ~10.6 MB is read.
+  100 KB" rather than as measurements. `alloc/run` also includes each iteration's `BuildPool()` —
+  itself under ~100 KB, and it cancels out of the cold-minus-warm delta.
 - **Workstation GC**, as with the ragfair fixture: `<ServerGarbageCollection>` is set on
-  `SPTarkov.Server.csproj`, not on `UnitTests.csproj`. It moves both paths.
+  `SPTarkov.Server.csproj`, not on `UnitTests.csproj`.
 
 ## Caveats
 
-- **Wall clock spread is wide** — native min-to-max is 309–423 ms on an otherwise idle machine.
+- **Elapsed-time spread is wide** — native min-to-max is 309–423 ms on an otherwise idle machine.
   Treat differences under ~10% between runs as noise; the fixture does no outlier rejection and
   reports no confidence interval.
-- **One map.** `bigmap` only. Maps differ enormously in loot volume, so the speedup does not
-  transfer to other locations unmeasured.
+- **One map.** `bigmap` only. Maps differ enormously in loot volume.
 - **A mod changes what is measured.** `UseLegacyPath()` also returns true when any frozen 4.1.2
   protected member carries a live Harmony patch. With such a mod loaded the server runs the legacy
   path in production regardless of these numbers.
