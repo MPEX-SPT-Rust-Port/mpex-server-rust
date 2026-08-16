@@ -22,6 +22,12 @@ internal sealed class FileLogHandler : BaseLogHandler
     /// </summary>
     private readonly Dictionary<string, nint> _sinks = [];
 
+    /// <summary>
+    /// Set under <see cref="_sinksLock"/> by <see cref="DisposeAsync"/>. Every native call happens
+    /// under that lock, so a handle can never be closed out from under an in-flight write.
+    /// </summary>
+    private bool _disposed;
+
     public override LoggerType LoggerType { get; } = LoggerType.File;
 
     public override void Log(SptLogMessage message, BaseSptLoggerReference reference)
@@ -33,25 +39,28 @@ internal sealed class FileLogHandler : BaseLogHandler
             throw new Exception("FilePath and FilePattern are required to use FileLogger");
         }
 
-        nint sink;
+        var line = Encoding.UTF8.GetBytes(FormatMessage(message.Message, message, reference));
 
         lock (_sinksLock)
         {
-            sink = GetOrCreateSink(config);
-        }
-
-        if (sink == 0)
-        {
-            return;
-        }
-
-        var line = Encoding.UTF8.GetBytes(FormatMessage(message.Message, message, reference));
-
-        unsafe
-        {
-            fixed (byte* linePtr = line)
+            if (_disposed)
             {
-                NativeMethods.LogWrite(sink, linePtr, (nuint)line.Length);
+                return;
+            }
+
+            var sink = GetOrCreateSink(config);
+
+            if (sink == 0)
+            {
+                return;
+            }
+
+            unsafe
+            {
+                fixed (byte* linePtr = line)
+                {
+                    NativeMethods.LogWrite(sink, linePtr, (nuint)line.Length);
+                }
             }
         }
     }
@@ -127,6 +136,13 @@ internal sealed class FileLogHandler : BaseLogHandler
     {
         lock (_sinksLock)
         {
+            if (_disposed)
+            {
+                return ValueTask.CompletedTask;
+            }
+
+            _disposed = true;
+
             foreach (var sink in _sinks.Values)
             {
                 if (sink != 0)
@@ -134,8 +150,6 @@ internal sealed class FileLogHandler : BaseLogHandler
                     NativeMethods.LogClose(sink);
                 }
             }
-
-            _sinks.Clear();
         }
 
         GC.SuppressFinalize(this);

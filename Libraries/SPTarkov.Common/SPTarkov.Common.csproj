@@ -21,6 +21,9 @@
     <PackageReference Include="ZLinq" Version="1.5.6" />
   </ItemGroup>
   <ItemGroup>
+    <InternalsVisibleTo Include="UnitTests" />
+  </ItemGroup>
+  <ItemGroup>
     <None Include="..\..\LICENSE" Pack="true" Visible="false" PackagePath="" />
   </ItemGroup>
   <!-- Emits the Spectre.Console.Ansi facade; see the note in Build.props. -->
