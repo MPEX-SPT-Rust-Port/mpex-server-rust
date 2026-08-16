@@ -31,7 +31,7 @@ of one line directly (current ABI 15).
 | The whole log pipeline — filters, level gates, per-target formatting, console + file sinks | `SPTLoggerDispatcher.Log` | `spt_logger_init`, `spt_log_emit`, `spt_logger_close` |
 
 Also working: mod-added fields on game data survive the round trip (`#[serde(flatten)] extra` maps
-mirroring Ceciler's `[JsonExtensionData]`); native log lines are replayed through the C# logger;
+mirroring Ceciler's `[JsonExtensionData]`); native generator diagnostics are replayed through the C# logger;
 seeded-RNG parity at the primitive level (xoshiro256\*\*, twin known-answer tests both sides).
 
 ## Broken / known divergences
@@ -187,7 +187,7 @@ seeded-RNG parity at the primitive level (xoshiro256\*\*, twin known-answer test
   effect on `PARKED_RNG`, whose only consumer is the loot dynamic entry point, which never runs on
   a rayon worker.
 - **The ragfair response is a framed MessagePack envelope, not a JSON buffer.** One length-prefixed
-  frame per offer behind a header frame (since ABI **10**, encoding tag 1; current ABI is 14), which
+  frame per offer behind a header frame (since ABI **10**, encoding tag 1; current ABI is 15), which
   C# deserialises with `Parallel.For` over the frames straight out of the native buffer — no
   whole-response JSON document is ever materialised. Only the ragfair response uses it; every other
   export is still JSON in / JSON out.
@@ -247,7 +247,7 @@ seeded-RNG parity at the primitive level (xoshiro256\*\*, twin known-answer test
   the stamp. A modded (ineligible) server therefore full-sends every call, ~43 ms and ~10.6 MB of
   managed allocation per quest, the same figure for every quest type
   ([BENCHMARK.md](BENCHMARK.md) § *The slice, and what a C#-side memo could buy*).
-- **The quest request is `{invariantStamp, invariant?, varying}` (ABI 14)**, the same shape and the
+- **The quest request is `{invariantStamp, invariant?, varying}` (since ABI 14)**, the same shape and the
   same status codes as ragfair's: `0` OK, `3` ERROR, `4` `STATUS_STALE_SLICE` — which surfaces as
   `NativeStaleSliceException` and self-heals with one full-send retry.
 - **The `QuestTypePool` round-trips.** The generators consume the pool they are handed, so the

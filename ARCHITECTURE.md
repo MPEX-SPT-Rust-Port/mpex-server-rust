@@ -152,7 +152,9 @@ startup outside DEBUG. That format is a contract shared with `rust/spt-native/sr
 ## Native Rust layer
 
 `rust/spt-native` is a `cdylib` called over C ABI from `Libraries/SPTarkov.Server.Core/Native/`
-(`NativeMethods.cs`, `SptNative.cs`). It owns database hash verification, the ported generation
+(`NativeMethods.cs`, `SptNative.cs`) — and, for the log exports, from the twin
+`Libraries/SPTarkov.Common/Native/NativeMethods.cs`, because `SPTarkov.Common` cannot reference
+Server.Core. It owns database hash verification, the ported generation
 paths — location loot, reward loot, whole-bot inventory, dynamic ragfair offers, repeatable quests —
 and the whole log pipeline. Sixteen exports, JSON in / JSON out — except the ragfair response, which
 comes back as a framed MessagePack envelope, and the three log exports, which pass one line's fields
