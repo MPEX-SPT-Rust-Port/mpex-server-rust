@@ -370,6 +370,12 @@ pub struct Logger {
     entries: Vec<LoggerEntry>,
 }
 
+// The FFI layer keeps one `Logger` in a process-global and emits from every request thread.
+const _: fn() = || {
+    fn assert_sync<T: Sync>() {}
+    assert_sync::<Logger>();
+};
+
 impl Logger {
     /// Parses the raw `sptLogger.json` bytes and opens every sink. Unparseable JSON is the only
     /// fatal error; a file target that cannot be opened is reported to stderr and skipped, the
@@ -764,6 +770,7 @@ mod tests {
         let config = file_config(&blocker.join("logs"), "Information", "");
 
         let logger = Logger::from_json(config.as_bytes()).unwrap();
+        assert!(logger.entries.is_empty());
         logger.emit(&record("App", "goes nowhere, must not panic"));
         logger.close();
     }

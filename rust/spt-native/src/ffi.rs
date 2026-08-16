@@ -1,5 +1,6 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 use rayon::prelude::*;
 use serde::Serialize;
@@ -7,6 +8,7 @@ use serde::de::DeserializeOwned;
 
 use crate::bot::bot_inventory_generator::{generate_inventory, generate_inventory_batch};
 use crate::log_sink::FileSink;
+use crate::logger::{LogLevel, LogRecord, Logger};
 use crate::loot::item_helper::LootError;
 use crate::loot::location_loot_generator::{generate_dynamic_loot, generate_static_containers};
 use crate::loot::loot_generator::{
@@ -526,6 +528,141 @@ pub unsafe extern "C" fn spt_log_close(handle: *mut FileSink) -> i32 {
     }
 }
 
+/// The process-wide log pipeline. A plain `Mutex<Option>` rather than a `OnceLock` so
+/// `spt_logger_close` can take it down (and tests can re-initialise afterwards).
+static LOGGER: Mutex<Option<Logger>> = Mutex::new(None);
+
+fn logger_guard() -> std::sync::MutexGuard<'static, Option<Logger>> {
+    LOGGER
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Initialises the log pipeline from the raw bytes of `sptLogger.json`. Idempotent: a second call
+/// while initialised is `STATUS_OK` and ignored. On `STATUS_ERROR` the parse-error text is in the
+/// out-buffer; the pipeline stays uninitialised and every later emit is a silent no-op - a broken
+/// log config must not stop the server.
+///
+/// # Safety
+/// `config_ptr` must point to `config_len` readable bytes of UTF-8; `out_ptr` and `out_len` must
+/// be valid for writes. A returned buffer is released with `spt_buf_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn spt_logger_init(
+    config_ptr: *const u8,
+    config_len: usize,
+    out_ptr: *mut *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    if config_ptr.is_null() || out_ptr.is_null() || out_len.is_null() {
+        return STATUS_BAD_ARGS;
+    }
+
+    unsafe {
+        *out_ptr = std::ptr::null_mut();
+        *out_len = 0;
+    }
+
+    let bytes = unsafe { std::slice::from_raw_parts(config_ptr, config_len) };
+
+    match catch_unwind(AssertUnwindSafe(|| {
+        let mut guard = logger_guard();
+        if guard.is_some() {
+            return Ok(());
+        }
+        Logger::from_json(bytes).map(|logger| {
+            *guard = Some(logger);
+        })
+    })) {
+        Ok(Ok(())) => STATUS_OK,
+        Ok(Err(error)) => {
+            unsafe { write_buffer(error.into_bytes(), out_ptr, out_len) };
+            STATUS_ERROR
+        }
+        Err(_) => STATUS_PANIC,
+    }
+}
+
+/// Queues one log message through the pipeline: filters, level gate, per-target formatting, and
+/// the console/file writer threads. `STATUS_OK` no-op when the pipeline is uninitialised - init
+/// failure was already reported once, per-line noise would drown it.
+///
+/// # Safety
+/// Each pointer must point to its length in readable UTF-8 bytes, unless the length is 0 - an
+/// empty `ReadOnlySpan<byte>` marshals as a null pointer, which must not be rejected.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn spt_log_emit(
+    category_ptr: *const u8,
+    category_len: usize,
+    message_ptr: *const u8,
+    message_len: usize,
+    exception_ptr: *const u8,
+    exception_len: usize,
+    thread_name_ptr: *const u8,
+    thread_name_len: usize,
+    level: i32,
+    tid: i32,
+    unix_millis: i64,
+) -> i32 {
+    fn as_str<'a>(ptr: *const u8, len: usize) -> Option<&'a str> {
+        if len == 0 {
+            return Some("");
+        }
+        if ptr.is_null() {
+            return None;
+        }
+        std::str::from_utf8(unsafe { std::slice::from_raw_parts(ptr, len) }).ok()
+    }
+
+    let (Some(category), Some(message), Some(exception), Some(thread_name)) = (
+        as_str(category_ptr, category_len),
+        as_str(message_ptr, message_len),
+        as_str(exception_ptr, exception_len),
+        as_str(thread_name_ptr, thread_name_len),
+    ) else {
+        return STATUS_BAD_ARGS;
+    };
+
+    let Some(level) = LogLevel::from_i32(level) else {
+        return STATUS_BAD_ARGS;
+    };
+
+    let record = LogRecord {
+        category,
+        message,
+        exception,
+        thread_name,
+        level,
+        tid,
+        unix_millis,
+    };
+
+    match catch_unwind(AssertUnwindSafe(|| {
+        if let Some(logger) = logger_guard().as_ref() {
+            logger.emit(&record);
+        }
+    })) {
+        Ok(()) => STATUS_OK,
+        Err(_) => STATUS_PANIC,
+    }
+}
+
+/// Flushes every sink and joins the writer threads. Idempotent; a later `spt_logger_init` may
+/// re-initialise.
+///
+/// # Safety
+/// No pointer arguments; marked unsafe only for symmetry with the export family.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn spt_logger_close() -> i32 {
+    match catch_unwind(AssertUnwindSafe(|| {
+        if let Some(logger) = logger_guard().take() {
+            logger.close();
+        }
+    })) {
+        Ok(()) => STATUS_OK,
+        Err(_) => STATUS_PANIC,
+    }
+}
+
 /// # Safety
 /// `ptr` and `len` must come from a successful `spt_*` call that handed back a buffer, and be
 /// freed at most once.
@@ -563,7 +700,7 @@ mod tests {
         assert_eq!(spt_native_abi_version(), crate::ABI_VERSION);
         assert_eq!(
             crate::ABI_VERSION,
-            14,
+            15,
             "bump SptNative.ExpectedAbiVersion too"
         );
     }
@@ -1391,5 +1528,83 @@ mod tests {
 
         assert_eq!(status, STATUS_BAD_ARGS);
         assert_eq!(out_len, 0, "nothing may be written when out_ptr is null");
+    }
+
+    #[test]
+    fn logger_exports_roundtrip() {
+        let dir = TempDir::new().unwrap();
+        let config = format!(
+            r#"{{ "loggers": [ {{ "type": "File", "logLevel": "Information",
+                "format": "%message%", "filePath": {path:?}, "filePattern": "spt.log",
+                "maxFileSizeMB": 10, "maxRollingFiles": 10, "filters": [] }} ] }}"#,
+            path = dir.path().display().to_string(),
+        );
+
+        let mut out_ptr: *mut u8 = std::ptr::null_mut();
+        let mut out_len: usize = 0;
+
+        // Bad JSON: error status, message in the buffer, pipeline stays uninitialised.
+        let status = unsafe { spt_logger_init(b"nope".as_ptr(), 4, &mut out_ptr, &mut out_len) };
+        assert_eq!(status, STATUS_ERROR);
+        assert!(!out_ptr.is_null());
+        unsafe { spt_buf_free(out_ptr, out_len) };
+
+        // Emit before init is an OK no-op.
+        let status = emit("Cat", "dropped", "", "main");
+        assert_eq!(status, STATUS_OK);
+
+        // Real init; the second init is an idempotent no-op.
+        let mut out_ptr: *mut u8 = std::ptr::null_mut();
+        let mut out_len: usize = 0;
+        let status =
+            unsafe { spt_logger_init(config.as_ptr(), config.len(), &mut out_ptr, &mut out_len) };
+        assert_eq!(status, STATUS_OK);
+        let status =
+            unsafe { spt_logger_init(config.as_ptr(), config.len(), &mut out_ptr, &mut out_len) };
+        assert_eq!(status, STATUS_OK);
+
+        assert_eq!(emit("Cat", "hello", "", "main"), STATUS_OK);
+        // A bad level is rejected.
+        let status = unsafe {
+            spt_log_emit(
+                "Cat".as_ptr(),
+                3,
+                "x".as_ptr(),
+                1,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                42,
+                1,
+                0,
+            )
+        };
+        assert_eq!(status, STATUS_BAD_ARGS);
+
+        // Close flushes; a second close is a no-op.
+        assert_eq!(unsafe { spt_logger_close() }, STATUS_OK);
+        assert_eq!(unsafe { spt_logger_close() }, STATUS_OK);
+
+        let contents = fs::read_to_string(dir.path().join("spt.log")).unwrap();
+        assert_eq!(contents, "hello\n");
+    }
+
+    fn emit(category: &str, message: &str, exception: &str, tname: &str) -> i32 {
+        unsafe {
+            spt_log_emit(
+                category.as_ptr(),
+                category.len(),
+                message.as_ptr(),
+                message.len(),
+                exception.as_ptr(),
+                exception.len(),
+                tname.as_ptr(),
+                tname.len(),
+                2, // Information
+                1,
+                0,
+            )
+        }
     }
 }
