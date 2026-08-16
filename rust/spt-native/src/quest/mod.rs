@@ -1,3 +1,4 @@
+pub mod completion;
 pub mod elimination;
 pub mod helper;
 pub mod models;
