@@ -12,6 +12,7 @@ use crate::loot::loot_generator::{
     create_forced_loot, create_random_loot, get_random_loot_container_loot,
     get_sealed_weapon_case_loot,
 };
+use crate::quest::{QuestError, generate_repeatable_quest};
 use crate::ragfair::models::{DynamicOffersHeader, DynamicOffersResult};
 use crate::ragfair::offer_generator::{RagfairError, generate_dynamic_offers};
 use crate::runtime::runtime;
@@ -22,7 +23,8 @@ pub const STATUS_BAD_ARGS: i32 = 1;
 pub const STATUS_PANIC: i32 = 2;
 /// Generation failed: the error message, not a result, is in the out-buffer.
 pub const STATUS_ERROR: i32 = 3;
-/// A slice-less ragfair request named a stamp this process has not cached; the caller resends.
+/// A slice-less ragfair or repeatable-quest request named a stamp this process has not cached; the
+/// caller resends.
 pub const STATUS_STALE_SLICE: i32 = 4;
 
 /// How a generator failure crosses the boundary: which status code, and what message buffer.
@@ -53,6 +55,22 @@ impl FfiFailure for RagfairError {
         match self {
             RagfairError::Loot(error) => error.message,
             RagfairError::StaleSlice => "no cached invariant slice for this stamp".to_string(),
+        }
+    }
+}
+
+impl FfiFailure for QuestError {
+    fn status(&self) -> i32 {
+        match self {
+            QuestError::Failed(_) => STATUS_ERROR,
+            QuestError::StaleSlice => STATUS_STALE_SLICE,
+        }
+    }
+
+    fn into_message(self) -> String {
+        match self {
+            QuestError::Failed(message) => message,
+            QuestError::StaleSlice => "no cached invariant slice for this stamp".to_string(),
         }
     }
 }
@@ -377,6 +395,31 @@ pub unsafe extern "C" fn spt_generate_dynamic_offers(
     }
 }
 
+/// One repeatable quest, from the cached invariant slice or the one this request carries.
+///
+/// # Safety
+/// See `spt_generate_static_containers`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn spt_generate_repeatable_quest(
+    req_ptr: *const u8,
+    req_len: usize,
+    out_ptr: *mut *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    unsafe {
+        run_generator_with(
+            req_ptr,
+            req_len,
+            out_ptr,
+            out_len,
+            generate_repeatable_quest,
+            |response| {
+                serde_json::to_vec(&response).expect("quest response serialization cannot fail")
+            },
+        )
+    }
+}
+
 /// # Safety
 /// `ptr` and `len` must come from a successful `spt_*` call that handed back a buffer, and be
 /// freed at most once.
@@ -414,7 +457,7 @@ mod tests {
         assert_eq!(spt_native_abi_version(), crate::ABI_VERSION);
         assert_eq!(
             crate::ABI_VERSION,
-            13,
+            14,
             "bump SptNative.ExpectedAbiVersion too"
         );
     }
@@ -1012,6 +1055,126 @@ mod tests {
         let miss = ragfair_request_with_stamp(42, false);
         let (status, _) = call_generate(spt_generate_dynamic_offers, miss.as_bytes());
         assert_eq!(status, STATUS_STALE_SLICE);
+    }
+
+    /// Every repeatable-quest call writes the quest family's own static slice slot — a different
+    /// slot from ragfair's, with its own lock.
+    fn quest_cache_lock() -> std::sync::MutexGuard<'static, ()> {
+        crate::quest::slice_cache::tests::CACHE_TEST_LOCK
+            .lock()
+            .unwrap()
+    }
+
+    /// A repeatable-quest request at `stamp`, with the slice sent or omitted, off the fixtures the
+    /// model tests already pin against the shipped database.
+    fn quest_request(stamp: i64, include_slice: bool, seed: Option<u64>) -> Vec<u8> {
+        let mut varying = crate::quest::models::tests::varying_value();
+        if let Some(seed) = seed {
+            varying["seed"] = serde_json::json!(seed);
+        }
+        let mut request = serde_json::json!({"invariantStamp": stamp, "varying": varying});
+        if include_slice {
+            request["invariant"] = crate::quest::models::tests::slice_value();
+        }
+
+        serde_json::to_vec(&request).expect("request serializes")
+    }
+
+    /// Blanks every 24-character hex run: the mongo ids the generators mint come off a process
+    /// counter and a clock, outside the seeded stream, so no seed pins them.
+    fn mask_ids(out: &[u8]) -> String {
+        let text = String::from_utf8(out.to_vec()).expect("the response is UTF-8");
+        let mut masked = String::with_capacity(text.len());
+        let mut run = String::new();
+        for character in text.chars() {
+            if character.is_ascii_hexdigit() {
+                run.push(character);
+                continue;
+            }
+            masked.push_str(if run.len() == 24 { "<id>" } else { &run });
+            run.clear();
+            masked.push(character);
+        }
+        masked.push_str(if run.len() == 24 { "<id>" } else { &run });
+
+        masked
+    }
+
+    #[test]
+    fn a_slice_less_quest_request_hits_the_cache_or_reports_stale() {
+        let _guard = quest_cache_lock();
+        // full send stores the slice under stamp 41
+        let (status, _) = call_generate(
+            spt_generate_repeatable_quest,
+            &quest_request(41, true, None),
+        );
+        assert_eq!(status, STATUS_OK);
+
+        // slice-less send with the same stamp generates from the cache
+        let (status, _) = call_generate(
+            spt_generate_repeatable_quest,
+            &quest_request(41, false, None),
+        );
+        assert_eq!(status, STATUS_OK);
+
+        // slice-less send with a different stamp is a stale-slice miss
+        let (status, out) = call_generate(
+            spt_generate_repeatable_quest,
+            &quest_request(42, false, None),
+        );
+        assert_eq!(status, STATUS_STALE_SLICE);
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "no cached invariant slice for this stamp"
+        );
+    }
+
+    #[test]
+    fn a_quest_generator_throw_returns_status_error_and_the_message() {
+        let _guard = quest_cache_lock();
+        // The Daily config ships no `Pickup` block, and `PickupQuestGenerator:39` dereferences it
+        // unconditionally — the C#-sanctioned throw, ported as a panic.
+        let mut request: serde_json::Value =
+            serde_json::from_slice(&quest_request(9, true, None)).unwrap();
+        request["varying"]["questType"] = serde_json::json!("Pickup");
+
+        let (status, out) = call_generate(
+            spt_generate_repeatable_quest,
+            &serde_json::to_vec(&request).unwrap(),
+        );
+
+        assert_eq!(status, STATUS_ERROR);
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "Pickup config was null at PickupQuestGenerator:39"
+        );
+    }
+
+    #[test]
+    fn a_seeded_quest_request_answers_the_same_bytes_twice() {
+        let _guard = quest_cache_lock();
+        let request = quest_request(7, true, Some(42));
+
+        let (first_status, first) = call_generate(spt_generate_repeatable_quest, &request);
+        let (second_status, second) = call_generate(spt_generate_repeatable_quest, &request);
+
+        assert_eq!(first_status, STATUS_OK);
+        assert_eq!(second_status, STATUS_OK);
+        let response: serde_json::Value = serde_json::from_slice(&first).unwrap();
+        assert!(
+            response["quest"].is_object(),
+            "the fixture request generates a quest"
+        );
+        assert!(response["pool"]["types"].is_array());
+        assert_eq!(mask_ids(&first), mask_ids(&second));
+
+        // …and the masking has teeth: another seed draws a different quest.
+        let (status, other) = call_generate(
+            spt_generate_repeatable_quest,
+            &quest_request(7, true, Some(7)),
+        );
+        assert_eq!(status, STATUS_OK);
+        assert_ne!(mask_ids(&first), mask_ids(&other));
     }
 
     #[test]

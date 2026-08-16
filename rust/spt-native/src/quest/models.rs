@@ -1301,7 +1301,7 @@ pub mod tests {
     }
 
     /// The varying half of a request, as the locked contract spells it.
-    fn varying_value() -> serde_json::Value {
+    pub fn varying_value() -> serde_json::Value {
         let config = database(QUEST_CONFIG_PATH);
 
         serde_json::json!({
