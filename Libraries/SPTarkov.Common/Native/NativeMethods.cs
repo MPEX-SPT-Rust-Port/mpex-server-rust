@@ -36,25 +36,6 @@ internal static partial class NativeMethods
         );
     }
 
-    [LibraryImport(LibraryName, EntryPoint = "spt_log_open")]
-    internal static partial int LogOpen(
-        ReadOnlySpan<byte> dirUtf8,
-        nuint dirLen,
-        ReadOnlySpan<byte> patternUtf8,
-        nuint patternLen,
-        uint maxFileSizeMb,
-        uint maxRollingFiles,
-        out nint outHandle,
-        out nint outPtr,
-        out nuint outLen
-    );
-
-    [LibraryImport(LibraryName, EntryPoint = "spt_log_write")]
-    internal static partial int LogWrite(nint handle, ReadOnlySpan<byte> lineUtf8, nuint lineLen);
-
-    [LibraryImport(LibraryName, EntryPoint = "spt_log_close")]
-    internal static partial int LogClose(nint handle);
-
     [LibraryImport(LibraryName, EntryPoint = "spt_logger_init")]
     internal static partial int LoggerInit(ReadOnlySpan<byte> configUtf8, nuint configLen, out nint outPtr, out nuint outLen);
 

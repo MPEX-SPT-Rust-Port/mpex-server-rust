@@ -3,7 +3,6 @@ using System.Text.Json;
 using SPTarkov.Common.Logger;
 using SPTarkov.Common.Models.Logging;
 using SPTarkov.Common.Native;
-using ZLinq;
 
 namespace SPTarkov.Common.Extensions;
 
@@ -69,26 +68,6 @@ public static class SptLoggerExtensions
         }
     }
 
-    private static void RegisterImplementations<TInterface>(
-        this IServiceCollection serviceCollection,
-        ServiceLifetime lifetime = ServiceLifetime.Singleton
-    )
-        where TInterface : class
-    {
-        var interfaceType = typeof(TInterface);
-
-        var implementingTypes = interfaceType
-            .Assembly.GetTypes()
-            .AsValueEnumerable()
-            .Where(type => interfaceType.IsAssignableFrom(type) && type != interfaceType && type.IsClass && !type.IsAbstract)
-            .ToList();
-
-        foreach (var implementation in implementingTypes)
-        {
-            serviceCollection.Add(new ServiceDescriptor(interfaceType, implementation, lifetime));
-        }
-    }
-
     public static IHostBuilder UseSptLoggerWithoutProvider(this IHostBuilder builder, IServiceProvider earlyLoggerServiceProvider)
     {
         ArgumentNullException.ThrowIfNull(builder);
@@ -117,8 +96,6 @@ public static class SptLoggerExtensions
             collection.AddSingleton(LoadConfig(ConfigurationPath));
             InitNativeLogger(ConfigurationPath);
         }
-
-        collection.RegisterImplementations<ILogHandler>(ServiceLifetime.Singleton);
 
         collection.AddSingleton<SPTLoggerDispatcher>();
         collection.AddSingleton<SptLoggerProvider>();
