@@ -99,11 +99,20 @@ struct Writer {
     pattern: String,
     /// 0 means never roll on size.
     max_size: u64,
-    /// 0 means keep every archived file.
+    /// Never 0 - `Writer::open` substitutes `DEFAULT_MAX_ROLLING`.
     max_rolling: usize,
     date: i64,
     file: BufWriter<File>,
     written: u64,
+    /// Set when the live file's last roll appended instead of renaming - a failed rename leaves
+    /// `written` at its already-over-cap length, which would otherwise satisfy the size check again
+    /// on the very next line and re-run the cascade once per line, deleting one archive each time.
+    roll_blocked: bool,
+    /// Counts `roll()` invocations. Test-only: proves a blocked roll is not retried on every
+    /// subsequent line, which the final on-disk bytes cannot show - an appended-in-place roll
+    /// leaves the same content on disk whether it ran once or a hundred times.
+    #[cfg(test)]
+    roll_calls: u32,
 }
 
 impl Writer {
@@ -137,6 +146,13 @@ impl Writer {
             date,
             file: BufWriter::new(file),
             written,
+            // Not `written > 0`: `open_live` deliberately appends to a non-empty file when a
+            // second handler in this process opens a path it already freshened (see
+            // `freshened_paths`), which is normal, not a blocked rename. Starting `false` costs at
+            // most one extra cascade attempt on a genuinely blocked start.
+            roll_blocked: false,
+            #[cfg(test)]
+            roll_calls: 0,
         })
     }
 
@@ -148,6 +164,7 @@ impl Writer {
         } else if self.max_size > 0
             && self.written > 0
             && self.written + line.len() as u64 + 1 > self.max_size
+            && !self.roll_blocked
         {
             self.roll()?;
         }
@@ -162,6 +179,10 @@ impl Writer {
     /// Cascades the archive set and opens a fresh live file. A date change lands here too: with the
     /// date out of the configured name a new day is an ordinary rotation, not a new filename.
     fn roll(&mut self) -> io::Result<()> {
+        #[cfg(test)]
+        {
+            self.roll_calls += 1;
+        }
         self.file.flush()?;
 
         let file = open_rolled(
@@ -170,6 +191,10 @@ impl Writer {
             self.max_rolling,
         )?;
         self.written = file.metadata()?.len();
+        // A successful archive always leaves an empty live file, so a non-zero length here means
+        // the rename was blocked and we appended instead. Re-running the cascade on every line
+        // would delete one archive per line, so hold off until a roll succeeds or the date turns.
+        self.roll_blocked = self.written > 0;
         self.file = BufWriter::new(file);
 
         Ok(())
@@ -488,8 +513,9 @@ mod tests {
         assert!(!archive_path(&dir, 3).exists());
     }
 
-    /// A rename fails whenever something else holds the file - the common Windows case. The
-    /// previous run's log must survive that, not be truncated away.
+    /// Occupies the archive slot with a non-empty directory, which no rename can replace,
+    /// standing in for the real-world case: something on Windows still holding the file open.
+    /// The previous run's log must survive that, not be truncated away.
     #[test]
     fn a_failed_rename_appends_instead_of_truncating() {
         let dir = TempDir::new().unwrap();
@@ -513,6 +539,54 @@ mod tests {
         sink.close();
 
         assert_eq!(read(&live_path(&dir)), "first run\nsecond run\n");
+    }
+
+    /// A blocked roll appends in place, so the bytes on disk look identical whether the cascade
+    /// ran once or on every line since - a content assertion alone cannot catch a regression here.
+    /// `roll_calls` is the one deterministic signal: unfixed, every one of the oversized lines
+    /// below re-enters `roll()` and re-runs the cascade (the review's "eight lines is enough to
+    /// wipe a 10-file archive set"); fixed, `roll_blocked` gates the size check after the first.
+    #[test]
+    fn a_blocked_rename_does_not_re_cascade_every_line() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().to_str().unwrap();
+
+        // Cap of 2 leaves `.1` as the only archive slot and empties the shift loop - same
+        // unmovable-blocker construction as `a_failed_rename_appends_instead_of_truncating`,
+        // just tripped by size instead of a restart.
+        let mut writer = Writer::open(path, "spt%DATE%.log", 1, 2).unwrap();
+        let line = vec![b'x'; 64 * 1024];
+
+        // Fill to just under the 1 MiB cap without rolling yet.
+        for _ in 0..15 {
+            writer.write_line(&line).unwrap();
+        }
+
+        // Occupy the only archive slot before the size check ever trips.
+        let blocked = archive_path(&dir, 1);
+        fs::create_dir(&blocked).unwrap();
+        fs::write(blocked.join("occupied"), b"x").unwrap();
+
+        // Each of these individually exceeds what is left under the cap, so every one is a
+        // fresh chance for the unfixed code to re-cascade.
+        for _ in 0..20 {
+            writer.write_line(&line).unwrap();
+        }
+        writer.file.flush().unwrap();
+
+        assert_eq!(
+            writer.roll_calls, 1,
+            "a blocked roll must not be retried on every subsequent line"
+        );
+        assert!(
+            blocked.join("occupied").exists(),
+            "the blocked archive slot must survive untouched"
+        );
+        assert_eq!(
+            read(&live_path(&dir)).lines().count(),
+            35,
+            "every line must still land in the live file"
+        );
     }
 
     #[test]

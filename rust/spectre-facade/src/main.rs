@@ -174,6 +174,10 @@ fn emit() -> Result<Vec<u8>, Box<dyn std::error::Error>> {
 /// otherwise identical assembly differ by four bytes. That is enough to make the emitted DLL newer
 /// than every downstream output on every build, which recompiles the whole solution.
 fn pin_pe_timestamp(image: &mut [u8]) {
+    // ponytail: indexes unchecked - a malformed PE from `res.write()` would panic here rather
+    // than error out gracefully. Unreachable in practice (the input is always our own emit's
+    // output) and a build-time panic is a loud failure, not a runtime risk; add bounds checks if
+    // this ever takes untrusted input.
     let lfanew = u32::from_le_bytes(image[0x3c..0x40].try_into().unwrap()) as usize;
 
     // COFF header: PE signature (4), Machine (2), NumberOfSections (2), then TimeDateStamp.

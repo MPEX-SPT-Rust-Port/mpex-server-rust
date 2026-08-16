@@ -439,18 +439,25 @@ pub unsafe extern "C" fn spt_log_open(
 ///
 /// # Safety
 /// `handle` must come from a successful `spt_log_open` and not yet have been closed; `line_ptr`
-/// must point to `line_len` readable bytes.
+/// must point to `line_len` readable bytes, unless `line_len` is 0 - an empty `ReadOnlySpan<byte>`
+/// marshals as a null pointer, and that must not be rejected as a bad argument.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn spt_log_write(
     handle: *mut FileSink,
     line_ptr: *const u8,
     line_len: usize,
 ) -> i32 {
-    if handle.is_null() || line_ptr.is_null() {
+    if handle.is_null() || (line_ptr.is_null() && line_len > 0) {
         return STATUS_BAD_ARGS;
     }
 
-    let line = unsafe { std::slice::from_raw_parts(line_ptr, line_len) }.to_vec();
+    // `slice::from_raw_parts` requires a non-null pointer even for a zero-length slice, which a
+    // null `line_ptr` (an empty `ReadOnlySpan<byte>`) is not.
+    let line = if line_len == 0 {
+        Vec::new()
+    } else {
+        unsafe { std::slice::from_raw_parts(line_ptr, line_len) }.to_vec()
+    };
 
     match catch_unwind(AssertUnwindSafe(|| unsafe { (*handle).write(line) })) {
         Ok(()) => STATUS_OK,
@@ -555,6 +562,37 @@ mod tests {
     #[test]
     fn freeing_null_is_a_no_op() {
         unsafe { spt_buf_free(std::ptr::null_mut(), 0) };
+    }
+
+    /// An empty `ReadOnlySpan<byte>` marshals as a null pointer with a zero length - that must not
+    /// be rejected as a bad argument, or a single empty formatted line would poison the sink.
+    #[test]
+    fn an_empty_line_with_a_null_pointer_is_not_bad_args() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().to_str().unwrap();
+
+        let mut out_handle: *mut FileSink = std::ptr::null_mut();
+        let mut out_ptr: *mut u8 = std::ptr::null_mut();
+        let mut out_len: usize = 0;
+        let status = unsafe {
+            spt_log_open(
+                path.as_ptr(),
+                path.len(),
+                b"spt.log".as_ptr(),
+                7,
+                0,
+                0,
+                &mut out_handle,
+                &mut out_ptr,
+                &mut out_len,
+            )
+        };
+        assert_eq!(status, STATUS_OK);
+
+        let status = unsafe { spt_log_write(out_handle, std::ptr::null(), 0) };
+        assert_eq!(status, STATUS_OK);
+
+        assert_eq!(unsafe { spt_log_close(out_handle) }, STATUS_OK);
     }
 
     /// The container tpl the error-path request below spawns; matches the `itemsView` key in

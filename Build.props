@@ -37,9 +37,11 @@
       discarded - the logger emits plain text.
 
       Only the path lives here. The <Reference> itself sits in each of the five projects that name
-      Color, because plain <Reference> items are not transitive and every one of those five has a
+      Color, because plain <Reference> items are not transitive and the other four have a
       ProjectReference chain to SPTarkov.Common, which emits the DLL - so the file always exists by
-      the time they resolve. Adding it here instead would hand it to SPTarkov.DI and
+      the time they resolve. SPTarkov.Common itself needs no such chain: its own
+      BeforeTargets="ResolveAssemblyReferences" BuildSpectreFacade target orders the emit ahead of
+      its own reference resolution. Adding the path here instead would hand it to SPTarkov.DI and
       SPTarkov.Reflection, which have no such chain and would race the emit.
     -->
   <PropertyGroup>
