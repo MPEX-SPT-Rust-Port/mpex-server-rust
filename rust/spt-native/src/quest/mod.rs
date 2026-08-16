@@ -1,5 +1,6 @@
 pub mod helper;
 pub mod models;
+pub mod reward_generator;
 pub mod slice_cache;
 
 use std::collections::HashSet;

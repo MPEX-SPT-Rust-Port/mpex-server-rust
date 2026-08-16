@@ -229,7 +229,7 @@ pub fn armor_item_has_removable_plate_slots(
 
 /// `ItemHelper.GetItemPrice` (`ItemHelper.cs:431-440`) — the handbook price when it is at least 1,
 /// the flea price otherwise, and `None` when neither table knows the tpl.
-fn get_item_price(
+pub(crate) fn get_item_price(
     handbook_prices: &IndexMap<String, f64>,
     flea_prices: &IndexMap<String, f64>,
     tpl: &str,
