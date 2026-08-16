@@ -199,9 +199,22 @@ mod tests {
     use super::*;
 
     /// dotnetdll stamps the PE header with the wall clock, which made every build emit a different
-    /// file and re-trigger the up-to-date check of every project referencing it.
+    /// file and re-trigger the up-to-date check of every project referencing it. Note this test
+    /// alone cannot catch that: the stamp's resolution is one second, so two emits here match
+    /// either way. `the_pe_timestamp_is_zeroed` is what pins it; this guards everything else.
     #[test]
     fn two_emits_are_byte_identical() {
         assert_eq!(emit().unwrap(), emit().unwrap());
+    }
+
+    /// The COFF `TimeDateStamp` is the one field dotnetdll fills from the wall clock, so asserting
+    /// it is zeroed pins the fix directly. `two_emits_are_byte_identical` cannot: the stamp has
+    /// one-second granularity, and two emits in the same test land in the same second either way.
+    #[test]
+    fn the_pe_timestamp_is_zeroed() {
+        let image = emit().unwrap();
+        let lfanew = u32::from_le_bytes(image[0x3c..0x40].try_into().unwrap()) as usize;
+
+        assert_eq!(&image[lfanew + 8..lfanew + 12], &[0, 0, 0, 0]);
     }
 }
