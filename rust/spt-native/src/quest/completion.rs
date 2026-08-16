@@ -469,6 +469,8 @@ pub fn generate(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use crate::loot::random_util::TestSeedGuard;
     use crate::quest::QuestContext;
     use crate::quest::helper::PRAPOR;
@@ -542,6 +544,10 @@ mod tests {
         let slice = slice();
         let config = daily_config();
         let mut generated = 0;
+        // Ranges pass under a wrong-bounds draw; the *set* of values seen over the 25 seeds does
+        // not. Both `:264` and `:312` are inclusive at their upper end, so both bounds must show up.
+        let mut distinct_counts = BTreeSet::new();
+        let mut hand_in_counts = BTreeSet::new();
 
         for seed in 1..=25u64 {
             let mut ctx = QuestContext::from_slice(&slice);
@@ -574,11 +580,7 @@ mod tests {
                 .expect("AvailableForFinish");
 
             // `:264` — the level 16-40 band asks `GetInt(1, 2)` distinct tpls
-            assert!(
-                (1..=2).contains(&conditions.len()),
-                "seed {seed}: {} conditions",
-                conditions.len()
-            );
+            distinct_counts.insert(conditions.len());
 
             for condition in conditions {
                 assert_eq!(condition.condition_type, "HandoverItem", "seed {seed}");
@@ -591,8 +593,7 @@ mod tests {
 
                 // `:312` — the band's `requestedItemCount` is 2-4, and the budget is never tight
                 // enough to clamp `maxValue` below it
-                let value = condition.value.expect("hand-in count");
-                assert!((2.0..=4.0).contains(&value), "seed {seed}: {value} asked");
+                hand_in_counts.insert(condition.value.expect("hand-in count") as i32);
 
                 // `:378-379`
                 assert_eq!(condition.max_durability, Some(100.0));
@@ -601,6 +602,10 @@ mod tests {
         }
 
         assert_eq!(generated, 25, "every seed should produce a quest");
+        // `GetInt` (`:264`) is inclusive at both ends — an exclusive draw would never reach 2
+        assert_eq!(distinct_counts, BTreeSet::from([1, 2]));
+        // `RandInt(min, max + 1)` (`:312`) — without the `+ 1` the 4 would never appear
+        assert_eq!(hand_in_counts, BTreeSet::from([2, 3, 4]));
     }
 
     /// The `||` at `:241` — a tpl listed by name survives (an item is never its own base class),
