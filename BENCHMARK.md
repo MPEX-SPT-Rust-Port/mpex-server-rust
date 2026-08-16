@@ -562,8 +562,9 @@ the bot and ragfair results, where the residual was payload transport and genera
 milliseconds.
 
 **On a modded server the native path loses on every type** — cold against legacy is 5.2x slower on
-Completion, 5.4x on Elimination and ~15x on Exploration and Pickup, because ~43 ms of fixed slice
-cost lands on a 3-20 ms quest. That is the cost of a mod being *loaded*; a mod that Harmony-patches
+Completion, ~2.9x on Elimination (against its corrected ~46 ms cold, not the 87 ms median in the
+table) and ~15x on Exploration and Pickup, because ~43 ms of fixed slice cost lands on a 3-22 ms
+quest. That is the cost of a mod being *loaded*; a mod that Harmony-patches
 any frozen 4.1.2 member, or substitutes a collaborator, already forces the legacy path and pays
 none of it.
 
@@ -592,7 +593,9 @@ Repeatable-quest-specific caveats, on top of the general ones below:
   whitelisted trader per type. Repeatable quests vary with both, and an unseeded run draws a
   different quest every time — the spread columns include that variation.
 - **No RSS figures**, and the warm arms' allocation rounds to 0.0-0.1 MB, so treat those as "under
-  100 KB" rather than as measurements.
+  100 KB" rather than as measurements. `alloc/run` also includes each iteration's `BuildPool()` -
+  itself under ~100 KB, and it cancels out of the cold-minus-warm delta, which is where the slice's
+  ~10.6 MB is read.
 - **Workstation GC**, as with the ragfair fixture: `<ServerGarbageCollection>` is set on
   `SPTarkov.Server.csproj`, not on `UnitTests.csproj`. It moves both paths.
 
