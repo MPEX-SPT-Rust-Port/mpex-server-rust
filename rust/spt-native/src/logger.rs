@@ -214,6 +214,87 @@ pub fn render(tokens: &[FormatToken], record: &LogRecord) -> String {
     out
 }
 
+enum CompiledMatcher {
+    Literal(String),
+    Regex(regex_lite::Regex),
+    /// An empty name, or a pattern regex-lite cannot compile (.NET-only syntax). Warned about
+    /// once at init; a broken filter must not block startup.
+    Never,
+}
+
+pub struct CompiledFilter {
+    pub filter_type: SptLoggerFilterType,
+    matcher: CompiledMatcher,
+}
+
+impl CompiledFilter {
+    pub fn compile(filter: &SptLoggerFilter) -> CompiledFilter {
+        let matcher = if filter.name.is_empty() {
+            CompiledMatcher::Never
+        } else {
+            match filter.matching_type {
+                MatchingType::Literal => CompiledMatcher::Literal(filter.name.clone()),
+                MatchingType::Regex => match regex_lite::Regex::new(&filter.name) {
+                    Ok(regex) => CompiledMatcher::Regex(regex),
+                    Err(error) => {
+                        eprintln!(
+                            "sptLogger.json filter '{}' is not a supported regex and will never match: {error}",
+                            filter.name
+                        );
+                        CompiledMatcher::Never
+                    }
+                },
+            }
+        };
+
+        CompiledFilter {
+            filter_type: filter.filter_type,
+            matcher,
+        }
+    }
+
+    pub fn matches(&self, category: &str) -> bool {
+        if category.is_empty() {
+            return false;
+        }
+
+        match &self.matcher {
+            CompiledMatcher::Literal(name) => name == category,
+            CompiledMatcher::Regex(regex) => regex.is_match(category),
+            CompiledMatcher::Never => false,
+        }
+    }
+}
+
+/// The per-logger decision `SPTLoggerDispatcher.Log` makes: any exclude match drops the line; if
+/// include filters exist at least one must match; then the level gate.
+pub fn should_emit(
+    level: LogLevel,
+    filters: &[CompiledFilter],
+    record_level: LogLevel,
+    category: &str,
+) -> bool {
+    let excludes = filters
+        .iter()
+        .filter(|f| f.filter_type == SptLoggerFilterType::Exclude);
+    let mut includes = filters
+        .iter()
+        .filter(|f| f.filter_type == SptLoggerFilterType::Include)
+        .peekable();
+
+    for exclude in excludes {
+        if exclude.matches(category) {
+            return false;
+        }
+    }
+
+    if includes.peek().is_some() && !includes.any(|f| f.matches(category)) {
+        return false;
+    }
+
+    record_level >= level
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -379,6 +460,96 @@ mod tests {
         let mut r = record("L", "x");
         r.thread_name = "";
         assert_eq!(render(&tokens, &r), "[]");
+    }
+
+    fn filter(
+        filter_type: SptLoggerFilterType,
+        name: &str,
+        matching: MatchingType,
+    ) -> CompiledFilter {
+        CompiledFilter::compile(&SptLoggerFilter {
+            filter_type,
+            name: name.to_string(),
+            matching_type: matching,
+        })
+    }
+
+    #[test]
+    fn literal_filters_match_the_whole_category_exactly() {
+        let f = filter(SptLoggerFilterType::Include, "A.B", MatchingType::Literal);
+        assert!(f.matches("A.B"));
+        assert!(!f.matches("A.B.C"));
+        assert!(!f.matches("a.b"));
+    }
+
+    #[test]
+    fn regex_filters_search_like_dotnet_ismatch() {
+        // .NET Regex.IsMatch is an unanchored search; ".*RequestLogger" hits anywhere.
+        let f = filter(
+            SptLoggerFilterType::Exclude,
+            ".*RequestLogger",
+            MatchingType::Regex,
+        );
+        assert!(f.matches("SPTarkov.Server.Core.Utils.Logger.RequestLogger"));
+        assert!(!f.matches("SPTarkov.Server.Core.Utils.App"));
+    }
+
+    #[test]
+    fn empty_names_and_empty_categories_never_match() {
+        let f = filter(SptLoggerFilterType::Include, "", MatchingType::Literal);
+        assert!(!f.matches("anything"));
+        let f = filter(SptLoggerFilterType::Include, "x", MatchingType::Literal);
+        assert!(!f.matches(""));
+    }
+
+    #[test]
+    fn an_uncompilable_regex_never_matches() {
+        // Lookarounds are .NET-only syntax that regex-lite rejects at compile time.
+        let f = filter(
+            SptLoggerFilterType::Include,
+            "(?=peek)",
+            MatchingType::Regex,
+        );
+        assert!(!f.matches("peek"));
+    }
+
+    #[test]
+    fn should_emit_applies_exclude_then_include_gate_then_level() {
+        let level = LogLevel::Information;
+        let cat = "SPTarkov.Server.Core.Utils.App";
+
+        // No filters: only the level decides.
+        assert!(should_emit(level, &[], LogLevel::Warning, cat));
+        assert!(!should_emit(level, &[], LogLevel::Debug, cat));
+
+        // An exclude match wins over everything.
+        let exclude = vec![filter(
+            SptLoggerFilterType::Exclude,
+            ".*App",
+            MatchingType::Regex,
+        )];
+        assert!(!should_emit(level, &exclude, LogLevel::Error, cat));
+
+        // Any include filter present gates: only matching categories pass.
+        let include = vec![filter(
+            SptLoggerFilterType::Include,
+            ".*RequestLogger",
+            MatchingType::Regex,
+        )];
+        assert!(!should_emit(level, &include, LogLevel::Error, cat));
+        assert!(should_emit(
+            level,
+            &include,
+            LogLevel::Error,
+            "Web.RequestLogger"
+        ));
+
+        // Exclude beats include when both match.
+        let both = vec![
+            filter(SptLoggerFilterType::Include, ".*App", MatchingType::Regex),
+            filter(SptLoggerFilterType::Exclude, ".*App", MatchingType::Regex),
+        ];
+        assert!(!should_emit(level, &both, LogLevel::Error, cat));
     }
 
     #[test]
