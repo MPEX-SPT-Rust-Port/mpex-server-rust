@@ -3,6 +3,7 @@ pub mod elimination;
 pub mod exploration;
 pub mod helper;
 pub mod models;
+pub mod pickup;
 pub mod reward_generator;
 pub mod slice_cache;
 

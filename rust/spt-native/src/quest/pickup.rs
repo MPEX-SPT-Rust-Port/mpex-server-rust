@@ -1,0 +1,347 @@
+//! `Generators/RepeatableQuests/PickupQuestGenerator.cs` — the fetch-N-items-of-a-type repeatable
+//! quest.
+//!
+//! Line references in this file are that generator unless another file is named.
+
+use crate::loot::models::{Diagnostic, ERROR};
+use crate::loot::random_util::{get_array_value, rand_int};
+use crate::quest::models::{
+    ListOrT, QuestTypePool, RepeatableQuest, RepeatableQuestConfig, RepeatableQuestType,
+};
+use crate::quest::{QuestContext, helper, reward_generator};
+
+/// A `NullReferenceException` the C# would raise where this port gives up instead — unwinding is
+/// undefined behaviour behind the FFI, so a null the C# never guards is reported and returns
+/// `None`. The C# logs nothing on these paths; it crashes.
+fn would_throw(message: &str) -> Diagnostic {
+    Diagnostic {
+        level: ERROR.to_owned(),
+        locale_key: None,
+        args: None,
+        message: Some(message.to_owned()),
+    }
+}
+
+/// `Generate` (`:22-67`) — dead in production: `RepeatableQuestController` dispatches on the
+/// `PickUp` of `QuestTypeEnum`, which never matches the `Pickup` the pool and config spell.
+///
+/// `questTypePool` is untouched — the location draw the C# would have made is commented out at
+/// `:46-47`.
+pub fn generate(
+    ctx: &mut QuestContext<'_>,
+    session_id: &str,
+    pmc_level: i32,
+    trader_id: &str,
+    _quest_type_pool: &mut QuestTypePool,
+    repeatable_config: &RepeatableQuestConfig,
+) -> Option<RepeatableQuest> {
+    // `:30` — only `Daily_Savage` ships a `Pickup` block, so the other two configs reach `:39`
+    // with a null and throw.
+    let Some(pickup_config) = repeatable_config.quest_config.pickup.as_ref() else {
+        ctx.diagnostics.push(would_throw(
+            "Pickup config is null at PickupQuestGenerator:30",
+        ));
+
+        return None;
+    };
+
+    // `:32` — the helper logs its own give-up reasons, and the C# throws at `:49` on the null.
+    let mut quest = helper::generate_repeatable_template(
+        ctx,
+        RepeatableQuestType::Pickup,
+        trader_id,
+        &repeatable_config.side,
+        session_id,
+    )?;
+
+    // `GetArrayValue` (`:39`) is `GetRandomElement` (`RandomUtil.cs:487-490`), which throws on a
+    // null or empty list.
+    let Some(entries) = pickup_config
+        .item_type_to_fetch_with_max_count
+        .as_deref()
+        .filter(|entries| !entries.is_empty())
+    else {
+        ctx.diagnostics.push(would_throw(
+            "ItemTypeToFetchWithMaxCount is null or empty at PickupQuestGenerator:39",
+        ));
+
+        return None;
+    };
+    let item_type_to_fetch_with_count = get_array_value(entries);
+
+    // `MinimumPickupCount.Value` (`:42`) throws on a null; `MaximumPickupCount + 1` (`:43`) does
+    // not — a null max lifts through to `RandInt`'s optional `high`, which then draws
+    // `[0, minPickupCount)` instead (`RandomUtil.cs:254-264`).
+    let Some(minimum_pickup_count) = item_type_to_fetch_with_count.minimum_pickup_count else {
+        ctx.diagnostics.push(would_throw(
+            "MinimumPickupCount is null at PickupQuestGenerator:42",
+        ));
+
+        return None;
+    };
+    let item_count_to_fetch = rand_int(
+        i64::from(minimum_pickup_count),
+        item_type_to_fetch_with_count
+            .maximum_pickup_count
+            .map(|maximum| i64::from(maximum) + 1),
+    );
+
+    // `ItemType` is a `string?` the C# drops into the list as-is; a null one would serialise as a
+    // null element, which this port spells as the empty string the way `MongoId`'s default does.
+    let item_type = item_type_to_fetch_with_count
+        .item_type
+        .clone()
+        .unwrap_or_default();
+
+    // Choose location - doesn't seem to work for anything other than 'any'
+    // var locationKey: string = this.randomUtil.drawRandomFromDict(questTypePool.pool.Pickup.locations)[0];
+    // var locationTarget = questTypePool.pool.Pickup.locations[locationKey];
+
+    // `FirstOrDefault` (`:49`) hands back a null the C# then dereferences at `:50`.
+    let Some(find_condition) = quest
+        .quest
+        .conditions
+        .available_for_finish
+        .as_mut()
+        .and_then(|conditions| {
+            conditions
+                .iter_mut()
+                .find(|condition| condition.condition_type == "FindItem")
+        })
+    else {
+        ctx.diagnostics.push(would_throw(
+            "No FindItem condition at PickupQuestGenerator:49",
+        ));
+
+        return None;
+    };
+    find_condition.target = Some(ListOrT::List(vec![item_type.clone()]));
+    find_condition.value = Some(item_count_to_fetch as f64);
+
+    // `:53-57` — the `CounterCreator`'s `Equipment` condition, each hop a C# null dereference.
+    // var locationCondition = counterCreatorCondition._props.counter.conditions.find(x => x._parent === "Location");
+    // (locationCondition._props as ILocationConditionProps).target = [...locationTarget];
+    let Some(equipment_condition) = quest
+        .quest
+        .conditions
+        .available_for_finish
+        .as_mut()
+        .and_then(|conditions| {
+            conditions
+                .iter_mut()
+                .find(|condition| condition.condition_type == "CounterCreator")
+        })
+        .and_then(|counter_creator_condition| counter_creator_condition.counter.as_mut())
+        .and_then(|counter| counter.conditions.as_mut())
+        .and_then(|conditions| {
+            conditions
+                .iter_mut()
+                .find(|condition| condition.condition_type == "Equipment")
+        })
+    else {
+        ctx.diagnostics.push(would_throw(
+            "No CounterCreator Equipment condition at PickupQuestGenerator:53-57",
+        ));
+
+        return None;
+    };
+    equipment_condition.equipment_inclusive = Some(vec![vec![item_type]]);
+
+    // Add rewards
+    // `:64` passes a difficulty of 1 flat — Pickup has no difficulty scaling.
+    quest.quest.rewards = reward_generator::generate_reward(
+        ctx,
+        pmc_level,
+        1.0,
+        trader_id,
+        repeatable_config,
+        &pickup_config.possible_skill_rewards,
+        None,
+    );
+
+    Some(quest)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use crate::loot::random_util::TestSeedGuard;
+    use crate::quest::QuestContext;
+    use crate::quest::models::{
+        ListOrT, QuestInvariantSlice, QuestTypePool, RepeatableQuestConfig, tests::slice_value,
+    };
+
+    const QUEST_CONFIG_PATH: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../Libraries/SPTarkov.Server.Assets/SPT_Data/configs/quest.json"
+    );
+    const TEMPLATES_PATH: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../Libraries/SPTarkov.Server.Assets/SPT_Data/database/templates/repeatableQuests.json"
+    );
+
+    /// `Models/Enums/Traders.cs:9` — the only trader `Daily_Savage` whitelists, and the reward
+    /// generator gives up on a trader that is not on the config's whitelist.
+    const FENCE: &str = "579dc571d53a0658a154fbec";
+
+    fn json(path: &str) -> serde_json::Value {
+        serde_json::from_str(&std::fs::read_to_string(path).expect("readable")).expect("JSON")
+    }
+
+    /// `Daily_Savage` is the only shipped config carrying a `Pickup` block (`QuestConfig.cs:346`).
+    fn savage_config() -> RepeatableQuestConfig {
+        serde_json::from_value(json(QUEST_CONFIG_PATH)["repeatableQuests"][2].clone())
+            .expect("parses")
+    }
+
+    /// The fixture slice with the real Pickup template and its scav template id spliced in.
+    fn slice() -> QuestInvariantSlice {
+        let mut value = slice_value();
+        let templates = json(TEMPLATES_PATH);
+
+        value["repeatableQuestTemplates"]["Pickup"] = templates["templates"]["Pickup"].clone();
+        value["repeatableQuestTemplateIds"]["scav"]["Pickup"] =
+            serde_json::json!("628f588ebb558574b2260fe5");
+
+        serde_json::from_value(value).expect("fixture slice parses")
+    }
+
+    /// Pickup draws nothing from the pool, so any pool does.
+    fn pool() -> QuestTypePool {
+        serde_json::from_value(serde_json::json!({
+            "types": ["Exploration", "Completion"],
+            "pool": {
+                "Exploration": { "locations": {} },
+                "Elimination": { "targets": {} },
+                "Pickup": { "locations": {} }
+            }
+        }))
+        .expect("pool parses")
+    }
+
+    /// The two draws (`:39` the item type, `:41` its count) land on the `FindItem` condition and
+    /// the `CounterCreator`'s `Equipment` condition.
+    #[test]
+    fn a_seeded_pickup_quest_asks_for_the_drawn_item_type() {
+        let slice = slice();
+        let config = savage_config();
+        let pickup_config = config.quest_config.pickup.as_ref().expect("Pickup config");
+        let entries = pickup_config
+            .item_type_to_fetch_with_max_count
+            .as_ref()
+            .expect("ItemTypeToFetchWithMaxCount");
+        let mut drawn = BTreeSet::new();
+        let mut counts = BTreeSet::new();
+
+        for seed in 1..=60u64 {
+            let mut ctx = QuestContext::from_slice(&slice);
+            let mut pool = pool();
+            let _guard = TestSeedGuard::install(seed);
+            let quest = super::generate(
+                &mut ctx,
+                "6193a720f8ee7e52e4290000",
+                20,
+                FENCE,
+                &mut pool,
+                &config,
+            )
+            .expect("the shipped Pickup template and config generate");
+
+            let conditions = quest
+                .quest
+                .conditions
+                .available_for_finish
+                .as_ref()
+                .expect("AvailableForFinish");
+
+            // `:49-51` — the drawn item type and count on the `FindItem` condition
+            let find_condition = conditions
+                .iter()
+                .find(|condition| condition.condition_type == "FindItem")
+                .expect("FindItem condition");
+            let Some(ListOrT::List(target)) = &find_condition.target else {
+                panic!("seed {seed}: FindItem target is not a list");
+            };
+            assert_eq!(target.len(), 1, "seed {seed}");
+            let item_type = target[0].clone();
+
+            let entry = entries
+                .iter()
+                .find(|entry| entry.item_type.as_deref() == Some(item_type.as_str()))
+                .unwrap_or_else(|| panic!("seed {seed}: {item_type} is not a configured type"));
+            let count = find_condition.value.expect("FindItem value") as i32;
+            let minimum = entry.minimum_pickup_count.expect("minPickupCount");
+            let maximum = entry.maximum_pickup_count.expect("maxPickupCount");
+            assert!(
+                (minimum..=maximum).contains(&count),
+                "seed {seed}: {count} outside {minimum}..={maximum}"
+            );
+
+            // `:57-61` — the same item type on the `Equipment` counter condition, the template's
+            // other two counter conditions left alone
+            let counter_conditions = conditions
+                .iter()
+                .find(|condition| condition.condition_type == "CounterCreator")
+                .expect("CounterCreator condition")
+                .counter
+                .as_ref()
+                .expect("counter")
+                .conditions
+                .as_ref()
+                .expect("counter conditions");
+            assert_eq!(counter_conditions.len(), 3, "seed {seed}");
+            let equipment_condition = counter_conditions
+                .iter()
+                .find(|condition| condition.condition_type == "Equipment")
+                .expect("Equipment condition");
+            assert_eq!(
+                equipment_condition.equipment_inclusive.as_deref(),
+                Some(&[vec![item_type.clone()]][..]),
+                "seed {seed}"
+            );
+
+            // `:64` — rewards replace the template's empty set
+            assert!(quest.quest.rewards.is_some(), "seed {seed}");
+
+            // Pickup never touches the pool
+            assert_eq!(pool.types, ["Exploration", "Completion"]);
+
+            drawn.insert(item_type);
+            counts.insert((minimum, maximum, count));
+        }
+
+        // `:39` draws across the whole list, and `:41`'s `+ 1` puts the upper bound in reach
+        assert!(drawn.len() > 1);
+        assert!(
+            counts
+                .iter()
+                .any(|(_, maximum, count)| count == maximum && *count > 1)
+        );
+    }
+
+    /// `:30` reads a config the two Pmc configs do not carry — where the C# throws at `:39`, this
+    /// port reports and gives up before spending a draw.
+    #[test]
+    fn a_config_without_a_pickup_block_gives_up() {
+        let slice = slice();
+        let mut ctx = QuestContext::from_slice(&slice);
+        let daily: RepeatableQuestConfig =
+            serde_json::from_value(json(QUEST_CONFIG_PATH)["repeatableQuests"][0].clone())
+                .expect("parses");
+
+        let _guard = TestSeedGuard::install(1);
+        assert!(
+            super::generate(
+                &mut ctx,
+                "6193a720f8ee7e52e4290000",
+                20,
+                FENCE,
+                &mut pool(),
+                &daily,
+            )
+            .is_none()
+        );
+        assert_eq!(ctx.diagnostics.len(), 1);
+    }
+}
