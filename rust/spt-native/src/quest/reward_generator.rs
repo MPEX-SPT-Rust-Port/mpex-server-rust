@@ -698,15 +698,16 @@ fn get_random_weapon_preset_within_budget(
             // (`PresetHelper.cs:100`) — so `:538`'s `.Value` cannot throw
             let encyclopedia = random_preset.encyclopedia.as_deref().unwrap_or_default();
 
-            return generate_preset_reward(
+            let reward = generate_preset_reward(
                 ctx,
                 encyclopedia,
                 1.0,
                 reward_index,
                 &mut chosen_preset_items,
                 true,
-            )
-            .map(|reward| (reward, preset_price));
+            );
+
+            return Some((reward, preset_price));
         }
     }
 
@@ -718,9 +719,9 @@ fn get_random_weapon_preset_within_budget(
 /// **Quirk 5, ported verbatim:** `:558` mints an id that `:587` overwrites with the root item's own
 /// id, making it dead. It is minted anyway (outside the RNG stream, so nothing downstream shifts).
 ///
-/// Deviation: a preset with no root item is the C# `NullReferenceException` at `:587`, reached one
-/// line after the warning at `:578`. Unwinding is undefined behaviour behind the FFI, so this
-/// reports the same warning and gives up on the weapon reward instead.
+/// A preset with no root item warns (`:578`) and then throws: `:586` hands the null root to
+/// `ReparentItemAndChildren`, which dereferences it at `ItemHelper.cs:1695`. Kept as a panic — a
+/// C#-sanctioned throw, which `ffi.rs`'s `catch_unwind` maps the same way it maps `:417`'s.
 fn generate_preset_reward(
     ctx: &mut QuestContext<'_>,
     tpl: &str,
@@ -728,7 +729,7 @@ fn generate_preset_reward(
     index: i32,
     preset: &mut [Item],
     found_in_raid: bool,
-) -> Option<Reward> {
+) -> Reward {
     let id = mongo_id::generate();
     let mut quest_reward_item = Reward {
         id: mongo_id::generate(),
@@ -747,14 +748,15 @@ fn generate_preset_reward(
 
     // Get presets root item
     let root_item = preset.iter().position(|item| item.template == tpl);
-    let Some(root_item) = root_item else {
+    if root_item.is_none() {
         ctx.diagnostics.push(plain(
             WARNING,
             format!("Root item of preset: {tpl} not found"),
         ));
+    }
 
-        return None;
-    };
+    // `:586` passes the null root straight into `ReparentItemAndChildren`, which throws on it
+    let root_item = root_item.expect("preset carries the root item its encyclopedia names");
 
     if let Some(upd) = preset[root_item].upd.as_mut() {
         // `SpawnedInSession` is untyped on `Upd`, so it rides in the passthrough map the way
@@ -772,7 +774,7 @@ fn generate_preset_reward(
     quest_reward_item.items = Some(item_helper::reparent_item_and_children(&root_item, preset));
     quest_reward_item.target = Some(root_item.id); // Target property and root items id must match
 
-    Some(quest_reward_item)
+    quest_reward_item
 }
 
 /// `GenerateItemReward` (`:600-627`) — a plain item reward, structured as the client wants it.
@@ -980,11 +982,10 @@ mod tests {
         serde_json::from_value(config["repeatableQuests"][0].clone()).expect("parses")
     }
 
-    /// The fixture slice with one price per tier band of `:443-448`.
-    fn priced_slice() -> QuestInvariantSlice {
+    /// The fixture slice, repriced.
+    fn priced_slice_of(prices: serde_json::Value) -> QuestInvariantSlice {
         let mut value = slice_value();
-        value["defaultPresetOrItemPrices"] =
-            serde_json::json!({ "cheap": 1000.0, "mid": 5000.0, "dear": 20000.0 });
+        value["defaultPresetOrItemPrices"] = prices;
 
         serde_json::from_value(value).expect("fixture slice parses")
     }
@@ -999,7 +1000,9 @@ mod tests {
     /// either side of it.
     #[test]
     fn the_stack_size_tier_table_skips_four_in_the_middle_band() {
-        let slice = priced_slice();
+        // One price per tier band of `:443-448`
+        let slice =
+            priced_slice_of(serde_json::json!({ "cheap": 1000.0, "mid": 5000.0, "dear": 20000.0 }));
         let ctx = QuestContext::from_slice(&slice);
         let _guard = TestSeedGuard::install(SEED);
 
@@ -1017,6 +1020,31 @@ mod tests {
             stack_sizes_drawn(&ctx, "dear"),
             BTreeSet::from([2, 3, 4]),
             "10001+ RUB"
+        );
+    }
+
+    /// Quirk 4 (`:392`): the budget loop breaks unconditionally at the end of its first full pass,
+    /// so one call yields at most one item however many `maxItemCount` asks for and however much
+    /// budget is left over. Pinned so a future reader does not "repair" it.
+    #[test]
+    fn the_budget_loop_rewards_one_item_however_many_are_asked_for() {
+        const POOL: [&str; 5] = ["aa", "bb", "cc", "dd", "ee"];
+
+        let slice = priced_slice_of(serde_json::json!({
+            "aa": 100.0, "bb": 100.0, "cc": 100.0, "dd": 100.0, "ee": 100.0
+        }));
+        let mut ctx = QuestContext::from_slice(&slice);
+        let config = daily_config();
+
+        let _guard = TestSeedGuard::install(SEED);
+        let rewarded =
+            get_rewardable_items_from_pool_within_budget(&mut ctx, &POOL, 5, 50_000.0, &config);
+
+        assert_eq!(rewarded.len(), 1, "the loop ran past its `:392` break");
+        // `maxItemCount` of 0 never enters the loop
+        assert!(
+            get_rewardable_items_from_pool_within_budget(&mut ctx, &POOL, 0, 50_000.0, &config)
+                .is_empty()
         );
     }
 
