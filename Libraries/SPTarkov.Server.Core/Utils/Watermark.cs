@@ -128,9 +128,6 @@ public class Watermark(
     }
 
     /// <summary>
-    ///     Draw watermark on screen
-    /// </summary>
-    /// <summary>
     ///     Draw watermark on screen. The colour parameter is retained for 4.1.2 mod
     ///     compatibility and ignored — the watermark prints as plain unframed lines.
     /// </summary>

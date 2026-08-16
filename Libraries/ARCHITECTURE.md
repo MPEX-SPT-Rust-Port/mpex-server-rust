@@ -26,7 +26,7 @@ SPTarkov.Server.Assets                          (content-only, no code reference
 
 | Project | .cs files | Depends on | NuGet of note |
 |---|---:|---|---|
-| `SPTarkov.Common` | 24 | — | ZLogger, Spectre.Console, SemanticVersioning, ZLinq |
+| `SPTarkov.Common` | 24 | — | SemanticVersioning, ZLinq |
 | `SPTarkov.DI` | 3 | — | MS.Extensions.DependencyInjection.Abstractions, Hosting.Abstractions |
 | `SPTarkov.Reflection` | 8 | `SPTarkov.DI` | HarmonyX |
 | `SPTarkov.Server.Core` | 840 | `SPTarkov.Common`, `SPTarkov.DI` | HarmonyX, FastCloner, System.IO.Hashing |
