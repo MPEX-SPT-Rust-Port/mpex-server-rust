@@ -1,10 +1,10 @@
 //! The file sink behind `FileLogHandler`.
 //!
-//! One background writer thread per configured log file, owning the file handle, the day/size
-//! rolling and the retention sweep. On the C# side those were split between ZLogger's rolling
-//! provider (which chose filenames) and `LogFileRollMonitor` (which polled the directory every
-//! minute re-deriving the same filenames to decide what to delete); here one owner does both, so
-//! retention runs exactly when a roll happens instead of on a timer.
+//! One background writer thread per configured log file, owning the file handle, the rotation and
+//! the archive cap. On the C# side those were split between ZLogger's rolling provider, which chose
+//! filenames but has no retention option at all, and `LogFileRollMonitor`, which polled the
+//! directory every minute re-deriving the same filenames to decide what to delete. Here one owner
+//! does both, so the cap is enforced exactly when a rotation happens instead of on a timer.
 //!
 //! The configured name is always the live file: a server start, a size roll and a date change each
 //! cascade the archive set down one index - `name.1.ext` becomes `name.2.ext` and so on, with the
@@ -16,7 +16,7 @@ use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::sync::{Mutex, OnceLock};
 use std::thread::JoinHandle;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -24,12 +24,16 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// A handle to one log file's writer thread. Lines are handed over a channel, so a logging call
 /// on a request thread costs a send and never touches the filesystem.
 pub struct FileSink {
-    sender: Option<Sender<Vec<u8>>>,
+    sender: Option<SyncSender<Vec<u8>>>,
     worker: Option<JoinHandle<()>>,
 }
 
 /// The number of files kept when the config does not set one: the live file plus `.1`..`.9`.
 const DEFAULT_MAX_ROLLING: usize = 10;
+
+/// Lines queued before writes start being dropped. A stalled disk must not grow the queue without
+/// limit, and a log line is not worth failing the request that emitted it.
+const QUEUE_CAPACITY: usize = 8192;
 
 impl FileSink {
     pub fn open(
@@ -39,7 +43,7 @@ impl FileSink {
         max_rolling_files: u32,
     ) -> io::Result<Self> {
         let mut writer = Writer::open(dir, pattern, max_file_size_mb, max_rolling_files)?;
-        let (sender, receiver) = channel::<Vec<u8>>();
+        let (sender, receiver) = sync_channel::<Vec<u8>>(QUEUE_CAPACITY);
         let worker = std::thread::Builder::new()
             .name("spt-log-sink".to_owned())
             .spawn(move || run(&mut writer, &receiver))?;
@@ -50,11 +54,12 @@ impl FileSink {
         })
     }
 
-    /// Queues one line. A write that cannot be delivered is dropped rather than propagated: losing
-    /// a log line is not worth failing the request that emitted it.
+    /// Queues one line. A write that cannot be delivered - the queue is full, or the writer thread
+    /// is gone - is dropped rather than propagated: losing a log line is not worth failing the
+    /// request that emitted it, and it is certainly not worth blocking it.
     pub fn write(&self, line: Vec<u8>) {
         if let Some(sender) = &self.sender {
-            let _ = sender.send(line);
+            let _ = sender.try_send(line);
         }
     }
 
@@ -96,7 +101,7 @@ struct Writer {
     max_size: u64,
     /// 0 means keep every archived file.
     max_rolling: usize,
-    date: String,
+    date: i64,
     file: BufWriter<File>,
     written: u64,
 }
@@ -111,13 +116,17 @@ impl Writer {
         let dir = PathBuf::from(dir);
         fs::create_dir_all(&dir)?;
 
-        let date = utc_date();
+        let date = utc_days();
         let max_rolling = if max_rolling_files == 0 {
             DEFAULT_MAX_ROLLING
         } else {
             max_rolling_files as usize
         };
-        let file = open_live(&dir, &replace_date(pattern, &date), max_rolling)?;
+        let file = open_live(
+            &dir,
+            &replace_date(pattern, &format_date(date)),
+            max_rolling,
+        )?;
         let written = file.metadata()?.len();
 
         Ok(Self {
@@ -132,7 +141,7 @@ impl Writer {
     }
 
     fn write_line(&mut self, line: &[u8]) -> io::Result<()> {
-        let today = utc_date();
+        let today = utc_days();
         if today != self.date {
             self.date = today;
             self.roll()?;
@@ -157,7 +166,7 @@ impl Writer {
 
         let file = open_rolled(
             &self.dir,
-            &replace_date(&self.pattern, &self.date),
+            &replace_date(&self.pattern, &format_date(self.date)),
             self.max_rolling,
         )?;
         self.written = file.metadata()?.len();
@@ -286,12 +295,17 @@ fn split_extension(file_name: &str) -> (&str, &str) {
     }
 }
 
-fn utc_date() -> String {
+fn utc_days() -> i64 {
     let seconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|elapsed| elapsed.as_secs())
         .unwrap_or(0);
-    let (year, month, day) = civil_from_days((seconds / 86_400) as i64);
+
+    (seconds / 86_400) as i64
+}
+
+fn format_date(days: i64) -> String {
+    let (year, month, day) = civil_from_days(days);
 
     format!("{year:04}{month:02}{day:02}")
 }
@@ -330,6 +344,13 @@ mod tests {
     }
 
     #[test]
+    fn format_date_matches_known_days() {
+        assert_eq!(format_date(0), "19700101");
+        assert_eq!(format_date(11016), "20000229");
+        assert_eq!(format_date(20681), "20260816");
+    }
+
+    #[test]
     fn replaces_date_case_insensitively() {
         assert_eq!(replace_date("spt%DATE%.log", "20260816"), "spt20260816.log");
         assert_eq!(replace_date("spt%date%.log", "20260816"), "spt20260816.log");
@@ -337,11 +358,12 @@ mod tests {
     }
 
     fn live_path(dir: &TempDir) -> PathBuf {
-        dir.path().join(replace_date("spt%DATE%.log", &utc_date()))
+        dir.path()
+            .join(replace_date("spt%DATE%.log", &format_date(utc_days())))
     }
 
     fn archive_path(dir: &TempDir, sequence: u32) -> PathBuf {
-        let file_name = replace_date("spt%DATE%.log", &utc_date());
+        let file_name = replace_date("spt%DATE%.log", &format_date(utc_days()));
         let (stem, extension) = split_extension(&file_name);
 
         dir.path().join(format!("{stem}.{sequence}{extension}"))

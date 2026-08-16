@@ -59,7 +59,18 @@ internal sealed class FileLogHandler : BaseLogHandler
             {
                 fixed (byte* linePtr = line)
                 {
-                    NativeMethods.LogWrite(sink, linePtr, (nuint)line.Length);
+                    if (NativeMethods.LogWrite(sink, linePtr, (nuint)line.Length) != StatusOk)
+                    {
+                        // A panic crossing the FFI boundary poisons the sink; disable it rather
+                        // than calling into it again on every line.
+                        NativeMethods.LogClose(sink);
+                        _sinks[SinkKey(config)] = 0;
+
+                        Console.Error.WriteLine(
+                            $"The native log sink for '{Path.Combine(config.FilePath, config.FilePattern)}' failed. "
+                                + "File logging for this target is disabled."
+                        );
+                    }
                 }
             }
         }
@@ -71,7 +82,7 @@ internal sealed class FileLogHandler : BaseLogHandler
     /// </summary>
     private nint GetOrCreateSink(FileSptLoggerReference config)
     {
-        var key = $"{config.FilePath}|{config.FilePattern}|{config.MaxFileSizeMb}|{config.MaxRollingFiles}";
+        var key = SinkKey(config);
 
         if (_sinks.TryGetValue(key, out var existingSink))
         {
@@ -82,6 +93,11 @@ internal sealed class FileLogHandler : BaseLogHandler
         _sinks.Add(key, sink);
 
         return sink;
+    }
+
+    private static string SinkKey(FileSptLoggerReference config)
+    {
+        return $"{config.FilePath}|{config.FilePattern}|{config.MaxFileSizeMb}|{config.MaxRollingFiles}";
     }
 
     private static unsafe nint OpenSink(FileSptLoggerReference config)
