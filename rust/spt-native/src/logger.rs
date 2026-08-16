@@ -177,7 +177,7 @@ pub fn compile_format(format: &str) -> Vec<FormatToken> {
 }
 
 /// Renders one line without its trailing newline - the sink owns the terminator, matching how the
-/// C# handlers passed unterminated lines to `spt_log_write`.
+/// C# handlers passed unterminated lines to the sink.
 pub fn render(tokens: &[FormatToken], record: &LogRecord) -> String {
     let days = record.unix_millis.div_euclid(86_400_000);
     let ms_of_day = record.unix_millis.rem_euclid(86_400_000);

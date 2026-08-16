@@ -73,8 +73,8 @@ impl FileSink {
     }
 }
 
-/// `spt_log_write` shares one sink across every logging thread through a raw pointer, which opts
-/// out of the checking that would otherwise catch a field going non-`Sync`. Assert it here.
+/// The pipeline shares one sink across every logging thread, so a field going non-`Sync` would
+/// break `spt_log_emit`. Assert it here.
 const _: fn() = || {
     fn assert_sync<T: Sync>() {}
     assert_sync::<FileSink>();
