@@ -5,7 +5,7 @@
       "logLevel": "Trace",
       "format": "[%date% %time%][%level%][%logger%] %message%",
       "filePath": "./user/logs/kestrel/",
-      "filePattern": "kestrel%DATE%.log",
+      "filePattern": "kestrel.log",
       "maxFileSizeMB": 10,
       "maxRollingFiles": 10,
       "filters": [
@@ -21,8 +21,8 @@
       "logLevel": "Trace",
       "format": "[%date% %time%][%level%][%logger%] %message%",
       "filePath": "./user/logs/spt/",
-      "filePattern": "spt%DATE%.log",
-      "maxFileSizeMB": 10,
+      "filePattern": "spt.log",
+      "maxFileSizeMB": 8,
       "maxRollingFiles": 10,
       "filters": [
         {
@@ -42,7 +42,7 @@
       "logLevel": "Trace",
       "format": "[%date% %time%][%level%][%logger%] %message%",
       "filePath": "./user/logs/requests/",
-      "filePattern": "requests%DATE%.log",
+      "filePattern": "requests.log",
       "maxFileSizeMB": 25,
       "maxRollingFiles": 10,
       "filters": [

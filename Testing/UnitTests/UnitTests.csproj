@@ -31,4 +31,11 @@
   <ItemGroup>
     <Compile Remove="Tests\Mock\MockSptLogger.cs" />
   </ItemGroup>
+  <ItemGroup>
+    <!-- Facade emitted by BuildSpectreFacade in SPTarkov.Common; see the note in Build.props. -->
+    <Reference Include="Spectre.Console.Ansi">
+      <HintPath>$(SpectreFacadePath)</HintPath>
+      <Private>true</Private>
+    </Reference>
+  </ItemGroup>
 </Project>

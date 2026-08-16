@@ -2,6 +2,9 @@ using Spectre.Console;
 
 namespace SPTarkov.Common.Models.Logging;
 
+/// <summary>
+/// TextColor/BackgroundColor are retained for 4.1.2 mod compatibility and are never rendered.
+/// </summary>
 public record SptLogMessage(
     string Logger,
     DateTime LogTime,

@@ -26,7 +26,7 @@ SPTarkov.Server.Assets                          (content-only, no code reference
 
 | Project | .cs files | Depends on | NuGet of note |
 |---|---:|---|---|
-| `SPTarkov.Common` | 24 | — | ZLogger, Spectre.Console, SemanticVersioning, ZLinq |
+| `SPTarkov.Common` | 24 | — | SemanticVersioning, ZLinq |
 | `SPTarkov.DI` | 3 | — | MS.Extensions.DependencyInjection.Abstractions, Hosting.Abstractions |
 | `SPTarkov.Reflection` | 8 | `SPTarkov.DI` | HarmonyX |
 | `SPTarkov.Server.Core` | 840 | `SPTarkov.Common`, `SPTarkov.DI` | HarmonyX, FastCloner, System.IO.Hashing |
@@ -44,7 +44,7 @@ a game type — no `MongoId`, no `Item`, no config record. Logging, semver and g
 
 | Folder | Contents |
 |---|---|
-| `Logger/` | `SptLogger`, `SptLoggerProvider`, `SPTLoggerDispatcher`, `SptEarlyLoggerFactory` (the pre-DI logger used during startup), `LogFileRollManager`, `SPTLoggerWrapper` (adapts the dispatcher to `Microsoft.Extensions.Logging.ILogger`) |
+| `Logger/` | `SptLogger`, `SptLoggerProvider`, `SPTLoggerDispatcher`, `SptEarlyLoggerFactory` (the pre-DI logger used during startup), `SPTLoggerWrapper` (adapts the dispatcher to `Microsoft.Extensions.Logging.ILogger`) |
 | `Logger/Handlers/` | `BaseLogHandler` → `ConsoleLogHandler`, `FileLogHandler` |
 | `Models/Logging/` | `ISptLogger`, `ILogHandler`, `SptLogMessage`, `SptLoggerConfiguration` (bound from `sptLogger.json`), `FileLogger` (empty marker type used as a log category) |
 | `Semver/` | `ISemVer` + `SemanticVersioningSemVer` — used for mod `SptVersion` range checks |

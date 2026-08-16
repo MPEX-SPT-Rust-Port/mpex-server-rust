@@ -13,15 +13,41 @@
     <IsPackable>true</IsPackable>
     <NoDefaultLaunchSettingsFile>true</NoDefaultLaunchSettingsFile>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <!--
+        Required by the [LibraryImport] source generator, which emits unsafe marshalling stubs and
+        fails the build without it (SYSLIB1062). No hand-written code in this project is unsafe.
+    -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="SemanticVersioning" Version="3.0.0" />
-    <PackageReference Include="Spectre.Console" Version="0.57.2" />
-    <PackageReference Include="Spectre.Console.Cli" Version="0.55.0" />
     <PackageReference Include="ZLinq" Version="1.5.6" />
-    <PackageReference Include="ZLogger" Version="2.5.10" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="UnitTests" />
   </ItemGroup>
   <ItemGroup>
     <None Include="..\..\LICENSE" Pack="true" Visible="false" PackagePath="" />
   </ItemGroup>
+  <ItemGroup>
+    <!-- Facade emitted by BuildSpectreFacade in SPTarkov.Common; see the note in Build.props. -->
+    <Reference Include="Spectre.Console.Ansi">
+      <HintPath>$(SpectreFacadePath)</HintPath>
+      <Private>true</Private>
+    </Reference>
+  </ItemGroup>
+  <!-- Emits the Spectre.Console.Ansi facade; see the note in Build.props. -->
+  <Target
+    Name="BuildSpectreFacade"
+    BeforeTargets="ResolveAssemblyReferences"
+    Inputs="$(SpectreFacadeDir)/spectre-facade/src/main.rs;$(SpectreFacadeDir)/spectre-facade/src/colors.rs;$(SpectreFacadeDir)/spectre-facade/Cargo.toml;$(SpectreFacadeDir)/Cargo.lock"
+    Outputs="$(SpectreFacadePath)"
+  >
+    <MakeDir Directories="$(SpectreFacadeDir)/target/spectre-facade" />
+    <Exec
+      Command="cargo run --locked -q -p spectre-facade -- &quot;$(SpectreFacadePath)&quot;"
+      WorkingDirectory="$(SpectreFacadeDir)"
+      ConsoleToMsBuild="true"
+    />
+  </Target>
 </Project>

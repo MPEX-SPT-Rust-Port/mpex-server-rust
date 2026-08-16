@@ -1,5 +1,6 @@
 pub mod bot;
 pub mod ffi;
+pub mod log_sink;
 pub mod loot;
 pub mod quest;
 pub mod ragfair;

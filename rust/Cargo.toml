@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["spt-native"]
+members = ["spt-native", "spectre-facade"]
 
 [profile.release]
 lto = "fat"

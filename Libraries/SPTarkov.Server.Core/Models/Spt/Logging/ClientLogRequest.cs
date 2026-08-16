@@ -17,6 +17,9 @@ public record ClientLogRequest : IRequestData
     [JsonPropertyName("Message")]
     public string? Message { get; set; }
 
+    /// <summary>
+    /// Still accepted from the client for compatibility; never rendered.
+    /// </summary>
     [JsonPropertyName("Color")]
     [JsonConverter(typeof(StringToSpectreColorConverter))]
     public Color? Color { get; set; }
