@@ -906,6 +906,9 @@ pub struct QuestInvariantSlice {
     /// Boss names per location, keyed by `LocationBase.Id`. `BossName` is the only member
     /// `EliminationQuestGenerator.cs:485-501` reads off a `BossLocationSpawn`, and the blacklist it
     /// filters the locations with (`DistLocationBlacklist`) is compared against that same key.
+    /// Keys are **never lowercased**, unlike `extracts_by_location` — shipped ids are mixed-case
+    /// (`Interchange`, `Sandbox_high`) and the C# comparison is ordinal, so the request builder
+    /// must not normalise them.
     pub boss_spawns_by_location: IndexMap<String, Vec<String>>,
     /// `LocationBase.AllExtracts` per location, keyed by the lowercased location key the C# looks
     /// up with (`ExplorationQuestGenerator.cs:183`). List order is load-bearing: the exit is drawn
