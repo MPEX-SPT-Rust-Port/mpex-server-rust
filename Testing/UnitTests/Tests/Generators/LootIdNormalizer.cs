@@ -14,10 +14,15 @@ internal static class LootIdNormalizer
     // bot inventory starts with, so each is a fresh MongoId that would never match across paths.
     // "root" is RagfairOffer's, pointing at its own items[0].
     // "qid"/"uid" are QuestStatus's back-pointers (quest id and session id) and "target" is a
-    // Reward's pointer at its own items[0] - the repeatable-quest equivalents of "root".
+    // Reward's pointer at its own items[0] - the repeatable-quest equivalents of "root". "id" is
+    // there for the same reason: a repeatable quest carries several, and one aliasing an _id in the
+    // same document has to resolve to that anchor rather than stay raw. A value no _id anchors is
+    // left alone either way, so a member that happens to be named "id" and holds something else is
+    // untouched.
     private static readonly string[] _idFields =
     [
         "_id",
+        "id",
         "parentId",
         "Root",
         "root",

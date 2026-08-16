@@ -43,13 +43,23 @@ namespace UnitTests.Tests.Generators;
 /// </item>
 /// </list>
 /// The <see cref="QuestTypePool"/> is built fresh per call and never shared, so it needs no restore.
+/// One thing is mutated and <i>not</i> restored: every native send advances
+/// <c>RepeatableQuestNativeRequestBuilder.LastSentSliceStamp</c> on the shared singleton. It is
+/// test-session state like ragfair's pre-generated flea - the native side revalidates every stamp and
+/// self-heals a stale one, and <c>RepeatableQuestNativeRequestBuilderTests</c> resets it in its own
+/// <c>[SetUp]</c>.
 ///
 /// The one sanctioned parity gap: <c>MongoId</c> minting sits outside the seeded stream on both
-/// sides, so ~12-25 ids per quest can never match. <see cref="LootIdNormalizer"/> maps the ones some
-/// <c>_id</c> anchors (the quest id behind <c>qid</c>, a reward's <c>target</c> pointing at its own
-/// <c>items[0]</c>); the rest are unreferenced <c>id</c> members and are masked positionally by
-/// <see cref="Canonicalise"/> - but only when the value is not one the shipped quest templates
-/// carried, so a path that mints where the other copies a template id still fails.
+/// sides, so ~12-25 ids per quest can never match. <see cref="LootIdNormalizer"/> maps every one that
+/// some <c>_id</c> in the same document anchors - the quest id behind <c>qid</c>, a reward's
+/// <c>target</c> pointing at its own <c>items[0]</c>, and any <c>id</c> member aliasing one of those.
+/// What is left is the ids nothing references, which <see cref="Canonicalise"/> masks positionally,
+/// and only when the shipped quest templates never carried the value - so a path that mints where the
+/// other copies, whether it copies a template id or an anchored one, still fails. The single blind
+/// spot that leaves is a straight swap of two <i>unreferenced</i> minted ids between sibling
+/// <c>id</c> members: positional numbering renames both, so it compares equal. That is semantically
+/// inert by definition - nothing reads either value - while aliasing, ordering and count changes are
+/// all still caught.
 /// </summary>
 [TestFixture]
 [NonParallelizable]
@@ -118,7 +128,7 @@ public class RepeatableQuestParityTests
         [ValueSource(nameof(_seeds))] ulong seed
     )
     {
-        var pmcLevel = LevelForBand(questType, bandIndex);
+        var pmcLevel = LevelForBand(_pmcDaily, questType, bandIndex);
         var traderId = TraderForType(questType, traderIndex);
         var label = $"type={questType} level={pmcLevel} trader={traderId}";
 
@@ -137,10 +147,11 @@ public class RepeatableQuestParityTests
     [Test]
     public void TheSameSeedGeneratesEquivalentPickupQuestsOnBothPaths([ValueSource(nameof(_seeds))] ulong seed)
     {
+        var pmcLevel = LevelForBand(_pickupConfig, "Pickup", 1);
         var traderId = _pickupConfig.TraderWhitelist.First(whitelist => whitelist.QuestTypes.Contains("Pickup")).TraderId;
 
-        var legacy = Generate("Pickup", 20, traderId, seed, forceLegacy: true);
-        var native = Generate("Pickup", 20, traderId, seed, forceLegacy: false);
+        var legacy = Generate("Pickup", pmcLevel, traderId, seed, forceLegacy: true);
+        var native = Generate("Pickup", pmcLevel, traderId, seed, forceLegacy: false);
 
         LootJsonAssert.AssertEqual(legacy.Quest, native.Quest, $"type=Pickup trader={traderId}", seed);
         LootJsonAssert.AssertEqual(legacy.Pool, native.Pool, $"type=Pickup trader={traderId} pool", seed);
@@ -155,7 +166,7 @@ public class RepeatableQuestParityTests
     [Test]
     public void AForcedSpecificEliminationLocationMatchesOnBothPaths([ValueSource(nameof(_seeds))] ulong seed)
     {
-        var pmcLevel = LevelForBand("Elimination", 1);
+        var pmcLevel = LevelForBand(_pmcDaily, "Elimination", 1);
         var traderId = TraderForType("Elimination", 0);
 
         var legacy = Generate("Elimination", pmcLevel, traderId, seed, forceLegacy: true, forceSpecificLocation: true);
@@ -181,10 +192,11 @@ public class RepeatableQuestParityTests
     [Test]
     public void AnExhaustedPoolReturnsNullOnBothPaths([ValueSource(nameof(_seeds))] ulong seed)
     {
+        var pmcLevel = LevelForBand(_pmcDaily, "Exploration", 1);
         var traderId = TraderForType("Exploration", 0);
 
-        var legacy = Generate("Exploration", 20, traderId, seed, forceLegacy: true, exhaustPool: true);
-        var native = Generate("Exploration", 20, traderId, seed, forceLegacy: false, exhaustPool: true);
+        var legacy = Generate("Exploration", pmcLevel, traderId, seed, forceLegacy: true, exhaustPool: true);
+        var native = Generate("Exploration", pmcLevel, traderId, seed, forceLegacy: false, exhaustPool: true);
 
         Assert.That(legacy.Quest, Is.EqualTo("null"), "the legacy path found a location in an emptied pool");
         Assert.That(native.Quest, Is.EqualTo("null"), "the native path found a location in an emptied pool");
@@ -197,10 +209,11 @@ public class RepeatableQuestParityTests
     [Test]
     public void ADifferentSeedProducesADifferentQuest([ValueSource(nameof(_questTypes))] string questType)
     {
+        var pmcLevel = LevelForBand(_pmcDaily, questType, 1);
         var traderId = TraderForType(questType, 0);
 
-        var atSeed = Generate(questType, 20, traderId, _seeds[0], forceLegacy: false);
-        var atOtherSeed = Generate(questType, 20, traderId, _seeds[1], forceLegacy: false);
+        var atSeed = Generate(questType, pmcLevel, traderId, _seeds[0], forceLegacy: false);
+        var atOtherSeed = Generate(questType, pmcLevel, traderId, _seeds[1], forceLegacy: false);
 
         Assert.That(atOtherSeed.Quest, Is.Not.EqualTo(atSeed.Quest), $"{questType} ignored the seed - the draws are not reaching it");
     }
@@ -228,9 +241,13 @@ public class RepeatableQuestParityTests
             pool.Pool.Exploration.Locations!.Clear();
         }
 
-        var eliminationConfig = _repeatableQuestHelper.GetEliminationConfigByPmcLevel(pmcLevel, repeatableConfig)!;
+        // Resolved only for the one case that writes to it - reading it here for a Pickup or
+        // Exploration run would be a latent NRE the moment the shipped bands stop covering the level
+        var forcedEliminationConfig = forceSpecificLocation
+            ? _repeatableQuestHelper.GetEliminationConfigByPmcLevel(pmcLevel, repeatableConfig)
+            : null;
         var originalForce = _questConfig.ForceLegacyRepeatableQuestGeneration;
-        var originalSpecificLocationChance = eliminationConfig.SpecificLocationChance;
+        var originalSpecificLocationChance = forcedEliminationConfig?.SpecificLocationChance;
         var originalSource = _randomUtil.RandomSource;
         var originalProbabilitySource = ProbabilityRandomSource.Current;
 
@@ -239,9 +256,9 @@ public class RepeatableQuestParityTests
             _questConfig.ForceLegacyRepeatableQuestGeneration = forceLegacy;
 
             // The whole repeatableConfig crosses in the varying half, so one write reaches both paths
-            if (forceSpecificLocation)
+            if (forcedEliminationConfig is not null)
             {
-                eliminationConfig.SpecificLocationChance = 100;
+                forcedEliminationConfig.SpecificLocationChance = 100;
             }
 
             if (forceLegacy)
@@ -269,7 +286,11 @@ public class RepeatableQuestParityTests
         finally
         {
             _questConfig.ForceLegacyRepeatableQuestGeneration = originalForce;
-            eliminationConfig.SpecificLocationChance = originalSpecificLocationChance;
+            if (forcedEliminationConfig is not null)
+            {
+                forcedEliminationConfig.SpecificLocationChance = originalSpecificLocationChance!.Value;
+            }
+
             _randomUtil.RandomSource = originalSource;
             ProbabilityRandomSource.Current = originalProbabilitySource;
             SetNativeSeed(generator, null);
@@ -310,7 +331,7 @@ public class RepeatableQuestParityTests
         {
             if (target.Data?.IsBoss ?? false)
             {
-                pool.Pool.Elimination.Targets!.Add(target.Key, new TargetLocation { Locations = ["any"] });
+                pool.Pool.Elimination.Targets!.Add(target.Key!, new TargetLocation { Locations = ["any"] });
 
                 continue;
             }
@@ -321,7 +342,7 @@ public class RepeatableQuestParityTests
                     : repeatableConfig.Locations.Keys;
 
             pool.Pool.Elimination.Targets!.Add(
-                target.Key,
+                target.Key!,
                 new TargetLocation { Locations = allowedLocations.Select(location => location.ToString()).ToList() }
             );
         }
@@ -331,15 +352,17 @@ public class RepeatableQuestParityTests
 
     /// <summary>
     /// The midpoint of the <paramref name="bandIndex"/>'th shipped level band for the type, so the
-    /// cases straddle bands the data declares rather than edges this fixture invents.
+    /// cases straddle bands the data declares rather than edges this fixture invents. Pickup ships no
+    /// bands of its own, but <see cref="BuildPool"/> still reads the elimination bands for every
+    /// type, so its level has to land inside one of those.
     /// </summary>
-    private int LevelForBand(string questType, int bandIndex)
+    private static int LevelForBand(RepeatableQuestConfig repeatableConfig, string questType, int bandIndex)
     {
         var bands = questType switch
         {
-            "Elimination" => _pmcDaily.QuestConfig.Elimination.Select(config => config.LevelRange).ToList(),
-            "Completion" => _pmcDaily.QuestConfig.CompletionConfig.Select(config => config.LevelRange).ToList(),
-            "Exploration" => _pmcDaily.QuestConfig.ExplorationConfig.Select(config => config.LevelRange).ToList(),
+            "Elimination" or "Pickup" => repeatableConfig.QuestConfig.Elimination.Select(config => config.LevelRange).ToList(),
+            "Completion" => repeatableConfig.QuestConfig.CompletionConfig.Select(config => config.LevelRange).ToList(),
+            "Exploration" => repeatableConfig.QuestConfig.ExplorationConfig.Select(config => config.LevelRange).ToList(),
             _ => throw new ArgumentOutOfRangeException(nameof(questType), questType, "no level bands for this type"),
         };
 
@@ -412,11 +435,11 @@ public class RepeatableQuestParityTests
 
     /// <summary>
     /// <see cref="LootIdNormalizer"/> first - it maps every <c>_id</c> to a positional placeholder and
-    /// rewrites the members that point at one. What survives is the minted ids nothing references:
-    /// a <c>Reward</c>'s own <c>id</c>, the <c>QuestStatus</c>'s, and the condition and counter ids
-    /// the generators re-mint. Those are masked positionally too, but only when the shipped templates
-    /// never carried the value - masking a template id would hide a path that mints where the other
-    /// copies.
+    /// rewrites the members that point at one, <c>id</c> included. What survives is the minted ids
+    /// nothing anchors: a <c>Reward</c>'s own <c>id</c>, the <c>QuestStatus</c>'s, and the condition
+    /// and counter ids the generators re-mint. Those are masked positionally too, but only when the
+    /// shipped templates never carried the value - masking a template id, like leaving an anchored
+    /// one for this pass, would hide a path that mints where the other copies.
     /// </summary>
     private string Canonicalise(string json)
     {
