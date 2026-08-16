@@ -172,6 +172,33 @@ pub fn get_int(min: i32, max: i32) -> i32 {
     }
 }
 
+/// A random integer in `low..high`, or in `0..low` when `high` is `None`, matching
+/// `RandomUtil.RandInt` (`RandomUtil.cs:254-264`).
+///
+/// The upper bound is *exclusive*, unlike [`get_int`]'s: `rand_int(1, Some(3))` never returns 3.
+/// Equal bounds return `low` without drawing at all, so parity depends on which of the two is used.
+///
+/// The C# takes `int`s; the wider parameters here save the call sites a cast off their `i64` counts
+/// and are narrowed to the C# width before the draw.
+///
+/// # Panics
+///
+/// On an empty range — a `low` of 0 or less with no `high`, or a `high` below `low` — where both C#
+/// sources throw.
+pub fn rand_int(low: i64, high: Option<i64>) -> i64 {
+    let (from, to) = match high {
+        // Return a random integer from 0 to low if high is not provided
+        None => (0, low),
+        // Return low directly when low and high are equal
+        Some(high) if high == low => return low,
+        Some(high) => (low, high),
+    };
+
+    assert!(to > from, "rand_int: empty range {from}..{to}");
+
+    i64::from(get_int32(from as i32, to as i32))
+}
+
 /// A random float in `[min, max)`, matching `RandomUtil.GetDouble` (`RandomUtil.cs:77-81`).
 pub fn get_double(min: f64, max: f64) -> f64 {
     // Same shape as the C#, so an inverted range walks below `min` here too instead of panicking.
@@ -353,6 +380,58 @@ fn gaussian_random(n: f64) -> f64 {
 /// If `list` is empty, as the C# throws on an empty collection.
 pub fn get_array_value<T>(list: &[T]) -> &T {
     &list[get_int(0, list.len() as i32 - 1) as usize]
+}
+
+/// A uniform `[0, 1)` draw, matching `RandomUtil.GetSecureRandomNumber` (`RandomUtil.cs:464-467`) —
+/// a straight delegation to the 48-bit shape, not the 53-bit one.
+pub fn get_secure_random_number() -> f64 {
+    next_double48()
+}
+
+/// `count` random elements of `original_list`, matching `RandomUtil.DrawRandomFromList`
+/// (`RandomUtil.cs:304-334`). A list either way, even at the C# default `count` of 1.
+///
+/// With `replacement` an element can be drawn more than once; without, the draws come out of a copy
+/// of the list that shrinks by one each time, and `count` is clamped to its length rather than
+/// running dry. Either way one [`rand_int`] is spent per draw — over a *shrinking* bound in the
+/// second case, so the two sequences diverge after the first draw.
+///
+/// The C# deep clones that copy through `ICloner`; the elements are cloned individually here, which
+/// comes to the same thing for the owned values the ported call sites pass.
+///
+/// # Panics
+///
+/// If `original_list` is empty and `replacement` is set, as the C# throws drawing an index out of an
+/// empty list. Without replacement there is nothing to draw and the result is empty, as in the C#.
+pub fn draw_random_from_list<T: Clone>(
+    original_list: &[T],
+    count: usize,
+    replacement: bool,
+) -> Vec<T> {
+    if replacement {
+        return (0..count)
+            .map(|_| original_list[rand_int(original_list.len() as i64, None) as usize].clone())
+            .collect();
+    }
+
+    let mut pool = original_list.to_vec();
+    let draw_count = count.min(pool.len());
+
+    (0..draw_count)
+        .map(|_| pool.remove(rand_int(pool.len() as i64, None) as usize))
+        .collect()
+}
+
+/// `count` random keys of `dict`, matching `RandomUtil.DrawRandomFromDict`
+/// (`RandomUtil.cs:345-351`) — the keys in insertion order, drawn by [`draw_random_from_list`].
+pub fn draw_random_from_dict<K: Clone, V>(
+    dict: &IndexMap<K, V>,
+    count: usize,
+    replacement: bool,
+) -> Vec<K> {
+    let keys: Vec<K> = dict.keys().cloned().collect();
+
+    draw_random_from_list(&keys, count, replacement)
 }
 
 /// A key drawn in proportion to its weight, matching `WeightedRandomHelper.GetWeightedValue`
@@ -742,6 +821,34 @@ mod tests {
         println!("PERCENT_OF_VALUE_BITS: [{}]", hex(&percents));
         println!("REDUCE_BY_PERCENT_BITS: [{}]", hex(&reductions));
         println!("WEIGHTED_GENERIC_INDICES: {generic_indices:?}");
+
+        let rand_ints_low: Vec<i64> = {
+            let _g = TestSeedGuard::install(42);
+            (0..5).map(|_| rand_int(10, None)).collect()
+        };
+        let rand_ints_ranged: Vec<i64> = {
+            let _g = TestSeedGuard::install(42);
+            (0..5).map(|_| rand_int(5, Some(15))).collect()
+        };
+        let keys: Vec<String> = kat_keys().into_iter().map(str::to_owned).collect();
+        let drawn_with: Vec<String> = {
+            let _g = TestSeedGuard::install(42);
+            draw_random_from_list(&keys, 5, true)
+        };
+        let drawn_without: Vec<String> = {
+            let _g = TestSeedGuard::install(42);
+            draw_random_from_list(&keys, 3, false)
+        };
+        let drawn_keys: Vec<String> = {
+            let _g = TestSeedGuard::install(42);
+            draw_random_from_dict(&kat_mixed_map(), 3, false)
+        };
+
+        println!("RAND_INT_10: {rand_ints_low:?}");
+        println!("RAND_INT_5_15: {rand_ints_ranged:?}");
+        println!("DRAW_FROM_LIST_5: {drawn_with:?}");
+        println!("DRAW_FROM_LIST_NO_REPLACEMENT_3: {drawn_without:?}");
+        println!("DRAW_FROM_DICT_NO_REPLACEMENT_3: {drawn_keys:?}");
     }
 
     /// The KAT map keys, shared with the C# twin where they have to parse as `MongoId`s — hence
@@ -896,6 +1003,25 @@ mod tests {
     const KAT_BIASED_80_120_SHIFT2_N2: [f64; 5] = [97.0, 100.0, 110.0, 88.0, 95.0];
     const KAT_GET_BOOL: [bool; 8] = [true, false, true, false, false, false, true, true];
     const KAT_ACCOUNT_IDS: [i32; 4] = [1_968_470, 1_080_510, 1_301_473, 1_221_345];
+    /// `rand_int(10, None)` — the `0..low` shape [`draw_random_from_list`] indexes with.
+    const KAT_RAND_INT_10: [i64; 5] = [6, 1, 1, 4, 8];
+    /// `rand_int(5, Some(15))` — the same draws shifted, since the range is the same width.
+    const KAT_RAND_INT_5_15: [i64; 5] = [11, 6, 6, 9, 13];
+    /// Five draws with replacement from [`kat_keys`], so repeats are expected.
+    const KAT_DRAW_FROM_LIST_5: [&str; 5] = [
+        "cccccccccccccccccccccccc",
+        "cccccccccccccccccccccccc",
+        "bbbbbbbbbbbbbbbbbbbbbbbb",
+        "bbbbbbbbbbbbbbbbbbbbbbbb",
+        "aaaaaaaaaaaaaaaaaaaaaaaa",
+    ];
+    /// Three draws without replacement from [`kat_keys`]: each draw indexes a pool one shorter than
+    /// the last, so the sequence diverges from the with-replacement one after the first draw.
+    const KAT_DRAW_FROM_LIST_NO_REPLACEMENT_3: [&str; 3] = [
+        "cccccccccccccccccccccccc",
+        "dddddddddddddddddddddddd",
+        "bbbbbbbbbbbbbbbbbbbbbbbb",
+    ];
 
     #[test]
     fn kat_roll_chance_is_pinned() {
@@ -1044,6 +1170,95 @@ mod tests {
         let values: Vec<i32> = (0..4).map(|_| generate_account_id()).collect();
 
         assert_eq!(values, KAT_ACCOUNT_IDS);
+    }
+
+    #[test]
+    fn kat_rand_int_is_pinned() {
+        {
+            let _g = TestSeedGuard::install(KAT_SEED);
+            let low_only: Vec<i64> = (0..5).map(|_| rand_int(10, None)).collect();
+            assert_eq!(low_only, KAT_RAND_INT_10);
+        }
+        let _g = TestSeedGuard::install(KAT_SEED);
+        let ranged: Vec<i64> = (0..5).map(|_| rand_int(5, Some(15))).collect();
+        assert_eq!(ranged, KAT_RAND_INT_5_15);
+    }
+
+    #[test]
+    fn rand_int_upper_bound_is_exclusive() {
+        // The C# hands `high` straight to `GetInt32` as its exclusive bound, unlike `get_int`, which
+        // adds one first. A seeded run of 200 draws over 1..3 therefore never yields 3.
+        let _g = TestSeedGuard::install(KAT_SEED);
+        let drawn: HashSet<i64> = (0..200).map(|_| rand_int(1, Some(3))).collect();
+
+        assert_eq!(drawn, HashSet::from([1, 2]));
+    }
+
+    #[test]
+    fn rand_int_returns_low_when_the_bounds_are_equal_without_drawing() {
+        // The C# shortcut returns `low` before reaching the source, so the stream is untouched for
+        // whatever draws next. Parity depends on it.
+        let _g = TestSeedGuard::install(KAT_SEED);
+        assert_eq!(rand_int(7, Some(7)), 7);
+
+        let after: Vec<i64> = (0..5).map(|_| rand_int(10, None)).collect();
+        assert_eq!(after, KAT_RAND_INT_10);
+    }
+
+    #[test]
+    #[should_panic(expected = "rand_int: empty range")]
+    fn rand_int_rejects_an_empty_range_as_the_csharp_does() {
+        // `RandomSource.GetInt32(0, 0)` throws on both C# sources; drawing an index out of an empty
+        // list is the call site that gets here.
+        rand_int(0, None);
+    }
+
+    #[test]
+    fn kat_draw_random_from_list_is_pinned() {
+        let list: Vec<String> = kat_keys().into_iter().map(str::to_owned).collect();
+
+        {
+            let _g = TestSeedGuard::install(KAT_SEED);
+            assert_eq!(draw_random_from_list(&list, 5, true), KAT_DRAW_FROM_LIST_5);
+        }
+        let _g = TestSeedGuard::install(KAT_SEED);
+        assert_eq!(
+            draw_random_from_list(&list, 3, false),
+            KAT_DRAW_FROM_LIST_NO_REPLACEMENT_3
+        );
+    }
+
+    #[test]
+    fn draw_random_from_list_without_replacement_never_repeats_and_stops_at_the_list_length() {
+        let list: Vec<String> = kat_keys().into_iter().map(str::to_owned).collect();
+
+        let _g = TestSeedGuard::install(KAT_SEED);
+        // The C# clamps `count` to the list length rather than running dry.
+        let drawn = draw_random_from_list(&list, 10, false);
+
+        assert_eq!(drawn.len(), 4);
+        assert_eq!(drawn.iter().collect::<HashSet<_>>().len(), 4);
+    }
+
+    #[test]
+    fn kat_draw_random_from_dict_is_pinned() {
+        // Keys only, in insertion order, so the draws are the list ones over the same four keys.
+        let _g = TestSeedGuard::install(KAT_SEED);
+        let drawn = draw_random_from_dict(&kat_mixed_map(), 3, false);
+
+        assert_eq!(drawn, KAT_DRAW_FROM_LIST_NO_REPLACEMENT_3);
+    }
+
+    #[test]
+    fn get_secure_random_number_is_the_forty_eight_bit_draw() {
+        // Same shape as `next_double48` — the C# `GetSecureRandomNumber` is a straight delegation,
+        // so it must land on the pinned 48-bit vectors rather than the 53-bit ones.
+        let _g = TestSeedGuard::install(KAT_SEED);
+        let bits: Vec<u64> = (0..3)
+            .map(|_| get_secure_random_number().to_bits())
+            .collect();
+
+        assert_eq!(bits, KAT_NEXT_DOUBLE48_BITS);
     }
 
     #[test]

@@ -135,6 +135,40 @@ public sealed class RandomSourceParityTests
 
     private static readonly int[] _katAccountIds = [1968470, 1080510, 1301473, 1221345];
 
+    /// <summary>
+    ///     RandInt(10) — the single-argument, 0..low shape DrawRandomFromList indexes with. Its upper
+    ///     bound is exclusive, unlike GetInt's.
+    /// </summary>
+    private static readonly int[] _katRandInt10 = [6, 1, 1, 4, 8];
+
+    /// <summary>
+    ///     RandInt(5, 15) — the same draws shifted, since the range is the same width.
+    /// </summary>
+    private static readonly int[] _katRandInt5To15 = [11, 6, 6, 9, 13];
+
+    /// <summary>
+    ///     Five draws with replacement from _katWeightedKeys, so repeats are expected.
+    /// </summary>
+    private static readonly string[] _katDrawFromList5 =
+    [
+        "cccccccccccccccccccccccc",
+        "cccccccccccccccccccccccc",
+        "bbbbbbbbbbbbbbbbbbbbbbbb",
+        "bbbbbbbbbbbbbbbbbbbbbbbb",
+        "aaaaaaaaaaaaaaaaaaaaaaaa",
+    ];
+
+    /// <summary>
+    ///     Three draws without replacement: each draw indexes a pool one shorter than the last, so the
+    ///     sequence diverges from the with-replacement one after the first draw.
+    /// </summary>
+    private static readonly string[] _katDrawFromListNoReplacement3 =
+    [
+        "cccccccccccccccccccccccc",
+        "dddddddddddddddddddddddd",
+        "bbbbbbbbbbbbbbbbbbbbbbbb",
+    ];
+
     [Test]
     public void RawXoshiroSequenceMatchesTheRustTwin()
     {
@@ -425,6 +459,81 @@ public sealed class RandomSourceParityTests
             var values = Enumerable.Range(0, 4).Select(_ => hashUtil.GenerateAccountId()).ToArray();
 
             Assert.That(values, Is.EqualTo(_katAccountIds));
+        }
+        finally
+        {
+            randomUtil.RandomSource = original;
+        }
+    }
+
+    [Test]
+    public void SeededRandIntMatchesTheRustKat()
+    {
+        var randomUtil = DI.GetInstance().GetService<RandomUtil>();
+        var original = randomUtil.RandomSource;
+        try
+        {
+            randomUtil.RandomSource = new SeededRandomSource(KatSeed);
+            var lowOnly = Enumerable.Range(0, 5).Select(_ => randomUtil.RandInt(10)).ToArray();
+
+            randomUtil.RandomSource = new SeededRandomSource(KatSeed);
+            var ranged = Enumerable.Range(0, 5).Select(_ => randomUtil.RandInt(5, 15)).ToArray();
+
+            Assert.That(lowOnly, Is.EqualTo(_katRandInt10));
+            Assert.That(ranged, Is.EqualTo(_katRandInt5To15));
+        }
+        finally
+        {
+            randomUtil.RandomSource = original;
+        }
+    }
+
+    [Test]
+    public void SeededDrawRandomFromListAndDictMatchTheRustKat()
+    {
+        var randomUtil = DI.GetInstance().GetService<RandomUtil>();
+
+        // Insertion order, which is the order the rust twin's IndexMap keeps.
+        var dict = _katWeightedKeys.ToDictionary(key => key, _ => 0d);
+
+        var original = randomUtil.RandomSource;
+        try
+        {
+            randomUtil.RandomSource = new SeededRandomSource(KatSeed);
+            var withReplacement = randomUtil.DrawRandomFromList(_katWeightedKeys.ToList(), 5);
+
+            randomUtil.RandomSource = new SeededRandomSource(KatSeed);
+            var withoutReplacement = randomUtil.DrawRandomFromList(_katWeightedKeys.ToList(), 3, false);
+
+            randomUtil.RandomSource = new SeededRandomSource(KatSeed);
+            var drawnKeys = randomUtil.DrawRandomFromDict(dict, 3, false);
+
+            Assert.That(withReplacement, Is.EqualTo(_katDrawFromList5));
+            Assert.That(withoutReplacement, Is.EqualTo(_katDrawFromListNoReplacement3));
+
+            // DrawRandomFromDict is DrawRandomFromList over the keys, so it draws the same.
+            Assert.That(drawnKeys, Is.EqualTo(_katDrawFromListNoReplacement3));
+        }
+        finally
+        {
+            randomUtil.RandomSource = original;
+        }
+    }
+
+    [Test]
+    public void GetSecureRandomNumberIsTheFortyEightBitDraw()
+    {
+        var randomUtil = DI.GetInstance().GetService<RandomUtil>();
+        var original = randomUtil.RandomSource;
+        try
+        {
+            randomUtil.RandomSource = new SeededRandomSource(KatSeed);
+
+            for (var i = 0; i < _katNextDouble48Bits.Length; i++)
+            {
+                var bits = BitConverter.DoubleToUInt64Bits(randomUtil.GetSecureRandomNumber());
+                Assert.That(bits, Is.EqualTo(_katNextDouble48Bits[i]), $"GetSecureRandomNumber #{i}");
+            }
         }
         finally
         {
