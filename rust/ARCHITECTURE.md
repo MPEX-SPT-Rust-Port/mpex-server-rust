@@ -49,6 +49,12 @@ C# SptNative → spt_generate_* (JSON in)
   `spt_verify_database` is separate because it blocks on the tokio runtime.
 - Status codes: `STATUS_OK` 0, `STATUS_BAD_ARGS` 1 (null pointer, bad UTF-8, unparseable JSON),
   `STATUS_PANIC` 2, `STATUS_ERROR` 3, `STATUS_STALE_SLICE` 4 (ragfair and quest only — see below).
+  **Quest is the exception to 2**: `quest/mod.rs` catches the generator's panic itself and reports it
+  as `STATUS_ERROR` 3 carrying the panic message, because that family ports a C#-sanctioned throw as
+  an `.expect` and the C# message is what the caller has to log. The cost is that a real port bug in
+  that family (an index panic in the Rust) also arrives as 3, indistinguishable from a sanctioned
+  generation failure, instead of reaching `SptNative.cs`'s "this indicates a native library bug"
+  wording. Deliberate: the message is worth more than the discrimination.
 - **Two requests have a cached half**, ragfair's and the repeatable quest's. Each arrives as
   `{invariantStamp, invariant?, varying}`; `src/ragfair/slice_cache.rs` and
   `src/quest/slice_cache.rs` each hold the last parsed invariant slice under the stamp it came with,
@@ -158,8 +164,13 @@ These are what keep the port correct; break one and output silently diverges fro
   discards. The loot family documents each draw inline at its call site instead, against the C# line. Adding,
   removing, or reordering a draw desynchronises the whole sequence, so a "harmless" early-out that skips a roll
   is a bug.
-- **No logging, no throwing.** C# `ISptLogger` calls become `Diagnostic` values the caller replays through its
-  own logger; C# exceptions (and unguarded null derefs) become `LootError`, returned rather than panicked.
+- **No logging, and one rule for throws.** C# `ISptLogger` calls become `Diagnostic` values the caller replays
+  through its own logger. A C# *return-null-and-log* path is ported as a `Diagnostic` plus `None`, in every
+  family. A C#-*sanctioned* `throw` is ported one of two ways, by family: loot, bot and ragfair return it as a
+  `LootError` (so does an unguarded null deref they would have NRE'd on); the quest family panics at the throw
+  site — `panic!` or `.expect` — and catches it at the family entry point (`quest/mod.rs:120`), which carries
+  the message across as `STATUS_ERROR`. Panicking is not unsafe here: every export runs inside `catch_unwind`
+  (`ffi.rs:195`), so nothing unwinds past the FFI boundary either way.
 - **Wire models come in four families** (`loot/models.rs`, `bot/models.rs`, `ragfair/models.rs`,
   `quest/models.rs`). DB/EFT models mirror C# records field-for-field, pinned to the exact
   `JsonPropertyName`, each with a `#[serde(flatten)] extra` map so

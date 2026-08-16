@@ -1,5 +1,8 @@
+using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using NUnit.Framework;
+using SPTarkov.Server.Core.Models.Eft.Common.Tables;
 using SPTarkov.Server.Core.Models.Enums;
 using SPTarkov.Server.Core.Models.Spt.Config;
 using SPTarkov.Server.Core.Models.Spt.Mod;
@@ -232,6 +235,40 @@ public class RepeatableQuestNativeRequestBuilderTests
         );
 
         Assert.That(_builder.LastSendIncludedSlice, Is.False, "the unchanged stamp should have hit the native cache");
+    }
+
+    /// <summary>
+    /// The <c>#[serde(flatten)] extra</c> contract that mirrors Ceciler's <c>[JsonExtensionData]</c>,
+    /// the quest counterpart of <c>SptNativeRagfairWireTests.AModAddedItemFieldSurvivesTheRoundTrip</c>:
+    /// a mod-added member on a quest template must not fail the native parse, and it must ride back
+    /// out on the generated quest. Hand-built JSON through the raw-bytes seam, because no typed
+    /// payload can express the extra member. The echo half only asserts on Release and publish
+    /// builds - <c>ExtensionData</c> is IL-injected by Ceciler, and without it System.Text.Json
+    /// discards the member on the way in.
+    /// </summary>
+    [Test]
+    public void AModAddedQuestTemplateFieldSurvivesTheRoundTrip()
+    {
+        var request = new GenerateRepeatableQuestRequest
+        {
+            // No real stamp: the slice this parks in the native cache is not one any send should hit
+            InvariantStamp = long.MaxValue,
+            Invariant = _builder.BuildInvariantSlice(),
+            Varying = BuildVarying(seed: 424242),
+        };
+
+        var json = JsonNode.Parse(JsonSerializer.Serialize(request, SptNative.QuestJsonOptions))!.AsObject();
+        json["invariant"]!["repeatableQuestTemplates"]!["Exploration"]!["modAddedField"] = "kept";
+
+        var result = SptNative.GenerateRepeatableQuest(Encoding.UTF8.GetBytes(json.ToJsonString()));
+
+        Assert.That(result.Quest, Is.Not.Null, "the mod-added member failed the native parse");
+
+        if (typeof(RepeatableQuest).GetProperty("ExtensionData") is { } extensionData)
+        {
+            var extension = (Dictionary<string, object>)extensionData.GetValue(result.Quest!)!;
+            Assert.That(((JsonElement)extension["modAddedField"]).GetString(), Is.EqualTo("kept"));
+        }
     }
 
     /// <summary>

@@ -224,11 +224,13 @@ seeded-RNG parity at the primitive level (xoshiro256\*\*, twin known-answer test
   `RepeatableQuestHelper` or of `RepeatableQuestRewardGenerator` — flips too, and the check runs per
   generator instance at call time. `PickupQuestGenerator` contributes **zero** frozen hookable
   members: its whole legacy body is inline in `Generate`, so nothing of its own is patchable.
-- **Five classes took constructor overloads**, not signature changes — the frozen 4.1.2 constructors
-  stay, and the container selects an overload adding `QuestConfig` and
-  `RepeatableQuestNativeRequestBuilder` on each of the four generators, and `QuestConfig` alone on
-  `RepeatableQuestRewardGenerator`. Additive only, and a generator built through the frozen
-  constructor has no native seam and runs legacy unconditionally.
+- **The four generators took constructor overloads**, not signature changes — the frozen 4.1.2
+  constructors stay, and the container selects an overload adding `QuestConfig` and
+  `RepeatableQuestNativeRequestBuilder` on each. Additive only, and a generator built through the
+  frozen constructor has no native seam and runs legacy unconditionally.
+  `RepeatableQuestRewardGenerator` and `RepeatableQuestHelper` are folded into the native path by
+  their callers rather than dispatching themselves, so neither needed a new constructor: both keep
+  their frozen 4.1.2 ones untouched.
 - **Three `QuestConfig` flags, C# defaults only.** `ForceLegacyRepeatableQuestGeneration`,
   `TrustNativeRequestCacheWithMods` and `DisableNativeRequestCache` are not serialised into
   `quest.json` — same as the ragfair flags, they exist as defaults on the config object and a user

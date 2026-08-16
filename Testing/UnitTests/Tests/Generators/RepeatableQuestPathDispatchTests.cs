@@ -395,8 +395,7 @@ public class RepeatableQuestPathDispatchTests
         ServerLocalisationService localisationService,
         ItemFilterService itemFilterService,
         SeasonalEventService seasonalEventService,
-        ICloner cloner,
-        QuestConfig questConfig
+        ICloner cloner
     )
         : RepeatableQuestRewardGenerator(
             logger,
@@ -409,7 +408,6 @@ public class RepeatableQuestPathDispatchTests
             localisationService,
             itemFilterService,
             seasonalEventService,
-            cloner,
-            questConfig
+            cloner
         ) { }
 }

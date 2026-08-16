@@ -653,7 +653,8 @@ pub struct TargetLocation {
 pub struct RepeatableQuestConfig {
     pub id: String,
     pub name: String,
-    /// `PlayerGroup` — `Pmc` or `Scav`; `Random` is declared but unimplemented.
+    /// `PlayerGroup` — a closed enum of `Pmc` and `Scav`; the C# XML doc on `Side` mentions a
+    /// `Random` the enum does not declare.
     pub side: String,
     pub types: Vec<String>,
     pub reset_time: i64,

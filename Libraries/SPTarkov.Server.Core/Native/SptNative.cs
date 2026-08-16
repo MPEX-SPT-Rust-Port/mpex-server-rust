@@ -449,24 +449,33 @@ public static class SptNative
     /// <c>EftEnumConverter</c> writes every unattributed enum as its numeric value, and the native
     /// side reads those keys as location names - so this one goes in front of it. Scoped to this
     /// family: the global options also write the profiles, whose stored shape is not ours to change.
+    ///
+    /// Derived once per source instance rather than once per process: <see cref="JsonUtil"/> replaces
+    /// the static it reads on every container build, so a permanent memo would keep serialising with
+    /// the converters of a container that is gone. Two threads racing a rebuild both produce
+    /// equivalent options and the loser's copy is dropped; the derived field is written before the
+    /// source it is keyed on, so a reader that sees the new source sees the options built from it.
     /// </summary>
     internal static JsonSerializerOptions QuestJsonOptions
     {
         get
         {
-            if (_questJsonOptions is null)
+            var source = LootJsonOptions;
+            if (!ReferenceEquals(_questJsonOptionsSource, source))
             {
-                var options = new JsonSerializerOptions(LootJsonOptions);
+                var options = new JsonSerializerOptions(source);
                 // Appending would leave the global enum factory ahead of it: first match wins
                 options.Converters.Insert(0, new JsonStringEnumConverter<ELocationName>());
                 _questJsonOptions = options;
+                _questJsonOptionsSource = source;
             }
 
-            return _questJsonOptions;
+            return _questJsonOptions!;
         }
     }
 
     private static JsonSerializerOptions? _questJsonOptions;
+    private static JsonSerializerOptions? _questJsonOptionsSource;
 
     private static unsafe VerifyResult VerifyDatabase(string sptDataDir)
     {

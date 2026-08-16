@@ -76,8 +76,12 @@ pub fn get_completion_config_by_pmc_level(
 }
 
 /// `GetRepeatableQuestTemplatesByGroup` (`:187-197`). The C# throws `ArgumentOutOfRangeException`
-/// for a group that is neither `Pmc` nor `Scav`; unwinding is undefined behaviour behind the FFI,
-/// so an unknown group returns `None` with a diagnostic instead.
+/// for a group that is neither `Pmc` nor `Scav` (`:195`), which this ports as a `Diagnostic` + `None`
+/// rather than the panic a sanctioned throw normally gets: that arm is the compiler-required default
+/// of a switch over `PlayerGroup`, a closed two-member enum whose only source is
+/// `RepeatableQuestConfig.Side` — string-converted at config load, so an out-of-domain value throws
+/// there and never reaches this switch. The deviation is unobservable; the Rust signature only widens
+/// the domain because the wire carries the group as a string.
 pub fn get_repeatable_quest_templates_by_group<'a>(
     ctx: &mut QuestContext<'a>,
     player_group: &str,
