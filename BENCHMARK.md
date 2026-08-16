@@ -10,6 +10,7 @@ plain `dotnet test` never runs them:
 | `RewardLootBenchmarkTests.cs` | airdrop loot — wall clock; numbers recorded in the reward-loot section of [ARCHITECTURE.md](ARCHITECTURE.md), not here |
 | `BotBenchmarkTests.cs` | one bot's inventory — wall clock, with the payload projection timed separately |
 | `RagfairBenchmarkTests.cs` | a dynamic flea offer pass — wall clock, with the payload projection timed separately |
+| `RepeatableQuestBenchmarkTests.cs` | one repeatable quest of each type — wall clock, native measured with the invariant slice cold and warm, with the slice projection timed separately |
 
 There are no `cargo bench` targets. `Containerfile.dev` mentions `cargo bench` as a toolchain
 capability, not as a suite that exists.
@@ -37,6 +38,10 @@ dotnet test -c Release --filter "FullyQualifiedName~BotBenchmarkTests" \
 
 # a full flea pass and a regeneration pass, both paths, plus the payload projection on its own
 dotnet test -c Release --filter "FullyQualifiedName~RagfairBenchmarkTests" \
+  --logger "console;verbosity=detailed"
+
+# one quest per type, legacy against native with the slice cold and warm, plus the slice on its own
+dotnet test -c Release --filter "FullyQualifiedName~RepeatableQuestBenchmarkTests" \
   --logger "console;verbosity=detailed"
 ```
 
@@ -453,6 +458,143 @@ Ragfair-specific caveats, on top of the general ones below:
 - **Native is measured first in each scenario**, so the legacy phase inherits a warmer process (and
   a heap already grown to the native path's high-water mark). That biases mildly *against* native —
   it does not account for the remaining 1.47x, but the gap is not smaller than measured.
+
+## Results — repeatable quest generation
+
+Recorded 2026-08-16 on `b0a3e27` plus the working-tree fixture that produced them. Same machine as
+the bot-generation and ragfair figures above, **not** the machine the location-loot figures came
+from.
+
+| | |
+|---|---|
+| CPU | AMD Ryzen 5 5600H (6C/12T) |
+| RAM | 23 GB |
+| OS | Linux 7.1.8-200.fc44.x86_64 |
+| .NET SDK | 10.0.110 |
+| rustc | 1.97.1 |
+| Configuration | Release, n=20 after 2 warmups, per arm per quest type |
+
+**Workload.** One `Generate` call per quest type — `Elimination`, `Completion`, `Exploration`,
+`Pickup` — on the live shipped database, at the midpoint of the second shipped level band for that
+type, for the first trader whitelisted for it, unseeded the way production runs. The
+`QuestTypePool` the controller builds is rebuilt per run *outside* the stopwatch, because the
+generators consume the pool they are handed.
+
+**Three arms per type**, all asserted rather than assumed — the fixture checks `LastPathTaken` and
+`RepeatableQuestNativeRequestBuilder.LastSendIncludedSlice` before it reports a number:
+
+- **legacy** — `QuestConfig.ForceLegacyRepeatableQuestGeneration`, the retained 4.1.2 C# path.
+- **native, slice cold** — `QuestConfig.DisableNativeRequestCache`, so every send carries the whole
+  invariant slice. This is what a server with mods loaded pays: `CacheEligible()` is false whenever
+  any mod is loaded unless the user set `TrustNativeRequestCacheWithMods`.
+- **native, slice warm** — the stamp is unchanged and the cache is eligible, so the send carries the
+  varying fields only and the native side reuses its parsed slice. This is what a stock server pays.
+
+A fourth phase times `BuildInvariantSlice()` on its own.
+
+### Wall clock
+
+Two full invocations of the fixture; the second median is the honest error bar on the first.
+
+| Type | Arm | median | median (2nd run) | mean | min | max | alloc/run |
+|---|---|---|---|---|---|---|---|
+| Elimination | legacy (C# 4.1.2) | 15.60 ms | 16.69 ms | 16.11 ms | 14.60 ms | 21.30 ms | 1.3 MB |
+| Elimination | native, slice cold | 87.11 ms | 88.19 ms | 81.91 ms | 43.76 ms | 106.46 ms | 10.9 MB |
+| Elimination | **native, slice warm** | **3.38 ms** | 3.38 ms | 3.41 ms | 3.30 ms | 4.17 ms | 0.1 MB |
+| Completion | legacy (C# 4.1.2) | 21.64 ms | 21.83 ms | 27.30 ms | 20.24 ms | 89.78 ms | 3.4 MB |
+| Completion | native, slice cold | 113.91 ms | 112.82 ms | 115.36 ms | 104.67 ms | 143.02 ms | 10.6 MB |
+| Completion | **native, slice warm** | **67.50 ms** | 68.99 ms | 66.96 ms | 61.75 ms | 70.24 ms | 0.1 MB |
+| Exploration | legacy (C# 4.1.2) | 3.13 ms | 3.11 ms | 3.40 ms | 2.98 ms | 5.13 ms | 1.2 MB |
+| Exploration | native, slice cold | 46.10 ms | 46.75 ms | 47.30 ms | 41.83 ms | 54.83 ms | 10.7 MB |
+| Exploration | **native, slice warm** | **3.31 ms** | 3.31 ms | 3.39 ms | 3.26 ms | 4.21 ms | 0.1 MB |
+| Pickup | legacy (C# 4.1.2) | 2.91 ms | 2.81 ms | 3.31 ms | 2.75 ms | 7.31 ms | 1.2 MB |
+| Pickup | native, slice cold | 45.38 ms | 45.70 ms | 47.45 ms | 40.94 ms | 57.05 ms | 10.7 MB |
+| Pickup | **native, slice warm** | **3.20 ms** | 3.20 ms | 3.26 ms | 3.14 ms | 4.00 ms | 0.0 MB |
+| — | `BuildInvariantSlice` only | 9.50 ms | 9.75 ms | 11.09 ms | 6.51 ms | 21.66 ms | 6.8 MB |
+
+Speedup on median wall clock, legacy against the warm native path — the pairing a stock server runs:
+
+| Type | speedup | reading |
+|---|---|---|
+| Elimination | **4.62x / 4.95x** | native is 4-5x faster (a third invocation read 6.24x, see below) |
+| Completion | **0.32x / 0.32x** | native is ~3.1x slower |
+| Exploration | 0.94x / 0.94x | level, native ~0.2 ms behind |
+| Pickup | 0.91x / 0.88x | level, native ~0.3 ms behind |
+
+Exploration and Pickup are the floor showing through: a warm native call costs ~3.2 ms whatever it
+generates, and those two quests are ~2.9 ms of C# work, so the native path spends its whole budget
+on the varying half of the request and the FFI round trip and comes out a fraction of a millisecond
+behind. Elimination is where the port pays — 15-17 ms of C# against the same ~3.4 ms floor.
+
+### The slice, and what a C#-side memo could buy
+
+The cost of sending the invariant slice is the cold median minus the warm median, per send:
+
+| Type | cold − warm (run 1 / run 2) |
+|---|---|
+| Elimination | 83.73 / 84.82 ms — inflated, see caveats |
+| Completion | 46.41 / 43.83 ms |
+| Exploration | 42.78 / 43.44 ms |
+| Pickup | 42.18 / 42.49 ms |
+
+**A full send costs ~43 ms and ~10.6 MB of managed allocation, every call.** That is what a modded
+server pays per repeatable quest, and it is the same figure for every quest type — the slice does not
+depend on which one is being generated.
+
+Of that ~43 ms, **`BuildInvariantSlice()` is 9.50 / 9.75 ms** (6.8 MB of the 10.6 MB): both price
+maps over the whole items table, the items view, every default weapon preset, and the boss spawns
+and extracts of every location. The remaining **~33 ms and ~3.8 MB is the serialise of the built
+slice plus the native side's parse of it**, neither of which a C#-side cache of the *object* reaches
+— the request is serialised whole, invariant and varying together.
+
+So a stamp-keyed C#-side memo of the built slice would remove **~10 ms of a ~43 ms cost — under a
+quarter of it — and only for servers that are ineligible for the native cache in the first place**.
+A stock server pays none of this. That is the measurement the memo was ruled out on, and it holds:
+the expensive half is on the wire, not in the projection.
+
+### The honest verdict
+
+**On a stock server the port is a win on the type that costs anything and a wash on two others —
+and a loss on Completion.** Completion's warm native call is 67.5 ms against legacy's 21.6 ms. That
+is not transport: its cold-minus-warm gap (~44 ms) is the same as every other type's, so the extra
+~64 ms sits *inside* the native call, after the slice is already parsed. This is the mirror image of
+the bot and ragfair results, where the residual was payload transport and generation was a few
+milliseconds.
+
+**On a modded server the native path loses on every type** — cold against legacy is 5.2x slower on
+Completion, 5.4x on Elimination and ~15x on Exploration and Pickup, because ~43 ms of fixed slice
+cost lands on a 3-20 ms quest. That is the cost of a mod being *loaded*; a mod that Harmony-patches
+any frozen 4.1.2 member, or substitutes a collaborator, already forces the legacy path and pays
+none of it.
+
+The unprofiled candidate is the per-tpl work Completion does over the *whole* items table twice
+(`get_items_to_retrieve_pool` → `is_valid_reward_item`, then the reward pass): `is_of_baseclasses`
+walks a template's parent chain on every call with no cache, where the C# path reads
+`ItemBaseClassService`'s prebuilt one. Nothing here proves that — it is a place to look, not a
+finding.
+
+Repeatable-quest-specific caveats, on top of the general ones below:
+
+- **The Elimination cold arm reads ~40 ms high, and it is measurement order.** It is the first
+  native phase in the process; its per-run timings sit at 78-107 ms and fall to 60 and 45 ms on the
+  last two runs, and its min (43.8 ms) matches the steady cold median of the other three types.
+  Read Elimination's cold cost as ~46 ms like the rest, and its 87 ms median — and the 84 ms slice
+  figure derived from it — as the first native phase paying for heap growth. Same artifact as the
+  bot fixture's assault-vs-usec gap.
+- **The Completion legacy arm's mean is not its cost.** Its first three timed runs are 96, 64 and 54
+  ms against a steady ~21 ms: two warmups do not fully hydrate the caches its reward pass hits. The
+  median (21.6 ms) is unaffected, which is why the median is the headline everywhere here.
+- **The Elimination legacy median moves between invocations** — 15.60, 16.69 and 21.25 ms over three
+  runs, each tight within itself (±3 ms). The warm native arm does not move at all (3.38 / 3.38 /
+  3.40 ms), so the Elimination speedup is a **4.6-6.2x** band, not the 4.62x the first table row
+  reads.
+- **One band, one trader, unseeded.** The midpoint of the second shipped level band and the first
+  whitelisted trader per type. Repeatable quests vary with both, and an unseeded run draws a
+  different quest every time — the spread columns include that variation.
+- **No RSS figures**, and the warm arms' allocation rounds to 0.0-0.1 MB, so treat those as "under
+  100 KB" rather than as measurements.
+- **Workstation GC**, as with the ragfair fixture: `<ServerGarbageCollection>` is set on
+  `SPTarkov.Server.csproj`, not on `UnitTests.csproj`. It moves both paths.
 
 ## Caveats
 
