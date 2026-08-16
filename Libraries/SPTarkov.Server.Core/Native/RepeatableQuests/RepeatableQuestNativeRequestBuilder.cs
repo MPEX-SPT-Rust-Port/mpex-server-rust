@@ -25,8 +25,10 @@ namespace SPTarkov.Server.Core.Native.RepeatableQuests;
 /// slice cache for the whole family.
 ///
 /// A singleton, unlike ragfair's projection: five generators share one native slice cache, so the
-/// last-sent stamp has to be shared too. Concurrent sends can race that field, and both outcomes
-/// self-heal - one redundant slice on the wire, or one stale-slice retry.
+/// last-sent stamp has to be shared too. Concurrent sends race that field, and nothing here has to
+/// win the race: the native side validates the stamp every request names against the slice it
+/// actually holds, so a lost update costs one redundant slice on the wire and a stale read costs one
+/// self-healing stale-slice retry. Neither can generate from the wrong slice.
 /// </summary>
 [Injectable(InjectionType.Singleton)]
 public class RepeatableQuestNativeRequestBuilder(
@@ -44,12 +46,18 @@ public class RepeatableQuestNativeRequestBuilder(
 )
 {
     /// <summary>
+    ///     <see cref="LastSentSliceStamp"/> before any slice has been sent under an eligible cache.
+    ///     <c>DatabaseMutationStamp</c> counts up from zero, so a negative value is never a real stamp.
+    /// </summary>
+    internal const long NeverSent = -1;
+
+    /// <summary>
     ///     The native side caches the parsed invariant slice under the stamp value it was sent
     ///     with; this is the stamp of the last slice it accepted, so an unchanged stamp can skip
-    ///     the slice entirely. Null until a slice is sent under an eligible cache. Internal set:
-    ///     the desync test seam.
+    ///     the slice entirely. <see cref="NeverSent"/> until a slice is sent under an eligible cache.
+    ///     Internal set: the desync test seam.
     /// </summary>
-    internal long? LastSentSliceStamp { get; set; }
+    internal long LastSentSliceStamp { get; set; } = NeverSent;
 
     /// <summary>
     ///     Whether the most recent native send carried the invariant slice. Test seam.
@@ -103,7 +111,7 @@ public class RepeatableQuestNativeRequestBuilder(
             LastSendIncludedSlice = true;
         }
 
-        LastSentSliceStamp = eligible ? stamp : null;
+        LastSentSliceStamp = eligible ? stamp : NeverSent;
 
         PayloadProjection.ReplayDiagnostics(result.Diagnostics, logger, localisationService);
 
@@ -154,7 +162,7 @@ public class RepeatableQuestNativeRequestBuilder(
             Items = PayloadProjection.BuildItemsView(templateItems),
             HandbookPrices = handbookPrices,
             FleaPrices = templateTable.Prices,
-            DefaultWeaponPresets = presetHelper.GetDefaultWeaponPresets().Values.Select(ToPresetView).ToList(),
+            DefaultWeaponPresets = presetHelper.GetDefaultWeaponPresets().Values.Select(PayloadProjection.ToPresetView).ToList(),
             DefaultPresetOrItemPrices = defaultPresetOrItemPrices,
             ItemBlacklist = itemFilterService.GetItemBlacklistCache(),
             RewardItemBlacklist = itemFilterService.GetItemRewardBlacklist(),
@@ -240,17 +248,6 @@ public class RepeatableQuestNativeRequestBuilder(
             Side = exit.Side,
             Chance = exit.Chance,
             PassageRequirement = exit.PassageRequirement.ToString(),
-        };
-    }
-
-    private static PresetView ToPresetView(Preset preset)
-    {
-        return new PresetView
-        {
-            Items = preset.Items,
-            Id = preset.Id,
-            Name = preset.Name,
-            Encyclopedia = preset.Encyclopedia,
         };
     }
 }

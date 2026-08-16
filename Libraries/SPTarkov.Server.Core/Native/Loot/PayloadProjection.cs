@@ -3,6 +3,7 @@ using Microsoft.Extensions.Logging;
 using SPTarkov.Common.Models.Logging;
 using SPTarkov.Server.Core.Models.Common;
 using SPTarkov.Server.Core.Models.Eft.Common.Tables;
+using SPTarkov.Server.Core.Models.Spt.Tables;
 using SPTarkov.Server.Core.Services.Locales;
 
 namespace SPTarkov.Server.Core.Native.Loot;
@@ -232,5 +233,20 @@ internal static class PayloadProjection
         }
 
         return text;
+    }
+
+    /// <summary>
+    /// The members of a <c>Preset</c> the native side reads. Shared: the ragfair and repeatable-quest
+    /// slices both carry preset pools, projected the same way.
+    /// </summary>
+    internal static PresetView ToPresetView(Preset preset)
+    {
+        return new PresetView
+        {
+            Items = preset.Items,
+            Id = preset.Id,
+            Name = preset.Name,
+            Encyclopedia = preset.Encyclopedia,
+        };
     }
 }

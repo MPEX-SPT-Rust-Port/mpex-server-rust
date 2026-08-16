@@ -58,11 +58,13 @@ internal static class RagfairPayloadProjection
             Dynamic = ragfairConfig.Dynamic,
             // The globals' map itself, keys included: the native side mirrors PresetHelper.IsPreset
             // and GetPreset, whose key domain is that map's keys, not each preset's own `_id`
-            ItemPresets = presetHelper.GetPresetsByPresetId().ToDictionary(preset => preset.Key, preset => ToPresetView(preset.Value)),
+            ItemPresets = presetHelper
+                .GetPresetsByPresetId()
+                .ToDictionary(preset => preset.Key, preset => PayloadProjection.ToPresetView(preset.Value)),
             DefaultPresets = ToPresetViews(presetHelper.GetDefaultPresets().Values),
             DefaultPresetsByTpl = presetHelper
                 .GetDefaultPresetByTpl()
-                .ToDictionary(preset => preset.Key, preset => ToPresetView(preset.Value)),
+                .ToDictionary(preset => preset.Key, preset => PayloadProjection.ToPresetView(preset.Value)),
             PresetsByTpl = presetsByTpl,
             // The whole flea price table, in source order: GetFleaPricesAsArray draws an index into it
             FleaPrices = templateTable.Prices,
@@ -114,17 +116,6 @@ internal static class RagfairPayloadProjection
 
     private static List<PresetView> ToPresetViews(IEnumerable<Preset> presets)
     {
-        return presets.Select(ToPresetView).ToList();
-    }
-
-    private static PresetView ToPresetView(Preset preset)
-    {
-        return new PresetView
-        {
-            Items = preset.Items,
-            Id = preset.Id,
-            Name = preset.Name,
-            Encyclopedia = preset.Encyclopedia,
-        };
+        return presets.Select(PayloadProjection.ToPresetView).ToList();
     }
 }

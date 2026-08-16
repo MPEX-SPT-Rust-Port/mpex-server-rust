@@ -30,6 +30,14 @@ public class RepeatableQuestNativeRequestBuilderTests
         _questConfig = di.GetService<QuestConfig>();
     }
 
+    [SetUp]
+    public void SetUp()
+    {
+        // The builder is the shared DI singleton, so another fixture's Send would otherwise leave the
+        // cache primed and the first send here slice-less
+        _builder.LastSentSliceStamp = RepeatableQuestNativeRequestBuilder.NeverSent;
+    }
+
     [TearDown]
     public void TearDown()
     {
@@ -128,7 +136,7 @@ public class RepeatableQuestNativeRequestBuilderTests
 
         Assert.That(
             exit.EnumerateObject().Select(property => property.Name),
-            Is.SubsetOf(new[] { "name", "side", "chance", "passageRequirement" })
+            Is.EquivalentTo(new[] { "name", "side", "chance", "passageRequirement" })
         );
         Assert.That(exit.GetProperty("passageRequirement").ValueKind, Is.EqualTo(JsonValueKind.String));
     }

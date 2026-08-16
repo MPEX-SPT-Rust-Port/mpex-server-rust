@@ -101,14 +101,14 @@ public record RepeatableQuestTemplates
 {
     /// <summary>
     ///     Pmc repeatable quest template ids keyed by type of quest
-    /// Keys: elimination, completion, exploration
+    /// Keys: Elimination, Completion, Exploration
     /// </summary>
     [JsonPropertyName("pmc")]
     public required Dictionary<string, MongoId> Pmc { get; set; }
 
     /// <summary>
     ///     Scav repeatable quest template ids keyed by type of quest
-    /// Keys: elimination, completion, exploration, pickup
+    /// Keys: Elimination, Completion, Exploration, Pickup
     /// </summary>
     [JsonPropertyName("scav")]
     public required Dictionary<string, MongoId> Scav { get; set; }
