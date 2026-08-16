@@ -94,20 +94,37 @@ internal sealed class FileLogHandler : BaseLogHandler
         nuint messageLen = 0;
         int status;
 
-        fixed (byte* directoryPtr = directory)
-        fixed (byte* patternPtr = pattern)
+        try
         {
-            status = NativeMethods.LogOpen(
-                directoryPtr,
-                (nuint)directory.Length,
-                patternPtr,
-                (nuint)pattern.Length,
-                (uint)config.MaxFileSizeMb,
-                (uint)config.MaxRollingFiles,
-                &handle,
-                &messagePtr,
-                &messageLen
+            fixed (byte* directoryPtr = directory)
+            fixed (byte* patternPtr = pattern)
+            {
+                status = NativeMethods.LogOpen(
+                    directoryPtr,
+                    (nuint)directory.Length,
+                    patternPtr,
+                    (nuint)pattern.Length,
+                    (uint)config.MaxFileSizeMb,
+                    (uint)config.MaxRollingFiles,
+                    &handle,
+                    &messagePtr,
+                    &messageLen
+                );
+            }
+        }
+        catch (Exception exception) when (exception is DllNotFoundException or EntryPointNotFoundException)
+        {
+            // The file logger makes the process's first native call, well before
+            // SptNative.EnsureLoadable() gets to report an ABI mismatch, so a missing or stale
+            // library surfaces here first. Without this it throws out of the dispatcher on every
+            // single log line.
+            Console.Error.WriteLine(
+                $"Failed to load spt_native for log file '{Path.Combine(config.FilePath, config.FilePattern)}': "
+                    + $"{exception.Message}. Rebuild the native library (dotnet build runs cargo automatically). "
+                    + "File logging for this target is disabled."
             );
+
+            return 0;
         }
 
         if (status == StatusOk)
