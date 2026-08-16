@@ -3,24 +3,11 @@
 //!
 //! Line references in this file are that generator unless another file is named.
 
-use crate::loot::models::{Diagnostic, ERROR};
 use crate::loot::random_util::{get_array_value, rand_int};
 use crate::quest::models::{
     ListOrT, QuestTypePool, RepeatableQuest, RepeatableQuestConfig, RepeatableQuestType,
 };
 use crate::quest::{QuestContext, helper, reward_generator};
-
-/// A `NullReferenceException` the C# would raise where this port gives up instead — unwinding is
-/// undefined behaviour behind the FFI, so a null the C# never guards is reported and returns
-/// `None`. The C# logs nothing on these paths; it crashes.
-fn would_throw(message: &str) -> Diagnostic {
-    Diagnostic {
-        level: ERROR.to_owned(),
-        locale_key: None,
-        args: None,
-        message: Some(message.to_owned()),
-    }
-}
 
 /// `Generate` (`:22-67`) — dead in production: `RepeatableQuestController` dispatches on the
 /// `PickUp` of `QuestTypeEnum`, which never matches the `Pickup` the pool and config spell.
@@ -35,17 +22,11 @@ pub fn generate(
     _quest_type_pool: &mut QuestTypePool,
     repeatable_config: &RepeatableQuestConfig,
 ) -> Option<RepeatableQuest> {
-    // `:30` — only `Daily_Savage` ships a `Pickup` block, so the other two configs reach `:39`
-    // with a null and throw.
-    let Some(pickup_config) = repeatable_config.quest_config.pickup.as_ref() else {
-        ctx.diagnostics.push(would_throw(
-            "Pickup config is null at PickupQuestGenerator:30",
-        ));
+    // `:30` is a plain assignment that cannot throw — only `Daily_Savage` ships a `Pickup` block,
+    // and the other two configs carry the null into `:39`, after `:32` has spent its draws.
+    let pickup_config = repeatable_config.quest_config.pickup.as_ref();
 
-        return None;
-    };
-
-    // `:32` — the helper logs its own give-up reasons, and the C# throws at `:49` on the null.
+    // `:32` — the helper logs its own give-up reasons.
     let mut quest = helper::generate_repeatable_template(
         ctx,
         RepeatableQuestType::Pickup,
@@ -54,31 +35,24 @@ pub fn generate(
         session_id,
     )?;
 
-    // `GetArrayValue` (`:39`) is `GetRandomElement` (`RandomUtil.cs:487-490`), which throws on a
-    // null or empty list.
-    let Some(entries) = pickup_config
-        .item_type_to_fetch_with_max_count
-        .as_deref()
-        .filter(|entries| !entries.is_empty())
-    else {
-        ctx.diagnostics.push(would_throw(
-            "ItemTypeToFetchWithMaxCount is null or empty at PickupQuestGenerator:39",
-        ));
+    let pickup_config = pickup_config.expect("Pickup config was null at PickupQuestGenerator:39");
 
-        return None;
-    };
-    let item_type_to_fetch_with_count = get_array_value(entries);
+    // `GetArrayValue` (`:39`) is `GetRandomElement` (`RandomUtil.cs:487-490`), which throws on a
+    // null list and on an empty one (`RandomUtil.cs:158-169`) — `get_array_value` panics on the
+    // empty case for free.
+    let item_type_to_fetch_with_count = get_array_value(
+        pickup_config
+            .item_type_to_fetch_with_max_count
+            .as_deref()
+            .expect("ItemTypeToFetchWithMaxCount was null at PickupQuestGenerator:39"),
+    );
 
     // `MinimumPickupCount.Value` (`:42`) throws on a null; `MaximumPickupCount + 1` (`:43`) does
     // not — a null max lifts through to `RandInt`'s optional `high`, which then draws
     // `[0, minPickupCount)` instead (`RandomUtil.cs:254-264`).
-    let Some(minimum_pickup_count) = item_type_to_fetch_with_count.minimum_pickup_count else {
-        ctx.diagnostics.push(would_throw(
-            "MinimumPickupCount is null at PickupQuestGenerator:42",
-        ));
-
-        return None;
-    };
+    let minimum_pickup_count = item_type_to_fetch_with_count
+        .minimum_pickup_count
+        .expect("MinimumPickupCount was null at PickupQuestGenerator:42");
     let item_count_to_fetch = rand_int(
         i64::from(minimum_pickup_count),
         item_type_to_fetch_with_count
@@ -98,53 +72,39 @@ pub fn generate(
     // var locationTarget = questTypePool.pool.Pickup.locations[locationKey];
 
     // `FirstOrDefault` (`:49`) hands back a null the C# then dereferences at `:50`.
-    let Some(find_condition) = quest
+    let find_condition = quest
         .quest
         .conditions
         .available_for_finish
         .as_mut()
-        .and_then(|conditions| {
-            conditions
-                .iter_mut()
-                .find(|condition| condition.condition_type == "FindItem")
-        })
-    else {
-        ctx.diagnostics.push(would_throw(
-            "No FindItem condition at PickupQuestGenerator:49",
-        ));
-
-        return None;
-    };
+        .expect("AvailableForFinish was null at PickupQuestGenerator:49")
+        .iter_mut()
+        .find(|condition| condition.condition_type == "FindItem")
+        .expect("No FindItem condition at PickupQuestGenerator:50");
     find_condition.target = Some(ListOrT::List(vec![item_type.clone()]));
     find_condition.value = Some(item_count_to_fetch as f64);
 
     // `:53-57` — the `CounterCreator`'s `Equipment` condition, each hop a C# null dereference.
     // var locationCondition = counterCreatorCondition._props.counter.conditions.find(x => x._parent === "Location");
     // (locationCondition._props as ILocationConditionProps).target = [...locationTarget];
-    let Some(equipment_condition) = quest
+    let equipment_condition = quest
         .quest
         .conditions
         .available_for_finish
         .as_mut()
-        .and_then(|conditions| {
-            conditions
-                .iter_mut()
-                .find(|condition| condition.condition_type == "CounterCreator")
-        })
-        .and_then(|counter_creator_condition| counter_creator_condition.counter.as_mut())
-        .and_then(|counter| counter.conditions.as_mut())
-        .and_then(|conditions| {
-            conditions
-                .iter_mut()
-                .find(|condition| condition.condition_type == "Equipment")
-        })
-    else {
-        ctx.diagnostics.push(would_throw(
-            "No CounterCreator Equipment condition at PickupQuestGenerator:53-57",
-        ));
-
-        return None;
-    };
+        .expect("AvailableForFinish was null at PickupQuestGenerator:53")
+        .iter_mut()
+        .find(|condition| condition.condition_type == "CounterCreator")
+        .expect("No CounterCreator condition at PickupQuestGenerator:57")
+        .counter
+        .as_mut()
+        .expect("Counter was null at PickupQuestGenerator:57")
+        .conditions
+        .as_mut()
+        .expect("Conditions were null at PickupQuestGenerator:57")
+        .iter_mut()
+        .find(|condition| condition.condition_type == "Equipment")
+        .expect("No Equipment condition at PickupQuestGenerator:58");
     equipment_condition.equipment_inclusive = Some(vec![vec![item_type]]);
 
     // Add rewards
@@ -320,10 +280,11 @@ mod tests {
         );
     }
 
-    /// `:30` reads a config the two Pmc configs do not carry — where the C# throws at `:39`, this
-    /// port reports and gives up before spending a draw.
+    /// `:30` reads a config the two Pmc configs do not carry, and `:39` dereferences it — after
+    /// `:32` has generated the template, which is why the panic is not raised at `:30`.
     #[test]
-    fn a_config_without_a_pickup_block_gives_up() {
+    #[should_panic(expected = "PickupQuestGenerator:39")]
+    fn a_config_without_a_pickup_block_throws_at_the_first_dereference() {
         let slice = slice();
         let mut ctx = QuestContext::from_slice(&slice);
         let daily: RepeatableQuestConfig =
@@ -331,17 +292,13 @@ mod tests {
                 .expect("parses");
 
         let _guard = TestSeedGuard::install(1);
-        assert!(
-            super::generate(
-                &mut ctx,
-                "6193a720f8ee7e52e4290000",
-                20,
-                FENCE,
-                &mut pool(),
-                &daily,
-            )
-            .is_none()
+        super::generate(
+            &mut ctx,
+            "6193a720f8ee7e52e4290000",
+            20,
+            FENCE,
+            &mut pool(),
+            &daily,
         );
-        assert_eq!(ctx.diagnostics.len(), 1);
     }
 }
