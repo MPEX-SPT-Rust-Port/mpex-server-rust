@@ -271,7 +271,7 @@ impl RepairBuffType {
 /// `Math.Round(value, 0, MidpointRounding.AwayFromZero)`. Unobservable — `item_helper::split_stack`
 /// is the only reader and every count that reaches it has already been through that setter, so the
 /// values are integral, and everything written here re-enters C# through the same setter.
-fn deserialize_string_or_number<'de, D>(deserializer: D) -> Result<Option<f64>, D::Error>
+pub(crate) fn deserialize_string_or_number<'de, D>(deserializer: D) -> Result<Option<f64>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
