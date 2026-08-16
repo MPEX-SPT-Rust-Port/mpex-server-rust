@@ -43,8 +43,10 @@ C# SptNative → spt_generate_* (JSON in)
   → serde serialize the result, or the LootError message, into an out-buffer
 ```
 
-- `run_generator` is the shared body of the ten generation exports. `spt_verify_database` is separate
-  because it blocks on the tokio runtime.
+- `run_generator_with` is the shared body of the ten generation exports; eight reach it through
+  `run_generator`, the JSON-response-plus-`LootError` wrapper. Ragfair and quest call it directly —
+  ragfair to frame its response instead of emitting one JSON document, quest for its own error type.
+  `spt_verify_database` is separate because it blocks on the tokio runtime.
 - Status codes: `STATUS_OK` 0, `STATUS_BAD_ARGS` 1 (null pointer, bad UTF-8, unparseable JSON),
   `STATUS_PANIC` 2, `STATUS_ERROR` 3, `STATUS_STALE_SLICE` 4 (ragfair and quest only — see below).
 - **Two requests have a cached half**, ragfair's and the repeatable quest's. Each arrives as

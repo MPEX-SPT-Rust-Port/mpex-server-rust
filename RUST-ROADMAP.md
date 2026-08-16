@@ -52,12 +52,14 @@ seeded-RNG parity at the primitive level (xoshiro256\*\*, twin known-answer test
   cost is small (once at startup, then per-expiry bursts) and native stays the default for family
   consistency; `RagfairConfig.ForceLegacyRagfairGeneration` is the opt-out.
 - **Completion quests are ~3.1x slower on the warm native path** — 67.50 ms native against 21.64 ms
-  legacy at the median, reproduced across three invocations. It is not transport: Completion's
+  legacy at the median, holding across two invocations. It is not transport: Completion's
   cold-minus-warm gap (~44 ms) is the same as every other quest type's, so the extra time sits inside
   the native call after the slice is already parsed. The unprofiled candidate cause is recorded in
-  [BENCHMARK.md](BENCHMARK.md) § *The honest verdict* — `completion.rs` walks a template's parent
-  chain per `is_of_baseclasses` call with no cache, twice over the whole items table, where the C#
-  path reads `ItemBaseClassService`'s prebuilt one. Named follow-up work; nothing measured proves it
+  [BENCHMARK.md](BENCHMARK.md) § *The honest verdict* — the per-tpl work Completion does over the
+  whole items table twice (`get_items_to_retrieve_pool` → `reward_generator::is_valid_reward_item`,
+  then the reward pass), where `loot/item_helper.rs`'s `is_of_baseclasses` walks a template's parent
+  chain on every call with no cache and the C# path reads `ItemBaseClassService`'s prebuilt one.
+  Named follow-up work; nothing measured proves it
   yet. `QuestConfig.ForceLegacyRepeatableQuestGeneration` is the opt-out.
 - **Exploration and Pickup quests are a wash** — a warm native call costs ~3.2 ms whatever it
   generates, and those two quests are ~2.9 ms of C# work, so native lands 0.2-0.3 ms behind legacy.
@@ -78,8 +80,8 @@ seeded-RNG parity at the primitive level (xoshiro256\*\*, twin known-answer test
   randomised buckets and the nighttime clamp, `RewardLootParityTests` over all five reward entry
   points, `RagfairParityTests`, `RepeatableQuestParityTests` over all four quest types), all seeded
   and byte-equal after id normalisation. The sanctioned gaps are minted `MongoId`s (outside the
-  seeded stream on both sides — a repeatable quest mints ~12-25 of them, the largest per-call count
-  of any family, and the normaliser masks every one) and, for ragfair only, `intId` (a live C#
+  seeded stream on both sides — a repeatable quest mints ~12-25 of them, all masked by the
+  normaliser) and, for ragfair only, `intId` (a live C#
   counter) and `startTime`/`endTime` (one batch timestamp natively vs a per-offer clock in legacy,
   so only the spread is compared).
 - **Patches on collaborators do not reach the native path** and do not flip to legacy — only the
@@ -222,9 +224,10 @@ seeded-RNG parity at the primitive level (xoshiro256\*\*, twin known-answer test
   `RepeatableQuestHelper` or of `RepeatableQuestRewardGenerator` — flips too, and the check runs per
   generator instance at call time. `PickupQuestGenerator` contributes **zero** frozen hookable
   members: its whole legacy body is inline in `Generate`, so nothing of its own is patchable.
-- **All four quest generators took constructor overloads**, not signature changes — the frozen 4.1.2
-  constructors stay, and the container selects an overload adding `QuestConfig` and
-  `RepeatableQuestNativeRequestBuilder`. Additive only, and an instance built through the frozen
+- **Five classes took constructor overloads**, not signature changes — the frozen 4.1.2 constructors
+  stay, and the container selects an overload adding `QuestConfig` and
+  `RepeatableQuestNativeRequestBuilder` on each of the four generators, and `QuestConfig` alone on
+  `RepeatableQuestRewardGenerator`. Additive only, and a generator built through the frozen
   constructor has no native seam and runs legacy unconditionally.
 - **Three `QuestConfig` flags, C# defaults only.** `ForceLegacyRepeatableQuestGeneration`,
   `TrustNativeRequestCacheWithMods` and `DisableNativeRequestCache` are not serialised into
@@ -246,13 +249,17 @@ seeded-RNG parity at the primitive level (xoshiro256\*\*, twin known-answer test
   mutated pool comes back in the response and is copied *into* the caller's instance
   (`CopyPoolInto`) rather than replacing it — the controller holds that instance and keeps reading
   it after the call, so reference identity has to survive.
-- **The ported 4.1.2 quirks are documented at their call sites**, as numbered
-  `**Quirk N, ported verbatim:**` comments in `rust/spt-native/src/quest/*.rs`. Grep the marker; the
-  behaviour they preserve is deliberate and reverting one silently diverges from C#.
+- **The ported 4.1.2 quirks are documented at their call sites**, as numbered `Quirk N` comments in
+  `rust/spt-native/src/quest/*.rs` (`reward_generator.rs` bolds them `**Quirk N, ported verbatim:**`;
+  `elimination.rs` uses the plain form, and `helper.rs:161` carries an unnumbered
+  `Ported quirk, not a typo`). Grep case-insensitively for `quirk` under `src/quest/` to find all of
+  them; the behaviour they preserve is deliberate and reverting one silently diverges from C#.
 
 ## Roadmap
 
 1. Later candidates, in `todo/TODO.md` order: scav case rewards, weather, fence assorts, raid-time
    adjustment, ragfair linked-item table.
-2. Profile `completion.rs`'s `is_of_baseclasses` walk against `ItemBaseClassService`'s prebuilt
-   parent map — the named candidate for Completion's 3.1x, unmeasured so far.
+2. Profile Completion's two whole-items-table passes through
+   `reward_generator::is_valid_reward_item`, and `loot/item_helper.rs`'s uncached
+   `is_of_baseclasses` walk under them, against `ItemBaseClassService`'s prebuilt parent map — the
+   named candidate for Completion's 3.1x, unmeasured so far.
