@@ -1,15 +1,26 @@
-using System.Globalization;
-using SPTarkov.Common.Extensions;
+using System.Text;
 using SPTarkov.Common.Models.Logging;
-using ZLogger.Providers;
+using SPTarkov.Common.Native;
 
 namespace SPTarkov.Common.Logger.Handlers;
 
+/// <summary>
+/// Writes formatted lines to spt_native's file sink, which owns the file handle, the day/size
+/// rolling and the retention sweep. Each configured target gets one sink, and one writer thread
+/// behind it, so a log call costs a channel send rather than a filesystem write.
+/// </summary>
 internal sealed class FileLogHandler : BaseLogHandler
 {
-    private readonly Lock _providersLock = new();
-    private readonly Dictionary<string, ZLoggerRollingFileLoggerProvider> _providers = [];
-    private readonly LogFileRollMonitor _logFileRollManager = new();
+    // ffi.rs
+    private const int StatusOk = 0;
+
+    private readonly Lock _sinksLock = new();
+
+    /// <summary>
+    /// Native sink handles keyed by target config. A zero handle marks a target whose open failed,
+    /// so the failure is reported once instead of on every line.
+    /// </summary>
+    private readonly Dictionary<string, nint> _sinks = [];
 
     public override LoggerType LoggerType { get; } = LoggerType.File;
 
@@ -22,72 +33,113 @@ internal sealed class FileLogHandler : BaseLogHandler
             throw new Exception("FilePath and FilePattern are required to use FileLogger");
         }
 
-        var provider = GetOrCreateProvider(config);
-        var logger = provider.CreateLogger(message.Logger);
-        var logLevel = message.LogLevel;
+        nint sink;
 
-        if (!logger.IsEnabled(logLevel))
+        lock (_sinksLock)
+        {
+            sink = GetOrCreateSink(config);
+        }
+
+        if (sink == 0)
         {
             return;
         }
 
-        logger.Log(logLevel, 0, message.Exception, "{Message}", FormatMessage(message.Message, message, reference));
+        var line = Encoding.UTF8.GetBytes(FormatMessage(message.Message, message, reference));
+
+        unsafe
+        {
+            fixed (byte* linePtr = line)
+            {
+                NativeMethods.LogWrite(sink, linePtr, (nuint)line.Length);
+            }
+        }
     }
 
-    private ZLoggerRollingFileLoggerProvider GetOrCreateProvider(FileSptLoggerReference config)
+    /// <summary>
+    /// Must be called under <see cref="_sinksLock"/>: opening twice would leak a native handle and
+    /// leave two writer threads appending to the same file.
+    /// </summary>
+    private nint GetOrCreateSink(FileSptLoggerReference config)
     {
-        var key = $"{config.FilePath}|{config.FilePattern}|{config.MaxFileSizeMb}";
+        var key = $"{config.FilePath}|{config.FilePattern}|{config.MaxFileSizeMb}|{config.MaxRollingFiles}";
 
-        lock (_providersLock)
+        if (_sinks.TryGetValue(key, out var existingSink))
         {
-            if (_providers.TryGetValue(key, out var existingProvider))
+            return existingSink;
+        }
+
+        var sink = OpenSink(config);
+        _sinks.Add(key, sink);
+
+        return sink;
+    }
+
+    private static unsafe nint OpenSink(FileSptLoggerReference config)
+    {
+        var directory = Encoding.UTF8.GetBytes(config.FilePath);
+        var pattern = Encoding.UTF8.GetBytes(config.FilePattern);
+
+        nint handle = 0;
+        byte* messagePtr = null;
+        nuint messageLen = 0;
+        int status;
+
+        fixed (byte* directoryPtr = directory)
+        fixed (byte* patternPtr = pattern)
+        {
+            status = NativeMethods.LogOpen(
+                directoryPtr,
+                (nuint)directory.Length,
+                patternPtr,
+                (nuint)pattern.Length,
+                (uint)config.MaxFileSizeMb,
+                (uint)config.MaxRollingFiles,
+                &handle,
+                &messagePtr,
+                &messageLen
+            );
+        }
+
+        if (status == StatusOk)
+        {
+            return handle;
+        }
+
+        try
+        {
+            // The logger cannot report its own failure through itself, so this goes to stderr.
+            var message = messagePtr == null ? $"internal status {status}" : Encoding.UTF8.GetString(messagePtr, checked((int)messageLen));
+
+            Console.Error.WriteLine(
+                $"Failed to open log file '{Path.Combine(config.FilePath, config.FilePattern)}': {message}. File logging for this target is disabled."
+            );
+        }
+        finally
+        {
+            NativeMethods.BufFree(messagePtr, messageLen);
+        }
+
+        return 0;
+    }
+
+    public override ValueTask DisposeAsync()
+    {
+        lock (_sinksLock)
+        {
+            foreach (var sink in _sinks.Values)
             {
-                return existingProvider;
+                if (sink != 0)
+                {
+                    NativeMethods.LogClose(sink);
+                }
             }
 
-            var options = new ZLoggerRollingFileOptions
-            {
-                FilePathSelector = (timestamp, sequenceNumber) =>
-                    BuildFilePath(config.FilePath, config.FilePattern, timestamp, sequenceNumber),
-                RollingInterval = RollingInterval.Day,
-                RollingSizeKB = config.MaxFileSizeMb * 1024,
-            };
-
-            options.UsePlainTextFormatter();
-
-            var provider = new ZLoggerRollingFileLoggerProvider(options);
-
-            _providers.Add(key, provider);
-            _logFileRollManager.RegisterTarget(key, config);
-
-            return provider;
-        }
-    }
-
-    private static string BuildFilePath(string filePath, string filePattern, DateTimeOffset timestamp, int sequenceNumber)
-    {
-        var date = timestamp.UtcDateTime.ToString("yyyyMMdd", CultureInfo.InvariantCulture);
-
-        var fileName = filePattern.Replace("%DATE%", date, StringComparison.OrdinalIgnoreCase);
-
-        var name = Path.GetFileNameWithoutExtension(fileName);
-        var extension = Path.GetExtension(fileName);
-
-        if (sequenceNumber > 0)
-        {
-            fileName = $"{name}.{sequenceNumber}{extension}";
+            _sinks.Clear();
         }
 
-        return Path.Combine(filePath, fileName);
-    }
+        GC.SuppressFinalize(this);
 
-    public override async ValueTask DisposeAsync()
-    {
-        await _logFileRollManager.DisposeAsync().ConfigureAwait(false);
-
-        foreach (var provider in _providers.Values)
-        {
-            await provider.DisposeAsync().ConfigureAwait(false);
-        }
+        return ValueTask.CompletedTask;
     }
 }

@@ -6,6 +6,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use crate::bot::bot_inventory_generator::{generate_inventory, generate_inventory_batch};
+use crate::log_sink::FileSink;
 use crate::loot::item_helper::LootError;
 use crate::loot::location_loot_generator::{generate_dynamic_loot, generate_static_containers};
 use crate::loot::loot_generator::{
@@ -377,6 +378,104 @@ pub unsafe extern "C" fn spt_generate_dynamic_offers(
     }
 }
 
+/// Opens a log file sink, writing its handle to `out_handle`. On failure the handle is left null
+/// and the `io::Error` text goes to the out-buffer, which the caller releases with `spt_buf_free`.
+///
+/// # Safety
+/// `dir_ptr`/`pattern_ptr` must point to `dir_len`/`pattern_len` readable bytes of UTF-8;
+/// `out_handle`, `out_ptr` and `out_len` must be valid for writes. The returned handle must be
+/// released exactly once with `spt_log_close`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn spt_log_open(
+    dir_ptr: *const u8,
+    dir_len: usize,
+    pattern_ptr: *const u8,
+    pattern_len: usize,
+    max_file_size_mb: u32,
+    max_rolling_files: u32,
+    out_handle: *mut *mut FileSink,
+    out_ptr: *mut *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    if dir_ptr.is_null() || pattern_ptr.is_null() || out_handle.is_null() {
+        return STATUS_BAD_ARGS;
+    }
+    if out_ptr.is_null() || out_len.is_null() {
+        return STATUS_BAD_ARGS;
+    }
+
+    unsafe {
+        *out_handle = std::ptr::null_mut();
+        *out_ptr = std::ptr::null_mut();
+        *out_len = 0;
+    }
+
+    let dir_bytes = unsafe { std::slice::from_raw_parts(dir_ptr, dir_len) };
+    let pattern_bytes = unsafe { std::slice::from_raw_parts(pattern_ptr, pattern_len) };
+    let (Ok(dir), Ok(pattern)) = (
+        std::str::from_utf8(dir_bytes),
+        std::str::from_utf8(pattern_bytes),
+    ) else {
+        return STATUS_BAD_ARGS;
+    };
+
+    match catch_unwind(AssertUnwindSafe(|| {
+        FileSink::open(dir, pattern, max_file_size_mb, max_rolling_files)
+    })) {
+        Ok(Ok(sink)) => {
+            unsafe { *out_handle = Box::into_raw(Box::new(sink)) };
+            STATUS_OK
+        }
+        Ok(Err(error)) => {
+            unsafe { write_buffer(error.to_string().into_bytes(), out_ptr, out_len) };
+            STATUS_ERROR
+        }
+        Err(_) => STATUS_PANIC,
+    }
+}
+
+/// Queues one already-formatted line. Never blocks on the filesystem, and drops the line rather
+/// than failing if the writer thread is gone - a lost log line must not fail a request.
+///
+/// # Safety
+/// `handle` must come from a successful `spt_log_open` and not yet have been closed; `line_ptr`
+/// must point to `line_len` readable bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn spt_log_write(
+    handle: *mut FileSink,
+    line_ptr: *const u8,
+    line_len: usize,
+) -> i32 {
+    if handle.is_null() || line_ptr.is_null() {
+        return STATUS_BAD_ARGS;
+    }
+
+    let line = unsafe { std::slice::from_raw_parts(line_ptr, line_len) }.to_vec();
+
+    match catch_unwind(AssertUnwindSafe(|| unsafe { (*handle).write(line) })) {
+        Ok(()) => STATUS_OK,
+        Err(_) => STATUS_PANIC,
+    }
+}
+
+/// Flushes the sink and joins its writer thread, consuming the handle.
+///
+/// # Safety
+/// `handle` must come from a successful `spt_log_open` and be closed at most once.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn spt_log_close(handle: *mut FileSink) -> i32 {
+    if handle.is_null() {
+        return STATUS_BAD_ARGS;
+    }
+
+    let sink = unsafe { Box::from_raw(handle) };
+
+    match catch_unwind(AssertUnwindSafe(move || sink.close())) {
+        Ok(()) => STATUS_OK,
+        Err(_) => STATUS_PANIC,
+    }
+}
+
 /// # Safety
 /// `ptr` and `len` must come from a successful `spt_*` call that handed back a buffer, and be
 /// freed at most once.
@@ -414,7 +513,7 @@ mod tests {
         assert_eq!(spt_native_abi_version(), crate::ABI_VERSION);
         assert_eq!(
             crate::ABI_VERSION,
-            13,
+            14,
             "bump SptNative.ExpectedAbiVersion too"
         );
     }
