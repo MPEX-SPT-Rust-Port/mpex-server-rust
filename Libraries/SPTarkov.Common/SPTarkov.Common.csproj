@@ -27,7 +27,12 @@
     <None Include="..\..\LICENSE" Pack="true" Visible="false" PackagePath="" />
   </ItemGroup>
   <!-- Emits the Spectre.Console.Ansi facade; see the note in Build.props. -->
-  <Target Name="BuildSpectreFacade" BeforeTargets="ResolveAssemblyReferences">
+  <Target
+    Name="BuildSpectreFacade"
+    BeforeTargets="ResolveAssemblyReferences"
+    Inputs="$(SpectreFacadeDir)/spectre-facade/src/main.rs;$(SpectreFacadeDir)/spectre-facade/src/colors.rs;$(SpectreFacadeDir)/spectre-facade/Cargo.toml;$(SpectreFacadeDir)/Cargo.lock"
+    Outputs="$(SpectreFacadePath)"
+  >
     <MakeDir Directories="$(SpectreFacadeDir)/target/spectre-facade" />
     <Exec
       Command="cargo run --locked -q -p spectre-facade -- &quot;$(SpectreFacadePath)&quot;"

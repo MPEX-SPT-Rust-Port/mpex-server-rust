@@ -28,11 +28,7 @@ use dotnetdll::prelude::*;
 
 mod colors;
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let out_path = std::env::args()
-        .nth(1)
-        .ok_or("usage: spectre-facade <output-path>")?;
-
+fn emit() -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let mut res = Resolution::new(Module::new("Spectre.Console.Ansi.dll"));
     res.assembly = Some(Assembly::new("Spectre.Console.Ansi"));
 
@@ -163,16 +159,49 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ),
     );
 
-    let written = res.write(WriteOptions {
+    let mut image = res.write(WriteOptions {
         is_32_bit: false,
         is_executable: false,
     })?;
+    pin_pe_timestamp(&mut image);
 
-    std::fs::write(&out_path, written)?;
+    Ok(image)
+}
+
+/// Zeroes the PE header's COFF `TimeDateStamp`.
+///
+/// dotnetdll writes `SystemTime::now()` there with no way to override it, so two emits of an
+/// otherwise identical assembly differ by four bytes. That is enough to make the emitted DLL newer
+/// than every downstream output on every build, which recompiles the whole solution.
+fn pin_pe_timestamp(image: &mut [u8]) {
+    let lfanew = u32::from_le_bytes(image[0x3c..0x40].try_into().unwrap()) as usize;
+
+    // COFF header: PE signature (4), Machine (2), NumberOfSections (2), then TimeDateStamp.
+    image[lfanew + 8..lfanew + 12].fill(0);
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let out_path = std::env::args()
+        .nth(1)
+        .ok_or("usage: spectre-facade <output-path>")?;
+
+    std::fs::write(&out_path, emit()?)?;
     eprintln!(
         "spectre-facade: wrote {out_path} ({} colours)",
         colors::COLORS.len()
     );
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// dotnetdll stamps the PE header with the wall clock, which made every build emit a different
+    /// file and re-trigger the up-to-date check of every project referencing it.
+    #[test]
+    fn two_emits_are_byte_identical() {
+        assert_eq!(emit().unwrap(), emit().unwrap());
+    }
 }
