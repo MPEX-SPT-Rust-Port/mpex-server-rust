@@ -7,9 +7,10 @@
 //! retention runs exactly when a roll happens instead of on a timer.
 //!
 //! The configured name is always the live file: a server start, a size roll and a date change each
-//! move the previous file aside to the next free `name.N.ext` and open a fresh one, so `spt.log`
-//! only ever holds the current run. The single exception is a second handler opening a path this
-//! process already freshened - see `freshened_paths`.
+//! cascade the archive set down one index - `name.1.ext` becomes `name.2.ext` and so on, with the
+//! highest index deleted rather than shifted - and open a fresh live file, so `spt.log` only ever
+//! holds the current run. The single exception is a second handler opening a path this process
+//! already freshened - see `freshened_paths`.
 
 use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
@@ -26,6 +27,9 @@ pub struct FileSink {
     sender: Option<Sender<Vec<u8>>>,
     worker: Option<JoinHandle<()>>,
 }
+
+/// The number of files kept when the config does not set one: the live file plus `.1`..`.9`.
+const DEFAULT_MAX_ROLLING: usize = 10;
 
 impl FileSink {
     pub fn open(
@@ -108,21 +112,23 @@ impl Writer {
         fs::create_dir_all(&dir)?;
 
         let date = utc_date();
-        let file = open_live(&dir, &replace_date(pattern, &date))?;
+        let max_rolling = if max_rolling_files == 0 {
+            DEFAULT_MAX_ROLLING
+        } else {
+            max_rolling_files as usize
+        };
+        let file = open_live(&dir, &replace_date(pattern, &date), max_rolling)?;
         let written = file.metadata()?.len();
 
-        let writer = Self {
+        Ok(Self {
             dir,
             pattern: pattern.to_owned(),
             max_size: u64::from(max_file_size_mb) * 1024 * 1024,
-            max_rolling: max_rolling_files as usize,
+            max_rolling,
             date,
             file: BufWriter::new(file),
             written,
-        };
-        writer.cleanup();
-
-        Ok(writer)
+        })
     }
 
     fn write_line(&mut self, line: &[u8]) -> io::Result<()> {
@@ -144,65 +150,20 @@ impl Writer {
         Ok(())
     }
 
-    /// Archives the live file and opens a fresh one under the same name. A date change lands here
-    /// too: `%DATE%` has already moved the live name on, so the archive step finds nothing to move
-    /// and this is just the new day's file being created.
+    /// Cascades the archive set and opens a fresh live file. A date change lands here too: with the
+    /// date out of the configured name a new day is an ordinary rotation, not a new filename.
     fn roll(&mut self) -> io::Result<()> {
         self.file.flush()?;
 
-        let file = open_rolled(&self.dir, &replace_date(&self.pattern, &self.date))?;
+        let file = open_rolled(
+            &self.dir,
+            &replace_date(&self.pattern, &self.date),
+            self.max_rolling,
+        )?;
+        self.written = file.metadata()?.len();
         self.file = BufWriter::new(file);
-        self.written = 0;
-        self.cleanup();
 
         Ok(())
-    }
-
-    /// Deletes all but the `max_rolling` most recent files of the *current* date's set, counting
-    /// the live file as one of them.
-    ///
-    /// Scoping the sweep to one date is what the C# `LogFileRollMonitor` did, and is preserved
-    /// deliberately: widening it to every date in the directory would start deleting previous
-    /// days' logs that installs today keep.
-    fn cleanup(&self) {
-        if self.max_rolling == 0 {
-            return;
-        }
-
-        let file_name = replace_date(&self.pattern, &self.date);
-        let (stem, extension) = split_extension(&file_name);
-
-        let Ok(entries) = fs::read_dir(&self.dir) else {
-            return;
-        };
-
-        // The live file is always the newest and archives always take the next free sequence, so
-        // rank alone is an exact recency order - no filesystem timestamp needed, and none of the
-        // ties a second-resolution one produces during a burst of rolls.
-        let mut files: Vec<(u32, PathBuf)> = entries
-            .flatten()
-            .filter_map(|entry| {
-                let name = entry.file_name();
-                let name = name.to_str()?;
-                let rank = if name == file_name {
-                    u32::MAX
-                } else {
-                    archived_sequence(name, stem, extension)?
-                };
-
-                Some((rank, entry.path()))
-            })
-            .collect();
-
-        if files.len() <= self.max_rolling {
-            return;
-        }
-
-        files.sort_by_key(|(rank, _)| std::cmp::Reverse(*rank));
-
-        for (_, path) in files.iter().skip(self.max_rolling) {
-            let _ = fs::remove_file(path);
-        }
     }
 }
 
@@ -227,11 +188,11 @@ fn claim_first_open(path: PathBuf) -> bool {
         .unwrap_or(true)
 }
 
-/// Opens the file this run logs to: archived and started empty on the process's first open,
+/// Opens the file this run logs to: cascaded and started empty on the process's first open,
 /// appended to on any later one so a prepatcher's second handler shares the same file.
-fn open_live(dir: &Path, file_name: &str) -> io::Result<File> {
+fn open_live(dir: &Path, file_name: &str, max_rolling: usize) -> io::Result<File> {
     if claim_first_open(dir.join(file_name)) {
-        return archive_and_truncate(dir, file_name);
+        return archive_and_open(dir, file_name, max_rolling);
     }
 
     OpenOptions::new()
@@ -241,49 +202,60 @@ fn open_live(dir: &Path, file_name: &str) -> io::Result<File> {
 }
 
 /// A roll always starts a new file. Claiming the path keeps a later handler appending to what this
-/// roll just started instead of archiving it out from under us.
-fn open_rolled(dir: &Path, file_name: &str) -> io::Result<File> {
+/// roll just started instead of cascading it out from under us.
+fn open_rolled(dir: &Path, file_name: &str, max_rolling: usize) -> io::Result<File> {
     claim_first_open(dir.join(file_name));
 
-    archive_and_truncate(dir, file_name)
+    archive_and_open(dir, file_name, max_rolling)
 }
 
-fn archive_and_truncate(dir: &Path, file_name: &str) -> io::Result<File> {
-    archive(dir, file_name);
+fn archive_and_open(dir: &Path, file_name: &str, max_rolling: usize) -> io::Result<File> {
+    let archived = cascade(dir, file_name, max_rolling);
 
     OpenOptions::new()
         .create(true)
         .write(true)
-        .truncate(true)
+        // A rename that failed - on Windows anything holding the file open is enough - must not
+        // cost the log: append to what is there rather than truncating it away.
+        .truncate(archived)
+        .append(!archived)
         .open(dir.join(file_name))
 }
 
-/// Renames the live file to the next free `name.N.ext`. An empty one is left to be truncated in
-/// place, so a burst of restarts that log nothing does not spend the retention window on blanks.
-fn archive(dir: &Path, file_name: &str) {
+/// Shifts the archive set down one index and frees `.1` for the live file. The highest index is
+/// deleted rather than moved, so the set never grows past `max_rolling` files counting the live
+/// one, and no directory scan is needed to decide what to keep.
+///
+/// Returns whether the live file was moved aside. A `false` means the caller must append to it
+/// instead of truncating it.
+fn cascade(dir: &Path, file_name: &str, max_rolling: usize) -> bool {
+    // A cap of one leaves no room for an archive: the live file is simply started over.
+    if max_rolling <= 1 {
+        return true;
+    }
+
     let live = dir.join(file_name);
 
     match fs::metadata(&live) {
         Ok(metadata) if metadata.len() > 0 => {}
-        _ => return,
+        // Nothing worth keeping. Truncating an empty or absent file in place costs no slot, so a
+        // burst of restarts that log nothing does not spend the retention window on blanks.
+        _ => return true,
     }
 
     let (stem, extension) = split_extension(file_name);
-    let sequence = next_archive_sequence(dir, stem, extension);
+    let indexed = |index: usize| dir.join(format!("{stem}.{index}{extension}"));
 
-    let _ = fs::rename(&live, dir.join(format!("{stem}.{sequence}{extension}")));
-}
+    let highest = max_rolling - 1;
+    let _ = fs::remove_file(indexed(highest));
 
-fn next_archive_sequence(dir: &Path, stem: &str, extension: &str) -> u32 {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return 1;
-    };
+    for index in (1..highest).rev() {
+        let _ = fs::rename(indexed(index), indexed(index + 1));
+    }
 
-    entries
-        .flatten()
-        .filter_map(|entry| archived_sequence(entry.file_name().to_str()?, stem, extension))
-        .max()
-        .map_or(1, |highest| highest.saturating_add(1))
+    // ponytail: indices at or above `highest` left by a config change that lowered the cap are
+    // not swept - delete them by hand, or widen this to a scan if it ever matters.
+    fs::rename(&live, indexed(1)).is_ok()
 }
 
 /// Case-insensitive `%DATE%` substitution, matching the C# `StringComparison.OrdinalIgnoreCase`.
@@ -312,14 +284,6 @@ fn split_extension(file_name: &str) -> (&str, &str) {
         Some(index) => file_name.split_at(index),
         None => (file_name, ""),
     }
-}
-
-/// The `N` of an archived `stem.N.ext`, or `None` if the name is not one.
-fn archived_sequence(file_name: &str, stem: &str, extension: &str) -> Option<u32> {
-    let rest = file_name.strip_prefix(stem)?.strip_prefix('.')?;
-    let sequence = rest.strip_suffix(extension)?;
-
-    sequence.parse().ok()
 }
 
 fn utc_date() -> String {
@@ -372,14 +336,6 @@ mod tests {
         assert_eq!(replace_date("spt.log", "20260816"), "spt.log");
     }
 
-    #[test]
-    fn recognises_only_numeric_archive_suffixes() {
-        assert_eq!(archived_sequence("spt.4.log", "spt", ".log"), Some(4));
-        assert_eq!(archived_sequence("spt.log", "spt", ".log"), None);
-        assert_eq!(archived_sequence("spt.old.log", "spt", ".log"), None);
-        assert_eq!(archived_sequence("other.1.log", "spt", ".log"), None);
-    }
-
     fn live_path(dir: &TempDir) -> PathBuf {
         dir.path().join(replace_date("spt%DATE%.log", &utc_date()))
     }
@@ -406,21 +362,44 @@ mod tests {
     }
 
     #[test]
-    fn each_start_archives_the_previous_file_and_opens_a_fresh_one() {
+    fn each_start_cascades_the_previous_files_down_one_index() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().to_str().unwrap();
 
         for run in 0..3 {
             simulate_restart(&dir);
-            let sink = FileSink::open(path, "spt%DATE%.log", 10, 5).unwrap();
+            let sink = FileSink::open(path, "spt%DATE%.log", 10, 10).unwrap();
             sink.write(format!("run {run}").into_bytes());
             sink.close();
         }
 
-        // Newest run in the live file, the two before it archived oldest-sequence-first.
+        // Newest run in the live file, and each older run one index further down.
         assert_eq!(read(&live_path(&dir)), "run 2\n");
-        assert_eq!(read(&archive_path(&dir, 1)), "run 0\n");
-        assert_eq!(read(&archive_path(&dir, 2)), "run 1\n");
+        assert_eq!(read(&archive_path(&dir, 1)), "run 1\n");
+        assert_eq!(read(&archive_path(&dir, 2)), "run 0\n");
+    }
+
+    #[test]
+    fn rotating_at_the_cap_deletes_the_highest_index() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().to_str().unwrap();
+
+        // A cap of 3 leaves room for the live file plus .1 and .2.
+        for run in 0..5 {
+            simulate_restart(&dir);
+            let sink = FileSink::open(path, "spt%DATE%.log", 10, 3).unwrap();
+            sink.write(format!("run {run}").into_bytes());
+            sink.close();
+        }
+
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 3);
+        assert_eq!(read(&live_path(&dir)), "run 4\n");
+        assert_eq!(read(&archive_path(&dir, 1)), "run 3\n");
+        assert_eq!(read(&archive_path(&dir, 2)), "run 2\n");
+        assert!(
+            !archive_path(&dir, 3).exists(),
+            "the cap must delete the highest index, not grow past it"
+        );
     }
 
     /// A prepatcher mod's second copy of SPTarkov.Common opens the same target within one start;
@@ -470,27 +449,48 @@ mod tests {
     }
 
     #[test]
-    fn rolls_on_size_and_keeps_only_the_retention_window() {
+    fn rolls_on_size_within_the_cap() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().to_str().unwrap();
 
-        // 1 MB limit, 2 files kept: write enough 64 KiB lines to force several rolls.
-        let mut writer = Writer::open(path, "spt%DATE%.log", 1, 2).unwrap();
+        // 1 MB limit, 3 files kept: write enough 64 KiB lines to force several rolls.
+        let mut writer = Writer::open(path, "spt%DATE%.log", 1, 3).unwrap();
         let line = vec![b'x'; 64 * 1024];
         for _ in 0..48 {
             writer.write_line(&line).unwrap();
         }
         writer.file.flush().unwrap();
 
-        let remaining = fs::read_dir(dir.path()).unwrap().count();
-        assert_eq!(remaining, 2, "retention should have pruned to 2 files");
-
-        // A prune never takes the live file, and takes the lowest sequence - the oldest - first.
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 3);
         assert!(live_path(&dir).exists());
-        assert!(
-            !archive_path(&dir, 1).exists(),
-            "the oldest archive should have gone first"
-        );
+        assert!(!archive_path(&dir, 3).exists());
+    }
+
+    /// A rename fails whenever something else holds the file - the common Windows case. The
+    /// previous run's log must survive that, not be truncated away.
+    #[test]
+    fn a_failed_rename_appends_instead_of_truncating() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().to_str().unwrap();
+
+        // A cap of 2 leaves `.1` as the only archive slot, so the shift loop is empty and the
+        // blocker below cannot be relocated out of the way ahead of the live file's rename.
+        simulate_restart(&dir);
+        let sink = FileSink::open(path, "spt%DATE%.log", 10, 2).unwrap();
+        sink.write(b"first run".to_vec());
+        sink.close();
+
+        // Occupy the destination with a non-empty directory, which no rename can replace.
+        let blocked = archive_path(&dir, 1);
+        fs::create_dir(&blocked).unwrap();
+        fs::write(blocked.join("occupied"), b"x").unwrap();
+
+        simulate_restart(&dir);
+        let sink = FileSink::open(path, "spt%DATE%.log", 10, 2).unwrap();
+        sink.write(b"second run".to_vec());
+        sink.close();
+
+        assert_eq!(read(&live_path(&dir)), "first run\nsecond run\n");
     }
 
     #[test]
