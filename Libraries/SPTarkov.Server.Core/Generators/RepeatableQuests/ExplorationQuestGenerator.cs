@@ -27,6 +27,27 @@ public class ExplorationQuestGenerator(
     MathUtil mathUtil
 ) : IRepeatableQuestGenerator
 {
+    private readonly QuestConfig? _questConfig;
+
+    /// <summary>
+    ///     The constructor the container uses: the frozen 4.1.2 one plus the config that carries the
+    ///     native path flags. Additive and apicompat-verified.
+    /// </summary>
+    public ExplorationQuestGenerator(
+        ISptLogger<ExplorationQuestGenerator> logger,
+        LocationTable locationTable,
+        RepeatableQuestHelper repeatableQuestHelper,
+        RepeatableQuestRewardGenerator repeatableQuestRewardGenerator,
+        ServerLocalisationService localisationService,
+        RandomUtil randomUtil,
+        MathUtil mathUtil,
+        QuestConfig questConfig
+    )
+        : this(logger, locationTable, repeatableQuestHelper, repeatableQuestRewardGenerator, localisationService, randomUtil, mathUtil)
+    {
+        _questConfig = questConfig;
+    }
+
     protected record LocationInfo(
         ELocationName LocationName,
         List<string> LocationTarget,

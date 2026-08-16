@@ -70,6 +70,30 @@ public record QuestConfig : BaseConfig
     /// </summary>
     [JsonPropertyName("locationIdMap")]
     public required Dictionary<string, string> LocationIdMap { get; set; }
+
+    /// <summary>
+    ///     Force repeatable quest generation down the retained 4.1.2 C# path instead of spt-native.
+    ///     The escape hatch for hooks the patch detection cannot see - patches on the shared helpers
+    ///     the generators call into.
+    /// </summary>
+    [JsonPropertyName("forceLegacyRepeatableQuestGeneration")]
+    public bool ForceLegacyRepeatableQuestGeneration { get; set; }
+
+    /// <summary>
+    ///     Keep the native request-slice cache live even with mods loaded. Off, any loaded mod
+    ///     disables the cache. On, the instrumented mutation paths (CustomItemService, the
+    ///     blacklist caches, seasonal events) still invalidate it, but a mod writing an injected
+    ///     table's dictionaries directly goes unseen - only enable when your mods don't do that.
+    /// </summary>
+    [JsonPropertyName("trustNativeRequestCacheWithMods")]
+    public bool TrustNativeRequestCacheWithMods { get; set; }
+
+    /// <summary>
+    ///     Always resend the full native request slice: disables the stamp cache without
+    ///     touching the native path itself.
+    /// </summary>
+    [JsonPropertyName("disableNativeRequestCache")]
+    public bool DisableNativeRequestCache { get; set; }
 }
 
 public record RepeatableQuestTemplates

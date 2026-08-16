@@ -33,6 +33,43 @@ public class RepeatableQuestRewardGenerator(
     ICloner cloner
 )
 {
+    private readonly QuestConfig? _questConfig;
+
+    /// <summary>
+    ///     The constructor the container uses: the frozen 4.1.2 one plus the config that carries the
+    ///     native path flags. Additive and apicompat-verified.
+    /// </summary>
+    public RepeatableQuestRewardGenerator(
+        ISptLogger<RepeatableQuestRewardGenerator> logger,
+        TemplateTable templateTable,
+        RandomUtil randomUtil,
+        MathUtil mathUtil,
+        ItemHelper itemHelper,
+        PresetHelper presetHelper,
+        HandbookHelper handbookHelper,
+        ServerLocalisationService localisationService,
+        ItemFilterService itemFilterService,
+        SeasonalEventService seasonalEventService,
+        ICloner cloner,
+        QuestConfig questConfig
+    )
+        : this(
+            logger,
+            templateTable,
+            randomUtil,
+            mathUtil,
+            itemHelper,
+            presetHelper,
+            handbookHelper,
+            localisationService,
+            itemFilterService,
+            seasonalEventService,
+            cloner
+        )
+    {
+        _questConfig = questConfig;
+    }
+
     /// <summary>
     ///     Generate the reward for a mission. A reward can consist of: <br />
     ///     - Experience <br />

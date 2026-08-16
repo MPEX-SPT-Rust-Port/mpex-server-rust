@@ -34,6 +34,39 @@ public class EliminationQuestGenerator(
     ICloner cloner
 ) : IRepeatableQuestGenerator
 {
+    private readonly QuestConfig? _questConfig;
+
+    /// <summary>
+    ///     The constructor the container uses: the frozen 4.1.2 one plus the config that carries the
+    ///     native path flags. Additive and apicompat-verified.
+    /// </summary>
+    public EliminationQuestGenerator(
+        ISptLogger<EliminationQuestGenerator> logger,
+        LocationTable locationTable,
+        RandomUtil randomUtil,
+        MathUtil mathUtil,
+        RepeatableQuestHelper repeatableQuestHelper,
+        ItemHelper itemHelper,
+        RepeatableQuestRewardGenerator repeatableQuestRewardGenerator,
+        ServerLocalisationService localisationService,
+        ICloner cloner,
+        QuestConfig questConfig
+    )
+        : this(
+            logger,
+            locationTable,
+            randomUtil,
+            mathUtil,
+            repeatableQuestHelper,
+            itemHelper,
+            repeatableQuestRewardGenerator,
+            localisationService,
+            cloner
+        )
+    {
+        _questConfig = questConfig;
+    }
+
     /// <summary>
     /// Body parts to present to the client as opposed to the body part information in quest data.
     /// </summary>

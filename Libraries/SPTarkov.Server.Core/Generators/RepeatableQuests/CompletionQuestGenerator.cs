@@ -30,6 +30,39 @@ public class CompletionQuestGenerator(
     ItemHelper itemHelper
 ) : IRepeatableQuestGenerator
 {
+    private readonly QuestConfig? _questConfig;
+
+    /// <summary>
+    ///     The constructor the container uses: the frozen 4.1.2 one plus the config that carries the
+    ///     native path flags. Additive and apicompat-verified.
+    /// </summary>
+    public CompletionQuestGenerator(
+        ISptLogger<CompletionQuestGenerator> logger,
+        TemplateTable templateTable,
+        RepeatableQuestHelper repeatableQuestHelper,
+        RepeatableQuestRewardGenerator repeatableQuestRewardGenerator,
+        SeasonalEventService seasonalEventService,
+        ServerLocalisationService localisationService,
+        RandomUtil randomUtil,
+        MathUtil mathUtil,
+        ItemHelper itemHelper,
+        QuestConfig questConfig
+    )
+        : this(
+            logger,
+            templateTable,
+            repeatableQuestHelper,
+            repeatableQuestRewardGenerator,
+            seasonalEventService,
+            localisationService,
+            randomUtil,
+            mathUtil,
+            itemHelper
+        )
+    {
+        _questConfig = questConfig;
+    }
+
     protected const int MaxRandomNumberAttempts = 6;
 
     /// <summary>

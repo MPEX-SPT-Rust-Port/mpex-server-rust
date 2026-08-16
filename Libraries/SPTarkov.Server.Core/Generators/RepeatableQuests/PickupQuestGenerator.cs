@@ -18,6 +18,23 @@ public class PickupQuestGenerator(
     RandomUtil randomUtil
 ) : IRepeatableQuestGenerator
 {
+    private readonly QuestConfig? _questConfig;
+
+    /// <summary>
+    ///     The constructor the container uses: the frozen 4.1.2 one plus the config that carries the
+    ///     native path flags. Additive and apicompat-verified.
+    /// </summary>
+    public PickupQuestGenerator(
+        RepeatableQuestHelper repeatableQuestHelper,
+        RepeatableQuestRewardGenerator repeatableQuestRewardGenerator,
+        RandomUtil randomUtil,
+        QuestConfig questConfig
+    )
+        : this(repeatableQuestHelper, repeatableQuestRewardGenerator, randomUtil)
+    {
+        _questConfig = questConfig;
+    }
+
     // TODO: This isn't really implemented, not in the current pool.
     public RepeatableQuest? Generate(
         MongoId sessionId,
