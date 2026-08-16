@@ -1,5 +1,6 @@
 pub mod completion;
 pub mod elimination;
+pub mod exploration;
 pub mod helper;
 pub mod models;
 pub mod reward_generator;
