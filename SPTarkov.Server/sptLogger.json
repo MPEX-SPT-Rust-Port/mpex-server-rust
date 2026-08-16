@@ -5,8 +5,8 @@
       "logLevel": "Information",
       "format": "[%date% %time%][%level%][%logger%] %message%",
       "filePath": "./user/logs/spt/",
-      "filePattern": "spt%DATE%.log",
-      "maxFileSizeMB": 10,
+      "filePattern": "spt.log",
+      "maxFileSizeMB": 8,
       "maxRollingFiles": 10,
       "filters": [
         {
@@ -26,7 +26,7 @@
       "logLevel": "Information",
       "format": "[%date% %time%][%level%][%logger%] %message%",
       "filePath": "./user/logs/requests/",
-      "filePattern": "requests%DATE%.log",
+      "filePattern": "requests.log",
       "maxFileSizeMB": 25,
       "maxRollingFiles": 10,
       "filters": [
