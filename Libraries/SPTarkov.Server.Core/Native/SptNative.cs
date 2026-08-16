@@ -7,6 +7,7 @@ using SPTarkov.Server.Core.Models.Enums;
 using SPTarkov.Server.Core.Native.Bot;
 using SPTarkov.Server.Core.Native.Loot;
 using SPTarkov.Server.Core.Native.Ragfair;
+using SPTarkov.Server.Core.Native.RepeatableQuests;
 using SPTarkov.Server.Core.Utils;
 
 namespace SPTarkov.Server.Core.Native;
@@ -45,6 +46,7 @@ internal enum LootExport
     RandomLootContainer,
     BotInventory,
     BotInventoryBatch,
+    RepeatableQuest,
 }
 
 public static class SptNative
@@ -55,7 +57,7 @@ public static class SptNative
     private const int StatusOk = 0;
     private const int StatusError = 3;
 
-    // ffi.rs: a slice-less ragfair request named a stamp the native cache does not hold
+    // ffi.rs: a slice-less request named a stamp the native cache does not hold
     private const int StatusStaleSlice = 4;
 
     // No CancellationToken: the native hash pass is a single bounded blocking call that cannot be
@@ -166,6 +168,27 @@ public static class SptNative
     internal static FramedOffersResult GenerateDynamicOffers(GenerateDynamicOffersRequest request)
     {
         return GenerateDynamicOffersFramed(JsonSerializer.SerializeToUtf8Bytes(request, LootJsonOptions));
+    }
+
+    /// <summary>
+    /// Generates one repeatable quest of the type the request names, plus the pool the generator
+    /// mutated on the way.
+    /// </summary>
+    /// <exception cref="NativeStaleSliceException">A slice-less request named a stamp the native cache does not hold.</exception>
+    /// <exception cref="InvalidOperationException">Generation failed, or the native side misbehaved.</exception>
+    internal static RepeatableQuestResult GenerateRepeatableQuest(GenerateRepeatableQuestRequest request)
+    {
+        return GenerateRepeatableQuest(JsonSerializer.SerializeToUtf8Bytes(request, QuestJsonOptions));
+    }
+
+    /// <summary>
+    /// The raw-bytes seam of <see cref="GenerateRepeatableQuest(GenerateRepeatableQuestRequest)"/>,
+    /// kept internal so tests can hand it JSON no typed payload can express - a mod-added field, or
+    /// a malformed request.
+    /// </summary>
+    internal static RepeatableQuestResult GenerateRepeatableQuest(ReadOnlySpan<byte> requestUtf8)
+    {
+        return Generate<RepeatableQuestResult>(LootExport.RepeatableQuest, requestUtf8, QuestJsonOptions);
     }
 
     /// <summary>
@@ -339,8 +362,14 @@ public static class SptNative
     /// native side reads. Internal so tests can hand it JSON that no typed payload can express: a
     /// mod-added field, or a deliberately malformed request.
     /// </summary>
-    internal static unsafe TResult Generate<TResult>(LootExport export, ReadOnlySpan<byte> requestUtf8)
+    internal static unsafe TResult Generate<TResult>(
+        LootExport export,
+        ReadOnlySpan<byte> requestUtf8,
+        JsonSerializerOptions? options = null
+    )
     {
+        options ??= LootJsonOptions;
+
         EnsureLoadable();
 
         byte* outPtr = null;
@@ -379,6 +408,12 @@ public static class SptNative
                     &outPtr,
                     &outLen
                 ),
+                LootExport.RepeatableQuest => NativeMethods.GenerateRepeatableQuest(
+                    requestPtr,
+                    (nuint)requestUtf8.Length,
+                    &outPtr,
+                    &outLen
+                ),
                 _ => throw new ArgumentOutOfRangeException(nameof(export), export, null),
             };
         }
@@ -390,7 +425,7 @@ public static class SptNative
             outLen,
             (buffer, length) =>
             {
-                return JsonSerializer.Deserialize<TResult>(new ReadOnlySpan<byte>((byte*)buffer, length), LootJsonOptions)
+                return JsonSerializer.Deserialize<TResult>(new ReadOnlySpan<byte>((byte*)buffer, length), options)
                     ?? throw new InvalidOperationException($"spt_native returned an empty {export} result.");
             }
         );
@@ -407,6 +442,31 @@ public static class SptNative
                 ?? throw new InvalidOperationException("JsonUtil has not been built yet, so the loot payload converters are unavailable.");
         }
     }
+
+    /// <summary>
+    /// The loot payload options plus a string converter for <see cref="ELocationName"/>, which the
+    /// quest payloads carry as dictionary keys on both the pool and the repeatable config.
+    /// <c>EftEnumConverter</c> writes every unattributed enum as its numeric value, and the native
+    /// side reads those keys as location names - so this one goes in front of it. Scoped to this
+    /// family: the global options also write the profiles, whose stored shape is not ours to change.
+    /// </summary>
+    internal static JsonSerializerOptions QuestJsonOptions
+    {
+        get
+        {
+            if (_questJsonOptions is null)
+            {
+                var options = new JsonSerializerOptions(LootJsonOptions);
+                // Appending would leave the global enum factory ahead of it: first match wins
+                options.Converters.Insert(0, new JsonStringEnumConverter<ELocationName>());
+                _questJsonOptions = options;
+            }
+
+            return _questJsonOptions;
+        }
+    }
+
+    private static JsonSerializerOptions? _questJsonOptions;
 
     private static unsafe VerifyResult VerifyDatabase(string sptDataDir)
     {
@@ -447,7 +507,8 @@ public static class SptNative
 }
 
 /// <summary>
-///     A slice-less ragfair request named a stamp the native cache does not hold. The caller
-///     self-heals by resending the request with the invariant slice included.
+///     A slice-less request named a stamp the native cache does not hold, on any family that splits
+///     its request into an invariant slice and a varying half. The caller self-heals by resending
+///     the request with the invariant slice included.
 /// </summary>
 internal sealed class NativeStaleSliceException(string message) : InvalidOperationException(message);

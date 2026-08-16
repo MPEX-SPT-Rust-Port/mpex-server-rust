@@ -80,16 +80,17 @@ public record QuestConfig : BaseConfig
     public bool ForceLegacyRepeatableQuestGeneration { get; set; }
 
     /// <summary>
-    ///     Keep the native request-slice cache live even with mods loaded. Off, any loaded mod
-    ///     disables the cache. On, the instrumented mutation paths (CustomItemService, the
-    ///     blacklist caches, seasonal events) still invalidate it, but a mod writing an injected
-    ///     table's dictionaries directly goes unseen - only enable when your mods don't do that.
+    ///     Keep the native repeatable-quest request-slice cache live even with mods loaded. Off, any
+    ///     loaded mod disables the cache. On, the instrumented mutation paths (CustomItemService, the
+    ///     item blacklist caches, seasonal events) still invalidate it, but a mod writing the quest
+    ///     templates, the location table's extracts and boss spawns, or this config's maps directly
+    ///     goes unseen - only enable when your mods don't do that.
     /// </summary>
     [JsonPropertyName("trustNativeRequestCacheWithMods")]
     public bool TrustNativeRequestCacheWithMods { get; set; }
 
     /// <summary>
-    ///     Always resend the full native request slice: disables the stamp cache without
+    ///     Always resend the full repeatable-quest invariant slice: disables the stamp cache without
     ///     touching the native path itself.
     /// </summary>
     [JsonPropertyName("disableNativeRequestCache")]
