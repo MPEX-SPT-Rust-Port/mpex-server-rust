@@ -1103,9 +1103,19 @@ mod tests {
     /// Blanks only the ids the generators *minted*: the response ids the request did not carry.
     /// Those come off a process counter and a clock, outside the seeded stream, so no seed pins
     /// them. Every id the request already knew — the trader, the template, the item tpls a reward
-    /// draw picks — stays visible, which is where a seed regression has to show.
+    /// draw picks — stays visible, which is where a seed regression has to show. Ids appearing as
+    /// a `"_tpl"` value count as known even when the request never carried them (a drawn reward's
+    /// template comes from the database, never the mint), so a same-price different-item
+    /// regression stays visible too.
     fn mask_minted_ids(out: &[u8], request: &[u8]) -> String {
-        let known: std::collections::HashSet<String> = mongo_ids(request).into_iter().collect();
+        let mut known: std::collections::HashSet<String> = mongo_ids(request).into_iter().collect();
+        let text = std::str::from_utf8(out).expect("the response is UTF-8");
+        for (idx, _) in text.match_indices("\"_tpl\":\"") {
+            let value = &text[idx + 8..];
+            if value.len() >= 24 && value.as_bytes()[24] == b'"' {
+                known.insert(value[..24].to_string());
+            }
+        }
         let mut masked = String::from_utf8(out.to_vec()).expect("the response is UTF-8");
         for id in mongo_ids(out) {
             if !known.contains(&id) {
