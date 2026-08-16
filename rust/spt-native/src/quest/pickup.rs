@@ -26,14 +26,17 @@ pub fn generate(
     // and the other two configs carry the null into `:39`, after `:32` has spent its draws.
     let pickup_config = repeatable_config.quest_config.pickup.as_ref();
 
-    // `:32` — the helper logs its own give-up reasons.
-    let mut quest = helper::generate_repeatable_template(
+    // `:32` — the helper logs its own give-up reasons and returns null
+    // (`RepeatableQuestHelper.cs:102-121`). This generator, unlike
+    // `ExplorationQuestGenerator.cs:80-84`, never checks for it: the null rides through the `:39`
+    // and `:41` draws to the dereference at `:49`.
+    let quest = helper::generate_repeatable_template(
         ctx,
         RepeatableQuestType::Pickup,
         trader_id,
         &repeatable_config.side,
         session_id,
-    )?;
+    );
 
     let pickup_config = pickup_config.expect("Pickup config was null at PickupQuestGenerator:39");
 
@@ -71,7 +74,9 @@ pub fn generate(
     // var locationKey: string = this.randomUtil.drawRandomFromDict(questTypePool.pool.Pickup.locations)[0];
     // var locationTarget = questTypePool.pool.Pickup.locations[locationKey];
 
-    // `FirstOrDefault` (`:49`) hands back a null the C# then dereferences at `:50`.
+    // `quest.Conditions` (`:49`) is where a null template lands, and `FirstOrDefault` hands back a
+    // null the C# then dereferences at `:50`.
+    let mut quest = quest.expect("Template was null at PickupQuestGenerator:49");
     let find_condition = quest
         .quest
         .conditions
@@ -149,7 +154,7 @@ mod tests {
         serde_json::from_str(&std::fs::read_to_string(path).expect("readable")).expect("JSON")
     }
 
-    /// `Daily_Savage` is the only shipped config carrying a `Pickup` block (`QuestConfig.cs:346`).
+    /// `Daily_Savage` is the only shipped config carrying a `Pickup` block (`QuestConfig.cs:352`).
     fn savage_config() -> RepeatableQuestConfig {
         serde_json::from_value(json(QUEST_CONFIG_PATH)["repeatableQuests"][2].clone())
             .expect("parses")
