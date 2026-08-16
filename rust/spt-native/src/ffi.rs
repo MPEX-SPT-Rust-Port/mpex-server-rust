@@ -1080,22 +1080,38 @@ mod tests {
         serde_json::to_vec(&request).expect("request serializes")
     }
 
-    /// Blanks every 24-character hex run: the mongo ids the generators mint come off a process
-    /// counter and a clock, outside the seeded stream, so no seed pins them.
-    fn mask_ids(out: &[u8]) -> String {
-        let text = String::from_utf8(out.to_vec()).expect("the response is UTF-8");
-        let mut masked = String::with_capacity(text.len());
+    /// Every 24-character hex run in `bytes` — the mongo ids crossing the boundary, whichever way.
+    fn mongo_ids(bytes: &[u8]) -> Vec<String> {
+        let text = std::str::from_utf8(bytes).expect("the payload is UTF-8");
+        let mut ids = Vec::new();
         let mut run = String::new();
-        for character in text.chars() {
+        // A trailing separator so a run ending at the last byte is closed like every other.
+        for character in text.chars().chain(std::iter::once(' ')) {
             if character.is_ascii_hexdigit() {
                 run.push(character);
                 continue;
             }
-            masked.push_str(if run.len() == 24 { "<id>" } else { &run });
+            if run.len() == 24 {
+                ids.push(run.clone());
+            }
             run.clear();
-            masked.push(character);
         }
-        masked.push_str(if run.len() == 24 { "<id>" } else { &run });
+
+        ids
+    }
+
+    /// Blanks only the ids the generators *minted*: the response ids the request did not carry.
+    /// Those come off a process counter and a clock, outside the seeded stream, so no seed pins
+    /// them. Every id the request already knew — the trader, the template, the item tpls a reward
+    /// draw picks — stays visible, which is where a seed regression has to show.
+    fn mask_minted_ids(out: &[u8], request: &[u8]) -> String {
+        let known: std::collections::HashSet<String> = mongo_ids(request).into_iter().collect();
+        let mut masked = String::from_utf8(out.to_vec()).expect("the response is UTF-8");
+        for id in mongo_ids(out) {
+            if !known.contains(&id) {
+                masked = masked.replace(&id, "<minted>");
+            }
+        }
 
         masked
     }
@@ -1166,15 +1182,25 @@ mod tests {
             "the fixture request generates a quest"
         );
         assert!(response["pool"]["types"].is_array());
-        assert_eq!(mask_ids(&first), mask_ids(&second));
+        // The ids a draw can move — the trader the quest is minted for, and the tpls it hands over
+        // — come off the request, so the masking leaves them in the compared bytes.
+        assert!(
+            mask_minted_ids(&first, &request).contains("54cb50c76803fa8b248b4571"),
+            "the request's own ids must survive the masking"
+        );
+        assert_eq!(
+            mask_minted_ids(&first, &request),
+            mask_minted_ids(&second, &request)
+        );
 
         // …and the masking has teeth: another seed draws a different quest.
-        let (status, other) = call_generate(
-            spt_generate_repeatable_quest,
-            &quest_request(7, true, Some(7)),
-        );
+        let other_request = quest_request(7, true, Some(7));
+        let (status, other) = call_generate(spt_generate_repeatable_quest, &other_request);
         assert_eq!(status, STATUS_OK);
-        assert_ne!(mask_ids(&first), mask_ids(&other));
+        assert_ne!(
+            mask_minted_ids(&first, &request),
+            mask_minted_ids(&other, &other_request)
+        );
     }
 
     #[test]

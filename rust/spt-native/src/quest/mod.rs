@@ -106,9 +106,9 @@ pub fn generate_repeatable_quest(
     } = request.varying;
     let _seed_guard = seed.map(TestSeedGuard::install);
 
-    // `:396` dispatches on the config's type name. `Pickup` is reachable here but not from the C#
-    // caller, whose switch spells the case `PickUp` and falls through to `null` for the pool's
-    // `Pickup`.
+    // `:395` dispatches on the config's type name, `Pickup` included — the case is spelled the way
+    // the pool spells it and does call the generator. The arm is dead only because no shipped
+    // `quest.json` config lists `Pickup` in its `types`, so nothing draws that name to dispatch on.
     let generate = match quest_type {
         RepeatableQuestType::Elimination => elimination::generate,
         RepeatableQuestType::Completion => completion::generate,
