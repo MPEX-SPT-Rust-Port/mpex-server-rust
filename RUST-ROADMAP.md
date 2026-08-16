@@ -6,11 +6,11 @@ internals see [rust/ARCHITECTURE.md](rust/ARCHITECTURE.md); for the C# side of t
 
 ## Status
 
-The loot family, the bot family and dynamic ragfair offer generation are ported and run natively by
-default. Every ported class keeps its full 4.1.2 C# implementation as a **legacy path**, selected
-automatically when a mod hooks it or manually via a config flag. Twelve C-ABI exports (`src/ffi.rs`)
-carry it, JSON in and JSON out — except the ragfair response, which is a framed MessagePack
-envelope (current ABI 13) the C# side parses in parallel.
+The loot family, the bot family, dynamic ragfair offer generation and the repeatable-quest family are
+ported and run natively by default. Every ported class keeps its full 4.1.2 C# implementation as a
+**legacy path**, selected automatically when a mod hooks it or manually via a config flag. Thirteen
+C-ABI exports (`src/ffi.rs`) carry it, JSON in and JSON out — except the ragfair response, which is a
+framed MessagePack envelope (current ABI 14) the C# side parses in parallel.
 
 ## Working
 
@@ -25,6 +25,7 @@ envelope (current ABI 13) the C# side parses in parallel.
 | Whole bot inventory (equipment, mods, weapons, loot) | `BotInventoryGenerator.GenerateInventory` | `spt_generate_bot_inventory` |
 | A whole bot wave in one call — shared views on the wire once, rayon-parallel per bot, one `{result \| error}` envelope each | `BotWaveBatcher.TryGenerateWave`, from `BotController.GenerateBotWave` | `spt_generate_bot_inventory_batch` |
 | A batch of dynamic flea offers (assort walk, pricing, barter schemes) | `RagfairOfferGenerator.GenerateDynamicOffers` | `spt_generate_dynamic_offers` |
+| Repeatable quests (all four types + rewards) | `*QuestGenerator.Generate` | `spt_generate_repeatable_quest` |
 
 Also working: mod-added fields on game data survive the round trip (`#[serde(flatten)] extra` maps
 mirroring Ceciler's `[JsonExtensionData]`); native log lines are replayed through the C# logger;
@@ -50,6 +51,17 @@ seeded-RNG parity at the primitive level (xoshiro256\*\*, twin known-answer test
   ~2%): it is the C# side binding ~367k `Models` objects out of the response, plus GC. Absolute
   cost is small (once at startup, then per-expiry bursts) and native stays the default for family
   consistency; `RagfairConfig.ForceLegacyRagfairGeneration` is the opt-out.
+- **Completion quests are ~3.1x slower on the warm native path** — 67.50 ms native against 21.64 ms
+  legacy at the median, reproduced across three invocations. It is not transport: Completion's
+  cold-minus-warm gap (~44 ms) is the same as every other quest type's, so the extra time sits inside
+  the native call after the slice is already parsed. The unprofiled candidate cause is recorded in
+  [BENCHMARK.md](BENCHMARK.md) § *The honest verdict* — `completion.rs` walks a template's parent
+  chain per `is_of_baseclasses` call with no cache, twice over the whole items table, where the C#
+  path reads `ItemBaseClassService`'s prebuilt one. Named follow-up work; nothing measured proves it
+  yet. `QuestConfig.ForceLegacyRepeatableQuestGeneration` is the opt-out.
+- **Exploration and Pickup quests are a wash** — a warm native call costs ~3.2 ms whatever it
+  generates, and those two quests are ~2.9 ms of C# work, so native lands 0.2-0.3 ms behind legacy.
+  The port pays on Elimination (4.6-6.2x) and nowhere else.
 - **`get_flea_prices_as_array` is O(offers × price table) if a mod enables barters** — it re-derives
   the whole filtered flea price list per barter offer, with an `is_of_baseclasses` walk per entry.
   Dead on shipped data (`ragfair.json` `dynamic.barter.chancePercent` is `0`, so no barter offer is
@@ -64,17 +76,22 @@ seeded-RNG parity at the primitive level (xoshiro256\*\*, twin known-answer test
 - **Golden-test parity is normalised, not raw-byte** — every family now has a full-output golden
   gate (`LootParityTests` over all 13 loot-bearing maps, `BotParityTests` including level-20
   randomised buckets and the nighttime clamp, `RewardLootParityTests` over all five reward entry
-  points, `RagfairParityTests`), all seeded and byte-equal after id normalisation. The sanctioned
-  gaps are minted `MongoId`s (outside the seeded stream on both sides) and, for ragfair only,
-  `intId` (a live C# counter) and `startTime`/`endTime` (one batch timestamp natively vs a
-  per-offer clock in legacy, so only the spread is compared).
+  points, `RagfairParityTests`, `RepeatableQuestParityTests` over all four quest types), all seeded
+  and byte-equal after id normalisation. The sanctioned gaps are minted `MongoId`s (outside the
+  seeded stream on both sides — a repeatable quest mints ~12-25 of them, the largest per-call count
+  of any family, and the normaliser masks every one) and, for ragfair only, `intId` (a live C#
+  counter) and `startTime`/`endTime` (one batch timestamp natively vs a per-offer clock in legacy,
+  so only the spread is compared).
 - **Patches on collaborators do not reach the native path** and do not flip to legacy — only the
   ported classes' own members are detected. Affected: `RandomUtil`, `ItemHelper`,
   `CounterTrackerHelper`, `BotGeneratorHelper`, `DurabilityLimitsHelper`, `RepairService.AddBuff`,
   `BotWeaponGeneratorHelper`, `BotEquipmentModPoolService`, `BotLootCacheService`,
   `WeightedRandomHelper`, `ItemFilterService`/`PresetHelper` predicates, `ICloner`. Ragfair adds
   `HandbookHelper`, `PaymentHelper`, `BotHelper`, `TraderHelper` and `SeasonalEventService` to that
-  list (its own four classes *are* detected — see *Exceptions in force*).
+  list (its own four classes *are* detected — see *Exceptions in force*). Repeatable quests add
+  `MathUtil`; their two folded-in collaborators, `RepeatableQuestHelper` and
+  `RepeatableQuestRewardGenerator`, *are* detected — both their frozen members and a container
+  substitution of either flip the calling generator to legacy.
 - **Templates without `_props` read as "not in the db"** on the native path — they are dropped from
   `itemsView`. Vanilla data always has `_props`; this only bites mod-added props-less templates.
 - **Typed loose-loot path is slow** — ~1347 ms per raid start for `bigmap` vs ~345 ms raw, against
@@ -96,8 +113,9 @@ seeded-RNG parity at the primitive level (xoshiro256\*\*, twin known-answer test
    route to legacy so hooks fire with baseline semantics. Add a `forceLegacy...` config flag as the
    escape hatch for hooks detection can't see.
 3. **Project per call, never cache.** Payloads are rebuilt from the live database, configs and
-   services on every call — that is what keeps runtime mod mutations visible. Accept the cost. One
-   exception is in force, the ragfair invariant slice; see *Exceptions in force* for its terms.
+   services on every call — that is what keeps runtime mod mutations visible. Accept the cost. Two
+   exceptions are in force, the ragfair and repeatable-quest invariant slices; see *Exceptions in
+   force* for their terms.
 4. **RNG parity.** Both sides draw through the shared xoshiro256\*\* source behind test-only seams
    (`Utils/RandomSource.cs` / `random_util.rs`), pinned by twin known-answer tests. Production C#
    randomness stays bit-for-bit unchanged.
@@ -108,7 +126,11 @@ seeded-RNG parity at the primitive level (xoshiro256\*\*, twin known-answer test
    for startup-internal subsystems mods never touch. Anything patchable calls Rust from inside a
    resolved service.
 7. **Gate loop** (no CI in this fork): `dotnet build -c Release` → `mpex-api-compat/ci/check-api-compat.sh`
-   → `dotnet test` → `csharpier format .`.
+   → `dotnet test` → `csharpier format .` → `cd rust && cargo test && cargo fmt --check &&
+   cargo clippy --all-targets -- -D warnings`.
+   **Gotcha:** run `dotnet tool restore --tool-manifest <mpex-api-compat>/.config/dotnet-tools.json`
+   first and invoke the script with the working directory *inside* `mpex-api-compat` — a missing
+   `apicompat` tool falsely reports "API COMPATIBILITY BROKEN".
 
 ### Exceptions in force
 
@@ -160,7 +182,7 @@ seeded-RNG parity at the primitive level (xoshiro256\*\*, twin known-answer test
   effect on `PARKED_RNG`, whose only consumer is the loot dynamic entry point, which never runs on
   a rayon worker.
 - **The ragfair response is a framed MessagePack envelope, not a JSON buffer.** One length-prefixed
-  frame per offer behind a header frame (since ABI **10**, encoding tag 1; current ABI is 13), which
+  frame per offer behind a header frame (since ABI **10**, encoding tag 1; current ABI is 14), which
   C# deserialises with `Parallel.For` over the frames straight out of the native buffer — no
   whole-response JSON document is ever materialised. Only the ragfair response uses it; every other
   export is still JSON in / JSON out.
@@ -180,7 +202,7 @@ seeded-RNG parity at the primitive level (xoshiro256\*\*, twin known-answer test
   used only when no mods are loaded, with `RagfairConfig.TrustNativeRequestCacheWithMods` as the
   opt-in for mod setups known not to mutate, and `RagfairConfig.DisableNativeRequestCache` as the
   kill switch. Every other payload in the crate is still projected per call.
-- **The ragfair request is `{invariantStamp, invariant?, varying}` (ABI 13).** The invariant half is
+- **The ragfair request is `{invariantStamp, invariant?, varying}` (since ABI 13).** The invariant half is
   sent only when the stamp moved; the native side keeps the parsed slice keyed by that stamp. A
   slice-less request whose stamp the cache does not hold returns `STATUS_STALE_SLICE` (4), which
   surfaces as `NativeStaleSliceException` and self-heals with one full-send retry — so a lost cache
@@ -190,8 +212,47 @@ seeded-RNG parity at the primitive level (xoshiro256\*\*, twin known-answer test
   `ragfairConfig.Dynamic` rides in the invariant slice, and nothing bumps the stamp when a config
   object is mutated. No production path writes it at runtime today; test fixtures that mutate
   config bump the stamp manually. Instrument the config objects if that ever changes.
+- **Repeatable quests freeze six classes and dispatch from four.** The frozen set is the four
+  dispatching generators — `EliminationQuestGenerator`, `CompletionQuestGenerator`,
+  `ExplorationQuestGenerator`, `PickupQuestGenerator` — plus `RepeatableQuestRewardGenerator` and
+  `RepeatableQuestHelper`, the two collaborators the native path folds in. A live patch on any
+  public/protected/protected-internal member of any of the six flips to legacy, **except the four
+  `Generate` methods**: each is a dispatcher now, so a patch on one wraps whichever path runs and
+  does *not* force legacy. A container substitution — a subclass of the generator itself, of
+  `RepeatableQuestHelper` or of `RepeatableQuestRewardGenerator` — flips too, and the check runs per
+  generator instance at call time. `PickupQuestGenerator` contributes **zero** frozen hookable
+  members: its whole legacy body is inline in `Generate`, so nothing of its own is patchable.
+- **All four quest generators took constructor overloads**, not signature changes — the frozen 4.1.2
+  constructors stay, and the container selects an overload adding `QuestConfig` and
+  `RepeatableQuestNativeRequestBuilder`. Additive only, and an instance built through the frozen
+  constructor has no native seam and runs legacy unconditionally.
+- **Three `QuestConfig` flags, C# defaults only.** `ForceLegacyRepeatableQuestGeneration`,
+  `TrustNativeRequestCacheWithMods` and `DisableNativeRequestCache` are not serialised into
+  `quest.json` — same as the ragfair flags, they exist as defaults on the config object and a user
+  who wants one adds it to the file.
+- **The quest invariant slice is cached natively too, in its own slot.** Same terms as ragfair's and
+  the same `DatabaseMutationStamp` key, but a **separate** native cache
+  (`src/quest/slice_cache.rs`): the two families project different slices and move independently.
+  Same eligibility gate — used only when no mods are loaded, with
+  `QuestConfig.TrustNativeRequestCacheWithMods` as the opt-in and `QuestConfig.DisableNativeRequestCache`
+  as the kill switch — and the **same ceiling**: a config edit without a table write does not bump
+  the stamp. A modded (ineligible) server therefore full-sends every call, ~43 ms and ~10.6 MB of
+  managed allocation per quest, the same figure for every quest type
+  ([BENCHMARK.md](BENCHMARK.md) § *The slice, and what a C#-side memo could buy*).
+- **The quest request is `{invariantStamp, invariant?, varying}` (ABI 14)**, the same shape and the
+  same status codes as ragfair's: `0` OK, `3` ERROR, `4` `STATUS_STALE_SLICE` — which surfaces as
+  `NativeStaleSliceException` and self-heals with one full-send retry.
+- **The `QuestTypePool` round-trips.** The generators consume the pool they are handed, so the
+  mutated pool comes back in the response and is copied *into* the caller's instance
+  (`CopyPoolInto`) rather than replacing it — the controller holds that instance and keeps reading
+  it after the call, so reference identity has to survive.
+- **The ported 4.1.2 quirks are documented at their call sites**, as numbered
+  `**Quirk N, ported verbatim:**` comments in `rust/spt-native/src/quest/*.rs`. Grep the marker; the
+  behaviour they preserve is deliberate and reverting one silently diverges from C#.
 
 ## Roadmap
 
-1. Later candidates, in `todo/TODO.md` order: repeatable quests, scav case rewards, weather, fence
-   assorts, raid-time adjustment, ragfair linked-item table.
+1. Later candidates, in `todo/TODO.md` order: scav case rewards, weather, fence assorts, raid-time
+   adjustment, ragfair linked-item table.
+2. Profile `completion.rs`'s `is_of_baseclasses` walk against `ItemBaseClassService`'s prebuilt
+   parent map — the named candidate for Completion's 3.1x, unmeasured so far.

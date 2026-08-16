@@ -14,42 +14,46 @@ Toolchain is pinned in `rust-toolchain.toml` (1.97.1, edition 2024). Dependencie
 `walkdir`, `xxhash-rust`, `base64` — plus `tempfile` as the only dev-dependency (the `verify` FFI
 tests need a real directory). `Cargo.lock` is committed.
 
-Roughly 35k lines across 32 files, tests included. `src/bot/` is ~45% of that and
-`bot_equipment_mod_generator.rs` alone ~4.2k; `src/loot/` ~31%, `src/ragfair/` ~20%.
+Roughly 43k lines across 44 files, tests included. `src/bot/` is ~38% of that and
+`bot_equipment_mod_generator.rs` alone ~4.2k; `src/loot/` ~27%, `src/ragfair/` ~17%,
+`src/quest/` ~13%.
 
 ## Layout
 
 | Path | Role |
 |---|---|
-| `src/lib.rs` | Module roots and `ABI_VERSION` (currently 13; must equal `SptNative.ExpectedAbiVersion`) |
+| `src/lib.rs` | Module roots and `ABI_VERSION` (currently 14; must equal `SptNative.ExpectedAbiVersion`) |
 | `src/ffi.rs` | The C-ABI surface. The **only** module containing `unsafe` |
 | `src/runtime.rs` | Process-wide multi-thread tokio runtime, `OnceLock`-built. Used only by `verify` |
 | `src/verify.rs` | Hashes `SPT_Data` with XXH3-128 and diffs it against `checks.dat` |
 | `src/loot/` | Location loot (static containers, loose loot) and reward loot (airdrops, cases, containers) |
 | `src/bot/` | One bot's entire inventory: equipment, mods, weapons, magazines, loot |
 | `src/ragfair/` | One batch of dynamic flea offers: the assort walk, pricing, barter schemes, the offers |
+| `src/quest/` | One repeatable quest of any of the four types, its rewards, and the mutated quest-type pool |
 
 ## FFI boundary (`ffi.rs`)
 
-Twelve `extern "C"` exports. Two are trivial (`spt_native_abi_version`, `spt_buf_free`); the other ten take a
+Thirteen `extern "C"` exports. Two are trivial (`spt_native_abi_version`, `spt_buf_free`); the other eleven take a
 UTF-8 JSON request and hand back a heap buffer the caller releases with `spt_buf_free`.
 
 ```
 C# SptNative → spt_generate_* (JSON in)
-  → serde deserialize into a request envelope from loot/, bot/ or ragfair/models.rs
+  → serde deserialize into a request envelope from loot/, bot/, ragfair/ or quest/models.rs
   → catch_unwind( generator )
   → serde serialize the result, or the LootError message, into an out-buffer
 ```
 
-- `run_generator` is the shared body of the nine generation exports. `spt_verify_database` is separate
+- `run_generator` is the shared body of the ten generation exports. `spt_verify_database` is separate
   because it blocks on the tokio runtime.
 - Status codes: `STATUS_OK` 0, `STATUS_BAD_ARGS` 1 (null pointer, bad UTF-8, unparseable JSON),
-  `STATUS_PANIC` 2, `STATUS_ERROR` 3, `STATUS_STALE_SLICE` 4 (ragfair only — see below).
-- **The ragfair request has a cached half.** It arrives as `{invariantStamp, invariant?, varying}`;
-  `src/ragfair/slice_cache.rs` holds the last parsed invariant slice under the stamp it came with,
-  so a repeat pass can omit it. A slice-less request whose stamp the cache does not hold returns
-  `STATUS_STALE_SLICE` and the C# caller retries once with the slice included. It is the only
-  request data the crate holds across calls; every other payload is still projected per call.
+  `STATUS_PANIC` 2, `STATUS_ERROR` 3, `STATUS_STALE_SLICE` 4 (ragfair and quest only — see below).
+- **Two requests have a cached half**, ragfair's and the repeatable quest's. Each arrives as
+  `{invariantStamp, invariant?, varying}`; `src/ragfair/slice_cache.rs` and
+  `src/quest/slice_cache.rs` each hold the last parsed invariant slice under the stamp it came with,
+  in **separate** slots, so a repeat pass can omit it. A slice-less request whose stamp the cache does
+  not hold returns `STATUS_STALE_SLICE` and the C# caller retries once with the slice included. Those
+  two slices are the only request data the crate holds across calls; every other payload is still
+  projected per call.
 - **A buffer is written on failure too** — the parse error or the `LootError` message. Ownership is decided by
   the out-pointer being non-null, never by the status code. `spt_verify_database`'s free-on-success-only shape
   must not be copied into the generators.
@@ -154,9 +158,9 @@ These are what keep the port correct; break one and output silently diverges fro
   is a bug.
 - **No logging, no throwing.** C# `ISptLogger` calls become `Diagnostic` values the caller replays through its
   own logger; C# exceptions (and unguarded null derefs) become `LootError`, returned rather than panicked.
-- **Wire models come in three families** (`loot/models.rs`, `bot/models.rs`, `ragfair/models.rs`). DB/EFT
-  models mirror C# records field-for-field, pinned to the exact `JsonPropertyName`, each with a
-  `#[serde(flatten)] extra` map so
+- **Wire models come in four families** (`loot/models.rs`, `bot/models.rs`, `ragfair/models.rs`,
+  `quest/models.rs`). DB/EFT models mirror C# records field-for-field, pinned to the exact
+  `JsonPropertyName`, each with a `#[serde(flatten)] extra` map so
   mod-added fields survive the round trip — the counterpart to the `[JsonExtensionData]` that `Tools/Ceciler`
   injects. Request/response envelopes are a fresh contract and use plain camelCase with no passthrough map.
 - **One C# RNG lifetime can span two native calls.** Each generator entry point (not `ffi.rs`) opens the run
