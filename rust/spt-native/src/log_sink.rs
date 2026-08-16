@@ -337,7 +337,7 @@ fn format_date(days: i64) -> String {
 
 /// Howard Hinnant's `civil_from_days`: days since the Unix epoch to a proleptic Gregorian date.
 /// Only the date is needed, so this is cheaper than taking on a calendar crate.
-fn civil_from_days(days: i64) -> (i64, u32, u32) {
+pub(crate) fn civil_from_days(days: i64) -> (i64, u32, u32) {
     let shifted = days + 719_468;
     let era = shifted.div_euclid(146_097);
     let day_of_era = shifted.rem_euclid(146_097);

@@ -2,6 +2,7 @@
 //! matching, format expansion, and the console/file sinks. C# builds an `SptLogMessage` and hands
 //! it across `spt_log_emit`; everything downstream lives here.
 
+use crate::log_sink::civil_from_days;
 use serde::Deserialize;
 
 /// Mirrors Microsoft.Extensions.Logging.LogLevel: the declaration order is the numeric order the
@@ -99,6 +100,118 @@ pub enum SptLoggerReference {
 #[derive(Debug, Deserialize)]
 pub struct SptLoggerConfiguration {
     pub loggers: Vec<SptLoggerReference>,
+}
+
+/// One log line as it crosses the FFI boundary, borrowed from the caller's buffers.
+pub struct LogRecord<'a> {
+    pub category: &'a str,
+    pub message: &'a str,
+    /// Pre-rendered by C# as `"{Exception.Message}\n{Exception.StackTrace}"`; empty when none.
+    pub exception: &'a str,
+    pub thread_name: &'a str,
+    pub level: LogLevel,
+    pub tid: i32,
+    pub unix_millis: i64,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum FormatToken {
+    Literal(String),
+    Date,
+    Time,
+    Message,
+    LoggerShort,
+    Logger,
+    Tid,
+    Tname,
+    Level,
+}
+
+/// Case-sensitive token substitution, mirroring the `string.Replace` chain in C#'s
+/// `BaseSptLoggerReference.GetCompiledFormat`. `%loggerShort%` must be tried before `%logger%`,
+/// exactly as the C# replacement order does.
+const TOKENS: [(&str, FormatToken); 8] = [
+    ("%date%", FormatToken::Date),
+    ("%time%", FormatToken::Time),
+    ("%message%", FormatToken::Message),
+    ("%loggerShort%", FormatToken::LoggerShort),
+    ("%logger%", FormatToken::Logger),
+    ("%tid%", FormatToken::Tid),
+    ("%tname%", FormatToken::Tname),
+    ("%level%", FormatToken::Level),
+];
+
+pub fn compile_format(format: &str) -> Vec<FormatToken> {
+    let mut tokens = Vec::new();
+    let mut literal = String::new();
+    let mut rest = format;
+
+    'outer: while !rest.is_empty() {
+        if rest.starts_with('%') {
+            for (text, token) in TOKENS {
+                if rest.starts_with(text) {
+                    if !literal.is_empty() {
+                        tokens.push(FormatToken::Literal(std::mem::take(&mut literal)));
+                    }
+                    tokens.push(token);
+                    rest = &rest[text.len()..];
+                    continue 'outer;
+                }
+            }
+        }
+
+        let mut chars = rest.chars();
+        literal.push(chars.next().expect("rest is non-empty"));
+        rest = chars.as_str();
+    }
+
+    if !literal.is_empty() {
+        tokens.push(FormatToken::Literal(literal));
+    }
+
+    tokens
+}
+
+/// Renders one line without its trailing newline - the sink owns the terminator, matching how the
+/// C# handlers passed unterminated lines to `spt_log_write`.
+pub fn render(tokens: &[FormatToken], record: &LogRecord) -> String {
+    let days = record.unix_millis.div_euclid(86_400_000);
+    let ms_of_day = record.unix_millis.rem_euclid(86_400_000);
+    let mut out = String::new();
+
+    for token in tokens {
+        match token {
+            FormatToken::Literal(text) => out.push_str(text),
+            FormatToken::Date => {
+                let (year, month, day) = civil_from_days(days);
+                out.push_str(&format!("{year:04}-{month:02}-{day:02}"));
+            }
+            FormatToken::Time => {
+                let (hours, minutes) = (ms_of_day / 3_600_000, ms_of_day % 3_600_000 / 60_000);
+                let (seconds, millis) = (ms_of_day % 60_000 / 1_000, ms_of_day % 1_000);
+                out.push_str(&format!("{hours:02}:{minutes:02}:{seconds:02}.{millis:03}"));
+            }
+            FormatToken::Message => out.push_str(record.message),
+            FormatToken::LoggerShort => {
+                let short = match record.category.rfind('.') {
+                    Some(index) => &record.category[index + 1..],
+                    Option::None => record.category,
+                };
+                out.push_str(short);
+            }
+            FormatToken::Logger => out.push_str(record.category),
+            FormatToken::Tid => out.push_str(&record.tid.to_string()),
+            FormatToken::Tname => out.push_str(record.thread_name),
+            FormatToken::Level => out.push_str(record.level.as_str()),
+        }
+    }
+
+    if !record.exception.is_empty() {
+        out.push('\n');
+        out.push_str(record.exception);
+    }
+
+    out
 }
 
 #[cfg(test)]
@@ -205,5 +318,74 @@ mod tests {
         assert_eq!(LogLevel::from_i32(7), None);
         assert_eq!(LogLevel::from_i32(-1), None);
         assert_eq!(LogLevel::Information.as_str(), "Information");
+    }
+
+    fn record<'a>(category: &'a str, message: &'a str) -> LogRecord<'a> {
+        LogRecord {
+            category,
+            message,
+            exception: "",
+            thread_name: "main",
+            level: LogLevel::Information,
+            tid: 7,
+            // 2026-08-16 17:10:05.123 UTC
+            unix_millis: 1_786_900_205_123,
+        }
+    }
+
+    #[test]
+    fn renders_the_shipped_file_format() {
+        let tokens = compile_format("[%date% %time%][%level%][%logger%] %message%");
+        let line = render(
+            &tokens,
+            &record("SPTarkov.Server.Core.Utils.App", "started"),
+        );
+        assert_eq!(
+            line,
+            "[2026-08-16 17:10:05.123][Information][SPTarkov.Server.Core.Utils.App] started"
+        );
+    }
+
+    #[test]
+    fn logger_short_takes_the_segment_after_the_last_dot() {
+        let tokens = compile_format("%loggerShort%|%logger%");
+        let line = render(&tokens, &record("A.B.C", "x"));
+        assert_eq!(line, "C|A.B.C");
+
+        let line = render(&tokens, &record("NoDots", "x"));
+        assert_eq!(line, "NoDots|NoDots");
+    }
+
+    #[test]
+    fn tokens_are_case_sensitive_and_unknown_text_passes_through() {
+        // C#'s string.Replace is ordinal case-sensitive: %DATE% is not a token.
+        let tokens = compile_format("%DATE% %tid% %tname% %notatoken%");
+        let line = render(&tokens, &record("L", "x"));
+        assert_eq!(line, "%DATE% 7 main %notatoken%");
+    }
+
+    #[test]
+    fn exception_text_is_appended_after_the_formatted_line() {
+        let tokens = compile_format("%message%");
+        let mut r = record("L", "boom");
+        r.exception = "kaput\n   at Frame";
+        let line = render(&tokens, &r);
+        assert_eq!(line, "boom\nkaput\n   at Frame");
+    }
+
+    #[test]
+    fn empty_thread_name_renders_empty() {
+        let tokens = compile_format("[%tname%]");
+        let mut r = record("L", "x");
+        r.thread_name = "";
+        assert_eq!(render(&tokens, &r), "[]");
+    }
+
+    #[test]
+    fn midnight_and_epoch_render_correctly() {
+        let tokens = compile_format("%date% %time%");
+        let mut r = record("L", "x");
+        r.unix_millis = 0;
+        assert_eq!(render(&tokens, &r), "1970-01-01 00:00:00.000");
     }
 }
