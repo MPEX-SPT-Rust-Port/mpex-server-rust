@@ -341,6 +341,9 @@ fn get_random_ammo<'a>(
 ) -> Result<(&'a str, &'a ItemView), ScavCaseError> {
     let ammo_reward_value_range_rub = &req.config.ammo_rewards.ammo_reward_value_range_rub;
     // C# filters its `DbAmmoItemsCache` (`:285`); see [`build_ammo_pool`] for why this rebuilds it.
+    // Ceiling: that rebuild is a full items-view scan *per ammo draw*, where C# scans once per
+    // generator instance. At most 7 rewards on a cold path, so it stays under the request's own
+    // transport cost — do not copy this shape onto a hot path without hoisting the pool.
     let possible_ammo_pool: Vec<(&str, &ItemView)> = build_ammo_pool(req)
         .into_iter()
         .filter(|(tpl, _)| {

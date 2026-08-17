@@ -140,10 +140,10 @@ public class ScavCaseHookLivenessTests
     }
 
     /// <summary>
-    /// The hookable set is built by reflection and the dispatcher is excluded by name, so a member
-    /// added under the name <c>Generate</c> would silently fall out of the scan and become
-    /// unhookable. Recomputing the frozen surface here pins the set's exact contents, not just its
-    /// shape.
+    /// The hookable set is built by reflection, and this recomputes the frozen surface independently
+    /// to pin the set's exact contents rather than just its shape: it fails if the generator's own
+    /// scan is ever narrowed - a tightened binding-flag set, another name excluded beside
+    /// <c>Generate</c> - and drops a member mods can currently patch.
     /// </summary>
     [Test]
     public void TheHookableSetIsTheFrozenSurfaceMinusTheDispatcher()

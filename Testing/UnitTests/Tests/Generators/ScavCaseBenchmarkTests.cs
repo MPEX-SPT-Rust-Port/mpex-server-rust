@@ -17,9 +17,10 @@ namespace UnitTests.Tests.Generators;
 /// with a handful of output items to amortise it against. <c>ScavCaseNativeRequestBuilder.Build</c>
 /// is timed on its own as a final phase: the C# half of that transport.
 ///
-/// The first recipe measured reads ~2x high on both arms - two warmups do not settle the first phase
-/// in the process, and reversing the recipe order moves the inflation with it. Read that row against
-/// the settled recipes; the scav case section of <c>BENCHMARK.md</c> records the reversed-order run.
+/// The first two recipes measured read high on both arms - two warmups do not settle the first
+/// phases in the process, and reversing the recipe order moves the inflation with it. Read those
+/// rows against the settled recipes; the scav case section of <c>BENCHMARK.md</c> records the
+/// reversed-order run.
 ///
 /// Run in Release; the cargo dev profile makes Debug numbers meaningless.
 /// </summary>

@@ -78,7 +78,7 @@ the native pipeline; seeded-RNG parity at the primitive level (xoshiro256\*\*, t
   across the shipped recipes (the payload does not depend on the recipe), measured off the settled
   positions; the first two positions measured in a run have not settled on either arm. `Build()`
   alone is ~6.8 ms of that, and the rest is transport, serialisation and rebinding, not generation —
-  the same items-view projection every family pays, against a 1-6 item output and a legacy arm that
+  the same items-view projection every family pays, against a 1-7 item output and a legacy arm that
   is sub-millisecond warm C#. It is a cold path — one call per finished scav case craft, behind a
   41-minute-to-5-hour timer — so it lands in the same acceptance class as reward loot: native stays
   the default, `ScavCaseConfig.ForceLegacyScavCaseGeneration` is the opt-out. See
@@ -89,6 +89,11 @@ the native pipeline; seeded-RNG parity at the primitive level (xoshiro256\*\*, t
   *dropped* from the projection by `ScavCaseNativeRequestBuilder` (sending a null would fail the
   parse of the whole request), so asking for one gets that same "no recipe found" where legacy NREs.
   C# was never able to generate it either. Never fires on vanilla data.
+- **An ammo pool with nothing in the rarity's price band is a message natively, an index throw in
+  legacy** — both warn first, then native fails with
+  `No cartridges found matching the price range for rarity: <rarity>` where the C# hands the empty
+  sequence on and throws indexing it. Same divergence class as the recipe id above: the failure is
+  the C#'s, only the text differs. Cannot fire on shipped data — all three rarity bands have ammo.
 - **The native scav case path is fresher than legacy for runtime-added items** — C# fills
   `DbItemsCache`/`DbAmmoItemsCache` once per generator instance and refills them only when empty.
   The generator is transient, but its holder graph bottoms out in a singleton, so in practice one
@@ -331,7 +336,10 @@ the native pipeline; seeded-RNG parity at the primitive level (xoshiro256\*\*, t
   `elimination.rs` uses the plain form, and `helper.rs:161` carries an unnumbered
   `Ported quirk, not a typo`). `src/scav_case/generator.rs` numbers its own the same way. Grep
   case-insensitively for `quirk` under `src/quest/` and `src/scav_case/` to find all of them; the
-  behaviour they preserve is deliberate and reverting one silently diverges from C#.
+  behaviour they preserve is deliberate and reverting one silently diverges from C#. The bare `:N`
+  line numbers in those comments — quirks and ordinary citations alike — are the 4.1.2 body the port
+  was written against, not the current file: where a native seam was inserted above the retained
+  legacy body, the C# line has since moved down by the size of that seam.
 - **Scav case took a constructor overload and freezes one class, its own.** The frozen 12-parameter
   4.1.2 constructor stays (as the primary constructor); the container selects an additive
   13-parameter overload adding `ScavCaseNativeRequestBuilder`. Additive only, and a generator built

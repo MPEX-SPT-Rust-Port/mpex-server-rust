@@ -637,7 +637,7 @@ figures came from.
 
 **The design expected native to lose here, and it does.** Scav case rewards are a cold path — one
 `Generate` call per finished craft, behind a 41-minute-to-5-hour hideout timer — and the call
-produces 1 to 6 reward groups. The native path projects and serialises the whole items view plus a
+produces 1 to 7 reward groups. The native path projects and serialises the whole items view plus a
 static price for every tpl in it on each call, with that handful of output items to amortise it
 against; the reward-loot port is the comparison class (~53 ms native vs ~17 ms legacy, 15-35 items).
 No parity gate was promised on this port and none is claimed.
@@ -694,7 +694,7 @@ that request, the native side's parse of it, generation itself, and binding the 
 
 The legacy path has nothing comparable to pay: it filters the item table once per generator instance
 into `DbItemsCache`/`DbAmmoItemsCache`, then a call is three price-range filters over that cached
-list plus 1-6 draws. Sub-millisecond is what a warm instance costs; a cold one pays the pool build
+list plus 1-7 draws. Sub-millisecond is what a warm instance costs; a cold one pays the pool build
 first, which this fixture excludes from both arms by warming up.
 
 ### The first two positions measured have not settled

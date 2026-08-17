@@ -1,4 +1,9 @@
 //! `Generators/ScavCaseRewardGenerator.cs`.
+//!
+//! Citation convention for this module: a bare `` `:N` `` is a line of the 4.1.2 body this port was
+//! written against, which now lives on in the C# file as `GenerateLegacy`. The native seam was
+//! inserted above it, so those numbers sit ~131 lines higher than the same code does in the current
+//! `ScavCaseRewardGenerator.cs`. Citations naming a file (`ItemHelper.cs:1245`) are current.
 
 pub mod generator;
 pub mod models;

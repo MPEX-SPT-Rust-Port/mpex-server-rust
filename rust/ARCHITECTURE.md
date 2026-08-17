@@ -204,7 +204,7 @@ These are what keep the port correct; break one and output silently diverges fro
   `LootError` (so does an unguarded null deref they would have NRE'd on); the quest family panics at the throw
   site — `panic!` or `.expect` — and catches it at the family entry point (`quest/mod.rs:120`), which carries
   the message across as `STATUS_ERROR`. Scav case does both: a `ScavCaseError` return where the C# throw is
-  reachable through a guard, a panic caught at its own entry point (`scav_case/mod.rs`) where the C# throws out
+  reachable through a guard, a panic caught at its own entry point (`scav_case/mod.rs:52`) where the C# throws out
   of a dictionary index. Panicking is not unsafe here: every export runs inside `catch_unwind`
   (`ffi.rs:195`), so nothing unwinds past the FFI boundary either way.
 - **Wire models come in five families** (`loot/models.rs`, `bot/models.rs`, `ragfair/models.rs`,
