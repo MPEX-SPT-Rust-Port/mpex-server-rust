@@ -11,8 +11,8 @@ ported and run natively by default. Every ported class keeps its full 4.1.2 C# i
 **legacy path**, selected automatically when a mod hooks it or manually via a config flag. The log
 pipeline is ported too, and has no legacy path: `SPTLoggerDispatcher` hands every line to the crate.
 Sixteen C-ABI exports (`src/ffi.rs`) carry all of it, JSON in and JSON out — except the ragfair
-response, which is a framed MessagePack envelope, and the three log exports, which pass the fields
-of one line directly (current ABI 15).
+response, which is a framed MessagePack envelope, and `spt_log_emit`, which passes the fields of one
+line directly (current ABI 15).
 
 ## Working
 

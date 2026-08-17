@@ -38,8 +38,9 @@ Roughly 45k lines across 46 files, tests included. `src/bot/` is ~37% of that an
 Sixteen `extern "C"` exports. Two are trivial (`spt_native_abi_version`, `spt_buf_free`); ten take a UTF-8
 JSON generation request; `spt_verify_database` takes a UTF-8 directory path instead. All eleven of those hand
 back a heap buffer the caller releases with `spt_buf_free`. The last three are the log pipeline
-(`spt_logger_init`, `spt_log_emit`, `spt_logger_close`), which pass one line's fields directly rather than a
-JSON document — see *The log pipeline* below.
+(`spt_logger_init`, `spt_log_emit`, `spt_logger_close`): `spt_logger_init` takes the raw `sptLogger.json`
+bytes and hands back a buffer only on failure, `spt_log_emit` passes one line's fields directly rather
+than a JSON document, and `spt_logger_close` takes nothing — see *The log pipeline* below.
 
 ```
 C# SptNative → spt_generate_* (JSON in)
