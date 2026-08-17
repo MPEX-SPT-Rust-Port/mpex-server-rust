@@ -1,6 +1,8 @@
+using System.Text.Json.Nodes;
 using NUnit.Framework;
 using SPTarkov.Server.Core.Generators;
 using SPTarkov.Server.Core.Generators.Loot;
+using SPTarkov.Server.Core.Helpers.Items;
 using SPTarkov.Server.Core.Models.Common;
 using SPTarkov.Server.Core.Models.Enums;
 using SPTarkov.Server.Core.Models.Spt.Config;
@@ -15,8 +17,9 @@ namespace UnitTests.Tests.Generators;
 ///
 /// State this fixture mutates, all of it restored in <see cref="Generate"/>'s <c>finally</c>:
 /// <see cref="ScavCaseConfig.ForceLegacyScavCaseGeneration"/> on the shared config singleton - the
-/// path selector - that config's <c>MoneyRewards.MoneyRewardChancePercent</c> for the one forced
-/// case, and <see cref="RandomUtil.RandomSource"/>, the seam the legacy path draws through.
+/// path selector - that config's <c>MoneyRewards.MoneyRewardChancePercent</c> and
+/// <c>AmmoRewards.AmmoRewardChancePercent</c> for the two forced cases, and
+/// <see cref="RandomUtil.RandomSource"/>, the seam the legacy path draws through.
 /// The generator itself is built fresh per run, so its two instance caches rebuild every time and the
 /// <c>NativeTestSeed</c> never outlives the call.
 ///
@@ -35,6 +38,7 @@ public class ScavCaseParityTests
     private ScavCaseConfig _scavCaseConfig = default!;
     private RandomUtil _randomUtil = default!;
     private JsonUtil _jsonUtil = default!;
+    private ItemHelper _itemHelper = default!;
     private List<MongoId> _recipeIds = default!;
 
     [OneTimeSetUp]
@@ -45,6 +49,7 @@ public class ScavCaseParityTests
         _scavCaseConfig = di.GetService<ScavCaseConfig>();
         _randomUtil = di.GetService<RandomUtil>();
         _jsonUtil = di.GetService<JsonUtil>();
+        _itemHelper = di.GetService<ItemHelper>();
         _recipeIds = di.GetService<HideoutTable>().Production.ScavRecipes!.Select(recipe => recipe.Id).ToList();
     }
 
@@ -89,6 +94,28 @@ public class ScavCaseParityTests
     }
 
     /// <summary>
+    /// Ammo is its own 5% roll (<c>scavcase.json</c>'s <c>ammoRewardChancePercent</c>) and never came
+    /// up across the matrix either, so nothing there proves the ammo pool - a filter of its own, not
+    /// the reward pool plus a baseclass test - or its narrowing to the rarity's price band. Forced
+    /// the same way the money case above is.
+    /// </summary>
+    [Test]
+    public void AForcedAmmoRewardMatchesOnBothPaths([ValueSource(nameof(_seeds))] ulong seed)
+    {
+        var legacy = Generate(_recipeIds[0], seed, forceLegacy: true, ammoRewardChancePercent: 100);
+        var native = Generate(_recipeIds[0], seed, forceLegacy: false, ammoRewardChancePercent: 100);
+
+        LootJsonAssert.AssertEqual(legacy, native, $"forced-ammo recipe={_recipeIds[0]}", seed);
+
+        // A forced case that produced no ammo would compare two ordinary runs. Group roots only: an
+        // ammo box's cartridges are ammo too and they arrive as children of an ordinary reward.
+        Assert.That(
+            RewardRootTpls(native).Any(tpl => _itemHelper.IsOfBaseclass(tpl, BaseClasses.AMMO)),
+            $"seed={seed} produced no ammo reward at a 100% ammo chance, so the ammo arm never ran"
+        );
+    }
+
+    /// <summary>
     /// Without this the parity cases could pass by both paths producing something seed-independent.
     /// </summary>
     [Test]
@@ -123,18 +150,26 @@ public class ScavCaseParityTests
     /// One generation on one path, off a generator built for this run alone - the legacy path caches
     /// its two item pools on the instance, and a run has to rebuild them exactly as the first one did.
     /// </summary>
-    private string Generate(MongoId recipeId, ulong seed, bool forceLegacy, int? moneyRewardChancePercent = null)
+    private string Generate(
+        MongoId recipeId,
+        ulong seed,
+        bool forceLegacy,
+        int? moneyRewardChancePercent = null,
+        int? ammoRewardChancePercent = null
+    )
     {
         var generator = BuildGenerator();
         var expected = forceLegacy ? LootGenerationPath.Legacy : LootGenerationPath.Native;
         var originalForce = _scavCaseConfig.ForceLegacyScavCaseGeneration;
         var originalMoneyChance = _scavCaseConfig.MoneyRewards.MoneyRewardChancePercent;
+        var originalAmmoChance = _scavCaseConfig.AmmoRewards.AmmoRewardChancePercent;
         var originalSource = _randomUtil.RandomSource;
 
         try
         {
             _scavCaseConfig.ForceLegacyScavCaseGeneration = forceLegacy;
             _scavCaseConfig.MoneyRewards.MoneyRewardChancePercent = moneyRewardChancePercent ?? originalMoneyChance;
+            _scavCaseConfig.AmmoRewards.AmmoRewardChancePercent = ammoRewardChancePercent ?? originalAmmoChance;
 
             if (forceLegacy)
             {
@@ -159,8 +194,18 @@ public class ScavCaseParityTests
         {
             _scavCaseConfig.ForceLegacyScavCaseGeneration = originalForce;
             _scavCaseConfig.MoneyRewards.MoneyRewardChancePercent = originalMoneyChance;
+            _scavCaseConfig.AmmoRewards.AmmoRewardChancePercent = originalAmmoChance;
             _randomUtil.RandomSource = originalSource;
         }
+    }
+
+    /// <summary>
+    /// The <c>_tpl</c> of each reward group's first item - the reward the pick itself produced,
+    /// before any branch gave it children.
+    /// </summary>
+    private static IEnumerable<MongoId> RewardRootTpls(string rewards)
+    {
+        return JsonNode.Parse(rewards)!.AsArray().Select(group => new MongoId(group![0]!["_tpl"]!.GetValue<string>()));
     }
 
     /// <summary>
