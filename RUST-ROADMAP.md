@@ -159,8 +159,11 @@ the native pipeline; seeded-RNG parity at the primitive level (xoshiro256\*\*, t
   `PresetHelper`/`ItemFilterService`, `SeasonalEventService` and `ICloner` are already listed and
   apply to it too. Its seam checks no collaborator *substitution* at all — see
   *Exceptions in force*.
-- **Templates without `_props` read as "not in the db"** on the native path — they are dropped from
-  `itemsView`. Vanilla data always has `_props`; this only bites mod-added props-less templates.
+- **Templates without `_props` read as "not in the db"** on the native *generator* paths — they are
+  dropped from `itemsView`. Vanilla data always has `_props`; this only bites mod-added props-less
+  templates. The base-class hydrate is the exception: `ItemBaseClassNativeRequestBuilder`
+  deliberately does not reuse `PayloadProjection.BuildItemsView`, so it projects the whole table and
+  a props-less template gets its cache entry exactly as in C#.
 - **Typed loose-loot path is slow** — ~1347 ms per raid start for `bigmap` vs ~345 ms raw, against
   929 ms for the C# it replaced. Any registered `LazyLoad` transformer (seasonal events, mods)
   forces it. Vanilla installs stay on the raw path.
