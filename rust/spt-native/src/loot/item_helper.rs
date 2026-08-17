@@ -197,11 +197,19 @@ impl ItemBaseClassCache {
     }
 
     /// `ItemHelper.IsOfBaseclasses` answered from the cache
-    /// (`ItemBaseClassService.ItemHasBaseClass`, `Overlaps` overload) — one probe per candidate.
+    /// (`ItemBaseClassService.ItemHasBaseClass`, `Overlaps` overload) — one probe for the chain,
+    /// then a scan of it.
+    ///
+    /// `Overlaps` enumerates the shorter side, and here that is always the stored chain: it holds
+    /// one id per link of a parent walk (single digits), where the candidate list is a whole
+    /// levelled whitelist (hundreds). Hashing each candidate instead costs more than the walk this
+    /// replaces, which the `completion` walk-ratio guard measures.
     pub fn is_of_baseclasses(&self, tpl: &str, base_class_tpls: &[&str]) -> bool {
-        self.ancestors
-            .get(tpl)
-            .is_some_and(|chain| base_class_tpls.iter().any(|base| chain.contains(*base)))
+        self.ancestors.get(tpl).is_some_and(|chain| {
+            chain
+                .iter()
+                .any(|ancestor| base_class_tpls.contains(&ancestor.as_str()))
+        })
     }
 }
 

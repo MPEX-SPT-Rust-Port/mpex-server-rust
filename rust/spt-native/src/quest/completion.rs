@@ -163,17 +163,17 @@ fn get_whitelisted_item_selection<'a>(
 
     // Filter and concatenate items according to current player level
     let item_ids_whitelisted = levelled_item_ids(item_whitelist, pmc_level);
-    // `:368` asks `IsOfBaseclass` once per whitelisted id, which C# affords because
-    // `ItemBaseClassService` answers each from an ancestor set precomputed at startup.
-    // `is_of_baseclass` walks the parent chain live, so that shape restarts a full walk per id;
-    // one walk testing every id at each link is the same answer for a fraction of the cost.
+    // `:368` asks `IsOfBaseclass` once per whitelisted id, answered from `ItemBaseClassService`'s
+    // precomputed ancestor sets. The cache probe below is that same shape: one lookup of the item's
+    // ancestor set, same answers as the walk it replaced (see `ItemBaseClassCache`).
     let whitelisted_base_classes: Vec<&str> = item_ids_whitelisted.iter().copied().collect();
 
     item_selection
         .into_iter()
         .filter(|tpl| {
             // Whitelist can contain item tpls and item base type ids
-            item_helper::is_of_baseclasses(ctx.items, tpl, &whitelisted_base_classes)
+            ctx.base_classes
+                .is_of_baseclasses(tpl, &whitelisted_base_classes)
                 || item_ids_whitelisted.contains(tpl)
         })
         .collect()
@@ -194,9 +194,7 @@ fn get_blacklisted_item_selection<'a>(
 
     // Filter and concatenate the arrays according to current player level
     let item_ids_blacklisted = levelled_item_ids(item_blacklist, pmc_level);
-    // One walk testing every id at each link, for the reason given on the whitelist above.
-    // `all(|b| !is_of_baseclass(b))` is that walk's De Morgan dual, so the `||` below still reads
-    // the answer `:241` reads.
+    // One cache probe per candidate item, as on the whitelist above.
     let blacklisted_base_classes: Vec<&str> = item_ids_blacklisted.iter().copied().collect();
 
     item_selection
@@ -207,7 +205,8 @@ fn get_blacklisted_item_selection<'a>(
             // directly passes the left operand, and a tpl matching only a listed base class passes
             // the right one — the blacklist drops nothing unless a tpl is listed *and* descends
             // from something else in the same list.
-            !item_helper::is_of_baseclasses(ctx.items, tpl, &blacklisted_base_classes)
+            !ctx.base_classes
+                .is_of_baseclasses(tpl, &blacklisted_base_classes)
                 || !item_ids_blacklisted.contains(tpl)
         })
         .collect()
@@ -221,7 +220,10 @@ fn generate_condition(
     completion_config: &CompletionConfig,
 ) -> QuestCondition {
     let mut only_found_in_raid = completion_config.required_items_are_fir;
-    let min_durability = if item_helper::is_of_baseclasses(ctx.items, item_tpl, &[WEAPON, ARMOR]) {
+    let min_durability = if ctx
+        .base_classes
+        .is_of_baseclasses(item_tpl, &[WEAPON, ARMOR])
+    {
         // `GetArrayValue` over a two element array (`:356`) — always a draw, never the range
         // between the two bounds.
         *get_array_value(&[
@@ -233,7 +235,7 @@ fn generate_condition(
     };
 
     // Dog tags MUST NOT be FiR for them to work
-    if is_dogtag(item_tpl) || item_helper::is_of_baseclass(ctx.items, item_tpl, AMMO) {
+    if is_dogtag(item_tpl) || ctx.base_classes.is_of_baseclass(item_tpl, AMMO) {
         only_found_in_raid = false;
     }
 

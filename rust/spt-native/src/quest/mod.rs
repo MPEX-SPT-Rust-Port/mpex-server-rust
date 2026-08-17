@@ -13,6 +13,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use indexmap::IndexMap;
 
+use crate::loot::item_helper::ItemBaseClassCache;
 use crate::loot::models::{Diagnostic, ItemView, PresetView};
 use crate::loot::random_util::TestSeedGuard;
 use crate::quest::models::{
@@ -27,6 +28,9 @@ use crate::quest::models::{
 /// (`let items = ctx.items;`) releases the `&mut ctx` and leaves the diagnostics writable.
 pub struct QuestContext<'a> {
     pub items: &'a IndexMap<String, ItemView>,
+    /// [`ItemBaseClassCache`] over [`Self::items`] — what `ItemHelper.IsOfBaseclass(es)` answers
+    /// from in C# (`ItemBaseClassService`), so the ported call sites probe it instead of walking.
+    pub base_classes: &'a ItemBaseClassCache,
     pub handbook_prices: &'a IndexMap<String, f64>,
     pub flea_prices: &'a IndexMap<String, f64>,
     pub default_weapon_presets: &'a [PresetView],
@@ -50,6 +54,7 @@ impl<'a> QuestContext<'a> {
     pub fn from_slice(slice: &'a QuestInvariantSlice) -> Self {
         QuestContext {
             items: &slice.items,
+            base_classes: slice.base_classes(),
             handbook_prices: &slice.handbook_prices,
             flea_prices: &slice.flea_prices,
             default_weapon_presets: &slice.default_weapon_presets,

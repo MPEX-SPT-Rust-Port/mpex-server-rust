@@ -437,6 +437,7 @@ fn get_rewardable_items_from_pool_within_budget<'a>(
     repeatable_config: &RepeatableQuestConfig,
 ) -> Vec<(&'a str, i32)> {
     let items = ctx.items;
+    let base_classes = ctx.base_classes;
     let mut items_to_return: Vec<(&'a str, i32)> = Vec::new();
     let mut exhaustible_item_pool = ExhaustableArray::new(item_pool.to_vec());
 
@@ -457,7 +458,7 @@ fn get_rewardable_items_from_pool_within_budget<'a>(
         };
 
         // Handle edge case - ammo
-        if item_helper::is_of_baseclass(items, chosen_item_from_pool, AMMO) {
+        if base_classes.is_of_baseclass(chosen_item_from_pool, AMMO) {
             // Don't reward ammo that stacks to less than what's allowed in config. A template
             // without a `StackMaxSize` takes the lifted-comparison-against-null arm of `:346`,
             // which is false.
@@ -572,7 +573,9 @@ fn can_increase_reward_item_stack_size(
 ) -> bool {
     let is_eligible_for_stack_size_increase = get_default_preset_or_item_price(ctx, tpl)
         < f64::from(max_rouble_price_to_stack)
-        && !item_helper::is_of_baseclasses(ctx.items, tpl, &[WEAPON, ARMORED_EQUIPMENT, AMMO])
+        && !ctx
+            .base_classes
+            .is_of_baseclasses(tpl, &[WEAPON, ARMORED_EQUIPMENT, AMMO])
         && !item_helper::item_requires_soft_inserts(ctx.items, tpl);
 
     is_eligible_for_stack_size_increase && get_chance_100(f64::from(random_chance_to_pass))
@@ -938,7 +941,7 @@ pub fn is_valid_reward_item(
     }
 
     // Item has blacklisted base types
-    if item_helper::is_of_baseclasses(ctx.items, tpl, item_type_blacklist) {
+    if ctx.base_classes.is_of_baseclasses(tpl, item_type_blacklist) {
         return false;
     }
 
@@ -949,7 +952,7 @@ pub fn is_valid_reward_item(
 
     // Trader has specific item base types they can give as rewards to player
     if item_base_whitelist
-        .is_some_and(|whitelist| !item_helper::is_of_baseclasses(ctx.items, tpl, whitelist))
+        .is_some_and(|whitelist| !ctx.base_classes.is_of_baseclasses(tpl, whitelist))
     {
         return false;
     }
