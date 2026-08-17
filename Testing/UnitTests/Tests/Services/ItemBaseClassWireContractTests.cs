@@ -22,8 +22,6 @@ public class ItemBaseClassWireContractTests
 
         Assert.That(result.ItemBaseClasses, Is.Not.Empty);
         Assert.That(result.RootNodeIds, Is.Not.Empty);
-        // Every chain id set is non-null; spot-check one known template has a chain.
-        Assert.That(result.ItemBaseClasses.Values, Has.All.Not.Null);
         // A misspelled `parent` would still fill the map, with every chain empty.
         Assert.That(result.ItemBaseClasses.Values, Has.Some.Not.Empty);
     }

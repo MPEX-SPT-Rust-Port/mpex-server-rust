@@ -27,6 +27,8 @@ public class ItemBaseClassPathDispatchTests
     private ItemBaseClassService _itemBaseClassService = default!;
     private ItemConfig _itemConfig = default!;
 
+    private bool _forceLegacyOriginal;
+
     [OneTimeSetUp]
     public void OneTimeSetUp()
     {
@@ -34,12 +36,14 @@ public class ItemBaseClassPathDispatchTests
 
         _itemBaseClassService = di.GetService<ItemBaseClassService>();
         _itemConfig = di.GetService<ItemConfig>();
+
+        _forceLegacyOriginal = _itemConfig.ForceLegacyItemBaseClassHydration;
     }
 
     [TearDown]
     public void TearDown()
     {
-        _itemConfig.ForceLegacyItemBaseClassHydration = false;
+        _itemConfig.ForceLegacyItemBaseClassHydration = _forceLegacyOriginal;
     }
 
     /// <summary>

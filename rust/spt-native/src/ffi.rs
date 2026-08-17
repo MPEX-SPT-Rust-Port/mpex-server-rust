@@ -1676,6 +1676,9 @@ mod tests {
 
         assert_eq!(status, STATUS_OK);
         let result: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        // Only the Item-type template is cached; the `node` root must not leak into the map.
+        let cache = result["result"]["itemBaseClasses"].as_object().unwrap();
+        assert_eq!(cache.len(), 1);
         // A `HashSet` crosses as an array, so the chain is order-independent.
         let chain = result["result"]["itemBaseClasses"]["child"]
             .as_array()

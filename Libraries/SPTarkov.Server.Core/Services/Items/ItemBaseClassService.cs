@@ -112,7 +112,7 @@ public class ItemBaseClassService(
     /// </summary>
     private bool UseLegacyPath()
     {
-        if (_requestBuilder is null || _itemConfig!.ForceLegacyItemBaseClassHydration)
+        if (_requestBuilder is null || _itemConfig?.ForceLegacyItemBaseClassHydration == true)
         {
             return true;
         }

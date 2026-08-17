@@ -98,6 +98,7 @@ mod tests {
             }}"#);
         let resp = build(&r);
         assert!(resp.item_base_classes.contains_key("child"));
+        assert_eq!(resp.item_base_classes.len(), 1);
         assert_eq!(
             resp.root_node_ids,
             vec!["node".to_string(), "untyped".to_string()]

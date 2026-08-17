@@ -119,8 +119,9 @@ public class ItemBaseClassParityTests
 
     /// <summary>
     /// The cache is only ever read through <see cref="ItemHelper.IsOfBaseclass"/>, so the answers it
-    /// gives have to be the same whichever path filled it - including the root node case, which the
-    /// cache answers by absence rather than by content.
+    /// gives have to be the same whichever path filled it - including the root node case, which is
+    /// answered by the tpl's presence in <c>_rootNodeIds</c>, an early return before the cache is
+    /// ever probed.
     /// </summary>
     [Test]
     public void ItemHelperAnswersMatchAfterNativeHydrate()

@@ -117,7 +117,13 @@ the native pipeline; seeded-RNG parity at the primitive level (xoshiro256\*\*, t
   leaves `{}`; and a cyclic chain recurses forever in C# — a stack overflow — where the native walk
   breaks at the first repeated parent. Neither is reachable on shipped data: none of the 4,553
   Item-type templates is parentless and the chains are acyclic. `ItemBaseClassParityTests` compares
-  both paths' whole output over the real table, so either would fail the gate rather than ship.
+  both paths' whole output over the real table, so either would fail the gate rather than ship. The
+  cache *key* is a third of the same kind: legacy stores under `item.Id`
+  (`ItemBaseClassService.cs:194,199`) where native keys by the `templateTable.Items` dictionary key
+  echoed back from Rust — identical on shipped data (the parity test proves it over all 4,553
+  Item-type templates) and on every supported insertion path, and separable only by a mod inserting
+  a template under a key ≠ its `_id`, where legacy is the broken arm, caching under an id nothing
+  ever looks up. Unreachable on shipped data, in native's favour.
 - **The native `_type` test is ASCII-only** — `eq_ignore_ascii_case` against C#'s
   `StringComparison.OrdinalIgnoreCase`, so a `_type` that matches `"Item"` only under non-ASCII case
   folding would be a root node natively and an Item in legacy. Every shipped `_type` is `"Item"` or
@@ -137,7 +143,9 @@ the native pipeline; seeded-RNG parity at the primitive level (xoshiro256\*\*, t
   gate (`LootParityTests` over all 13 loot-bearing maps, `BotParityTests` including level-20
   randomised buckets and the nighttime clamp, `RewardLootParityTests` over all five reward entry
   points, `RagfairParityTests`, `RepeatableQuestParityTests` over all four quest types,
-  `ScavCaseParityTests` over every shipped recipe at two seeds), all seeded and byte-equal after id
+  `ScavCaseParityTests` over every shipped recipe at two seeds, `ItemBaseClassParityTests` over the
+  whole shipped items table — the one gate needing no normaliser at all, its walk being
+  deterministic and compared for exact equality), the rest all seeded and byte-equal after id
   normalisation. The sanctioned gaps are minted `MongoId`s (outside the seeded stream on both sides —
   a repeatable quest mints ~12-25 of them, and a scav case mints from three sources: the reward
   roots, a preset's `ReplaceIDs`, and the cartridge children `ItemHelper.AddCartridgesToAmmoBox` adds
@@ -366,11 +374,12 @@ the native pipeline; seeded-RNG parity at the primitive level (xoshiro256\*\*, t
   `HydrateItemBaseClassCache`, is that hydrate resets only the cache dictionary and never
   `_rootNodeIds`, so the native arm unions the response's root ids into the existing set rather than
   replacing it. Grep case-insensitively for `quirk` under `src/quest/`, `src/scav_case/` and
-  `src/base_class.rs` to find the rest; the behaviour they preserve is deliberate and reverting one
-  silently diverges from C#. The bare `:N` line numbers in those comments — quirks and ordinary
-  citations alike — are the 4.1.2 body the port was written against, not the current file: where a
-  native seam was inserted above the retained legacy body, the C# line has since moved down by the
-  size of that seam.
+  `src/base_class.rs` to find the rest (that grep turns up base-class quirks 1, 2, 3 and 5 only:
+  quirk 4 has no code site, its quirk being an unreachable error path — nothing to port); the
+  behaviour they preserve is deliberate and reverting one silently diverges from C#. The bare `:N`
+  line numbers in those comments — quirks and ordinary citations alike — are the 4.1.2 body the port
+  was written against, not the current file: where a native seam was inserted above the retained
+  legacy body, the C# line has since moved down by the size of that seam.
 - **Scav case took a constructor overload and freezes one class, its own.** The frozen 12-parameter
   4.1.2 constructor stays (as the primary constructor); the container selects an additive
   13-parameter overload adding `ScavCaseNativeRequestBuilder`. Additive only, and a generator built
