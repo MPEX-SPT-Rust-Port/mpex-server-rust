@@ -1495,7 +1495,15 @@ mod tests {
     #[test]
     fn logger_exports_roundtrip() {
         /// The messages this test emits; everything else in the file belongs to a generator.
-        const MINE: [&str; 4] = ["hello", "nullspans", "still up", "after teardown"];
+        const MINE: [&str; 7] = [
+            "hello",
+            "nullspans",
+            "still up",
+            "after teardown",
+            "before init",
+            "Unable to find an item with tpl of: 54009119af1c881c07000029 in Db",
+            "plain line",
+        ];
 
         let dir = TempDir::new().unwrap();
         let config = format!(
@@ -1517,6 +1525,16 @@ mod tests {
         // Emit before init is an OK no-op.
         let status = emit("Cat", "dropped", "", "main");
         assert_eq!(status, STATUS_OK);
+
+        // Same for a generator diagnostic: a run before the host initialised logging drops its
+        // lines rather than panicking on the empty pipeline.
+        crate::diag::DiagSink::Pipeline.push(crate::loot::models::Diagnostic {
+            category: "SPTarkov.Server.Core.Generators.Loot.LootGenerator",
+            level: crate::loot::models::WARNING.to_owned(),
+            locale_key: None,
+            args: None,
+            message: Some("before init".to_owned()),
+        });
 
         // Real init; the second init keeps the running pipeline and takes a reference.
         let mut out_ptr: *mut u8 = std::ptr::null_mut();
@@ -1586,6 +1604,34 @@ mod tests {
         };
         assert_eq!(status, STATUS_BAD_ARGS);
 
+        // Locale table + live diagnostic emission share the same run: bad JSON first.
+        let status = unsafe { spt_locales_set(b"nope".as_ptr(), 4, &mut out_ptr, &mut out_len) };
+        assert_eq!(status, STATUS_ERROR);
+        assert!(!out_ptr.is_null());
+        unsafe { spt_buf_free(out_ptr, out_len) };
+
+        let locales =
+            br#"{ "item-invalid_tpl_item": "Unable to find an item with tpl of: %s in Db" }"#;
+        let status =
+            unsafe { spt_locales_set(locales.as_ptr(), locales.len(), &mut out_ptr, &mut out_len) };
+        assert_eq!(status, STATUS_OK);
+
+        let mut sink = crate::diag::DiagSink::Pipeline;
+        sink.push(crate::loot::models::Diagnostic {
+            category: "SPTarkov.Server.Core.Helpers.Items.ItemHelper",
+            level: crate::loot::models::ERROR.to_owned(),
+            locale_key: Some("item-invalid_tpl_item".to_owned()),
+            args: Some(serde_json::json!("54009119af1c881c07000029")),
+            message: None,
+        });
+        sink.push(crate::loot::models::Diagnostic {
+            category: "SPTarkov.Server.Core.Generators.Loot.LootGenerator",
+            level: crate::loot::models::WARNING.to_owned(),
+            locale_key: None,
+            args: None,
+            message: Some("plain line".to_owned()),
+        });
+
         // The first close drops the second init's reference - the nested `Program.Main` disposing
         // its container must not take the outer host's logging down with it.
         assert_eq!(unsafe { spt_logger_close() }, STATUS_OK);
@@ -1603,7 +1649,17 @@ mod tests {
             .lines()
             .filter(|line| MINE.contains(line))
             .collect();
-        assert_eq!(mine, ["hello", "nullspans", "still up"]);
+        // "before init" and "after teardown" never reach the file: no pipeline, nothing written.
+        assert_eq!(
+            mine,
+            [
+                "hello",
+                "nullspans",
+                "Unable to find an item with tpl of: 54009119af1c881c07000029 in Db",
+                "plain line",
+                "still up",
+            ]
+        );
     }
 
     fn emit(category: &str, message: &str, exception: &str, tname: &str) -> i32 {
