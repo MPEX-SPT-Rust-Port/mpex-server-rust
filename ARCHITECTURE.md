@@ -175,8 +175,9 @@ or ABI-mismatched library fails fast.
 
 Logging is the exception with no legacy path: `AddSptLogger` initialises the native pipeline from the
 raw `sptLogger.json` bytes and `SPTLoggerDispatcher.Log` emits straight into it, so the C# side keeps
-only the `ISptLogger`/`SptLogger` front end. It is failure-tolerant by contract — a broken library or
-config produces one stderr notice and logging stays off rather than stopping the server. The ported
+the `ISptLogger`/`SptLogger` front end and the mod `ILogHandler` fan-out (`BaseLogHandler`), which sees
+Rust-originated lines through the `spt_log_set_tap` callback. It is failure-tolerant by contract — a
+broken library or config produces one stderr notice and logging stays off rather than stopping the server. The ported
 generators log into that pipeline directly rather than handing lines back for C# to replay, so
 `DatabaseImporter` pushes the resolved server locales over `spt_locales_set` before anything can generate;
 a failed push is one stderr notice and generator lines fall back to their locale keys.
