@@ -1,3 +1,4 @@
+use std::any::Any;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -143,6 +144,20 @@ pub const PAYLOAD_JSON: u8 = 0;
 /// string-keyed under the same wire names the JSON stage used.
 pub const PAYLOAD_MSGPACK: u8 = 1;
 
+/// The text a caught panic carries — `panic!`/`expect` payloads are a `String` or a `&str`.
+/// Anything else gets fixed fallback text; the payload type is not worth reporting.
+pub(crate) fn panic_message(payload: Box<dyn Any + Send>) -> String {
+    payload
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| {
+            payload
+                .downcast_ref::<&str>()
+                .map(|text| (*text).to_owned())
+        })
+        .unwrap_or_else(|| "native call panicked with a non-string payload".to_owned())
+}
+
 /// The shared body of the generation exports: JSON request in, status plus either the JSON
 /// result or an error message out. Runs on the calling thread.
 ///
@@ -204,14 +219,19 @@ where
 
             STATUS_OK
         }
-        // Only the message survives: diagnostics gathered before the failure are dropped.
+        // Diagnostics emitted before the failure are already in the log (DiagSink emits live);
+        // only the failure message itself needs to cross.
         Ok(Err(error)) => {
             let status = error.status();
             unsafe { write_buffer(error.into_message().into_bytes(), out_ptr, out_len) };
 
             status
         }
-        Err(_) => STATUS_PANIC,
+        Err(payload) => {
+            unsafe { write_buffer(panic_message(payload).into_bytes(), out_ptr, out_len) };
+
+            STATUS_PANIC
+        }
     }
 }
 
@@ -513,7 +533,11 @@ pub unsafe extern "C" fn spt_logger_init(
             unsafe { write_buffer(error.into_bytes(), out_ptr, out_len) };
             STATUS_ERROR
         }
-        Err(_) => STATUS_PANIC,
+        Err(payload) => {
+            unsafe { write_buffer(panic_message(payload).into_bytes(), out_ptr, out_len) };
+
+            STATUS_PANIC
+        }
     }
 }
 
@@ -657,7 +681,11 @@ pub unsafe extern "C" fn spt_locales_set(
             unsafe { write_buffer(error.into_bytes(), out_ptr, out_len) };
             STATUS_ERROR
         }
-        Err(_) => STATUS_PANIC,
+        Err(payload) => {
+            unsafe { write_buffer(panic_message(payload).into_bytes(), out_ptr, out_len) };
+
+            STATUS_PANIC
+        }
     }
 }
 
@@ -698,7 +726,7 @@ mod tests {
         assert_eq!(spt_native_abi_version(), crate::ABI_VERSION);
         assert_eq!(
             crate::ABI_VERSION,
-            16,
+            17,
             "bump SptNative.ExpectedAbiVersion too"
         );
     }
@@ -854,6 +882,64 @@ mod tests {
         assert_eq!(
             String::from_utf8(out).unwrap(),
             format!("Container: {CONTAINER_TPL} is missing from staticLoot.json")
+        );
+    }
+
+    #[test]
+    fn a_panicking_generator_returns_status_panic_and_the_message() {
+        let mut out_ptr: *mut u8 = std::ptr::null_mut();
+        let mut out_len: usize = 0;
+
+        // No generator family has a reachable panic (C# crash-equivalents were ported as
+        // `LootError`), so the envelope is driven directly with a panicking generate fn. The
+        // literal payload exercises the `&str` downcast; the quest roundtrip test's `.expect`
+        // covers the `String` one.
+        let status = unsafe {
+            run_generator(
+                b"{}".as_ptr(),
+                2,
+                &mut out_ptr,
+                &mut out_len,
+                |_: serde_json::Value| -> Result<serde_json::Value, LootError> {
+                    panic!("kaboom: it went sideways")
+                },
+            )
+        };
+
+        assert_eq!(status, STATUS_PANIC);
+        assert!(!out_ptr.is_null(), "the panic message buffer is missing");
+        let message = unsafe { std::slice::from_raw_parts(out_ptr, out_len) }.to_vec();
+        unsafe { spt_buf_free(out_ptr, out_len) };
+        assert_eq!(
+            String::from_utf8(message).unwrap(),
+            "kaboom: it went sideways"
+        );
+    }
+
+    #[test]
+    fn a_non_string_panic_payload_crosses_as_the_fallback_text() {
+        let mut out_ptr: *mut u8 = std::ptr::null_mut();
+        let mut out_len: usize = 0;
+
+        let status = unsafe {
+            run_generator(
+                b"{}".as_ptr(),
+                2,
+                &mut out_ptr,
+                &mut out_len,
+                |_: serde_json::Value| -> Result<serde_json::Value, LootError> {
+                    std::panic::panic_any(42)
+                },
+            )
+        };
+
+        assert_eq!(status, STATUS_PANIC);
+        assert!(!out_ptr.is_null(), "the panic message buffer is missing");
+        let message = unsafe { std::slice::from_raw_parts(out_ptr, out_len) }.to_vec();
+        unsafe { spt_buf_free(out_ptr, out_len) };
+        assert_eq!(
+            String::from_utf8(message).unwrap(),
+            "native call panicked with a non-string payload"
         );
     }
 

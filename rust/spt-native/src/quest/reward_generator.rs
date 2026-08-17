@@ -727,7 +727,7 @@ fn get_random_weapon_preset_within_budget(
 ///
 /// A preset with no root item warns (`:578`) and then throws: `:586` hands the null root to
 /// `ReparentItemAndChildren`, which dereferences it at `ItemHelper.cs:1695`. Kept as a panic — a
-/// C#-sanctioned throw, which `ffi.rs`'s `catch_unwind` maps the same way it maps `:417`'s.
+/// C#-sanctioned throw, which `quest/mod.rs`'s `catch_unwind` maps the same way it maps `:417`'s.
 fn generate_preset_reward(
     ctx: &mut QuestContext<'_>,
     tpl: &str,

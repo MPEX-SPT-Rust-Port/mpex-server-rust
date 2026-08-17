@@ -119,7 +119,7 @@ pub fn generate_repeatable_quest(
 
     let mut ctx = QuestContext::from_slice(&slice);
     // The generators panic where the C# throws; the message is the failure the caller reports.
-    // Diagnostics gathered before the throw are dropped, as they are on every other export.
+    // Diagnostics emitted before the throw are already in the log — DiagSink emits live.
     let quest = catch_unwind(AssertUnwindSafe(|| {
         generate(
             &mut ctx,
@@ -135,17 +135,7 @@ pub fn generate_repeatable_quest(
     Ok(QuestNativeResponse { quest, pool })
 }
 
-/// The text a caught panic carries — `expect`/`panic!` payloads are a `String` or a `&str`.
+/// The text a caught panic carries, wrapped as this family's sanctioned-throw failure.
 fn panic_message(payload: Box<dyn Any + Send>) -> QuestError {
-    let message = payload
-        .downcast_ref::<String>()
-        .cloned()
-        .or_else(|| {
-            payload
-                .downcast_ref::<&str>()
-                .map(|text| (*text).to_owned())
-        })
-        .unwrap_or_else(|| "repeatable quest generation panicked".to_owned());
-
-    QuestError::Failed(message)
+    QuestError::Failed(crate::ffi::panic_message(payload))
 }
