@@ -20,8 +20,12 @@ public class SptLoggerDispatcherTests
         _directory = Path.Combine(Path.GetTempPath(), $"spt-log-{Guid.NewGuid():N}");
 
         // The pipeline is process-global and another fixture's AddSptLogger call may have
-        // initialised it against the real config; close so this fixture's config takes.
-        NativeMethods.LoggerClose();
+        // initialised it against the real config; close so this fixture's config takes. Init is
+        // ref-counted, so one close only drops one reference - drain a few, extra ones are no-ops.
+        for (var i = 0; i < 4; i++)
+        {
+            NativeMethods.LoggerClose();
+        }
 
         var configJson = $$"""
             {

@@ -28,9 +28,11 @@ public static class SptLoggerExtensions
     }
 
     /// <summary>
-    /// Hands the raw sptLogger.json bytes to the native pipeline. Runs once per process — the
-    /// native side is idempotent — and never throws: per the port's contract a broken native
-    /// library or config gets one stderr notice and logging stays off.
+    /// Hands the raw sptLogger.json bytes to the native pipeline. Usually runs once per process,
+    /// but a prepatched server's nested Program.Main inits again — the native side ref-counts, so
+    /// that container's dispose does not take the outer host's logging down. Never throws: per the
+    /// port's contract a broken native library or config gets one stderr notice and logging stays
+    /// off.
     /// </summary>
     private static void InitNativeLogger(string configPath)
     {

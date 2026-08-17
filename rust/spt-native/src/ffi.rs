@@ -422,20 +422,24 @@ pub unsafe extern "C" fn spt_generate_repeatable_quest(
     }
 }
 
-/// The process-wide log pipeline. A plain `Mutex<Option>` rather than a `OnceLock` so
-/// `spt_logger_close` can take it down (and tests can re-initialise afterwards).
-static LOGGER: Mutex<Option<Logger>> = Mutex::new(None);
+/// The process-wide log pipeline and its init ref-count. A plain `Mutex<Option>` rather than a
+/// `OnceLock` so `spt_logger_close` can take it down (and tests can re-initialise afterwards); the
+/// count lives inside the same lock so init and close cannot race each other.
+static LOGGER: Mutex<(usize, Option<Logger>)> = Mutex::new((0, None));
 
-fn logger_guard() -> std::sync::MutexGuard<'static, Option<Logger>> {
+fn logger_guard() -> std::sync::MutexGuard<'static, (usize, Option<Logger>)> {
     LOGGER
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// Initialises the log pipeline from the raw bytes of `sptLogger.json`. Idempotent: a second call
-/// while initialised is `STATUS_OK` and ignored. On `STATUS_ERROR` the parse-error text is in the
-/// out-buffer; the pipeline stays uninitialised and every later emit is a silent no-op - a broken
-/// log config must not stop the server.
+/// Initialises the log pipeline from the raw bytes of `sptLogger.json`. Ref-counted: a call while
+/// already initialised keeps the running pipeline, ignores the new config, bumps the count and
+/// returns `STATUS_OK`. It takes as many `spt_logger_close` calls as there were successful inits to
+/// tear the pipeline down - the prepatcher's nested `Program.Main` disposes its own container while
+/// the outer host keeps logging. On `STATUS_ERROR` the parse-error text is in the out-buffer, the
+/// count is untouched, the pipeline stays uninitialised and every later emit is a silent no-op - a
+/// broken log config must not stop the server.
 ///
 /// # Safety
 /// `config_ptr` must point to `config_len` readable bytes of UTF-8; `out_ptr` and `out_len` must
@@ -466,11 +470,12 @@ pub unsafe extern "C" fn spt_logger_init(
 
     match catch_unwind(AssertUnwindSafe(|| {
         let mut guard = logger_guard();
-        if guard.is_some() {
+        if guard.1.is_some() {
+            guard.0 += 1;
             return Ok(());
         }
         Logger::from_json(bytes).map(|logger| {
-            *guard = Some(logger);
+            *guard = (1, Some(logger));
         })
     })) {
         Ok(Ok(())) => STATUS_OK,
@@ -537,7 +542,7 @@ pub unsafe extern "C" fn spt_log_emit(
     };
 
     match catch_unwind(AssertUnwindSafe(|| {
-        if let Some(logger) = logger_guard().as_ref() {
+        if let Some(logger) = logger_guard().1.as_ref() {
             logger.emit(&record);
         }
     })) {
@@ -546,17 +551,31 @@ pub unsafe extern "C" fn spt_log_emit(
     }
 }
 
-/// Flushes every sink and joins the writer threads. Idempotent; a later `spt_logger_init` may
-/// re-initialise.
+/// Drops one `spt_logger_init` reference; on the last one, flushes every sink and joins the writer
+/// threads. Closing more often than init was called is an idempotent `STATUS_OK` no-op, and a later
+/// `spt_logger_init` re-initialises from zero.
 ///
 /// # Safety
 /// No pointer arguments; marked unsafe only for symmetry with the export family.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn spt_logger_close() -> i32 {
     match catch_unwind(AssertUnwindSafe(|| {
-        // The guard drops on this line: the writer-thread join below must not hold the lock, or a
-        // concurrent emit blocks until the join finishes.
-        let taken = logger_guard().take();
+        // The guard drops at the end of this block: the writer-thread join below must not hold the
+        // lock, or a concurrent emit blocks until the join finishes.
+        let taken = {
+            let mut guard = logger_guard();
+            match guard.0 {
+                0 => None,
+                1 => {
+                    guard.0 = 0;
+                    guard.1.take()
+                }
+                count => {
+                    guard.0 = count - 1;
+                    None
+                }
+            }
+        };
         if let Some(logger) = taken {
             logger.close();
         }
@@ -1425,7 +1444,7 @@ mod tests {
         let status = emit("Cat", "dropped", "", "main");
         assert_eq!(status, STATUS_OK);
 
-        // Real init; the second init is an idempotent no-op.
+        // Real init; the second init keeps the running pipeline and takes a reference.
         let mut out_ptr: *mut u8 = std::ptr::null_mut();
         let mut out_len: usize = 0;
         let status =
@@ -1493,12 +1512,18 @@ mod tests {
         };
         assert_eq!(status, STATUS_BAD_ARGS);
 
-        // Close flushes; a second close is a no-op.
+        // The first close drops the second init's reference - the nested `Program.Main` disposing
+        // its container must not take the outer host's logging down with it.
+        assert_eq!(unsafe { spt_logger_close() }, STATUS_OK);
+        assert_eq!(emit("Cat", "still up", "", "main"), STATUS_OK);
+
+        // The matching close flushes and tears down; further closes are no-ops.
         assert_eq!(unsafe { spt_logger_close() }, STATUS_OK);
         assert_eq!(unsafe { spt_logger_close() }, STATUS_OK);
+        assert_eq!(emit("Cat", "after teardown", "", "main"), STATUS_OK);
 
         let contents = fs::read_to_string(dir.path().join("spt.log")).unwrap();
-        assert_eq!(contents, "hello\nnullspans\n");
+        assert_eq!(contents, "hello\nnullspans\nstill up\n");
     }
 
     fn emit(category: &str, message: &str, exception: &str, tname: &str) -> i32 {

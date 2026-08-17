@@ -7,11 +7,37 @@ use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::thread::JoinHandle;
 
 use crate::log_sink::{FileSink, civil_from_days};
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
+
+/// Matches one of `variants` case-insensitively, the way C#'s `JsonStringEnumConverter` reads the
+/// three converter-backed enums below. The `type` tag of a `loggers` entry is deliberately *not*
+/// routed through here: C#'s hand-written `BaseSptLoggerReferenceConverter` is case-sensitive.
+fn deserialize_case_insensitive<'de, D, T>(
+    deserializer: D,
+    variants: &[(&str, T)],
+) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Copy,
+{
+    let text = String::deserialize(deserializer)?;
+
+    variants
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(&text))
+        .map(|(_, value)| *value)
+        .ok_or_else(|| {
+            let names: Vec<&str> = variants.iter().map(|(name, _)| *name).collect();
+            serde::de::Error::custom(format!(
+                "unknown value '{text}', expected one of {}",
+                names.join(", ")
+            ))
+        })
+}
 
 /// Mirrors Microsoft.Extensions.Logging.LogLevel: the declaration order is the numeric order the
 /// C# side sends across the boundary, and `can_log` is `messageLevel >= loggerLevel`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum LogLevel {
     Trace,
     Debug,
@@ -50,16 +76,57 @@ impl LogLevel {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+impl<'de> Deserialize<'de> for LogLevel {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<LogLevel, D::Error> {
+        deserialize_case_insensitive(
+            deserializer,
+            &[
+                ("Trace", LogLevel::Trace),
+                ("Debug", LogLevel::Debug),
+                ("Information", LogLevel::Information),
+                ("Warning", LogLevel::Warning),
+                ("Error", LogLevel::Error),
+                ("Critical", LogLevel::Critical),
+                ("None", LogLevel::None),
+            ],
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SptLoggerFilterType {
     Exclude,
     Include,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+impl<'de> Deserialize<'de> for SptLoggerFilterType {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<SptLoggerFilterType, D::Error> {
+        deserialize_case_insensitive(
+            deserializer,
+            &[
+                ("Exclude", SptLoggerFilterType::Exclude),
+                ("Include", SptLoggerFilterType::Include),
+            ],
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MatchingType {
     Literal,
     Regex,
+}
+
+impl<'de> Deserialize<'de> for MatchingType {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<MatchingType, D::Error> {
+        deserialize_case_insensitive(
+            deserializer,
+            &[
+                ("Literal", MatchingType::Literal),
+                ("Regex", MatchingType::Regex),
+            ],
+        )
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -381,6 +448,9 @@ impl Logger {
     /// fatal error; a file target that cannot be opened is reported to stderr and skipped, the
     /// same per-target disable the C# `FileLogHandler` applied.
     pub fn from_json(bytes: &[u8]) -> Result<Logger, String> {
+        // C# reads the same file through `JsonSerializer.Deserialize(Stream)`, which skips a UTF-8
+        // BOM; serde_json does not.
+        let bytes = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes);
         let config: SptLoggerConfiguration =
             serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
 
@@ -754,6 +824,68 @@ mod tests {
 
         let contents = std::fs::read_to_string(dir.path().join("test.log")).unwrap();
         assert_eq!(contents, "[Information] kept\n");
+    }
+
+    #[test]
+    fn a_bom_prefixed_lowercase_config_parses_like_the_pascal_case_one() {
+        // C# reads the file with `JsonSerializer.Deserialize(Stream)`: it skips a UTF-8 BOM, and
+        // its `JsonStringEnumConverter` matches these three enums case-insensitively.
+        fn run(
+            dir: &std::path::Path,
+            level: &str,
+            kind: &str,
+            matching: &str,
+            bom: bool,
+        ) -> String {
+            let config = file_config(
+                dir,
+                level,
+                &format!(
+                    r#"{{ "type": "{kind}", "name": "Noise.*", "matchingType": "{matching}" }}"#
+                ),
+            );
+            let mut bytes: Vec<u8> = if bom {
+                b"\xEF\xBB\xBF".to_vec()
+            } else {
+                Vec::new()
+            };
+            bytes.extend_from_slice(config.as_bytes());
+
+            let logger = Logger::from_json(&bytes).unwrap();
+            logger.emit(&record("App", "kept"));
+            logger.emit(&LogRecord {
+                level: LogLevel::Debug,
+                ..record("App", "below level")
+            });
+            logger.emit(&LogRecord {
+                level: LogLevel::Error,
+                ..record("Noise.Chatter", "excluded")
+            });
+            logger.close();
+
+            std::fs::read_to_string(dir.join("test.log")).unwrap()
+        }
+
+        let pascal_dir = tempfile::TempDir::new().unwrap();
+        let lower_dir = tempfile::TempDir::new().unwrap();
+        let pascal = run(pascal_dir.path(), "Information", "Exclude", "Regex", false);
+        assert_eq!(pascal, "[Information] kept\n");
+        assert_eq!(
+            run(lower_dir.path(), "information", "exclude", "regex", true),
+            pascal
+        );
+
+        // An unknown value still fails, naming the offending string…
+        let bad = file_config(pascal_dir.path(), "Verbose", "");
+        let Err(error) = Logger::from_json(bad.as_bytes()) else {
+            panic!("an unknown log level must not parse");
+        };
+        assert!(error.contains("'Verbose'"), "unhelpful error: {error}");
+
+        // …and the `type` tag stays case-sensitive, matching C#'s hand-written converter.
+        let bad =
+            file_config(pascal_dir.path(), "Information", "").replace(r#""File""#, r#""file""#);
+        assert!(Logger::from_json(bad.as_bytes()).is_err());
     }
 
     #[test]
