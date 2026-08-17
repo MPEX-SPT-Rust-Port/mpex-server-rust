@@ -114,6 +114,10 @@ struct Writer {
     /// leaves the same content on disk whether it ran once or a hundred times.
     #[cfg(test)]
     roll_calls: u32,
+    /// Test-only clock override: `write_line` reads the day through `current_day`, so a test can
+    /// turn the date without waiting for midnight.
+    #[cfg(test)]
+    day_override: Option<i64>,
 }
 
 impl Writer {
@@ -154,11 +158,22 @@ impl Writer {
             roll_blocked: false,
             #[cfg(test)]
             roll_calls: 0,
+            #[cfg(test)]
+            day_override: None,
         })
     }
 
+    fn current_day(&self) -> i64 {
+        #[cfg(test)]
+        if let Some(day) = self.day_override {
+            return day;
+        }
+
+        utc_days()
+    }
+
     fn write_line(&mut self, line: &[u8]) -> io::Result<()> {
-        let today = utc_days();
+        let today = self.current_day();
         if today != self.date {
             self.date = today;
             self.roll()?;
@@ -603,5 +618,54 @@ mod tests {
         sink.close();
 
         assert_eq!(read(&live_path(&dir)).lines().count(), 1000);
+    }
+
+    /// The day-roll branch of `write_line` — unreachable without the clock seam, since
+    /// `utc_days()` reads the wall clock. Pattern without `%DATE%`: with the date out of the
+    /// filename, a new day is an ordinary cascade of the same file.
+    #[test]
+    fn a_date_change_rolls_the_live_file() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().to_str().unwrap();
+
+        let mut writer = Writer::open(path, "spt.log", 0, 5).unwrap();
+        writer.day_override = Some(writer.date);
+        writer.write_line(b"day one").unwrap();
+        writer.day_override = Some(writer.date + 1);
+        writer.write_line(b"day two").unwrap();
+        writer.file.flush().unwrap();
+
+        assert_eq!(read(&dir.path().join("spt.log")), "day two\n");
+        assert_eq!(read(&dir.path().join("spt.1.log")), "day one\n");
+    }
+
+    /// `cascade`'s `max_rolling <= 1` early return: no room for an archive, the live file
+    /// simply starts over.
+    #[test]
+    fn a_cap_of_one_starts_over_without_archiving() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().to_str().unwrap();
+
+        for run in 0..2 {
+            simulate_restart(&dir);
+            let sink = FileSink::open(path, "spt%DATE%.log", 10, 1).unwrap();
+            sink.write(format!("run {run}").into_bytes());
+            sink.close();
+        }
+
+        assert_eq!(read(&live_path(&dir)), "run 1\n");
+        assert!(
+            !archive_path(&dir, 1).exists(),
+            "a cap of one must never spend an archive slot"
+        );
+    }
+
+    /// `Writer::open` substitutes `DEFAULT_MAX_ROLLING` for a configured 0.
+    #[test]
+    fn a_zero_cap_substitutes_the_default() {
+        let dir = TempDir::new().unwrap();
+        let writer = Writer::open(dir.path().to_str().unwrap(), "spt.log", 0, 0).unwrap();
+
+        assert_eq!(writer.max_rolling, DEFAULT_MAX_ROLLING);
     }
 }
