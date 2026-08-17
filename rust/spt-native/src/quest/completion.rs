@@ -476,6 +476,7 @@ pub fn generate(
 mod tests {
     use std::collections::BTreeSet;
 
+    use crate::diag::DiagSink;
     use crate::loot::random_util::TestSeedGuard;
     use crate::quest::QuestContext;
     use crate::quest::helper::PRAPOR;
@@ -556,6 +557,7 @@ mod tests {
 
         for seed in 1..=25u64 {
             let mut ctx = QuestContext::from_slice(&slice);
+            ctx.diagnostics = DiagSink::capture();
             let _guard = TestSeedGuard::install(seed);
             let Some(quest) = super::generate(
                 &mut ctx,

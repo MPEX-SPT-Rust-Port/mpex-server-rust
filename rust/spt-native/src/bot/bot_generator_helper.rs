@@ -53,6 +53,7 @@ use crate::bot::models::{
     ChooseRandomCompatibleModResult, ContainerDetailsWire, ContainerMapDetailsWire,
     EquipmentFilters, RandomisedResourceValues,
 };
+use crate::diag::DiagSink;
 use crate::loot::container_extensions::{container_is_full, find_slot_for_item};
 use crate::loot::item_helper::{LootError, get_item};
 use crate::loot::models::{
@@ -980,7 +981,7 @@ pub(crate) fn get_item_size(
     item_tpl: &str,
     item_id: &str,
     items: &[Item],
-    diagnostics: &mut Vec<Diagnostic>,
+    diagnostics: &mut DiagSink,
 ) -> (i32, i32) {
     // Invalid item
     let Some(item_template) = get_item(items_view, item_tpl) else {
@@ -1235,7 +1236,7 @@ mod tests {
                 secure_container_ammo_stack_count: 0,
                 mod_pool_slot_order: &crate::bot::NO_MOD_POOL_ORDER,
                 is_night_time,
-                diagnostics: Vec::new(),
+                diagnostics: DiagSink::capture(),
             }
         }
     }
@@ -1790,7 +1791,7 @@ mod tests {
                 ..Default::default()
             }
         );
-        assert!(ctx.diagnostics.is_empty());
+        assert!(ctx.diagnostics.captured().is_empty());
     }
 
     #[test]
@@ -1805,9 +1806,9 @@ mod tests {
             result.reason.as_deref(),
             Some("item: nope does not exist in the database")
         );
-        assert_eq!(ctx.diagnostics.len(), 1);
+        assert_eq!(ctx.diagnostics.captured().len(), 1);
         assert_eq!(
-            ctx.diagnostics[0].locale_key.as_deref(),
+            ctx.diagnostics.captured()[0].locale_key.as_deref(),
             Some("bot-invalid_item_compatibility_check")
         );
     }
@@ -1955,9 +1956,9 @@ mod tests {
             add(&mut grids, &mut ctx, &slots, "i1", "i1x1", &mut inventory).0,
             ItemAddedResult::NoContainers
         );
-        assert_eq!(ctx.diagnostics.len(), 1);
+        assert_eq!(ctx.diagnostics.captured().len(), 1);
         assert!(
-            ctx.diagnostics[0]
+            ctx.diagnostics.captured()[0]
                 .message
                 .as_deref()
                 .unwrap()
@@ -2002,6 +2003,7 @@ mod tests {
         );
         assert_eq!(
             ctx.diagnostics
+                .captured()
                 .iter()
                 .map(|diagnostic| (diagnostic.level.as_str(), diagnostic.locale_key.as_deref()))
                 .collect::<Vec<_>>(),
@@ -2012,7 +2014,7 @@ mod tests {
         );
 
         // Root id absent from the item list is the other 1x1 fallback (`:644`), a plain message.
-        ctx.diagnostics.clear();
+        ctx.diagnostics = DiagSink::capture();
         let mut orphan = vec![inventory_item("i2", "i2x1", None)];
         grids.add_item_with_children_to_equipment_slot(
             &mut ctx,
@@ -2023,10 +2025,10 @@ mod tests {
             &mut inventory,
         );
 
-        assert_eq!(ctx.diagnostics.len(), 1);
-        assert_eq!(ctx.diagnostics[0].level, ERROR);
+        assert_eq!(ctx.diagnostics.captured().len(), 1);
+        assert_eq!(ctx.diagnostics.captured()[0].level, ERROR);
         assert!(
-            ctx.diagnostics[0]
+            ctx.diagnostics.captured()[0]
                 .message
                 .as_deref()
                 .unwrap()

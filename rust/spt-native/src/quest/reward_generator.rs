@@ -968,6 +968,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
+    use crate::diag::DiagSink;
     use crate::loot::random_util::TestSeedGuard;
     use crate::quest::QuestContext;
     use crate::quest::helper::PRAPOR;
@@ -1040,6 +1041,7 @@ mod tests {
             "aa": 100.0, "bb": 100.0, "cc": 100.0, "dd": 100.0, "ee": 100.0
         }));
         let mut ctx = QuestContext::from_slice(&slice);
+        ctx.diagnostics = DiagSink::capture();
         let config = daily_config();
 
         let _guard = TestSeedGuard::install(SEED);
@@ -1060,6 +1062,7 @@ mod tests {
     fn a_seeded_reward_leads_with_experience_then_money() {
         let slice = crate::quest::models::tests::slice();
         let mut ctx = QuestContext::from_slice(&slice);
+        ctx.diagnostics = DiagSink::capture();
         let config = daily_config();
         let skill_rewards = &config.quest_config.elimination[0].possible_skill_rewards;
 

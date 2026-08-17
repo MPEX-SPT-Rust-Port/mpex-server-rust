@@ -256,6 +256,7 @@ pub fn get_quest_location_by_map_id<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::diag::DiagSink;
     use crate::quest::QuestContext;
     use crate::quest::models::{RepeatableQuestType, tests::slice};
 
@@ -265,6 +266,7 @@ mod tests {
     fn generate_repeatable_template_substitutes_prapor_everywhere_but_the_name() {
         let slice = slice();
         let mut ctx = QuestContext::from_slice(&slice);
+        ctx.diagnostics = DiagSink::capture();
 
         let quest = generate_repeatable_template(
             &mut ctx,
@@ -286,7 +288,7 @@ mod tests {
         let status = quest.quest_status.as_ref().expect("quest status");
         assert_eq!(status.qid, quest.quest.id);
         assert_eq!(status.uid.as_deref(), Some("6193a720f8ee7e52e4290000"));
-        assert!(ctx.diagnostics.is_empty());
+        assert!(ctx.diagnostics.captured().is_empty());
     }
 
     /// The three error paths the C# logs and bails on: a type the database has no template for
@@ -296,6 +298,7 @@ mod tests {
     fn the_error_paths_report_their_locale_key_and_give_up() {
         let slice = slice();
         let mut ctx = QuestContext::from_slice(&slice);
+        ctx.diagnostics = DiagSink::capture();
 
         // The fixture only carries the Elimination template
         assert!(
@@ -326,6 +329,7 @@ mod tests {
 
         let keys: Vec<_> = ctx
             .diagnostics
+            .captured()
             .iter()
             .map(|diagnostic| diagnostic.locale_key.as_deref().unwrap())
             .collect();

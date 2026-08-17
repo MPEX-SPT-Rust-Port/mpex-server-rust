@@ -1394,6 +1394,7 @@ mod tests {
     use super::*;
     use crate::bot::durability_limits_helper::BotDurability;
     use crate::bot::models::{EquipmentFilters, RandomisedResourceDetails};
+    use crate::diag::DiagSink;
     use crate::loot::models::PresetView;
     use crate::loot::random_util::{TestSeedGuard, get_double};
 
@@ -1593,7 +1594,7 @@ mod tests {
                 secure_container_ammo_stack_count: 0,
                 mod_pool_slot_order: &crate::bot::NO_MOD_POOL_ORDER,
                 is_night_time: false,
-                diagnostics: Vec::new(),
+                diagnostics: DiagSink::capture(),
             }
         }
 
@@ -1823,7 +1824,7 @@ mod tests {
         assert_eq!(after_run, stream_position_after(|| {}));
         assert!(inventory.is_empty());
         assert_eq!(
-            ctx.diagnostics[0].locale_key.as_deref(),
+            ctx.diagnostics.captured()[0].locale_key.as_deref(),
             Some("bot-unable_to_generate_bot_loot")
         );
     }
@@ -2282,6 +2283,7 @@ mod tests {
         // Two calls to `GetItemSpawnLimitsForBotType`, so two warnings.
         assert_eq!(
             ctx.diagnostics
+                .captured()
                 .iter()
                 .filter(|diagnostic| diagnostic.locale_key.as_deref()
                     == Some("bot-unable_to_find_spawn_limits_fallback_to_defaults"))

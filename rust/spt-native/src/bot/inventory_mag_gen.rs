@@ -490,6 +490,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::diag::DiagSink;
 
     use crate::bot::durability_limits_helper::BotDurability;
     use crate::bot::models::{EquipmentFilters, RandomisedResourceDetails};
@@ -573,7 +574,7 @@ mod tests {
                 secure_container_ammo_stack_count: 0,
                 mod_pool_slot_order: &crate::bot::NO_MOD_POOL_ORDER,
                 is_night_time: false,
-                diagnostics: Vec::new(),
+                diagnostics: DiagSink::capture(),
             }
         }
     }

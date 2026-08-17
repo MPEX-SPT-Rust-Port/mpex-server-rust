@@ -131,6 +131,7 @@ pub fn generate(
 mod tests {
     use std::collections::BTreeSet;
 
+    use crate::diag::DiagSink;
     use crate::loot::random_util::TestSeedGuard;
     use crate::quest::QuestContext;
     use crate::quest::models::{
@@ -201,6 +202,7 @@ mod tests {
 
         for seed in 1..=60u64 {
             let mut ctx = QuestContext::from_slice(&slice);
+            ctx.diagnostics = DiagSink::capture();
             let mut pool = pool();
             let _guard = TestSeedGuard::install(seed);
             let quest = super::generate(
@@ -292,6 +294,7 @@ mod tests {
     fn a_config_without_a_pickup_block_throws_at_the_first_dereference() {
         let slice = slice();
         let mut ctx = QuestContext::from_slice(&slice);
+        ctx.diagnostics = DiagSink::capture();
         let daily: RepeatableQuestConfig =
             serde_json::from_value(json(QUEST_CONFIG_PATH)["repeatableQuests"][0].clone())
                 .expect("parses");

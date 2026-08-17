@@ -203,6 +203,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::diag::DiagSink;
     use crate::loot::item_helper::STASH;
     use crate::loot::models::{ItemView, PresetView};
     use crate::loot::random_util::TestSeedGuard;
@@ -326,7 +327,7 @@ mod tests {
                 pmc_names_bear: &NO_NAMES,
                 timestamp: 1_700_000_000,
                 seasonal_event_active: false,
-                diagnostics: Vec::new(),
+                diagnostics: DiagSink::capture(),
             }
         }
     }

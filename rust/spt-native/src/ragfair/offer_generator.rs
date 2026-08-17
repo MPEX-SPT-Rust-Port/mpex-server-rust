@@ -62,6 +62,7 @@ use rayon::prelude::*;
 use serde_json::json;
 
 use super::RagfairContext;
+use crate::diag::DiagSink;
 use crate::loot::item_helper::{
     AMMO_BOX, ARMOR_PLATE, ARMORED_EQUIPMENT, FUEL, LootError, WEAPON, add_cartridges_to_ammo_box,
     armor_item_can_hold_mods, armor_item_has_removable_plate_slots, get_item,
@@ -471,7 +472,7 @@ pub fn generate_with_slice(
         pmc_names_bear: &slice.pmc_names_bear,
         timestamp,
         seasonal_event_active: slice.seasonal_event_active,
-        diagnostics: Vec::new(),
+        diagnostics: DiagSink::Pipeline,
     };
 
     let replacing_expired_offers = expired_offers
@@ -545,7 +546,7 @@ pub fn generate_with_slice(
                 offers.push(offer);
             }
             rejected.extend(worker_rejected);
-            ctx.diagnostics.extend(worker_diagnostics);
+            ctx.diagnostics.absorb(worker_diagnostics);
         }
     }
     ctx.diagnostics.push(plain(
@@ -559,7 +560,7 @@ pub fn generate_with_slice(
     Ok(DynamicOffersResult {
         offers,
         rejected_can_sell_templates: rejected.into_iter().collect(),
-        diagnostics: ctx.diagnostics,
+        diagnostics: Vec::new(),
     })
 }
 
@@ -1556,7 +1557,7 @@ mod tests {
                 pmc_names_bear: &self.names_bear,
                 timestamp: OFFER_TIME,
                 seasonal_event_active: false,
-                diagnostics: Vec::new(),
+                diagnostics: DiagSink::capture(),
             }
         }
     }
@@ -3222,22 +3223,6 @@ mod tests {
             error.message.contains("not found in db"),
             "{}",
             error.message
-        );
-    }
-
-    #[test]
-    fn the_batch_reports_how_long_the_offer_pass_took() {
-        let result = offers_of(Fixture::new());
-
-        let last = result
-            .diagnostics
-            .last()
-            .expect("the pass always reports its offer timing");
-        let message = last.message.as_deref().unwrap_or_default();
-        assert_eq!(last.level, "debug");
-        assert!(
-            message.starts_with("Took ") && message.ends_with("ms to CreateOffersFromAssort"),
-            "{message}"
         );
     }
 

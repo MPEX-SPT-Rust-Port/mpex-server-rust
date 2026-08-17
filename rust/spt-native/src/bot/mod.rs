@@ -16,12 +16,13 @@ use indexmap::IndexMap;
 use crate::bot::durability_limits_helper::BotDurability;
 use crate::bot::models::{EquipmentFilterDetails, EquipmentFilters, RandomisedResourceDetails};
 use crate::bot::repair_service::BonusSettings;
-use crate::loot::models::{Diagnostic, ItemView, PresetView};
+use crate::diag::DiagSink;
+use crate::loot::models::{ItemView, PresetView};
 
 use std::collections::HashSet;
 
-/// The read-only views one bot generation run consults, plus the diagnostics the C# caller replays
-/// through its logger — the bot family's analog of [`crate::loot::item_helper::LootContext`].
+/// The read-only views one bot generation run consults, plus the [`DiagSink`] its diagnostics
+/// emit through — the bot family's analog of [`crate::loot::item_helper::LootContext`].
 ///
 /// Every view is borrowed for `'a`, so copying one out (`let items = ctx.items;`) releases the
 /// `&mut ctx` and leaves the diagnostics writable.
@@ -79,7 +80,7 @@ pub struct BotContext<'a> {
     /// membership is still derived by [`crate::bot::mod_pool_service`]. Missing entry = database
     /// order.
     pub mod_pool_slot_order: &'a IndexMap<String, Vec<usize>>,
-    pub diagnostics: Vec<Diagnostic>,
+    pub diagnostics: DiagSink,
 }
 
 /// Empty stand-ins for the views a fixture that exercises none of them still has to supply.

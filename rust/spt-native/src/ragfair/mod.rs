@@ -9,11 +9,12 @@ use std::collections::HashSet;
 
 use indexmap::IndexMap;
 
-use crate::loot::models::{Diagnostic, ItemView, PresetView};
+use crate::diag::DiagSink;
+use crate::loot::models::{ItemView, PresetView};
 use crate::ragfair::models::DynamicConfigWire;
 
-/// The read-only views one dynamic ragfair pass consults, plus the diagnostics the C# caller
-/// replays through its logger — the ragfair family's analog of [`crate::bot::BotContext`].
+/// The read-only views one dynamic ragfair pass consults, plus the [`DiagSink`] its diagnostics
+/// emit through — the ragfair family's analog of [`crate::bot::BotContext`].
 ///
 /// Every view is borrowed for `'a`, so copying one out (`let items = ctx.items;`) releases the
 /// `&mut ctx` and leaves the diagnostics writable.
@@ -54,12 +55,12 @@ pub struct RagfairContext<'a> {
     pub timestamp: i64,
     /// `SeasonalEventService.SeasonalEventEnabled()`.
     pub seasonal_event_active: bool,
-    pub diagnostics: Vec<Diagnostic>,
+    pub diagnostics: DiagSink,
 }
 
 impl<'a> RagfairContext<'a> {
-    /// A worker's view of the same pass: every shared reference copied, a fresh diagnostics
-    /// buffer of its own — what lets the batch walk fan out without sharing `&mut self`.
+    /// A worker's view of the same pass: every shared reference copied, a forked sink of its own
+    /// — what lets the batch walk fan out without sharing `&mut self`.
     pub fn fork(&self) -> RagfairContext<'a> {
         RagfairContext {
             items: self.items,
@@ -77,7 +78,7 @@ impl<'a> RagfairContext<'a> {
             pmc_names_bear: self.pmc_names_bear,
             timestamp: self.timestamp,
             seasonal_event_active: self.seasonal_event_active,
-            diagnostics: Vec::new(),
+            diagnostics: self.diagnostics.fork(),
         }
     }
 }

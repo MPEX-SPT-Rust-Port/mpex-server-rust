@@ -8,6 +8,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use crate::bot::bot_inventory_generator::{generate_inventory, generate_inventory_batch};
+use crate::diag::DiagSink;
 use crate::logger::{LogLevel, LogRecord, Logger};
 use crate::loot::item_helper::LootError;
 use crate::loot::location_loot_generator::{generate_dynamic_loot, generate_static_containers};
@@ -257,7 +258,11 @@ pub unsafe extern "C" fn spt_create_random_loot(
     out_ptr: *mut *mut u8,
     out_len: *mut usize,
 ) -> i32 {
-    unsafe { run_generator(req_ptr, req_len, out_ptr, out_len, create_random_loot) }
+    unsafe {
+        run_generator(req_ptr, req_len, out_ptr, out_len, |request| {
+            create_random_loot(request, &mut DiagSink::Pipeline)
+        })
+    }
 }
 
 /// # Safety
@@ -282,13 +287,9 @@ pub unsafe extern "C" fn spt_get_sealed_weapon_case_loot(
     out_len: *mut usize,
 ) -> i32 {
     unsafe {
-        run_generator(
-            req_ptr,
-            req_len,
-            out_ptr,
-            out_len,
-            get_sealed_weapon_case_loot,
-        )
+        run_generator(req_ptr, req_len, out_ptr, out_len, |request| {
+            get_sealed_weapon_case_loot(request, &mut DiagSink::Pipeline)
+        })
     }
 }
 
@@ -911,10 +912,6 @@ mod tests {
         assert_eq!(status, STATUS_OK);
         let result: serde_json::Value = serde_json::from_slice(&out).unwrap();
         assert_eq!(result["items"], serde_json::json!([]));
-        assert_eq!(
-            result["diagnostics"][0]["localeKey"],
-            "loot-non_item_picked_as_sealed_weapon_crate_reward"
-        );
     }
 
     #[test]
@@ -1499,6 +1496,9 @@ mod tests {
 
     #[test]
     fn logger_exports_roundtrip() {
+        /// The messages this test emits; everything else in the file belongs to a generator.
+        const MINE: [&str; 4] = ["hello", "nullspans", "still up", "after teardown"];
+
         let dir = TempDir::new().unwrap();
         let config = format!(
             r#"{{ "loggers": [ {{ "type": "File", "logLevel": "Information",
@@ -1598,8 +1598,14 @@ mod tests {
         assert_eq!(unsafe { spt_logger_close() }, STATUS_OK);
         assert_eq!(emit("Cat", "after teardown", "", "main"), STATUS_OK);
 
+        // Generators in other tests emit their diagnostics through the same process-global
+        // pipeline, so only this test's own lines can be asserted on.
         let contents = fs::read_to_string(dir.path().join("spt.log")).unwrap();
-        assert_eq!(contents, "hello\nnullspans\nstill up\n");
+        let mine: Vec<&str> = contents
+            .lines()
+            .filter(|line| MINE.contains(line))
+            .collect();
+        assert_eq!(mine, ["hello", "nullspans", "still up"]);
     }
 
     fn emit(category: &str, message: &str, exception: &str, tname: &str) -> i32 {

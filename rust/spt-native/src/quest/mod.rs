@@ -13,15 +13,16 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use indexmap::IndexMap;
 
-use crate::loot::models::{Diagnostic, ItemView, PresetView};
+use crate::diag::DiagSink;
+use crate::loot::models::{ItemView, PresetView};
 use crate::loot::random_util::TestSeedGuard;
 use crate::quest::models::{
     ExitView, LevelledItemFilter, QuestInvariantSlice, QuestNativeRequest, QuestNativeResponse,
     QuestVaryingRequest, RepeatableQuestTemplates, RepeatableQuestType, RepeatableTemplates,
 };
 
-/// The read-only views one repeatable-quest pass consults, plus the diagnostics the C# caller
-/// replays through its logger — the quest family's analog of [`crate::ragfair::RagfairContext`].
+/// The read-only views one repeatable-quest pass consults, plus the [`DiagSink`] its diagnostics
+/// emit through — the quest family's analog of [`crate::ragfair::RagfairContext`].
 ///
 /// Every view is borrowed for `'a` off the cached [`QuestInvariantSlice`], so copying one out
 /// (`let items = ctx.items;`) releases the `&mut ctx` and leaves the diagnostics writable.
@@ -42,11 +43,11 @@ pub struct QuestContext<'a> {
     pub extracts_by_location: &'a IndexMap<String, Vec<ExitView>>,
     pub repeatable_quest_template_ids: &'a RepeatableQuestTemplates,
     pub location_id_map: &'a IndexMap<String, String>,
-    pub diagnostics: Vec<Diagnostic>,
+    pub diagnostics: DiagSink,
 }
 
 impl<'a> QuestContext<'a> {
-    /// Borrow every view off `slice` and start a fresh diagnostics buffer — one pass's context.
+    /// Borrow every view off `slice` and emit straight to the log pipeline — one pass's context.
     pub fn from_slice(slice: &'a QuestInvariantSlice) -> Self {
         QuestContext {
             items: &slice.items,
@@ -65,7 +66,7 @@ impl<'a> QuestContext<'a> {
             extracts_by_location: &slice.extracts_by_location,
             repeatable_quest_template_ids: &slice.repeatable_quest_template_ids,
             location_id_map: &slice.location_id_map,
-            diagnostics: Vec::new(),
+            diagnostics: DiagSink::Pipeline,
         }
     }
 }
@@ -134,7 +135,7 @@ pub fn generate_repeatable_quest(
     Ok(QuestNativeResponse {
         quest,
         pool,
-        diagnostics: ctx.diagnostics,
+        diagnostics: Vec::new(),
     })
 }
 

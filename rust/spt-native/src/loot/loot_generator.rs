@@ -19,6 +19,7 @@ use super::models::{
     WARNING,
 };
 use super::{mongo_id, random_util};
+use crate::diag::DiagSink;
 
 /// The `typeof(T).FullName` this file's diagnostics log under.
 const CATEGORY: &str = "SPTarkov.Server.Core.Generators.Loot.LootGenerator";
@@ -99,7 +100,10 @@ fn new_loot_item(tpl: &str, stack_objects_count: f64) -> Item {
 /// (`:92-94,113-115,133-135`), so a pool that can only ever be rejected — every item an armor, say —
 /// spins the loop until the process dies. Ported as written; the retry consumes draws each pass, and
 /// the draw count is what the parity test compares.
-pub fn create_random_loot(request: CreateRandomLootRequest) -> Result<RewardLootResult, LootError> {
+pub fn create_random_loot(
+    request: CreateRandomLootRequest,
+    diagnostics: &mut DiagSink,
+) -> Result<RewardLootResult, LootError> {
     let _seed_guard = request
         .db
         .test_seed
@@ -108,7 +112,6 @@ pub fn create_random_loot(request: CreateRandomLootRequest) -> Result<RewardLoot
     let db = &request.db;
     let options = &request.loot_request;
     let mut result: Vec<Vec<Item>> = Vec::new();
-    let mut diagnostics: Vec<Diagnostic> = Vec::new();
 
     // `InitItemLimitCounter(options.ItemLimits)` (`:49`) enumerates the dictionary, so a null one
     // throws before anything else happens.
@@ -217,7 +220,7 @@ pub fn create_random_loot(request: CreateRandomLootRequest) -> Result<RewardLoot
                     &mut item_type_counts,
                     &reward_pool_results.blacklist,
                     &mut result,
-                    &mut diagnostics,
+                    diagnostics,
                 )? {
                     index += 1;
                 }
@@ -260,7 +263,7 @@ pub fn create_random_loot(request: CreateRandomLootRequest) -> Result<RewardLoot
                     &mut item_type_counts,
                     &reward_pool_results.blacklist,
                     &mut result,
-                    &mut diagnostics,
+                    diagnostics,
                 )? {
                     index += 1;
                 }
@@ -270,7 +273,7 @@ pub fn create_random_loot(request: CreateRandomLootRequest) -> Result<RewardLoot
 
     Ok(RewardLootResult {
         items: result,
-        diagnostics,
+        diagnostics: Vec::new(),
     })
 }
 
@@ -571,7 +574,7 @@ fn find_and_add_random_preset_to_loot(
     item_type_counts: &mut IndexMap<String, ItemLimit>,
     item_blacklist: &HashSet<String>,
     result: &mut Vec<Vec<Item>>,
-    diagnostics: &mut Vec<Diagnostic>,
+    diagnostics: &mut DiagSink,
 ) -> Result<bool, LootError> {
     if preset_pool.is_empty() {
         diagnostics.push(localised(WARNING, "loot-preset_pool_is_empty", None));
@@ -702,6 +705,7 @@ fn new_reward_item(tpl: &str) -> Item {
 /// the C# caller after the call, not by this method.
 pub fn get_sealed_weapon_case_loot(
     request: SealedWeaponCaseRequest,
+    diagnostics: &mut DiagSink,
 ) -> Result<RewardLootResult, LootError> {
     let _seed_guard = request
         .db
@@ -711,7 +715,6 @@ pub fn get_sealed_weapon_case_loot(
     let db = &request.db;
     let settings = &request.container_settings;
     let mut items_to_return: Vec<Vec<Item>> = Vec::new();
-    let mut diagnostics: Vec<Diagnostic> = Vec::new();
 
     // Choose a weapon to give to the player (weighted)
     let chosen_weapon_tpl = random_util::get_weighted_value(&settings.weapon_reward_weight)?;
@@ -726,7 +729,7 @@ pub fn get_sealed_weapon_case_loot(
 
         return Ok(RewardLootResult {
             items: items_to_return,
-            diagnostics,
+            diagnostics: Vec::new(),
         });
     };
 
@@ -785,7 +788,7 @@ pub fn get_sealed_weapon_case_loot(
         settings,
         linked_items_to_weapon,
         chosen_weapon_preset,
-        &mut diagnostics,
+        diagnostics,
     ));
 
     // Handle non-weapon mod reward types
@@ -793,12 +796,12 @@ pub fn get_sealed_weapon_case_loot(
         db,
         settings,
         weapon_details_db,
-        &mut diagnostics,
+        diagnostics,
     )?);
 
     Ok(RewardLootResult {
         items: items_to_return,
-        diagnostics,
+        diagnostics: Vec::new(),
     })
 }
 
@@ -807,7 +810,7 @@ fn get_sealed_container_non_weapon_mod_rewards(
     db: &RewardLootDb,
     settings: &SealedContainerSettingsView,
     weapon_details_db: &ItemView,
-    diagnostics: &mut Vec<Diagnostic>,
+    diagnostics: &mut DiagSink,
 ) -> Result<Vec<Vec<Item>>, LootError> {
     let mut rewards: Vec<Vec<Item>> = Vec::new();
 
@@ -930,7 +933,7 @@ fn get_sealed_container_weapon_mod_rewards(
     settings: &SealedContainerSettingsView,
     linked_items_to_weapon: &[String],
     chosen_weapon_preset: &PresetView,
-    diagnostics: &mut Vec<Diagnostic>,
+    diagnostics: &mut DiagSink,
 ) -> Vec<Vec<Item>> {
     let mut mod_rewards: Vec<Vec<Item>> = Vec::new();
 
@@ -1285,8 +1288,16 @@ mod tests {
         // Swept over seeds rather than repeated on one: a single seed replays one set of draw
         // values, so an order hazard whose draws happen to coincide under it would stay invisible.
         for seed in 0..25 {
-            let a = create_random_loot(random_request(seed, options_json())).unwrap();
-            let b = create_random_loot(random_request(seed, options_json())).unwrap();
+            let a = create_random_loot(
+                random_request(seed, options_json()),
+                &mut DiagSink::capture(),
+            )
+            .unwrap();
+            let b = create_random_loot(
+                random_request(seed, options_json()),
+                &mut DiagSink::capture(),
+            )
+            .unwrap();
 
             assert_eq!(shape(&a), shape(&b), "seed {seed}");
         }
@@ -1301,7 +1312,8 @@ mod tests {
         let mut options = options_json();
         options["itemCount"] = json!({ "min": 3, "max": 3 });
 
-        let result = create_random_loot(random_request(12345, options)).unwrap();
+        let result =
+            create_random_loot(random_request(12345, options), &mut DiagSink::capture()).unwrap();
 
         // Any draw the retry loop rejected (the pool holds two armor entries) is invisible in the
         // output but still shifts everything after it, which is what makes this a draw-order check.
@@ -1327,7 +1339,11 @@ mod tests {
     #[test]
     fn random_loot_adds_a_crate_an_item_and_both_presets() {
         for seed in 0..25 {
-            let result = create_random_loot(random_request(seed, options_json())).unwrap();
+            let result = create_random_loot(
+                random_request(seed, options_json()),
+                &mut DiagSink::capture(),
+            )
+            .unwrap();
             let all_tpls = tpls(&result);
 
             // One sealed crate, one item, one weapon preset, one armor preset.
@@ -1370,19 +1386,28 @@ mod tests {
 
         let mut cache_only = db_json();
         cache_only["globalBlacklist"] = json!([PLAIN_ITEM_TPL]);
-        let unfiltered =
-            create_random_loot(request_from(cache_only, 12345, options.clone())).unwrap();
+        let unfiltered = create_random_loot(
+            request_from(cache_only, 12345, options.clone()),
+            &mut DiagSink::capture(),
+        )
+        .unwrap();
         assert!(tpls(&unfiltered).contains(&PLAIN_ITEM_TPL));
 
         let mut config = db_json();
         config["configBlacklist"] = json!([PLAIN_ITEM_TPL]);
-        let filtered = create_random_loot(request_from(config, 12345, options)).unwrap();
+        let filtered = create_random_loot(
+            request_from(config, 12345, options),
+            &mut DiagSink::capture(),
+        )
+        .unwrap();
         assert!(!tpls(&filtered).contains(&PLAIN_ITEM_TPL));
     }
 
     #[test]
     fn preset_items_are_found_in_raid_under_fresh_ids() {
-        let result = create_random_loot(random_request(7, options_json())).unwrap();
+        let result =
+            create_random_loot(random_request(7, options_json()), &mut DiagSink::capture())
+                .unwrap();
         let preset_group = result
             .items
             .iter()
@@ -1410,14 +1435,16 @@ mod tests {
     fn armor_level_whitelist_admits_only_matching_presets() {
         let mut options = options_json();
         options["armorLevelWhitelist"] = json!([4]);
-        let admitted = create_random_loot(random_request(3, options)).unwrap();
+        let admitted =
+            create_random_loot(random_request(3, options), &mut DiagSink::capture()).unwrap();
         assert!(tpls(&admitted).contains(&VEST_TPL));
 
         let mut options = options_json();
         options["armorLevelWhitelist"] = json!([2]);
-        let rejected = create_random_loot(random_request(3, options)).unwrap();
+        let mut sink = DiagSink::capture();
+        let rejected = create_random_loot(random_request(3, options), &mut sink).unwrap();
         assert!(!tpls(&rejected).contains(&VEST_TPL));
-        assert!(rejected.diagnostics.is_empty());
+        assert!(sink.captured().is_empty());
     }
 
     /// The pool filter compares `_type` with `OrdinalIgnoreCase`, so `"Item"` belongs in it.
@@ -1430,7 +1457,8 @@ mod tests {
         options["itemTypeWhitelist"] = json!([MISC_NODE]);
         options["itemBlacklist"] = json!([STACK_ITEM_TPL]);
 
-        let result = create_random_loot(random_request(11, options)).unwrap();
+        let result =
+            create_random_loot(random_request(11, options), &mut DiagSink::capture()).unwrap();
 
         assert_eq!(tpls(&result), vec![PLAIN_ITEM_TPL]);
     }
@@ -1448,7 +1476,8 @@ mod tests {
         options["itemBlacklist"] = json!([STACK_ITEM_TPL]);
         options["itemLimits"] = json!({ MISC_NODE: 0 });
 
-        let result = create_random_loot(random_request(5, options)).unwrap();
+        let result =
+            create_random_loot(random_request(5, options), &mut DiagSink::capture()).unwrap();
 
         // A working limit check would have rejected the second and third draws forever.
         assert_eq!(tpls(&result), vec![PLAIN_ITEM_TPL; 3]);
@@ -1463,7 +1492,11 @@ mod tests {
         options["itemTypeWhitelist"] = json!([AMMO]);
 
         for seed in 0..25 {
-            let result = create_random_loot(random_request(seed, options.clone())).unwrap();
+            let result = create_random_loot(
+                random_request(seed, options.clone()),
+                &mut DiagSink::capture(),
+            )
+            .unwrap();
             let count = result.items[0][0].upd.as_ref().unwrap().stack_objects_count;
 
             assert_eq!(result.items[0][0].template, AMMO_ITEM_TPL);
@@ -1484,7 +1517,8 @@ mod tests {
         options["itemTypeWhitelist"] = json!([AMMO]);
         options["itemStackLimits"] = json!({ AMMO_ITEM_TPL: { "min": 30, "max": 30 } });
 
-        let result = create_random_loot(random_request(2, options)).unwrap();
+        let result =
+            create_random_loot(random_request(2, options), &mut DiagSink::capture()).unwrap();
 
         assert_eq!(
             result.items[0][0].upd.as_ref().unwrap().stack_objects_count,
@@ -1497,7 +1531,8 @@ mod tests {
         let mut options = options_json();
         options["weaponCrateCount"] = Value::Null;
 
-        let error = create_random_loot(random_request(1, options)).unwrap_err();
+        let error =
+            create_random_loot(random_request(1, options), &mut DiagSink::capture()).unwrap_err();
 
         assert!(error.message.contains("WeaponCrateCount"), "{error:?}");
     }
@@ -1508,8 +1543,11 @@ mod tests {
         let mut envelope = db_json();
         envelope["itemsView"][PLAIN_ITEM_TPL]["name"] = Value::Null;
 
-        let error =
-            create_random_loot(request_from(envelope, 1, crates_only_options())).unwrap_err();
+        let error = create_random_loot(
+            request_from(envelope, 1, crates_only_options()),
+            &mut DiagSink::capture(),
+        )
+        .unwrap_err();
 
         assert!(error.message.contains("has no name"), "{error:?}");
     }
@@ -1528,7 +1566,9 @@ mod tests {
         options["weaponCrateCount"] = json!({ "min": 0, "max": 0 });
         options["weaponPresetCount"] = json!({ "min": 1, "max": 1 });
 
-        let error = create_random_loot(request_from(envelope, 1, options)).unwrap_err();
+        let error =
+            create_random_loot(request_from(envelope, 1, options), &mut DiagSink::capture())
+                .unwrap_err();
 
         assert!(error.message.contains("has no items"), "{error:?}");
     }
@@ -1643,10 +1683,16 @@ mod tests {
     #[test]
     fn a_test_seed_makes_the_sealed_case_deterministic() {
         for seed in 0..25 {
-            let a =
-                get_sealed_weapon_case_loot(sealed_request(seed, sealed_settings_json())).unwrap();
-            let b =
-                get_sealed_weapon_case_loot(sealed_request(seed, sealed_settings_json())).unwrap();
+            let a = get_sealed_weapon_case_loot(
+                sealed_request(seed, sealed_settings_json()),
+                &mut DiagSink::capture(),
+            )
+            .unwrap();
+            let b = get_sealed_weapon_case_loot(
+                sealed_request(seed, sealed_settings_json()),
+                &mut DiagSink::capture(),
+            )
+            .unwrap();
 
             assert_eq!(shape(&a), shape(&b), "seed {seed}");
         }
@@ -1656,8 +1702,10 @@ mod tests {
     /// order `:495-502` builds them in, at a pinned seed so a draw-count regression shows up.
     #[test]
     fn a_pinned_seed_draws_a_known_sealed_case() {
+        let mut sink = DiagSink::capture();
         let result =
-            get_sealed_weapon_case_loot(sealed_request(12345, sealed_settings_json())).unwrap();
+            get_sealed_weapon_case_loot(sealed_request(12345, sealed_settings_json()), &mut sink)
+                .unwrap();
 
         assert_eq!(
             shape(&result),
@@ -1675,7 +1723,7 @@ mod tests {
                 ],
             ]
         );
-        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        assert!(sink.captured().is_empty(), "{:?}", sink.captured());
 
         // The cartridge that lands on location 0 goes out without one, as live does it.
         let ammo_box = result.items.last().unwrap();
@@ -1695,8 +1743,11 @@ mod tests {
         settings["weaponModRewardLimits"] = json!({});
 
         for seed in 0..10 {
-            let result =
-                get_sealed_weapon_case_loot(sealed_request(seed, settings.clone())).unwrap();
+            let result = get_sealed_weapon_case_loot(
+                sealed_request(seed, settings.clone()),
+                &mut DiagSink::capture(),
+            )
+            .unwrap();
 
             assert_eq!(
                 shape(&result),
@@ -1717,7 +1768,9 @@ mod tests {
         settings["defaultPresetsOnly"] = json!(true);
         settings["weaponModRewardLimits"] = json!({});
 
-        let result = get_sealed_weapon_case_loot(sealed_request(4, settings)).unwrap();
+        let result =
+            get_sealed_weapon_case_loot(sealed_request(4, settings), &mut DiagSink::capture())
+                .unwrap();
         let preset = &result.items[0];
 
         assert!(
@@ -1738,15 +1791,17 @@ mod tests {
         settings["defaultPresetsOnly"] = json!(true);
         settings["weaponModRewardLimits"] = json!({});
 
+        let mut sink = DiagSink::capture();
         let result =
-            get_sealed_weapon_case_loot(sealed_request_from(envelope, 6, settings)).unwrap();
+            get_sealed_weapon_case_loot(sealed_request_from(envelope, 6, settings), &mut sink)
+                .unwrap();
 
         assert_eq!(result.items.len(), 1);
         assert_eq!(
-            result.diagnostics[0].locale_key.as_deref(),
+            sink.captured()[0].locale_key.as_deref(),
             Some("loot-default_preset_not_found_using_random")
         );
-        assert_eq!(result.diagnostics[0].args, Some(json!(WEAPON_TPL)));
+        assert_eq!(sink.captured()[0].args, Some(json!(WEAPON_TPL)));
     }
 
     /// The weighted pick landed on a tpl the db has no item for (`:470-476`).
@@ -1755,14 +1810,15 @@ mod tests {
         let mut settings = sealed_settings_json();
         settings["weaponRewardWeight"] = json!({ "aaaaaaaaaaaaaaaaaaaaaaa9": 1 });
 
-        let result = get_sealed_weapon_case_loot(sealed_request(1, settings)).unwrap();
+        let mut sink = DiagSink::capture();
+        let result = get_sealed_weapon_case_loot(sealed_request(1, settings), &mut sink).unwrap();
 
         assert!(result.items.is_empty());
         assert_eq!(
-            result.diagnostics[0].locale_key.as_deref(),
+            sink.captured()[0].locale_key.as_deref(),
             Some("loot-non_item_picked_as_sealed_weapon_crate_reward")
         );
-        assert_eq!(result.diagnostics[0].level, ERROR);
+        assert_eq!(sink.captured()[0].level, ERROR);
     }
 
     /// A tpl with no presets at all: `GetArrayValue` on the empty list is C#'s
@@ -1774,8 +1830,11 @@ mod tests {
         let mut settings = mods_only_settings();
         settings["weaponRewardWeight"] = json!({ VEST_TPL: 1 });
 
-        let error =
-            get_sealed_weapon_case_loot(sealed_request_from(envelope, 1, settings)).unwrap_err();
+        let error = get_sealed_weapon_case_loot(
+            sealed_request_from(envelope, 1, settings),
+            &mut DiagSink::capture(),
+        )
+        .unwrap_err();
 
         assert!(error.message.contains("Preset pool"), "{error:?}");
     }
@@ -1789,8 +1848,11 @@ mod tests {
         let mut settings = mods_only_settings();
         settings["weaponModRewardLimits"] = json!({ MISC_NODE: { "min": 3, "max": 3 } });
 
-        let result =
-            get_sealed_weapon_case_loot(sealed_request_from(envelope, 8, settings)).unwrap();
+        let result = get_sealed_weapon_case_loot(
+            sealed_request_from(envelope, 8, settings),
+            &mut DiagSink::capture(),
+        )
+        .unwrap();
 
         // The preset group plus three mod rewards, all of the one mod that survived the filter —
         // the blacklisted mod and the one parented outside the reward key are both gone.
@@ -1808,12 +1870,13 @@ mod tests {
         settings["defaultPresetsOnly"] = json!(true);
         settings["weaponModRewardLimits"] = json!({ ARMOR: { "min": 1, "max": 1 } });
 
-        let result = get_sealed_weapon_case_loot(sealed_request(2, settings)).unwrap();
+        let mut sink = DiagSink::capture();
+        let result = get_sealed_weapon_case_loot(sealed_request(2, settings), &mut sink).unwrap();
 
         assert_eq!(result.items.len(), 1);
-        assert_eq!(result.diagnostics[0].level, DEBUG);
+        assert_eq!(sink.captured()[0].level, DEBUG);
         assert_eq!(
-            result.diagnostics[0].message.as_deref(),
+            sink.captured()[0].message.as_deref(),
             Some(
                 format!(
                     "No items found to fulfil reward type: {ARMOR} for weapon: weapon_default, skipping type"
@@ -1844,12 +1907,16 @@ mod tests {
 
         let mut seeds_that_disagree = 0;
         for seed in 0..25 {
-            let with_skip =
-                get_sealed_weapon_case_loot(sealed_request(seed, with_skip_settings.clone()))
-                    .unwrap();
-            let without =
-                get_sealed_weapon_case_loot(sealed_request(seed, without_settings.clone()))
-                    .unwrap();
+            let with_skip = get_sealed_weapon_case_loot(
+                sealed_request(seed, with_skip_settings.clone()),
+                &mut DiagSink::capture(),
+            )
+            .unwrap();
+            let without = get_sealed_weapon_case_loot(
+                sealed_request(seed, without_settings.clone()),
+                &mut DiagSink::capture(),
+            )
+            .unwrap();
 
             // Both hand back the preset and one mod; only which mod can differ.
             assert_eq!(with_skip.items.len(), 2, "seed {seed}");
@@ -1872,8 +1939,11 @@ mod tests {
         settings["rewardTypeLimits"] = json!({ AMMO_BOX: { "min": 4, "max": 4 } });
 
         for seed in 0..15 {
-            let result =
-                get_sealed_weapon_case_loot(sealed_request(seed, settings.clone())).unwrap();
+            let result = get_sealed_weapon_case_loot(
+                sealed_request(seed, settings.clone()),
+                &mut DiagSink::capture(),
+            )
+            .unwrap();
 
             assert_eq!(result.items.len(), 5, "seed {seed}");
             for box_group in &result.items[1..] {
@@ -1892,12 +1962,14 @@ mod tests {
         settings["weaponModRewardLimits"] = json!({});
         settings["rewardTypeLimits"] = json!({ AMMO_BOX: { "min": 1, "max": 1 } });
 
+        let mut sink = DiagSink::capture();
         let result =
-            get_sealed_weapon_case_loot(sealed_request_from(envelope, 1, settings)).unwrap();
+            get_sealed_weapon_case_loot(sealed_request_from(envelope, 1, settings), &mut sink)
+                .unwrap();
 
         assert_eq!(result.items.len(), 1);
         assert_eq!(
-            result.diagnostics[0].message.as_deref(),
+            sink.captured()[0].message.as_deref(),
             Some(format!("No ammo box with caliber {WEAPON_CALIBER} found, skipping").as_str())
         );
     }
@@ -1912,7 +1984,9 @@ mod tests {
         settings["rewardTypeLimits"] = json!({ AMMO_BOX: { "min": 1, "max": 1 } });
         settings["ammoBoxWhitelist"] = json!(["aaaaaaaaaaaaaaaaaaaaaaa9"]);
 
-        let error = get_sealed_weapon_case_loot(sealed_request(1, settings)).unwrap_err();
+        let error =
+            get_sealed_weapon_case_loot(sealed_request(1, settings), &mut DiagSink::capture())
+                .unwrap_err();
 
         assert!(
             error.message.contains("aaaaaaaaaaaaaaaaaaaaaaa9"),
@@ -1931,9 +2005,11 @@ mod tests {
         settings["weaponModRewardLimits"] = json!({});
         settings["rewardTypeLimits"] = json!({ MISC_NODE: { "min": 2, "max": 2 } });
 
-        let blacklist_only =
-            get_sealed_weapon_case_loot(sealed_request_from(envelope.clone(), 1, settings.clone()))
-                .unwrap();
+        let blacklist_only = get_sealed_weapon_case_loot(
+            sealed_request_from(envelope.clone(), 1, settings.clone()),
+            &mut DiagSink::capture(),
+        )
+        .unwrap();
 
         // Only the blacklisted item is eligible — every other MISC item is filtered out.
         assert_eq!(blacklist_only.items.len(), 3);
@@ -1943,14 +2019,16 @@ mod tests {
         }
 
         settings["allowBossItems"] = json!(true);
+        let mut sink = DiagSink::capture();
         let boss_items_allowed =
-            get_sealed_weapon_case_loot(sealed_request_from(envelope, 1, settings)).unwrap();
+            get_sealed_weapon_case_loot(sealed_request_from(envelope, 1, settings), &mut sink)
+                .unwrap();
 
         // `!(true || IsBossItem(id))` is false for every item, so the pool is empty and the branch
         // only logs.
         assert_eq!(boss_items_allowed.items.len(), 1);
         assert_eq!(
-            boss_items_allowed.diagnostics[0].message.as_deref(),
+            sink.captured()[0].message.as_deref(),
             Some(format!("No items with base type of {MISC_NODE} found, skipping").as_str())
         );
     }
@@ -1966,11 +2044,13 @@ mod tests {
         settings["weaponModRewardLimits"] = json!({});
         settings["rewardTypeLimits"] = json!({ MISC_NODE: { "min": 1, "max": 1 } });
 
+        let mut sink = DiagSink::capture();
         let result =
-            get_sealed_weapon_case_loot(sealed_request_from(envelope, 1, settings)).unwrap();
+            get_sealed_weapon_case_loot(sealed_request_from(envelope, 1, settings), &mut sink)
+                .unwrap();
 
         assert_eq!(result.items.len(), 1);
-        assert_eq!(result.diagnostics[0].level, DEBUG);
+        assert_eq!(sink.captured()[0].level, DEBUG);
     }
 
     // -----------------------------------------------------------------------

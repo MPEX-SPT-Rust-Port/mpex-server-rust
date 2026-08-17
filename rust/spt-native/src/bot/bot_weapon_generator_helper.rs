@@ -246,6 +246,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::diag::DiagSink;
 
     use crate::bot::durability_limits_helper::BotDurability;
     use crate::bot::models::{EquipmentFilters, RandomisedResourceDetails};
@@ -345,7 +346,7 @@ mod tests {
                 secure_container_ammo_stack_count: 0,
                 mod_pool_slot_order: &crate::bot::NO_MOD_POOL_ORDER,
                 is_night_time: false,
-                diagnostics: Vec::new(),
+                diagnostics: DiagSink::capture(),
             }
         }
     }
@@ -445,7 +446,7 @@ mod tests {
             get_randomized_bullet_count(&mut ctx, &three_magazines(), MAGAZINE_TPL).unwrap();
 
         assert_eq!(count, Some(90.0));
-        assert!(ctx.diagnostics.is_empty());
+        assert!(ctx.diagnostics.captured().is_empty());
     }
 
     #[test]
@@ -512,10 +513,10 @@ mod tests {
             None
         );
 
-        assert_eq!(ctx.diagnostics.len(), 2);
-        assert_eq!(ctx.diagnostics[0].level, ERROR);
+        assert_eq!(ctx.diagnostics.captured().len(), 2);
+        assert_eq!(ctx.diagnostics.captured()[0].level, ERROR);
         assert_eq!(
-            ctx.diagnostics[0].message.as_deref(),
+            ctx.diagnostics.captured()[0].message.as_deref(),
             Some(
                 format!(
                     "Parent item null when trying to get randomized bullet count for: {ORPHAN_MAGAZINE_TPL}"
@@ -575,7 +576,7 @@ mod tests {
                 .and_then(|upd| upd.stack_objects_count),
             Some(30.0)
         );
-        assert!(ctx.diagnostics.is_empty());
+        assert!(ctx.diagnostics.captured().is_empty());
     }
 
     #[test]

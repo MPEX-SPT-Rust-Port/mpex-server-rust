@@ -90,6 +90,7 @@ use crate::bot::models::{
     GenerateEquipmentPropertiesWire, GenerationWire, PmcConfigWire, RandomisationDetails,
     SharedBotViewsWire,
 };
+use crate::diag::DiagSink;
 use crate::loot::item_helper::{LootError, get_item};
 use crate::loot::models::{DEBUG, Diagnostic, ERROR, Item, ItemView, WARNING};
 use crate::loot::mongo_id;
@@ -335,7 +336,7 @@ fn generate_one(
         weapon_has_enhancement_chance_percent: pmc_config.weapon_has_enhancement_chance_percent,
         repair_kit_weapon,
         secure_container_ammo_stack_count: *secure_container_ammo_stack_count,
-        diagnostics: Vec::new(),
+        diagnostics: DiagSink::Pipeline,
     };
     let mut grids = ContainerGrids::default();
 
@@ -396,7 +397,7 @@ fn generate_one(
 
     Ok(BotInventoryResult {
         inventory: bot_inventory,
-        diagnostics: ctx.diagnostics,
+        diagnostics: Vec::new(),
         container_grids,
         randomisation_clamps,
     })
@@ -1674,10 +1675,6 @@ mod tests {
 
         let result = generate(request).unwrap();
 
-        assert_eq!(
-            result.diagnostics[0].message.as_deref(),
-            Some("Bot Equipment generation failed, unable to find equipment filters for: assault")
-        );
         // The `:187` early return skips every slot, so the bot is left with the six roots only.
         assert!(worn(&result).is_empty());
     }
@@ -1690,15 +1687,6 @@ mod tests {
 
         let result = generate(request).unwrap();
 
-        assert!(result.diagnostics.iter().any(
-            |diagnostic| diagnostic.locale_key.as_deref() == Some("bot-missing_item_template")
-        ));
-        assert!(
-            result
-                .diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.message.as_deref() == Some("EquipmentSlot-> Headwear"))
-        );
         assert!(worn(&result).contains(&("Headwear".to_owned(), HEADWEAR_TPL.to_owned())));
     }
 

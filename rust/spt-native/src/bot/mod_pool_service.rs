@@ -189,6 +189,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::diag::DiagSink;
 
     use crate::bot::durability_limits_helper::BotDurability;
     use crate::bot::models::{EquipmentFilters, RandomisedResourceDetails};
@@ -278,7 +279,7 @@ mod tests {
                 secure_container_ammo_stack_count: 0,
                 mod_pool_slot_order: &self.order,
                 is_night_time: false,
-                diagnostics: Vec::new(),
+                diagnostics: DiagSink::capture(),
             }
         }
     }
@@ -390,15 +391,15 @@ mod tests {
         let found = get_compatible_mods_for_weapon_slot(&mut ctx, WEAPON_TPL, "mod_scope");
 
         assert_eq!(found, IndexSet::from([SCOPE_TPL.to_owned()]));
-        assert!(ctx.diagnostics.is_empty());
+        assert!(ctx.diagnostics.captured().is_empty());
 
         let missing = get_compatible_mods_for_weapon_slot(&mut ctx, WEAPON_TPL, "mod_stock");
 
         assert!(missing.is_empty());
-        assert_eq!(ctx.diagnostics.len(), 1);
-        assert_eq!(ctx.diagnostics[0].level, WARNING);
+        assert_eq!(ctx.diagnostics.captured().len(), 1);
+        assert_eq!(ctx.diagnostics.captured()[0].level, WARNING);
         assert_eq!(
-            ctx.diagnostics[0].message.as_deref(),
+            ctx.diagnostics.captured()[0].message.as_deref(),
             Some(format!("Slot: mod_stock not found for item: {WEAPON_TPL} in cache").as_str())
         );
     }

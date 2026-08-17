@@ -2501,6 +2501,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::diag::DiagSink;
 
     use crate::bot::durability_limits_helper::BotDurability;
     use crate::bot::models::RandomisedResourceDetails;
@@ -2635,7 +2636,7 @@ mod tests {
                 repair_kit_weapon: &crate::bot::NO_BUFFS,
                 secure_container_ammo_stack_count: 0,
                 mod_pool_slot_order: &crate::bot::NO_MOD_POOL_ORDER,
-                diagnostics: Vec::new(),
+                diagnostics: DiagSink::capture(),
             }
         }
     }
@@ -2900,10 +2901,10 @@ mod tests {
             Some(IndexSet::from([DEFAULT_PLATE.to_owned()]))
         );
         // `:409-414`, with the wrapped-to-min level string the loop left behind.
-        assert_eq!(ctx.diagnostics.len(), 1);
-        assert_eq!(ctx.diagnostics[0].level, DEBUG);
+        assert_eq!(ctx.diagnostics.captured().len(), 1);
+        assert_eq!(ctx.diagnostics.captured()[0].level, DEBUG);
         assert_eq!(
-            ctx.diagnostics[0].message.as_deref(),
+            ctx.diagnostics.captured()[0].message.as_deref(),
             Some(
                 format!(
                     "Plate filter too restrictive for armor: plate_carrier {CARRIER}, unable to find plates of level: 2, using items default plate"
@@ -3156,6 +3157,7 @@ mod tests {
         assert_eq!(equipment.len(), 1, "the slot should have been skipped");
         let reported = ctx
             .diagnostics
+            .captured()
             .last()
             .expect("the failed selection is reported");
         assert_eq!(reported.level, DEBUG);
@@ -3191,10 +3193,10 @@ mod tests {
         .unwrap();
 
         assert_eq!(equipment.len(), 1);
-        assert_eq!(ctx.diagnostics.len(), 1);
-        assert_eq!(ctx.diagnostics[0].level, WARNING);
+        assert_eq!(ctx.diagnostics.captured().len(), 1);
+        assert_eq!(ctx.diagnostics.captured()[0].level, WARNING);
         assert_eq!(
-            ctx.diagnostics[0].message.as_deref(),
+            ctx.diagnostics.captured()[0].message.as_deref(),
             Some(
                 format!("bot: assault lacks a mod slot pool for item: {PRESET_ARMOR} preset_armor")
                     .as_str()
@@ -3228,6 +3230,7 @@ mod tests {
 
         let reported = ctx
             .diagnostics
+            .captured()
             .iter()
             .find(|entry| entry.locale_key.as_deref() == Some("bot-mod_slot_missing_from_item"))
             .expect("the missing slot is reported");
@@ -3416,7 +3419,7 @@ mod tests {
                     repair_kit_weapon: &crate::bot::NO_BUFFS,
                     secure_container_ammo_stack_count: 0,
                     mod_pool_slot_order: &crate::bot::NO_MOD_POOL_ORDER,
-                    diagnostics: Vec::new(),
+                    diagnostics: DiagSink::capture(),
                 }
             }
         }
@@ -3679,6 +3682,7 @@ mod tests {
             assert_eq!(request.mod_limits.scope.count, Some(2));
             let reported = ctx
                 .diagnostics
+                .captured()
                 .last()
                 .expect("the refused scope is reported");
             assert_eq!(reported.level, DEBUG);
@@ -3724,7 +3728,7 @@ mod tests {
                 "scope"
             ));
             assert_eq!(count.count, Some(5));
-            assert!(ctx.diagnostics.is_empty());
+            assert!(ctx.diagnostics.captured().is_empty());
         }
 
         /// `:1800-1813`: one ammo tpl, cloned into **every** slot of the cylinder — the non-camora
@@ -3774,6 +3778,7 @@ mod tests {
             );
             let reported = ctx
                 .diagnostics
+                .captured()
                 .iter()
                 .find(|entry| {
                     entry.locale_key.as_deref()
@@ -3809,7 +3814,7 @@ mod tests {
 
             assert_eq!(weapon.len(), 4);
             assert!(weapon[1..].iter().all(|item| item.template == SHELL));
-            assert!(ctx.diagnostics.is_empty());
+            assert!(ctx.diagnostics.captured().is_empty());
         }
 
         /// A cylinder whose pool holds neither `cartridges` nor `camora_000` is reported and skipped.
@@ -3832,13 +3837,13 @@ mod tests {
             );
 
             assert!(weapon.is_empty());
-            assert_eq!(ctx.diagnostics.len(), 1);
-            assert_eq!(ctx.diagnostics[0].level, ERROR);
+            assert_eq!(ctx.diagnostics.captured().len(), 1);
+            assert_eq!(ctx.diagnostics.captured()[0].level, ERROR);
             assert_eq!(
-                ctx.diagnostics[0].locale_key.as_deref(),
+                ctx.diagnostics.captured()[0].locale_key.as_deref(),
                 Some("bot-missing_cartridge_slot")
             );
-            assert_eq!(ctx.diagnostics[0].args, Some(json!(CYLINDER)));
+            assert_eq!(ctx.diagnostics.captured()[0].args, Some(json!(CYLINDER)));
         }
 
         /// The whitelist keeps whitelisted sight base classes and mounts that hold only those.
@@ -3862,7 +3867,7 @@ mod tests {
                 filter_sights_by_weapon_type(&mut ctx, &weapon, &scopes, &whitelist),
                 IndexSet::from([SCOPE.to_owned(), SCOPE_MOUNT.to_owned()])
             );
-            assert!(ctx.diagnostics.is_empty());
+            assert!(ctx.diagnostics.captured().is_empty());
 
             // A weapon type with no whitelist entry keeps the whole pool, and says so.
             let unlisted: IndexMap<String, Vec<String>> =
@@ -3871,10 +3876,10 @@ mod tests {
                 filter_sights_by_weapon_type(&mut ctx, &weapon, &scopes, &unlisted),
                 scopes
             );
-            assert_eq!(ctx.diagnostics.len(), 1);
-            assert_eq!(ctx.diagnostics[0].level, DEBUG);
+            assert_eq!(ctx.diagnostics.captured().len(), 1);
+            assert_eq!(ctx.diagnostics.captured()[0].level, DEBUG);
             assert_eq!(
-                ctx.diagnostics[0].message.as_deref(),
+                ctx.diagnostics.captured()[0].message.as_deref(),
                 Some(
                     format!(
                         "Unable to find whitelist for weapon type: {RIFLE_CLASS} m4a1, skipping sight filtering"
@@ -3996,14 +4001,14 @@ mod tests {
             generate_mods_for_weapon(&mut ctx, &mut request).unwrap();
 
             assert_eq!(request.weapon.len(), 1);
-            assert_eq!(ctx.diagnostics.len(), 1);
-            assert_eq!(ctx.diagnostics[0].level, ERROR);
+            assert_eq!(ctx.diagnostics.captured().len(), 1);
+            assert_eq!(ctx.diagnostics.captured()[0].level, ERROR);
             assert_eq!(
-                ctx.diagnostics[0].locale_key.as_deref(),
+                ctx.diagnostics.captured()[0].locale_key.as_deref(),
                 Some("bot-unable_to_add_mods_to_weapon_missing_ammo_slot")
             );
             assert_eq!(
-                ctx.diagnostics[0].args.as_ref().unwrap()["weaponName"],
+                ctx.diagnostics.captured()[0].args.as_ref().unwrap()["weaponName"],
                 "shell"
             );
         }
@@ -4023,13 +4028,13 @@ mod tests {
             generate_mods_for_weapon(&mut ctx, &mut request).unwrap();
 
             assert_eq!(request.weapon.len(), 1);
-            assert_eq!(ctx.diagnostics.len(), 1);
+            assert_eq!(ctx.diagnostics.captured().len(), 1);
             assert_eq!(
-                ctx.diagnostics[0].locale_key.as_deref(),
+                ctx.diagnostics.captured()[0].locale_key.as_deref(),
                 Some("bot-weapon_missing_mod_slot")
             );
             assert_eq!(
-                ctx.diagnostics[0].args.as_ref().unwrap()["modSlot"],
+                ctx.diagnostics.captured()[0].args.as_ref().unwrap()["modSlot"],
                 "mod_launcher"
             );
         }

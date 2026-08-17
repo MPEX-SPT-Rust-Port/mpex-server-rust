@@ -891,6 +891,7 @@ pub fn generate(
 
 #[cfg(test)]
 mod tests {
+    use crate::diag::DiagSink;
     use crate::loot::random_util::TestSeedGuard;
     use crate::quest::QuestContext;
     use crate::quest::helper::PRAPOR;
@@ -948,6 +949,7 @@ mod tests {
     fn a_seeded_elimination_quest_draws_one_or_two_body_parts_and_empties_the_target_pool() {
         let slice = slice();
         let mut ctx = QuestContext::from_slice(&slice);
+        ctx.diagnostics = DiagSink::capture();
         let config = daily_config();
         let mut pool = pool();
 
@@ -1070,6 +1072,7 @@ mod tests {
 
         let slice = slice();
         let mut ctx = QuestContext::from_slice(&slice);
+        ctx.diagnostics = DiagSink::capture();
         let mut pool = pool();
 
         let _guard = TestSeedGuard::install(7);
