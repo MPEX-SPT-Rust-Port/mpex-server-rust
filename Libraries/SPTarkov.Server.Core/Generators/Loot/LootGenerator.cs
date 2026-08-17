@@ -216,8 +216,6 @@ public class LootGenerator(
             }
         );
 
-        PayloadProjection.ReplayDiagnostics(result.Diagnostics, logger, serverLocalisationService);
-
         return result.Items;
     }
 
@@ -355,8 +353,6 @@ public class LootGenerator(
                 ForcedLoot = forcedLootToAdd,
             }
         );
-
-        PayloadProjection.ReplayDiagnostics(result.Diagnostics, logger, serverLocalisationService);
 
         return result.Items;
     }
@@ -714,8 +710,6 @@ public class LootGenerator(
             }
         );
 
-        PayloadProjection.ReplayDiagnostics(result.Diagnostics, logger, serverLocalisationService);
-
         return result.Items;
     }
 
@@ -949,8 +943,6 @@ public class LootGenerator(
                 PresetTpls = [.. presetHelper.GetTplsWithPresets()],
             }
         );
-
-        PayloadProjection.ReplayDiagnostics(result.Diagnostics, logger, serverLocalisationService);
 
         return result.Items;
     }

@@ -15,10 +15,8 @@ using SPTarkov.Server.Core.Models.Spt.Config;
 using SPTarkov.Server.Core.Models.Spt.Tables;
 using SPTarkov.Server.Core.Native;
 using SPTarkov.Server.Core.Native.Bot;
-using SPTarkov.Server.Core.Native.Loot;
 using SPTarkov.Server.Core.Services.Bot;
 using SPTarkov.Server.Core.Services.Items;
-using SPTarkov.Server.Core.Services.Locales;
 using SPTarkov.Server.Core.Services.Profile;
 using SPTarkov.Server.Core.Utils.Cloners;
 
@@ -50,7 +48,6 @@ public class BotWaveBatcher(
     HandbookHelper handbookHelper,
     GlobalTable globalTable,
     MatchBotDetailsCacheService matchBotDetailsCacheService,
-    ServerLocalisationService serverLocalisationService,
     BotConfig botConfig,
     PmcConfig pmcConfig,
     RepairConfig repairConfig,
@@ -154,7 +151,6 @@ public class BotWaveBatcher(
                 }
 
                 entry.Bot.Inventory = envelope.Result.Inventory;
-                PayloadProjection.ReplayDiagnostics(envelope.Result.Diagnostics, logger, serverLocalisationService);
                 if (!entry.Details.ClearBotContainerCacheAfterGeneration)
                 {
                     botInventoryGenerator.RestoreContainerGrids(entry.Bot.Id.Value, envelope.Result.ContainerGrids);

@@ -20,7 +20,6 @@ using SPTarkov.Server.Core.Models.Spt.Bots;
 using SPTarkov.Server.Core.Models.Spt.Config;
 using SPTarkov.Server.Core.Native;
 using SPTarkov.Server.Core.Native.Bot;
-using SPTarkov.Server.Core.Native.Loot;
 using SPTarkov.Server.Core.Services;
 using SPTarkov.Server.Core.Services.Bot;
 using SPTarkov.Server.Core.Services.Locales;
@@ -236,8 +235,6 @@ public class BotInventoryGenerator(
                 botWeaponGenerator.RepairConfig
             )
         );
-
-        PayloadProjection.ReplayDiagnostics(result.Diagnostics, logger, serverLocalisationService);
 
         // The cache is state the native side kept to itself; when the caller wants it afterwards the
         // grids have to be put back. Legacy clears it instead when the flag is set, and there is

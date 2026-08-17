@@ -199,8 +199,6 @@ public class LocationLootGenerator(
             }
         );
 
-        ReplayDiagnostics(result.Diagnostics);
-
         // Carry the counts the native side reached into the dynamic phase
         counterTrackerHelper.SetTrackedCounts(result.TrackedCounts);
 
@@ -254,8 +252,6 @@ public class LocationLootGenerator(
                 LooseLoot = dynamicLootDist is null ? RawLooseLootJson(locationName) : dynamicLootDist,
             }
         );
-
-        ReplayDiagnostics(result.Diagnostics);
 
         // Keep the tracker in step with what the native side counted
         counterTrackerHelper.SetTrackedCounts(result.TrackedCounts);
@@ -358,12 +354,6 @@ public class LocationLootGenerator(
     private static double MultiplierForLocation(Dictionary<string, double> multipliers, string locationId)
     {
         return multipliers.TryGetValue(locationId, out var multiplier) ? multiplier : multipliers["default"];
-    }
-
-    /// <inheritdoc cref="PayloadProjection.ReplayDiagnostics{T}"/>
-    private void ReplayDiagnostics(List<Diagnostic> diagnostics)
-    {
-        PayloadProjection.ReplayDiagnostics(diagnostics, logger, serverLocalisationService);
     }
 
     private List<SpawnpointTemplate> GenerateStaticContainersLegacy(

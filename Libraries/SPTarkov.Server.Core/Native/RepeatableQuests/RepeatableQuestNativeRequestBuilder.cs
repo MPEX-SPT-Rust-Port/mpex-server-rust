@@ -1,4 +1,3 @@
-using SPTarkov.Common.Models.Logging;
 using SPTarkov.DI.Annotations;
 using SPTarkov.Server.Core.Helpers.Items;
 using SPTarkov.Server.Core.Helpers.Profile;
@@ -12,7 +11,6 @@ using SPTarkov.Server.Core.Models.Spt.Repeatable;
 using SPTarkov.Server.Core.Models.Spt.Tables;
 using SPTarkov.Server.Core.Native.Loot;
 using SPTarkov.Server.Core.Services.Items;
-using SPTarkov.Server.Core.Services.Locales;
 using SPTarkov.Server.Core.Services.Server;
 using LocationTable = SPTarkov.Server.Core.Models.Spt.Tables.LocationTable;
 
@@ -32,14 +30,12 @@ namespace SPTarkov.Server.Core.Native.RepeatableQuests;
 /// </summary>
 [Injectable(InjectionType.Singleton)]
 public class RepeatableQuestNativeRequestBuilder(
-    ISptLogger<RepeatableQuestNativeRequestBuilder> logger,
     TemplateTable templateTable,
     LocationTable locationTable,
     HandbookHelper handbookHelper,
     PresetHelper presetHelper,
     ItemFilterService itemFilterService,
     SeasonalEventService seasonalEventService,
-    ServerLocalisationService localisationService,
     QuestConfig questConfig,
     DatabaseMutationStamp databaseMutationStamp,
     IReadOnlyList<SptMod> loadedMods
@@ -112,8 +108,6 @@ public class RepeatableQuestNativeRequestBuilder(
         }
 
         LastSentSliceStamp = eligible ? stamp : NeverSent;
-
-        PayloadProjection.ReplayDiagnostics(result.Diagnostics, logger, localisationService);
 
         return (result.Quest, result.Pool);
     }
