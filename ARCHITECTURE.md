@@ -156,10 +156,11 @@ startup outside DEBUG. That format is a contract shared with `rust/spt-native/sr
 `Libraries/SPTarkov.Common/Native/NativeMethods.cs`, because `SPTarkov.Common` cannot reference
 Server.Core. It owns database hash verification, the ported generation
 paths — location loot, reward loot, whole-bot inventory, dynamic ragfair offers, repeatable quests,
-scav case rewards — and the whole log pipeline. Eighteen exports, JSON in / JSON out — except the
-ragfair response, which comes back as a framed MessagePack envelope, and the log exports, where
-`spt_logger_init` takes the raw `sptLogger.json` bytes and `spt_log_emit` passes one line's fields
-directly — with `spt_native_abi_version` handshaking against `SptNative.ExpectedAbiVersion`.
+scav case rewards — the item base-class cache build, and the whole log pipeline. Nineteen exports,
+JSON in / JSON out — except the ragfair response, which comes back as a framed MessagePack
+envelope, and the log exports, where `spt_logger_init` takes the raw `sptLogger.json` bytes and
+`spt_log_emit` passes one line's fields directly — with `spt_native_abi_version` handshaking against
+`SptNative.ExpectedAbiVersion`.
 
 Payloads are projected from the live database on every call, with one exception: the ragfair
 request's call-invariant half is sent only when `DatabaseMutationStamp` — a singleton the
@@ -168,7 +169,7 @@ parsed copy keyed by that stamp. Because a mod writing an injected table directl
 those bump sites, the skip is gated on no mods being loaded, with opt-in and kill-switch flags on
 `RagfairConfig`; a cache miss self-heals by resending. See `RUST-ROADMAP.md` § *Exceptions in force*.
 
-Every ported *generator* keeps its complete 4.1.2 C# implementation as a **legacy path**, taken
+Every ported *class* keeps its complete 4.1.2 C# implementation as a **legacy path**, taken
 automatically when a mod hooks it or forced by config — so a Rust cutover never removes a mod's
 extension point. `DatabaseImporter` calls `SptNative.EnsureLoadable()` on every startup, so a missing
 or ABI-mismatched library fails fast.

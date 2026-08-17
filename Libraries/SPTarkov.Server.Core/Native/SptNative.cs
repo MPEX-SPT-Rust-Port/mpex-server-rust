@@ -4,6 +4,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using SPTarkov.Server.Core.Models.Eft.Ragfair;
 using SPTarkov.Server.Core.Models.Enums;
+using SPTarkov.Server.Core.Native.BaseClass;
 using SPTarkov.Server.Core.Native.Bot;
 using SPTarkov.Server.Core.Native.Loot;
 using SPTarkov.Server.Core.Native.Ragfair;
@@ -49,11 +50,12 @@ internal enum LootExport
     BotInventoryBatch,
     RepeatableQuest,
     ScavCaseRewards,
+    ItemBaseClass,
 }
 
 public static class SptNative
 {
-    private const uint ExpectedAbiVersion = 18;
+    private const uint ExpectedAbiVersion = 19;
 
     // ffi.rs
     private const int StatusOk = 0;
@@ -175,6 +177,19 @@ public static class SptNative
     public static ScavCaseRewardsResponse GenerateScavCaseRewards(ScavCaseRewardsRequest request)
     {
         return Generate<ScavCaseRewardsResponse>(LootExport.ScavCaseRewards, JsonSerializer.SerializeToUtf8Bytes(request, LootJsonOptions));
+    }
+
+    /// <summary>
+    /// Walks every template's parent chain in one call, handing back the whole
+    /// <c>_itemBaseClassesCache</c> and the root node ids beside it.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">The build failed, or the native side misbehaved.</exception>
+    public static ItemBaseClassResult BuildItemBaseClassCache(ItemBaseClassRequest request)
+    {
+        return Generate<ItemBaseClassResponse>(
+            LootExport.ItemBaseClass,
+            JsonSerializer.SerializeToUtf8Bytes(request, LootJsonOptions)
+        ).Result;
     }
 
     /// <summary>
@@ -462,6 +477,7 @@ public static class SptNative
                     &outPtr,
                     &outLen
                 ),
+                LootExport.ItemBaseClass => NativeMethods.BuildItemBaseClassCache(requestPtr, (nuint)requestUtf8.Length, &outPtr, &outLen),
                 _ => throw new ArgumentOutOfRangeException(nameof(export), export, null),
             };
         }

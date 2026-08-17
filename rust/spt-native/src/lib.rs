@@ -1,3 +1,4 @@
+pub mod base_class;
 pub mod bot;
 pub mod diag;
 pub mod ffi;
@@ -10,4 +11,4 @@ pub mod runtime;
 pub mod scav_case;
 pub mod verify;
 
-pub const ABI_VERSION: u32 = 18;
+pub const ABI_VERSION: u32 = 19;

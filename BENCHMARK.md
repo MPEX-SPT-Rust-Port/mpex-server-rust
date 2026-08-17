@@ -1,8 +1,8 @@
 # Benchmarks
 
 Every benchmark in this repo measures a Rust port against the retained 4.1.2 C# implementation it
-replaced. They live in `Testing/UnitTests/Tests/Generators/` as `[Explicit]` NUnit fixtures, so a
-plain `dotnet test` never runs them:
+replaced. They live under `Testing/UnitTests/Tests/` as `[Explicit]` NUnit fixtures, so a plain
+`dotnet test` never runs them:
 
 | Fixture | Measures |
 |---|---|
@@ -12,6 +12,7 @@ plain `dotnet test` never runs them:
 | `RagfairBenchmarkTests.cs` | a dynamic flea offer pass — elapsed time per pass, with the payload projection timed separately |
 | `RepeatableQuestBenchmarkTests.cs` | one repeatable quest of each type — elapsed time per quest, native measured with the invariant slice cold and warm, with the slice projection timed separately |
 | `ScavCaseBenchmarkTests.cs` | one scav case of each shipped recipe — elapsed time per call, with the request projection timed separately |
+| `ItemBaseClassBenchmarkTests.cs` | one bulk item base class cache build over the shipped items table — elapsed time per hydrate, with the request projection timed separately |
 
 There are no `cargo bench` targets. `Containerfile.dev` mentions `cargo bench` as a toolchain
 capability, not as a suite that exists.
@@ -47,6 +48,10 @@ dotnet test -c Release --filter "FullyQualifiedName~RepeatableQuestBenchmarkTest
 
 # one scav case per shipped recipe, both paths, plus the request projection on its own
 dotnet test -c Release --filter "FullyQualifiedName~ScavCaseBenchmarkTests" \
+  --logger "console;verbosity=detailed"
+
+# one bulk base class cache build, both paths, plus the request projection on its own
+dotnet test -c Release --filter "FullyQualifiedName~ItemBaseClassBenchmarkTests" \
   --logger "console;verbosity=detailed"
 ```
 
@@ -739,6 +744,95 @@ Scav-case-specific caveats, on top of the general ones below:
 - **`Build()`'s mean is not its cost.** 9.26 ms against a 6.84 ms median and a 4.46 ms min, in both
   invocations. Read the median; the phase is skewed by a few slow runs and no cause was measured.
 - **Workstation GC**, as with the ragfair and quest fixtures.
+
+## Results — item base class cache
+
+Recorded 2026-08-17 on `526704c` plus the working-tree fixture that produced them. Same machine as
+the bot-generation, ragfair, repeatable-quest and scav-case figures above, not the machine the
+location-loot figures came from.
+
+| | |
+|---|---|
+| CPU | AMD Ryzen 5 5600H (6C/12T) |
+| RAM | 23 GB |
+| OS | Linux 7.1.8-200.fc44.x86_64 |
+| .NET SDK | 10.0.110 |
+| rustc | 1.97.1 |
+| Configuration | Release, n=20 after 2 warmups, per arm |
+
+**Native loses this one, by ~3.5x.** The build is a deterministic walk over the shipped items table,
+and the C# it replaces is a tight loop over a dictionary the process already holds: no filtering, no
+draws, no clone. There is nothing on the native side that the walk itself can win back against a
+round trip, and this benchmark exists to put a number on the loss rather than to claim one. It is a
+startup path — see *Why native stays the default anyway* below.
+
+**Workload.** One `ItemBaseClassService.HydrateItemBaseClassCache()` call over the live shipped
+items table: 4,673 templates in, a cache of 4,553 tpls carrying 20,218 ancestor ids plus 120 root
+node ids out. This is the whole workload the service has; nothing else about it was ported.
+
+**Two arms**, asserted rather than assumed — the fixture checks `LastPathTaken` before it reports a
+number:
+
+- **native** — the additive constructor, which wires the request builder. What the container builds.
+- **legacy** — the frozen 4.1.2 constructor, which has no native seam and so hydrates legacy
+  unconditionally. Selected by construction rather than by `ItemConfig.ForceLegacyItemBaseClassHydration`,
+  so the fixture never touches the shared config; the dispatcher reaches the same body either way.
+
+**A service instance per run**, built outside the stopwatch. That is the production shape — one
+hydrate on a fresh singleton — and it keeps the legacy arm honest, since its dictionary is built
+from nothing every time.
+
+A third phase times `ItemBaseClassNativeRequestBuilder.Build()` on its own.
+
+### Elapsed time per hydrate
+
+Two full invocations of the fixture. The recorded figures are the second invocation's; the first
+invocation's median is the error bar on it.
+
+| Arm | median | median (1st run) | mean | min | max |
+|---|---|---|---|---|---|
+| **native (rust)** | **29.19 ms** | 29.60 ms | 29.22 ms | 20.35 ms | 44.92 ms |
+| **legacy (C# 4.1.2)** | **8.19 ms** | 8.80 ms | 10.32 ms | 7.42 ms | 23.97 ms |
+| `Build` (request only) | 0.34 ms | 0.29 ms | 0.37 ms | 0.29 ms | 0.62 ms |
+
+Speedup on median elapsed time per hydrate: **0.28x** (0.30x on the first invocation) — native is
+**~3.4-3.6x slower**. An earlier pair of invocations of the same fixture, before the payload-shape
+line was added to it, read 29.45 / 30.52 ms native against 7.52 / 7.42 ms legacy: the same result.
+
+**It is not the request projection.** `Build()` is **0.34 ms**, ~1% of the native median — the
+cheapest request any port in this file builds, because it is two fields per template, `_parent` and
+`_type`, and nothing else. Every other port in this file pays 5-14 ms here; this one does not, and it
+loses anyway. The remaining ~29 ms is the serialise of that request, the native side's parse of it,
+the walk, and binding the response back into `Dictionary<MongoId, HashSet<MongoId>>`. The response is
+the bigger payload of the two: 20,218 ancestor ids across 4,553 sets against the request's 4,673
+two-field entries, and every one of those ids comes back through `MongoId`'s validating constructor.
+
+The legacy path has nothing comparable to pay. It walks each template's parent chain in-process
+against a dictionary it already has, adding straight into the cache — 8.2 ms for the whole table,
+~1.8 µs per template.
+
+**Measurement order does not move this.** Reversing the two arms reads 27.65 ms native against
+8.56 ms legacy (0.31x), inside the spread of the table above. The first-position inflation
+documented on the quest and scav-case fixtures does not appear here on either arm.
+
+### Why native stays the default anyway
+
+`PostDbLoadService.PerformPostDbLoadActions` calls hydrate exactly once, after mods have loaded, and
+a mod that adds items may call it again explicitly. So the measured loss is **~21 ms added to server
+startup**, once, on a path no player and no raid loop ever reaches. Native stays the default for
+family consistency with the other ported services, and
+`ItemConfig.ForceLegacyItemBaseClassHydration` is the opt-out for anyone who disagrees.
+
+Base-class-specific caveats, on top of the general ones below:
+
+- **No allocation or RSS figures.** This fixture times elapsed wall clock only. Native allocates the
+  4,673-entry request view and the whole response map per call, on the managed heap, and neither is
+  measured here.
+- **Only the bulk build is ported.** `AddItemToCache`, the per-item fallback `ItemHasBaseClass` uses
+  for a tpl the bulk build missed, is unchanged C# on both paths and is not measured.
+- **The legacy arm's mean is not its cost.** 10.32 ms against an 8.19 ms median and a 7.42 ms min:
+  a few slow early runs, the same artifact the other fixtures document. Read the median.
+- **Workstation GC**, as with the ragfair, quest and scav-case fixtures.
 
 ## Caveats
 

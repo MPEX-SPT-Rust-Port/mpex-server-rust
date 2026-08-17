@@ -6,14 +6,14 @@ internals see [rust/ARCHITECTURE.md](rust/ARCHITECTURE.md); for the C# side of t
 
 ## Status
 
-The loot family, the bot family, dynamic ragfair offer generation, the repeatable-quest family and
-scav case rewards are ported and run natively by default. Every ported class keeps its full 4.1.2 C#
-implementation as a **legacy path**, selected automatically when a mod hooks it or manually via a
-config flag. The log pipeline is ported too, and has no legacy path: `SPTLoggerDispatcher` hands
-every line to the crate.
-Eighteen C-ABI exports (`src/ffi.rs`) carry all of it, JSON in and JSON out — except the ragfair
+The loot family, the bot family, dynamic ragfair offer generation, the repeatable-quest family, scav
+case rewards and the item base-class cache build are ported and run natively by default. Every
+ported class keeps its full 4.1.2 C# implementation as a **legacy path**, selected automatically
+when a mod hooks it or manually via a config flag. The log pipeline is ported too, and has no legacy
+path: `SPTLoggerDispatcher` hands every line to the crate.
+Nineteen C-ABI exports (`src/ffi.rs`) carry all of it, JSON in and JSON out — except the ragfair
 response, which is a framed MessagePack envelope, and `spt_log_emit`, which passes the fields of one
-line directly (current ABI 18).
+line directly (current ABI 19).
 
 ## Working
 
@@ -30,6 +30,7 @@ line directly (current ABI 18).
 | A batch of dynamic flea offers (assort walk, pricing, barter schemes) | `RagfairOfferGenerator.GenerateDynamicOffers` | `spt_generate_dynamic_offers` |
 | Repeatable quests (all four types + rewards) | `*QuestGenerator.Generate` | `spt_generate_repeatable_quest` |
 | Scav case rewards | `ScavCaseRewardGenerator.Generate` | `spt_generate_scav_case_rewards` |
+| Item base-class cache hydrate | `ItemBaseClassService.HydrateItemBaseClassCache` | `spt_build_item_base_class_cache` |
 | The whole log pipeline — filters, level gates, per-target formatting, console + file sinks | `SPTLoggerDispatcher.Log` | `spt_logger_init`, `spt_log_emit`, `spt_logger_close` |
 | Generator diagnostics, localised and logged natively as they happen | `DatabaseImporter` → `SptNative.SetServerLocales` | `spt_locales_set` |
 
@@ -100,6 +101,33 @@ the native pipeline; seeded-RNG parity at the primitive level (xoshiro256\*\*, t
   instance answers every craft for the life of the process; the native request rebuilds both pools
   per call. Same shape as the ragfair `AllowedFleaPriceItemsForBarter` divergence — in native's
   favour, but a divergence.
+- **The item base-class cache hydrate is ~3.5x slower** — 29.19 ms native against 8.19 ms legacy at
+  the median, for one full build over the shipped 4,673-template table. The request projection is
+  not the cost here: `Build()` is 0.34 ms, ~1% of the native median, because it sends two fields per
+  template and nothing else. The rest is the round trip and the C# side binding 20,218 ancestor ids
+  back out of the response through `MongoId`'s validating constructor — the same response-binding
+  ceiling the ragfair pass hit. `PostDbLoadService.PerformPostDbLoadActions` calls hydrate once,
+  after mods have loaded, so the loss is **~21 ms added to server startup**, on a path no player and
+  no raid loop reaches: native stays the default for family consistency and
+  `ItemConfig.ForceLegacyItemBaseClassHydration` is the opt-out. See
+  [BENCHMARK.md](BENCHMARK.md) § *Results — item base class cache*.
+- **A parentless Item-type template and a cyclic parent chain both diverge on the hydrate** — C#'s
+  `AddBaseItems` stores `item.Parent` before it looks it up, so an Item-type template with an empty
+  `_parent` is left holding `{ MongoId.Empty }` where the native walk breaks before storing and
+  leaves `{}`; and a cyclic chain recurses forever in C# — a stack overflow — where the native walk
+  breaks at the first repeated parent. Neither is reachable on shipped data: none of the 4,553
+  Item-type templates is parentless and the chains are acyclic. `ItemBaseClassParityTests` compares
+  both paths' whole output over the real table, so either would fail the gate rather than ship. The
+  cache *key* is a third of the same kind: legacy stores under `item.Id`
+  (`ItemBaseClassService.cs:194,199`) where native keys by the `templateTable.Items` dictionary key
+  echoed back from Rust — identical on shipped data (the parity test proves it over all 4,553
+  Item-type templates) and on every supported insertion path, and separable only by a mod inserting
+  a template under a key ≠ its `_id`, where legacy is the broken arm, caching under an id nothing
+  ever looks up. Unreachable on shipped data, in native's favour.
+- **The native `_type` test is ASCII-only** — `eq_ignore_ascii_case` against C#'s
+  `StringComparison.OrdinalIgnoreCase`, so a `_type` that matches `"Item"` only under non-ASCII case
+  folding would be a root node natively and an Item in legacy. Every shipped `_type` is `"Item"` or
+  `"Node"`.
 - **`get_flea_prices_as_array` is O(offers × price table) if a mod enables barters** — it re-derives
   the whole filtered flea price list per barter offer, with an ancestor-cache probe per entry.
   Dead on shipped data (`ragfair.json` `dynamic.barter.chancePercent` is `0`, so no barter offer is
@@ -115,7 +143,9 @@ the native pipeline; seeded-RNG parity at the primitive level (xoshiro256\*\*, t
   gate (`LootParityTests` over all 13 loot-bearing maps, `BotParityTests` including level-20
   randomised buckets and the nighttime clamp, `RewardLootParityTests` over all five reward entry
   points, `RagfairParityTests`, `RepeatableQuestParityTests` over all four quest types,
-  `ScavCaseParityTests` over every shipped recipe at two seeds), all seeded and byte-equal after id
+  `ScavCaseParityTests` over every shipped recipe at two seeds, `ItemBaseClassParityTests` over the
+  whole shipped items table — the one gate needing no normaliser at all, its walk being
+  deterministic and compared for exact equality), the rest all seeded and byte-equal after id
   normalisation. The sanctioned gaps are minted `MongoId`s (outside the seeded stream on both sides —
   a repeatable quest mints ~12-25 of them, and a scav case mints from three sources: the reward
   roots, a preset's `ReplaceIDs`, and the cartridge children `ItemHelper.AddCartridgesToAmmoBox` adds
@@ -137,8 +167,11 @@ the native pipeline; seeded-RNG parity at the primitive level (xoshiro256\*\*, t
   `PresetHelper`/`ItemFilterService`, `SeasonalEventService` and `ICloner` are already listed and
   apply to it too. Its seam checks no collaborator *substitution* at all — see
   *Exceptions in force*.
-- **Templates without `_props` read as "not in the db"** on the native path — they are dropped from
-  `itemsView`. Vanilla data always has `_props`; this only bites mod-added props-less templates.
+- **Templates without `_props` read as "not in the db"** on the native *generator* paths — they are
+  dropped from `itemsView`. Vanilla data always has `_props`; this only bites mod-added props-less
+  templates. The base-class hydrate is the exception: `ItemBaseClassNativeRequestBuilder`
+  deliberately does not reuse `PayloadProjection.BuildItemsView`, so it projects the whole table and
+  a props-less template gets its cache entry exactly as in C#.
 - **Typed loose-loot path is slow** — ~1347 ms per raid start for `bigmap` vs ~345 ms raw, against
   929 ms for the C# it replaced. Any registered `LazyLoad` transformer (seasonal events, mods)
   forces it. Vanilla installs stay on the raw path.
@@ -266,7 +299,7 @@ the native pipeline; seeded-RNG parity at the primitive level (xoshiro256\*\*, t
   effect on `PARKED_RNG`, whose only consumer is the loot dynamic entry point, which never runs on
   a rayon worker.
 - **The ragfair response is a framed MessagePack envelope, not a JSON buffer.** One length-prefixed
-  frame per offer behind a header frame (since ABI **10**, encoding tag 1; current ABI is 18), which
+  frame per offer behind a header frame (since ABI **10**, encoding tag 1; current ABI is 19), which
   C# deserialises with `Parallel.For` over the frames straight out of the native buffer — no
   whole-response JSON document is ever materialised. Only the ragfair response uses it; every other
   export is still JSON in / JSON out.
@@ -336,8 +369,14 @@ the native pipeline; seeded-RNG parity at the primitive level (xoshiro256\*\*, t
 - **The ported 4.1.2 quirks are documented at their call sites**, as numbered `Quirk N` comments in
   `rust/spt-native/src/quest/*.rs` (`reward_generator.rs` bolds them `**Quirk N, ported verbatim:**`;
   `elimination.rs` uses the plain form, and `helper.rs:161` carries an unnumbered
-  `Ported quirk, not a typo`). `src/scav_case/generator.rs` numbers its own the same way. Grep
-  case-insensitively for `quirk` under `src/quest/` and `src/scav_case/` to find all of them; the
+  `Ported quirk, not a typo`). `src/scav_case/generator.rs` and `src/base_class.rs` number their own
+  the same way — and one of the base-class set is on the C# side of the seam: quirk 1, in
+  `HydrateItemBaseClassCache`, is that hydrate resets only the cache dictionary and never
+  `_rootNodeIds`, so the native arm unions the response's root ids into the existing set rather than
+  replacing it. Grep case-insensitively for `quirk` under `src/quest/`, `src/scav_case/` and
+  `src/base_class.rs` to find the rest (that grep turns up base-class quirks 2, 3 and 5 only:
+  quirk 1's comment sits on the C# side just described, and quirk 4 has no code site, its quirk
+  being an unreachable error path — nothing to port); the
   behaviour they preserve is deliberate and reverting one silently diverges from C#. The bare `:N`
   line numbers in those comments — quirks and ordinary citations alike — are the 4.1.2 body the port
   was written against, not the current file: where a native seam was inserted above the retained
@@ -361,6 +400,22 @@ the native pipeline; seeded-RNG parity at the primitive level (xoshiro256\*\*, t
 - **Scav case caches nothing — guideline 3's default holds.** Every call reprojects the items view,
   the static price table, the default presets, the blacklists and the recipe table. The ragfair and
   quest invariant slices are still the only two exceptions in the crate.
+- **`ItemBaseClassService` took a constructor overload and freezes one class, its own.** The frozen
+  3-parameter 4.1.2 constructor stays (as the primary constructor); the container selects an
+  additive 5-parameter overload adding `ItemBaseClassNativeRequestBuilder` and `ItemConfig`.
+  Additive only, and a service built through the frozen constructor gets a null builder and hydrates
+  legacy unconditionally. The hookable set is every declared public/protected member of
+  `ItemBaseClassService` **except `HydrateItemBaseClassCache`**, the dispatcher — 5 members
+  (`AddItemToCache`, `AddBaseItems`, both `ItemHasBaseClass` overloads, `GetItemBaseClasses`); a
+  live patch on any of them, or a subclass of the service from the container, flips to legacy. Same
+  shape as scav case.
+- **One `ItemConfig` flag, C# default only.** `ForceLegacyItemBaseClassHydration` is not serialised
+  into `item.json` — same as the ragfair, quest and scav case flags, it exists as a default on the
+  config object and a user who wants it adds it to the file.
+- **The base-class hydrate caches nothing either.** One full items-view projection per
+  `HydrateItemBaseClassCache` call, guideline 3's default, even though the service is a singleton
+  hydrated once at startup. Only the bulk build moved: `AddItemToCache`, the per-item fallback
+  `ItemHasBaseClass` uses for a tpl the bulk build missed, is unchanged C# on both paths.
 
 ## Roadmap
 
