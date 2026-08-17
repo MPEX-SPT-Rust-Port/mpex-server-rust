@@ -61,14 +61,14 @@ use indexmap::IndexSet;
 use rayon::prelude::*;
 use serde_json::json;
 
-use super::{RagfairContext, plain};
+use super::RagfairContext;
 use crate::loot::item_helper::{
     AMMO_BOX, ARMOR_PLATE, ARMORED_EQUIPMENT, FUEL, LootError, WEAPON, add_cartridges_to_ammo_box,
     armor_item_can_hold_mods, armor_item_has_removable_plate_slots, get_item,
     get_removable_plate_slot_ids, is_of_baseclass, is_of_baseclasses,
 };
 use crate::loot::models::{
-    Item, UpdFoodDrink, UpdKey, UpdMedKit, UpdRepairKit, UpdRepairable, UpdResource,
+    Diagnostic, Item, UpdFoodDrink, UpdKey, UpdMedKit, UpdRepairKit, UpdRepairable, UpdResource,
 };
 use crate::loot::mongo_id;
 use crate::loot::random_util::{
@@ -90,6 +90,20 @@ use crate::ragfair::server_helper::{
     is_item_valid_ragfair_item,
 };
 use crate::ragfair::slice_cache;
+
+/// The `typeof(T).FullName` this file's diagnostics log under.
+const CATEGORY: &str = "SPTarkov.Server.Core.Generators.Ragfair.RagfairOfferGenerator";
+
+/// A plain interpolated log line the pipeline renders under this file's category.
+fn plain(level: &str, message: String) -> Diagnostic {
+    Diagnostic {
+        category: CATEGORY,
+        level: level.to_owned(),
+        locale_key: None,
+        args: None,
+        message: Some(message),
+    }
+}
 
 /// `Models/Enums/OfferCreator.cs` — the wire never carries it; it is a call-site constant on the
 /// C# side too.

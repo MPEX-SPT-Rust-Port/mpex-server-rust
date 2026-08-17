@@ -71,6 +71,9 @@ use crate::loot::models::{DEBUG, Diagnostic, ERROR, Item, ItemView, Upd, WARNING
 use crate::loot::mongo_id;
 use crate::loot::random_util::{get_chance_100, get_weighted_value};
 
+/// The `typeof(T).FullName` this file's diagnostics log under.
+const CATEGORY: &str = "SPTarkov.Server.Core.Generators.Bot.BotWeaponGenerator";
+
 /// `BotWeaponGenerator.ModMagazineSlotId` (`:44`).
 const MOD_MAGAZINE_SLOT_ID: &str = "mod_magazine";
 
@@ -1192,6 +1195,7 @@ fn fill_camoras_with_ammo(weapon_mods: &mut [Item], magazine_id: &str, ammo_tpl:
 
 fn plain(level: &str, message: String) -> Diagnostic {
     Diagnostic {
+        category: CATEGORY,
         level: level.to_owned(),
         locale_key: None,
         args: None,
@@ -1201,6 +1205,7 @@ fn plain(level: &str, message: String) -> Diagnostic {
 
 fn localised(level: &str, locale_key: &str, args: serde_json::Value) -> Diagnostic {
     Diagnostic {
+        category: CATEGORY,
         level: level.to_owned(),
         locale_key: Some(locale_key.to_owned()),
         args: Some(args),

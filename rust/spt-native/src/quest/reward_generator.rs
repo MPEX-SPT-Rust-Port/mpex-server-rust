@@ -19,6 +19,10 @@ use crate::loot::random_util::{
 use crate::quest::QuestContext;
 use crate::quest::models::{RepeatableQuestConfig, Reward, RewardScaling};
 
+/// The `typeof(T).FullName` this file's diagnostics log under.
+const CATEGORY: &str =
+    "SPTarkov.Server.Core.Generators.RepeatableQuests.RepeatableQuestRewardGenerator";
+
 /// `Models/Enums/Money.cs:7`.
 const ROUBLES: &str = "5449016a4bdc2d6f028b456f";
 /// `Models/Enums/Money.cs:8`.
@@ -40,6 +44,7 @@ const TRADER_STANDING: &str = "TraderStanding";
 /// A plain interpolated log line the C# caller replays through its logger.
 fn plain(level: &str, message: String) -> Diagnostic {
     Diagnostic {
+        category: CATEGORY,
         level: level.to_owned(),
         locale_key: None,
         args: None,
@@ -51,6 +56,7 @@ fn plain(level: &str, message: String) -> Diagnostic {
 /// and its arguments cross.
 fn localised(level: &str, locale_key: &str, args: serde_json::Value) -> Diagnostic {
     Diagnostic {
+        category: CATEGORY,
         level: level.to_owned(),
         locale_key: Some(locale_key.to_owned()),
         args: Some(args),

@@ -93,6 +93,9 @@ use crate::loot::models::{
 use crate::loot::mongo_id;
 use crate::loot::random_util::{get_array_value, get_chance_100, get_int, get_weighted_value};
 
+/// The `typeof(T).FullName` this file's diagnostics log under.
+const CATEGORY: &str = "SPTarkov.Server.Core.Generators.Loot.BotLootGenerator";
+
 /// `EquipmentSlots` member names, as strings (see [`crate::bot::bot_weapon_generator`]).
 const POCKETS: &str = "Pockets";
 const TACTICAL_VEST: &str = "TacticalVest";
@@ -1366,6 +1369,7 @@ fn key_not_found(key: &str) -> LootError {
 
 fn plain(level: &str, message: String) -> Diagnostic {
     Diagnostic {
+        category: CATEGORY,
         level: level.to_owned(),
         locale_key: None,
         args: None,
@@ -1375,6 +1379,7 @@ fn plain(level: &str, message: String) -> Diagnostic {
 
 fn localised(level: &str, locale_key: &str, args: serde_json::Value) -> Diagnostic {
     Diagnostic {
+        category: CATEGORY,
         level: level.to_owned(),
         locale_key: Some(locale_key.to_owned()),
         args: Some(args),

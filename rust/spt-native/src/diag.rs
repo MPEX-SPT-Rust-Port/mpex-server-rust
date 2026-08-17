@@ -6,6 +6,9 @@ use std::sync::Mutex;
 
 use serde_json::Value;
 
+use crate::logger::LogLevel;
+use crate::loot::models::Diagnostic;
+
 /// The resolved server-locale table, pushed once by C# over `spt_locales_set` after the database
 /// import. Overwritten wholesale on every set — the prepatch host's second push is harmless.
 static LOCALES: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
@@ -65,10 +68,78 @@ fn element_to_string(value: &Value) -> String {
     }
 }
 
+/// Where a run's diagnostics go: production renders and emits each line through the process-global
+/// log pipeline as it happens; tests capture them as data, keeping the existing assertions.
+pub enum DiagSink {
+    Pipeline,
+    Capture(Vec<Diagnostic>),
+}
+
+impl DiagSink {
+    pub fn capture() -> DiagSink {
+        DiagSink::Capture(Vec::new())
+    }
+
+    pub fn push(&mut self, diagnostic: Diagnostic) {
+        match self {
+            DiagSink::Pipeline => {
+                let (level, text) = level_and_text(&diagnostic);
+                crate::ffi::emit_pipeline(diagnostic.category, level, &text);
+            }
+            DiagSink::Capture(entries) => entries.push(diagnostic),
+        }
+    }
+
+    /// A worker's sink for a rayon fan-out: same variant as the parent, its own buffer.
+    pub fn fork(&self) -> DiagSink {
+        match self {
+            DiagSink::Pipeline => DiagSink::Pipeline,
+            DiagSink::Capture(_) => DiagSink::capture(),
+        }
+    }
+
+    /// Merges a fork's buffer back. Under `Pipeline` the workers already emitted — no-op.
+    pub fn absorb(&mut self, other: DiagSink) {
+        if let (DiagSink::Capture(mine), DiagSink::Capture(theirs)) = (self, other) {
+            mine.extend(theirs);
+        }
+    }
+
+    /// Test-side observation point; the Pipeline variant has nothing to observe.
+    pub fn captured(&self) -> &[Diagnostic] {
+        match self {
+            DiagSink::Capture(entries) => entries,
+            DiagSink::Pipeline => {
+                panic!("captured() reads a Capture sink; production sinks emit instead")
+            }
+        }
+    }
+}
+
+/// `PayloadProjection.ReplayDiagnostics`' level dispatch: success replayed through
+/// `logger.Success` (Information on the emit path); an unknown level becomes a prefixed Warning
+/// rather than being dropped.
+pub fn level_and_text(diagnostic: &Diagnostic) -> (LogLevel, String) {
+    let message = match &diagnostic.locale_key {
+        Some(key) => localise(key, diagnostic.args.as_ref()),
+        None => diagnostic.message.clone().unwrap_or_default(),
+    };
+    match diagnostic.level.as_str() {
+        "debug" => (LogLevel::Debug, message),
+        "warning" => (LogLevel::Warning, message),
+        "error" => (LogLevel::Error, message),
+        "success" => (LogLevel::Information, message),
+        unknown => (LogLevel::Warning, format!("[{unknown}] {message}")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    use crate::logger::LogLevel;
+    use crate::loot::models::{DEBUG, Diagnostic, ERROR, SUCCESS, WARNING};
 
     fn table() -> HashMap<String, String> {
         HashMap::from([
@@ -170,5 +241,79 @@ mod tests {
             localise_with(None, "item-invalid_tpl_item", Some(&json!("x"))),
             "item-invalid_tpl_item"
         );
+    }
+
+    fn plain_diag(level: &str, message: &str) -> Diagnostic {
+        Diagnostic {
+            category: "SPTarkov.Server.Core.Generators.Loot.LootGenerator",
+            level: level.to_owned(),
+            locale_key: None,
+            args: None,
+            message: Some(message.to_owned()),
+        }
+    }
+
+    #[test]
+    fn capture_sink_collects_in_order() {
+        let mut sink = DiagSink::capture();
+        sink.push(plain_diag(WARNING, "first"));
+        sink.push(plain_diag(ERROR, "second"));
+        assert_eq!(sink.captured().len(), 2);
+        assert_eq!(sink.captured()[0].message.as_deref(), Some("first"));
+    }
+
+    #[test]
+    fn fork_and_absorb_mirror_the_parent_variant() {
+        let parent = DiagSink::capture();
+        let mut child = parent.fork();
+        child.push(plain_diag(DEBUG, "from worker"));
+        let mut parent = parent;
+        parent.absorb(child);
+        assert_eq!(parent.captured().len(), 1);
+
+        // Pipeline forks stay Pipeline; absorb is a no-op (workers already emitted).
+        let pipeline = DiagSink::Pipeline;
+        assert!(matches!(pipeline.fork(), DiagSink::Pipeline));
+    }
+
+    #[test]
+    fn level_mapping_matches_replay_diagnostics() {
+        // ReplayDiagnostics: debug/warning/error map straight, success went through
+        // logger.Success (Information on the emit path), unknown levels became a
+        // prefixed Warning rather than being dropped.
+        assert_eq!(
+            level_and_text(&plain_diag(DEBUG, "m")),
+            (LogLevel::Debug, "m".to_owned())
+        );
+        assert_eq!(
+            level_and_text(&plain_diag(WARNING, "m")),
+            (LogLevel::Warning, "m".to_owned())
+        );
+        assert_eq!(
+            level_and_text(&plain_diag(ERROR, "m")),
+            (LogLevel::Error, "m".to_owned())
+        );
+        assert_eq!(
+            level_and_text(&plain_diag(SUCCESS, "m")),
+            (LogLevel::Information, "m".to_owned())
+        );
+        assert_eq!(
+            level_and_text(&plain_diag("fancy", "m")),
+            (LogLevel::Warning, "[fancy] m".to_owned())
+        );
+    }
+
+    #[test]
+    fn locale_keyed_diagnostics_render_through_the_table() {
+        // Table unset in unit tests -> key-as-template fallback; the full table path is covered
+        // by localise_with above and the ffi end-to-end test.
+        let diagnostic = Diagnostic {
+            category: "SPTarkov.Server.Core.Helpers.Items.ItemHelper",
+            level: ERROR.to_owned(),
+            locale_key: Some("no-such-key".to_owned()),
+            args: None,
+            message: None,
+        };
+        assert_eq!(level_and_text(&diagnostic).1, "no-such-key");
     }
 }

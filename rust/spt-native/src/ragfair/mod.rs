@@ -91,14 +91,3 @@ pub(crate) static NO_NAMES: std::sync::LazyLock<Vec<String>> = std::sync::LazyLo
 #[cfg(test)]
 pub(crate) static NO_DEFAULT_PRESETS: std::sync::LazyLock<Vec<PresetView>> =
     std::sync::LazyLock::new(Vec::new);
-
-/// The [`Diagnostic`] constructor the ragfair modules share. The bot modules re-declare their own
-/// per file; here it lives once and is imported.
-pub(crate) fn plain(level: &str, message: String) -> Diagnostic {
-    Diagnostic {
-        level: level.to_owned(),
-        locale_key: None,
-        args: None,
-        message: Some(message),
-    }
-}

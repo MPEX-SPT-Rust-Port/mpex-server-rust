@@ -787,10 +787,14 @@ pub const SUCCESS: &str = "success";
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Diagnostic {
+    /// The `typeof(T).FullName` category this line logs under — the C# class the emitting Rust
+    /// file ports. Set by each file's helper from its `CATEGORY` const.
+    #[serde(skip)]
+    pub category: &'static str,
     /// One of [`DEBUG`], [`WARNING`], [`ERROR`], [`SUCCESS`].
     pub level: String,
     pub locale_key: Option<String>,
-    /// Object; C# replays it via `ServerLocalisationService`.
+    /// Object; rendered by `diag::localise`.
     pub args: Option<serde_json::Value>,
     /// Plain interpolated messages.
     pub message: Option<String>,
@@ -1394,6 +1398,7 @@ mod tests {
                 ..Default::default()
             }]],
             diagnostics: vec![Diagnostic {
+                category: "SPTarkov.Server.Core.Generators.Loot.LootGenerator",
                 level: DEBUG.to_owned(),
                 locale_key: None,
                 args: None,
@@ -1418,6 +1423,7 @@ mod tests {
             static_loot_item_count: 4,
             static_container_count: 2,
             diagnostics: vec![Diagnostic {
+                category: "SPTarkov.Server.Core.Generators.Loot.LocationLootGenerator",
                 level: "warning".to_owned(),
                 locale_key: Some("loot-missing_item".to_owned()),
                 args: Some(serde_json::json!({"tpl":"x"})),

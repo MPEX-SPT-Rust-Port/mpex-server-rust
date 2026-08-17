@@ -61,6 +61,9 @@ use crate::loot::models::{
 };
 use crate::loot::random_util::{get_chance_100, get_double, get_percent_of_value, round_to_digits};
 
+/// The `typeof(T).FullName` this file's diagnostics log under.
+const CATEGORY: &str = "SPTarkov.Server.Core.Helpers.Bot.BotGeneratorHelper";
+
 /// `BaseClasses.FLASHLIGHT` (`Models/Enums/BaseClasses.cs:39`).
 pub(crate) const FLASHLIGHT: &str = "55818b084bdc2d5b648b4571";
 /// `BaseClasses.TACTICAL_COMBO` (`:120`).
@@ -396,6 +399,7 @@ pub fn is_item_incompatible_with_current_items(
 
     let Some(item_to_equip) = get_item(items, tpl_to_check) else {
         ctx.diagnostics.push(Diagnostic {
+            category: CATEGORY,
             level: WARNING.to_owned(),
             locale_key: Some("bot-invalid_item_compatibility_check".to_owned()),
             args: Some(serde_json::json!({
@@ -682,6 +686,7 @@ impl ContainerGrids {
             // Get container details from db
             let Some(container_db_details) = get_item(ctx.items, &container.template) else {
                 ctx.diagnostics.push(Diagnostic {
+                    category: CATEGORY,
                     level: WARNING.to_owned(),
                     locale_key: Some("bot-missing_container_with_tpl".to_owned()),
                     args: Some(serde_json::Value::String(container.template.clone())),
@@ -985,6 +990,7 @@ pub(crate) fn get_item_size(
             "inventory-return_default_size",
         ] {
             diagnostics.push(Diagnostic {
+                category: CATEGORY,
                 level: ERROR.to_owned(),
                 locale_key: Some(locale_key.to_owned()),
                 args: Some(serde_json::Value::String(item_tpl.to_owned())),
@@ -998,6 +1004,7 @@ pub(crate) fn get_item_size(
 
     let Some(root_item) = items.iter().find(|item| item.id == item_id) else {
         diagnostics.push(Diagnostic {
+            category: CATEGORY,
             level: ERROR.to_owned(),
             locale_key: None,
             args: None,
@@ -1053,6 +1060,7 @@ pub(crate) fn get_item_size(
 
                 let Some(template) = get_item(items_view, &child_item.template) else {
                     diagnostics.push(Diagnostic {
+                        category: CATEGORY,
                         level: ERROR.to_owned(),
                         locale_key: Some(
                             "inventory-get_item_size_item_not_found_by_tpl".to_owned(),
@@ -1112,6 +1120,7 @@ fn is_folded(item: &Item) -> bool {
 
 fn debug_diagnostic(message: String) -> Diagnostic {
     Diagnostic {
+        category: CATEGORY,
         level: crate::loot::models::DEBUG.to_owned(),
         locale_key: None,
         args: None,

@@ -1039,6 +1039,7 @@ mod tests {
                 ..Default::default()
             },
             diagnostics: vec![Diagnostic {
+                category: "SPTarkov.Server.Core.Generators.Bot.BotInventoryGenerator",
                 level: crate::loot::models::DEBUG.to_owned(),
                 locale_key: Some("bot-missing_item".to_owned()),
                 args: Some(serde_json::json!({"tpl":"x"})),

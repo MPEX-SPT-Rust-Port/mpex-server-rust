@@ -20,6 +20,9 @@ use crate::loot::item_helper::{
 use crate::loot::models::{DEBUG, Diagnostic, ERROR, Item, Upd};
 use crate::loot::{mongo_id, random_util};
 
+/// The `typeof(T).FullName` this file's diagnostics log under.
+const CATEGORY: &str = "SPTarkov.Server.Core.Helpers.Bot.BotWeaponGeneratorHelper";
+
 /// `BotWeaponGeneratorHelper._magCheck` (`:18`).
 const MAG_CHECK: [&str; 2] = ["CylinderMagazine", "SpringDrivenCylinder"];
 
@@ -82,6 +85,7 @@ pub fn get_randomized_bullet_count(
     let (Some(mag_template), Some(parent_item)) = (mag_template, get_item(items, parent_tpl))
     else {
         ctx.diagnostics.push(Diagnostic {
+            category: CATEGORY,
             level: ERROR.to_owned(),
             locale_key: None,
             args: None,
@@ -200,6 +204,7 @@ pub fn add_ammo_into_equipment_slots(
 
         if result != ItemAddedResult::Success {
             ctx.diagnostics.push(Diagnostic {
+                category: CATEGORY,
                 level: DEBUG.to_owned(),
                 locale_key: None,
                 args: None,

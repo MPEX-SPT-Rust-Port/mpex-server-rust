@@ -24,6 +24,9 @@ use super::models::{
 use super::probability_object_array::{ProbabilityObject, ProbabilityObjectArray};
 use super::{mongo_id, random_util};
 
+/// The `typeof(T).FullName` this file's diagnostics log under.
+const CATEGORY: &str = "SPTarkov.Server.Core.Generators.Loot.LocationLootGenerator";
+
 /// `LocationLootGenerator.cs:1269-1276`. C# types `ChosenCount` as `double?`; the empty group is
 /// seeded with -1 and every other value comes out of `GetInt`.
 #[derive(Debug, Clone, Default)]
@@ -47,6 +50,7 @@ struct ContainerItem {
 /// A plain interpolated log line.
 fn diagnostic(level: &str, message: String) -> Diagnostic {
     Diagnostic {
+        category: CATEGORY,
         level: level.to_owned(),
         locale_key: None,
         args: None,
@@ -58,6 +62,7 @@ fn diagnostic(level: &str, message: String) -> Diagnostic {
 /// (a bare value for the `%s` keys, an object whose members match the C# anonymous type otherwise).
 fn localised(level: &str, locale_key: &str, args: serde_json::Value) -> Diagnostic {
     Diagnostic {
+        category: CATEGORY,
         level: level.to_owned(),
         locale_key: Some(locale_key.to_owned()),
         args: Some(args),

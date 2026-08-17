@@ -37,6 +37,9 @@ use crate::loot::item_helper::{
 };
 use crate::loot::models::{Diagnostic, ItemView, WARNING};
 
+/// The `typeof(T).FullName` this file's diagnostics log under.
+const CATEGORY: &str = "SPTarkov.Server.Core.Services.Bot.BotEquipmentModPoolService";
+
 /// `BotEquipmentModPoolService.GetModsForGearSlot` (`:154-157`), against the pool
 /// `GenerateGearPool` (`:215-226`) would have built.
 pub fn get_mods_for_gear_slot(
@@ -79,6 +82,7 @@ pub fn get_compatible_mods_for_weapon_slot(
     }
 
     ctx.diagnostics.push(Diagnostic {
+        category: CATEGORY,
         level: WARNING.to_owned(),
         locale_key: None,
         args: None,

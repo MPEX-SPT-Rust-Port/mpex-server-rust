@@ -20,6 +20,9 @@ use super::models::{
 };
 use super::{mongo_id, random_util};
 
+/// The `typeof(T).FullName` this file's diagnostics log under.
+const CATEGORY: &str = "SPTarkov.Server.Core.Generators.Loot.LootGenerator";
+
 /// `LootGenerator.cs:715-724` — a spawn limit and how much of it has been used.
 #[derive(Debug, Clone, Copy)]
 struct ItemLimit {
@@ -37,6 +40,7 @@ struct ItemRewardPoolResults<'a> {
 /// A plain interpolated log line.
 fn diagnostic(level: &str, message: String) -> Diagnostic {
     Diagnostic {
+        category: CATEGORY,
         level: level.to_owned(),
         locale_key: None,
         args: None,
@@ -48,6 +52,7 @@ fn diagnostic(level: &str, message: String) -> Diagnostic {
 /// bare value for the `%s` keys, `None` for the keys C# calls the single-argument overload with).
 fn localised(level: &str, locale_key: &str, args: Option<serde_json::Value>) -> Diagnostic {
     Diagnostic {
+        category: CATEGORY,
         level: level.to_owned(),
         locale_key: Some(locale_key.to_owned()),
         args,

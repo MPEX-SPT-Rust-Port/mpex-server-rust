@@ -1,6 +1,7 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicI32, Ordering};
 
 use rayon::prelude::*;
 use serde::Serialize;
@@ -431,6 +432,35 @@ fn logger_guard() -> std::sync::MutexGuard<'static, (usize, Option<Logger>)> {
     LOGGER
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Native emitters get a small process-local id per thread — the managed thread id never crosses
+/// the boundary for lines Rust originates, but worker threads still stay distinguishable.
+static NEXT_EMIT_TID: AtomicI32 = AtomicI32::new(1);
+thread_local! {
+    static EMIT_TID: i32 = NEXT_EMIT_TID.fetch_add(1, Ordering::Relaxed);
+}
+
+/// The native-side entry to the same pipeline `spt_log_emit` feeds: filters, level gate, format,
+/// sinks. Uninitialised pipeline is a silent no-op, matching the export's contract.
+pub(crate) fn emit_pipeline(category: &str, level: LogLevel, message: &str) {
+    let unix_millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as i64)
+        .unwrap_or(0);
+    let thread = std::thread::current();
+    let record = LogRecord {
+        category,
+        message,
+        exception: "",
+        thread_name: thread.name().unwrap_or(""),
+        level,
+        tid: EMIT_TID.with(|tid| *tid),
+        unix_millis,
+    };
+    if let Some(logger) = logger_guard().1.as_ref() {
+        logger.emit(&record);
+    }
 }
 
 /// Initialises the log pipeline from the raw bytes of `sptLogger.json`. Ref-counted: a call while

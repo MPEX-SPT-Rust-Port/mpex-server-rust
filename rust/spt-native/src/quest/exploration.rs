@@ -15,9 +15,13 @@ use crate::quest::models::{
 };
 use crate::quest::{QuestContext, helper, reward_generator};
 
+/// The `typeof(T).FullName` this file's diagnostics log under.
+const CATEGORY: &str = "SPTarkov.Server.Core.Generators.RepeatableQuests.ExplorationQuestGenerator";
+
 /// A `ServerLocalisationService.GetText` line the C# caller replays through its logger.
 fn localised(level: &str, locale_key: &str, args: Option<serde_json::Value>) -> Diagnostic {
     Diagnostic {
+        category: CATEGORY,
         level: level.to_owned(),
         locale_key: Some(locale_key.to_owned()),
         args,
@@ -145,6 +149,7 @@ fn try_generate_available_for_finish(
         .is_some_and(|conditions| conditions[0].counter.is_some())
     {
         ctx.diagnostics.push(Diagnostic {
+            category: CATEGORY,
             level: ERROR.to_owned(),
             locale_key: None,
             args: None,

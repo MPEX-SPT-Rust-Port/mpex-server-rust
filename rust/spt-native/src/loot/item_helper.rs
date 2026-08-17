@@ -12,6 +12,9 @@ use super::models::{
 use super::probability_object_array::{ProbabilityObject, ProbabilityObjectArray};
 use super::{mongo_id, random_util};
 
+/// The `typeof(T).FullName` this file's diagnostics log under.
+const CATEGORY: &str = "SPTarkov.Server.Core.Helpers.Items.ItemHelper";
+
 // Base-class tpls, copied verbatim from `Models/Enums/BaseClasses.cs`. They live here rather than in
 // their own module because `item_helper` is the only place base classes are ever tested against.
 
@@ -742,6 +745,7 @@ impl LootError {
 /// A plain interpolated log line, the shape most of the ported call sites use.
 fn diagnostic(level: &str, message: String) -> Diagnostic {
     Diagnostic {
+        category: CATEGORY,
         level: level.to_owned(),
         locale_key: None,
         args: None,
@@ -957,6 +961,7 @@ pub fn fill_magazine_with_cartridge(
     let cartridge_details = get_item(items_view, cartridge_tpl);
     if cartridge_details.is_none() {
         diagnostics.push(Diagnostic {
+            category: CATEGORY,
             level: ERROR.to_owned(),
             locale_key: Some("item-invalid_tpl_item".to_owned()),
             args: Some(serde_json::Value::String(cartridge_tpl.to_owned())),

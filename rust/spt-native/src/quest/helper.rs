@@ -11,6 +11,9 @@ use crate::quest::models::{
     RepeatableQuestType,
 };
 
+/// The `typeof(T).FullName` this file's diagnostics log under.
+const CATEGORY: &str = "SPTarkov.Server.Core.Helpers.Quest.RepeatableQuestHelper";
+
 /// `Models/Enums/Traders.cs:7`.
 pub(crate) const PRAPOR: &str = "54cb50c76803fa8b248b4571";
 /// `Models/Enums/Traders.cs:17`.
@@ -20,6 +23,7 @@ pub(crate) const REF: &str = "6617beeaa9cfa777ca915b7c";
 /// localised text stays C#-side, so only the key and its arguments cross.
 fn localised(locale_key: &str, args: serde_json::Value) -> Diagnostic {
     Diagnostic {
+        category: CATEGORY,
         level: ERROR.to_owned(),
         locale_key: Some(locale_key.to_owned()),
         args: Some(args),

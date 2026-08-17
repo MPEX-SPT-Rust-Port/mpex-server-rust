@@ -16,6 +16,9 @@ use crate::quest::models::{
 };
 use crate::quest::{QuestContext, helper, reward_generator};
 
+/// The `typeof(T).FullName` this file's diagnostics log under.
+const CATEGORY: &str = "SPTarkov.Server.Core.Generators.RepeatableQuests.CompletionQuestGenerator";
+
 /// `MaxRandomNumberAttempts` (`:33`).
 const MAX_RANDOM_NUMBER_ATTEMPTS: i32 = 6;
 
@@ -44,6 +47,7 @@ const DOG_TAG_TPLS: [&str; 14] = [
 /// A `ServerLocalisationService.GetText` line the C# caller replays through its logger.
 fn localised(level: &str, locale_key: &str, args: Option<serde_json::Value>) -> Diagnostic {
     Diagnostic {
+        category: CATEGORY,
         level: level.to_owned(),
         locale_key: Some(locale_key.to_owned()),
         args,
@@ -388,6 +392,7 @@ pub fn generate(
         session_id,
     ) else {
         ctx.diagnostics.push(Diagnostic {
+            category: CATEGORY,
             level: ERROR.to_owned(),
             locale_key: None,
             args: None,

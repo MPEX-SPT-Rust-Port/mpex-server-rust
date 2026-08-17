@@ -74,6 +74,9 @@ use crate::loot::models::{
 use crate::loot::mongo_id;
 use crate::loot::random_util::{get_weighted_value, roll_chance, round_half_even};
 
+/// The `typeof(T).FullName` this file's diagnostics log under.
+const CATEGORY: &str = "SPTarkov.Server.Core.Generators.Bot.BotEquipmentModGenerator";
+
 /// `BotEquipmentModGenerator._cartridgeHolderSlots` (`:67-74`), returned by `GetAmmoContainers`
 /// (`:1527-1530`).
 const CARTRIDGE_HOLDER_SLOTS: [&str; 5] = [
@@ -286,6 +289,7 @@ pub fn generate_mods_for_equipment(
             get_mod_item_slot_from_db_template(mod_slot_name, parent_template)
         else {
             ctx.diagnostics.push(Diagnostic {
+                category: CATEGORY,
                 level: ERROR.to_owned(),
                 locale_key: Some("bot-mod_slot_missing_from_item".to_owned()),
                 args: Some(serde_json::json!({
@@ -2383,6 +2387,7 @@ fn is_mod_valid_for_slot(
     // Mod lacks db template object
     if !mod_found_in_db {
         ctx.diagnostics.push(Diagnostic {
+            category: CATEGORY,
             level: ERROR.to_owned(),
             locale_key: Some("bot-no_item_template_found_when_adding_mod".to_owned()),
             args: Some(serde_json::json!({
@@ -2468,6 +2473,7 @@ fn parse_plate_level(level: &str) -> Result<i32, LootError> {
 /// A plain interpolated log line, the shape most of the ported call sites use.
 fn diagnostic(level: &str, message: String) -> Diagnostic {
     Diagnostic {
+        category: CATEGORY,
         level: level.to_owned(),
         locale_key: None,
         args: None,
@@ -2480,6 +2486,7 @@ fn diagnostic(level: &str, message: String) -> Diagnostic {
 /// the same shape `loot::location_loot_generator` uses.
 fn localised(level: &str, locale_key: &str, args: serde_json::Value) -> Diagnostic {
     Diagnostic {
+        category: CATEGORY,
         level: level.to_owned(),
         locale_key: Some(locale_key.to_owned()),
         args: Some(args),
