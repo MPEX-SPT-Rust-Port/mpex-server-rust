@@ -51,19 +51,22 @@ seeded-RNG parity at the primitive level (xoshiro256\*\*, twin known-answer test
   ~2%): it is the C# side binding ~367k `Models` objects out of the response, plus GC. Absolute
   cost is small (once at startup, then per-expiry bursts) and native stays the default for family
   consistency; `RagfairConfig.ForceLegacyRagfairGeneration` is the opt-out.
-- **Completion quests are ~3.1x slower on the warm native path** — 67.50 ms native against 21.64 ms
-  legacy at the median, holding across two invocations. It is not transport: Completion's
-  cold-minus-warm gap (~44 ms) is the same as every other quest type's, so the extra time sits inside
-  the native call after the slice is already parsed. The unprofiled candidate cause is recorded in
-  [BENCHMARK.md](BENCHMARK.md) § *The honest verdict* — the per-tpl work Completion does over the
-  whole items table twice (`get_items_to_retrieve_pool` → `reward_generator::is_valid_reward_item`,
-  then the reward pass), where `loot/item_helper.rs`'s `is_of_baseclasses` walks a template's parent
-  chain on every call with no cache and the C# path reads `ItemBaseClassService`'s prebuilt one.
-  Named follow-up work; nothing measured proves it
-  yet. `QuestConfig.ForceLegacyRepeatableQuestGeneration` is the opt-out.
-- **Exploration and Pickup quests are a wash** — a warm native call costs ~3.2 ms whatever it
-  generates, and those two quests are ~2.9 ms of C# work, so native lands 0.2-0.3 ms behind legacy.
-  The port pays on Elimination (4.6-6.2x) and nowhere else.
+- **Completion quests are ~1.7x faster on the warm native path** — ~13 ms native against ~23 ms
+  legacy at the median, holding across two invocations. They were **3.1x slower** (67.50 ms) until
+  the base-class walk in `GetWhitelistedItemSelection` was measured: C# tests all 137 whitelisted
+  candidates per item as O(1) hits on `ItemBaseClassService`'s prebuilt parent map, and the port
+  kept that shape while answering each call with a fresh parent-chain walk. Testing every candidate
+  in a single walk cost 66.9 ms → 9.85 ms on the real table. See
+  [BENCHMARK.md](BENCHMARK.md) § *What the Completion figures used to be*.
+  `QuestConfig.ForceLegacyRepeatableQuestGeneration` is the opt-out.
+- **Completion still carries ~10 ms the other quest types do not** — it is the only type that runs
+  `is_valid_reward_item` over all 4,673 templates, and `loot/item_helper.rs`'s `is_of_baseclasses`
+  has no cache behind it. Porting `ItemBaseClassService`'s prebuilt map is the named fix, and it is
+  not Completion-specific: the uncached walk has 58 call sites across the bot, ragfair, loot and
+  quest modules.
+- **Exploration and Pickup quests are a wash** — a warm native call costs ~3.3 ms whatever it
+  generates, and those two quests are ~3 ms of C# work, so native lands within a few tenths of a
+  millisecond of legacy either way. The port pays on Elimination (4.7-6.3x) and Completion (~1.7x).
 - **`get_flea_prices_as_array` is O(offers × price table) if a mod enables barters** — it re-derives
   the whole filtered flea price list per barter offer, with an `is_of_baseclasses` walk per entry.
   Dead on shipped data (`ragfair.json` `dynamic.barter.chancePercent` is `0`, so no barter offer is
@@ -261,7 +264,7 @@ seeded-RNG parity at the primitive level (xoshiro256\*\*, twin known-answer test
 
 1. Later candidates, in `todo/TODO.md` order: scav case rewards, weather, fence assorts, raid-time
    adjustment, ragfair linked-item table.
-2. Profile Completion's two whole-items-table passes through
-   `reward_generator::is_valid_reward_item`, and `loot/item_helper.rs`'s uncached
-   `is_of_baseclasses` walk under them, against `ItemBaseClassService`'s prebuilt parent map — the
-   named candidate for Completion's 3.1x, unmeasured so far.
+2. Port `ItemBaseClassService`'s prebuilt parent map behind `loot/item_helper.rs`'s uncached
+   `is_of_baseclasses` walk. Measured: it is the ~10 ms Completion still carries over the other
+   quest types, through `reward_generator::is_valid_reward_item` over the whole items table. The
+   walk has 58 call sites across bot, ragfair, loot and quest, so the win is not Completion's alone.

@@ -163,14 +163,17 @@ fn get_whitelisted_item_selection<'a>(
 
     // Filter and concatenate items according to current player level
     let item_ids_whitelisted = levelled_item_ids(item_whitelist, pmc_level);
+    // `:368` asks `IsOfBaseclass` once per whitelisted id, which C# affords because
+    // `ItemBaseClassService` answers each from an ancestor set precomputed at startup.
+    // `is_of_baseclass` walks the parent chain live, so that shape restarts a full walk per id;
+    // one walk testing every id at each link is the same answer for a fraction of the cost.
+    let whitelisted_base_classes: Vec<&str> = item_ids_whitelisted.iter().copied().collect();
 
     item_selection
         .into_iter()
         .filter(|tpl| {
             // Whitelist can contain item tpls and item base type ids
-            item_ids_whitelisted
-                .iter()
-                .any(|whitelisted| item_helper::is_of_baseclass(ctx.items, tpl, whitelisted))
+            item_helper::is_of_baseclasses(ctx.items, tpl, &whitelisted_base_classes)
                 || item_ids_whitelisted.contains(tpl)
         })
         .collect()
@@ -191,6 +194,10 @@ fn get_blacklisted_item_selection<'a>(
 
     // Filter and concatenate the arrays according to current player level
     let item_ids_blacklisted = levelled_item_ids(item_blacklist, pmc_level);
+    // One walk testing every id at each link, for the reason given on the whitelist above.
+    // `all(|b| !is_of_baseclass(b))` is that walk's De Morgan dual, so the `||` below still reads
+    // the answer `:241` reads.
+    let blacklisted_base_classes: Vec<&str> = item_ids_blacklisted.iter().copied().collect();
 
     item_selection
         .into_iter()
@@ -200,9 +207,7 @@ fn get_blacklisted_item_selection<'a>(
             // directly passes the left operand, and a tpl matching only a listed base class passes
             // the right one — the blacklist drops nothing unless a tpl is listed *and* descends
             // from something else in the same list.
-            item_ids_blacklisted
-                .iter()
-                .all(|blacklisted| !item_helper::is_of_baseclass(ctx.items, tpl, blacklisted))
+            !item_helper::is_of_baseclasses(ctx.items, tpl, &blacklisted_base_classes)
                 || !item_ids_blacklisted.contains(tpl)
         })
         .collect()
@@ -470,7 +475,9 @@ pub fn generate(
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
+    use std::time::Instant;
 
+    use crate::loot::item_helper;
     use crate::loot::random_util::TestSeedGuard;
     use crate::quest::QuestContext;
     use crate::quest::helper::PRAPOR;
@@ -486,6 +493,19 @@ mod tests {
         env!("CARGO_MANIFEST_DIR"),
         "/../../Libraries/SPTarkov.Server.Assets/SPT_Data/database/templates/repeatableQuests.json"
     );
+    const ITEMS_PATH: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../Libraries/SPTarkov.Server.Assets/SPT_Data/database/templates/items.json"
+    );
+
+    /// The midpoint of Completion's second shipped level band — the level `BENCHMARK.md`'s
+    /// repeatable quest fixture generates at, where the whitelist unions to 137 candidates.
+    const PMC_LEVEL: i32 = 20;
+
+    /// Headroom over a single walk per item. The filter sits at ~1x once it stops restarting the
+    /// walk, and at ~7x while it does, so this separates the two without being tight enough for a
+    /// contended box to trip.
+    const MAX_WALK_RATIO: f64 = 3.0;
 
     /// The base class every fixture item hangs off — whitelisted by tpl at `:205`, so the whole
     /// pool passes the whitelist through `IsOfBaseclass` rather than by name.
@@ -647,5 +667,79 @@ mod tests {
                 expected
             );
         }
+    }
+
+    /// The fixture slice carrying the real shipped item table and the real Completion whitelist.
+    /// Only `parent` is projected: it is the one member the base class walk reads, and the filter's
+    /// other test is a plain `contains` on the tpl.
+    ///
+    /// Requires `scripts/decompress-assets.sh` to have unpacked `items.json`.
+    fn real_items_slice() -> QuestInvariantSlice {
+        let mut value = slice_value();
+        let raw = json(ITEMS_PATH);
+        let mut items = serde_json::Map::new();
+
+        for (tpl, template) in raw.as_object().expect("items object") {
+            items.insert(
+                tpl.clone(),
+                serde_json::json!({ "parent": template["_parent"] }),
+            );
+        }
+
+        value["items"] = serde_json::Value::Object(items);
+        value["completionItemsWhitelist"] =
+            json(TEMPLATES_PATH)["data"]["Completion"]["itemsWhitelist"].clone();
+
+        serde_json::from_value(value).expect("real item slice parses")
+    }
+
+    /// `GetWhitelistedItemSelection` (`:365-371`) tests every whitelisted candidate against every
+    /// item in the pool. C# affords that shape because `ItemBaseClassService` answers each
+    /// `IsOfBaseclass` from an ancestor set precomputed at startup, in O(1);
+    /// [`item_helper::is_of_baseclass`] walks the parent chain live, so the ported shape restarts a
+    /// full walk per candidate — 137 of them at the level this fixture runs at — and the filter
+    /// ends up costing more than the rest of the quest call put together.
+    ///
+    /// Pinned against a one-walk reference measured on the same box in the same profile rather
+    /// than a wall clock bound, because the absolute cost differs by an order of magnitude between
+    /// Release and debug and would be flaky either way.
+    #[test]
+    fn the_whitelist_filter_walks_each_item_chain_once() {
+        let slice = real_items_slice();
+        let ctx = QuestContext::from_slice(&slice);
+        let selection: Vec<&str> = slice.items.keys().map(String::as_str).collect();
+
+        let whitelisted = super::levelled_item_ids(ctx.completion_items_whitelist, PMC_LEVEL);
+        let candidates: Vec<&str> = whitelisted.iter().copied().collect();
+
+        // One walk per item, every candidate tested at each link.
+        let start = Instant::now();
+        let reference: Vec<&str> = selection
+            .iter()
+            .copied()
+            .filter(|tpl| {
+                item_helper::is_of_baseclasses(ctx.items, tpl, &candidates)
+                    || whitelisted.contains(tpl)
+            })
+            .collect();
+        let reference_elapsed = start.elapsed();
+
+        let start = Instant::now();
+        let kept = super::get_whitelisted_item_selection(&ctx, selection.clone(), PMC_LEVEL);
+        let elapsed = start.elapsed();
+
+        assert_eq!(
+            kept, reference,
+            "the filter must keep what a single walk per item keeps"
+        );
+
+        let ratio = elapsed.as_secs_f64() / reference_elapsed.as_secs_f64();
+        assert!(
+            ratio <= MAX_WALK_RATIO,
+            "the whitelist filter cost {ratio:.1}x a single walk per item over {} templates \
+             ({elapsed:?} against {reference_elapsed:?}), so it is restarting the parent walk per \
+             whitelisted candidate; test every candidate in one walk instead",
+            selection.len()
+        );
     }
 }
