@@ -7,6 +7,7 @@ pub mod loot;
 pub mod quest;
 pub mod ragfair;
 pub mod runtime;
+pub mod scav_case;
 pub mod verify;
 
 pub const ABI_VERSION: u32 = 16;
