@@ -62,8 +62,8 @@ seeded-RNG parity at the primitive level (xoshiro256\*\*, twin known-answer test
 - **Completion still carries ~10 ms the other quest types do not** — it is the only type that runs
   `is_valid_reward_item` over all 4,673 templates, and `loot/item_helper.rs`'s `is_of_baseclasses`
   has no cache behind it. Porting `ItemBaseClassService`'s prebuilt map is the named fix, and it is
-  not Completion-specific: the uncached walk has 58 call sites across the bot, ragfair, loot and
-  quest modules.
+  not Completion-specific: the uncached walk has 20 call sites across the bot, ragfair, loot and
+  quest modules, plus seven more behind `item_helper`'s own wrappers.
 - **Exploration and Pickup quests are a wash** — a warm native call costs ~3.3 ms whatever it
   generates, and those two quests are ~3 ms of C# work, so native lands within a few tenths of a
   millisecond of legacy either way. The port pays on Elimination (4.7-6.3x) and Completion (~1.7x).
@@ -267,4 +267,5 @@ seeded-RNG parity at the primitive level (xoshiro256\*\*, twin known-answer test
 2. Port `ItemBaseClassService`'s prebuilt parent map behind `loot/item_helper.rs`'s uncached
    `is_of_baseclasses` walk. Measured: it is the ~10 ms Completion still carries over the other
    quest types, through `reward_generator::is_valid_reward_item` over the whole items table. The
-   walk has 58 call sites across bot, ragfair, loot and quest, so the win is not Completion's alone.
+   walk has 20 call sites across bot, ragfair, loot and quest, plus seven behind `item_helper`'s own
+   wrappers, so the win is not Completion's alone.

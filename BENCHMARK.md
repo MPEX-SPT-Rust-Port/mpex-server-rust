@@ -512,7 +512,8 @@ every one of those does at least two `is_of_baseclass` calls. C# answers each fr
 `item_helper::is_of_baseclasses` walks the parent chain live on every call.
 
 Porting that cache is what closes the remaining gap. It is not Completion-specific — the uncached
-walk has 58 call sites across the bot, ragfair, loot and quest modules, and Completion is only where
+walk has 20 call sites across the bot, ragfair, loot and quest modules, plus seven more behind
+`item_helper`'s own wrappers, and Completion is only where
 the call volume makes it visible.
 
 ### What the Completion figures used to be
