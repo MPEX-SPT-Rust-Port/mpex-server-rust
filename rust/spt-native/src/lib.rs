@@ -1,4 +1,5 @@
 pub mod bot;
+pub mod diag;
 pub mod ffi;
 pub mod log_sink;
 pub mod logger;
