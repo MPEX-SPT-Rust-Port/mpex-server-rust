@@ -490,6 +490,21 @@ fn logger_guard() -> std::sync::MutexGuard<'static, (usize, Option<Logger>)> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// The C# callback receiving Rust-originated log lines, so mod-registered ILogHandlers see the
+/// full stream and not only what crossed spt_log_emit. Spans are category, message, thread
+/// name; scalars are level, tid, unix-millis. Buffers are valid only for the call.
+type LogTap =
+    unsafe extern "C" fn(*const u8, usize, *const u8, usize, *const u8, usize, i32, i32, i64);
+
+/// Poison-tolerant like `logger_guard` — a panicked taker must not kill logging.
+static LOG_TAP: Mutex<Option<LogTap>> = Mutex::new(None);
+
+fn log_tap() -> Option<LogTap> {
+    *LOG_TAP
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// Native emitters get a small process-local id per thread — the managed thread id never crosses
 /// the boundary for lines Rust originates, but worker threads still stay distinguishable.
 static NEXT_EMIT_TID: AtomicI32 = AtomicI32::new(1);
@@ -514,6 +529,23 @@ pub(crate) fn emit_pipeline(category: &str, level: LogLevel, message: &str) {
         tid: EMIT_TID.with(|tid| *tid),
         unix_millis,
     };
+    // Rust-originated lines only: C#-originated lines fan out to handlers on the C# side, with
+    // their original Exception object.
+    if let Some(tap) = log_tap() {
+        unsafe {
+            tap(
+                record.category.as_ptr(),
+                record.category.len(),
+                record.message.as_ptr(),
+                record.message.len(),
+                record.thread_name.as_ptr(),
+                record.thread_name.len(),
+                record.level as i32,
+                record.tid,
+                record.unix_millis,
+            )
+        };
+    }
     if let Some(logger) = logger_guard().1.as_ref() {
         logger.emit(&record);
     }
@@ -734,6 +766,25 @@ pub unsafe extern "C" fn spt_logger_close() -> i32 {
         if let Some(logger) = taken {
             logger.close();
         }
+    })) {
+        Ok(()) => STATUS_OK,
+        Err(_) => STATUS_PANIC,
+    }
+}
+
+/// Registers — or with a null pointer clears — the process-wide tap receiving Rust-originated
+/// log lines. Independent of pipeline init state: a tap set before `spt_logger_init` still
+/// receives generator lines.
+///
+/// # Safety
+/// A non-null `tap` must stay callable until cleared or process exit (C# roots the delegate),
+/// and must not unwind. The spans it receives are valid only for the duration of each call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn spt_log_set_tap(tap: Option<LogTap>) -> i32 {
+    match catch_unwind(AssertUnwindSafe(|| {
+        *LOG_TAP
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = tap;
     })) {
         Ok(()) => STATUS_OK,
         Err(_) => STATUS_PANIC,
@@ -1735,6 +1786,26 @@ mod tests {
         assert_eq!(out_len, 0, "nothing may be written when out_ptr is null");
     }
 
+    static TAP_LINES: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+    unsafe extern "C" fn roundtrip_tap(
+        _category_ptr: *const u8,
+        _category_len: usize,
+        message_ptr: *const u8,
+        message_len: usize,
+        _tname_ptr: *const u8,
+        _tname_len: usize,
+        level: i32,
+        _tid: i32,
+        _millis: i64,
+    ) {
+        let message =
+            std::str::from_utf8(unsafe { std::slice::from_raw_parts(message_ptr, message_len) })
+                .unwrap_or("<bad utf8>")
+                .to_owned();
+        TAP_LINES.lock().unwrap().push(format!("{level}:{message}"));
+    }
+
     #[test]
     fn logger_exports_roundtrip() {
         /// The messages this test emits; everything else in the file belongs to a generator.
@@ -1893,6 +1964,9 @@ mod tests {
             unsafe { spt_logger_reinit(config.as_ptr(), config.len(), &mut out_ptr, &mut out_len) };
         assert_eq!(status, STATUS_OK);
 
+        // The tap receives Rust-originated lines only.
+        assert_eq!(unsafe { spt_log_set_tap(Some(roundtrip_tap)) }, STATUS_OK);
+
         // Locale table + live diagnostic emission share the same run: bad JSON first.
         let status = unsafe { spt_locales_set(b"nope".as_ptr(), 4, &mut out_ptr, &mut out_len) };
         assert_eq!(status, STATUS_ERROR);
@@ -1920,6 +1994,37 @@ mod tests {
             args: None,
             message: Some("plain line".to_owned()),
         });
+
+        // Parallel tests' generator diagnostics share the process-global tap; filter to ours.
+        {
+            let tapped = TAP_LINES.lock().unwrap();
+            assert!(tapped.contains(
+                &"4:Unable to find an item with tpl of: 54009119af1c881c07000029 in Db".to_owned()
+            ));
+            assert!(tapped.contains(&"3:plain line".to_owned()));
+            assert!(
+                !tapped.iter().any(|line| line.ends_with(":hello")),
+                "spt_log_emit lines fan out C#-side and must not reach the tap"
+            );
+        }
+
+        // A cleared tap receives nothing further.
+        assert_eq!(unsafe { spt_log_set_tap(None) }, STATUS_OK);
+        sink.push(crate::loot::models::Diagnostic {
+            category: "SPTarkov.Server.Core.Generators.Loot.LootGenerator",
+            level: crate::loot::models::WARNING.to_owned(),
+            locale_key: None,
+            args: None,
+            message: Some("untapped line".to_owned()),
+        });
+        assert!(
+            !TAP_LINES
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|line| line.ends_with(":untapped line")),
+            "a cleared tap must receive nothing"
+        );
 
         // The first close drops the second init's reference - the nested `Program.Main` disposing
         // its container must not take the outer host's logging down with it.

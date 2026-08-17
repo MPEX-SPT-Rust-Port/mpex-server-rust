@@ -8,29 +8,89 @@ namespace SPTarkov.Common.Logger;
 
 /// <summary>
 /// Shim over the native log pipeline: builds the flat spt_log_emit call from an SptLogMessage.
-/// Filtering, level gating, formatting and the console/file writers all live in spt_native;
-/// spt_logger_init has already run from AddSptLogger. The ILogHandler parameter is retained for
-/// the frozen 4.1.2 surface — handlers are still disposed, but messages no longer route to them.
+/// Filtering, level gating, formatting and the console/file writers live in spt_native;
+/// spt_logger_init has already run from AddSptLogger. Mod-registered ILogHandlers are routed to
+/// again (restored 4.1.2 behaviour): C#-originated lines fan out here with their original
+/// Exception object, Rust-originated lines arrive through the spt_log_set_tap callback.
 /// </summary>
-public sealed class SPTLoggerDispatcher(SptLoggerConfiguration config, IEnumerable<ILogHandler> logHandlers) : IAsyncDisposable
+public sealed class SPTLoggerDispatcher : IAsyncDisposable
 {
     // ffi.rs
     private const int StatusOk = 0;
 
     /// <summary>
+    /// The dispatcher the native tap fans out through. Static because the callback crosses the
+    /// FFI boundary without instance state; the library is loaded once per process, so there is
+    /// one tap slot — last registered wins, cleared on dispose.
+    /// </summary>
+    private static SPTLoggerDispatcher? _tapTarget;
+
+    /// <summary>
+    /// Rooted for the process lifetime: the native side holds the function pointer produced
+    /// from this delegate, so it must never be collected.
+    /// </summary>
+    private static readonly NativeTapDelegate TapCallback = OnNativeLine;
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate void NativeTapDelegate(
+        nint categoryPtr,
+        nuint categoryLen,
+        nint messagePtr,
+        nuint messageLen,
+        nint threadNamePtr,
+        nuint threadNameLen,
+        int level,
+        int tid,
+        long unixMillis
+    );
+
+    [ThreadStatic]
+    private static bool _inHandlerFanOut;
+
+    private readonly SptLoggerConfiguration _config;
+    private readonly ILogHandler[] _logHandlers;
+    private readonly bool _tapRegistered;
+
+    /// <summary>
     /// Set when the native side fails: a panic status, or an unloadable library. Reported once to
-    /// stderr; after that every Log call is a no-op instead of a per-line error storm. The unsynchronised
-    /// read is deliberate — the worst case is one extra report per racing thread.
+    /// stderr; after that every native emit is a no-op instead of a per-line error storm. Handler
+    /// fan-out is C#-only and keeps working. The unsynchronised read is deliberate — the worst
+    /// case is one extra report per racing thread.
     /// </summary>
     private bool _disabled;
 
+    public SPTLoggerDispatcher(SptLoggerConfiguration config, IEnumerable<ILogHandler> logHandlers)
+    {
+        _config = config;
+        _logHandlers = logHandlers.ToArray();
+
+        if (_logHandlers.Length == 0)
+        {
+            return;
+        }
+
+        _tapTarget = this;
+
+        try
+        {
+            NativeMethods.LogSetTap(Marshal.GetFunctionPointerForDelegate(TapCallback));
+            _tapRegistered = true;
+        }
+        catch (Exception failure) when (failure is DllNotFoundException or EntryPointNotFoundException)
+        {
+            // No native library means no native-origin lines; the C# fan-out still works.
+        }
+    }
+
     public bool IsLogEnabled(LogLevel level)
     {
-        return config.Loggers.Any(logger => logger.LogLevel.CanLog(level));
+        return _config.Loggers.Any(logger => logger.LogLevel.CanLog(level));
     }
 
     public void Log(SptLogMessage message)
     {
+        FanOutToHandlers(message);
+
         if (_disabled)
         {
             return;
@@ -94,7 +154,7 @@ public sealed class SPTLoggerDispatcher(SptLoggerConfiguration config, IEnumerab
     /// </summary>
     public bool ReloadConfiguration()
     {
-        var configBytes = JsonSerializer.SerializeToUtf8Bytes(config);
+        var configBytes = JsonSerializer.SerializeToUtf8Bytes(_config);
         nint messagePtr = 0;
         nuint messageLen = 0;
 
@@ -134,8 +194,143 @@ public sealed class SPTLoggerDispatcher(SptLoggerConfiguration config, IEnumerab
         }
     }
 
+    /// <summary>
+    /// The pre-af58d5f routing loop, restored: per config reference — exclude filters, include
+    /// gate, level — each handler of the reference's type receives the message. A throwing
+    /// handler is skipped, and a handler that logs re-entrantly skips nested fan-out (its line
+    /// still reaches the native sinks) — logging must never recurse or die on a mod's account.
+    /// </summary>
+    private void FanOutToHandlers(SptLogMessage message)
+    {
+        if (_logHandlers.Length == 0 || _inHandlerFanOut)
+        {
+            return;
+        }
+
+        _inHandlerFanOut = true;
+
+        try
+        {
+            foreach (var reference in _config.Loggers)
+            {
+                if (!ShouldRoute(reference, message))
+                {
+                    continue;
+                }
+
+                foreach (var handler in _logHandlers)
+                {
+                    if (handler.LoggerType != reference.Type)
+                    {
+                        continue;
+                    }
+
+                    try
+                    {
+                        handler.Log(message, reference);
+                    }
+                    catch
+                    {
+                        // A broken mod handler must not take logging down.
+                    }
+                }
+            }
+        }
+        finally
+        {
+            _inHandlerFanOut = false;
+        }
+    }
+
+    /// <summary>
+    /// The per-reference decision, same contract as logger.rs should_emit: any exclude match
+    /// drops, if includes exist at least one must match, then the level gate.
+    /// </summary>
+    private static bool ShouldRoute(BaseSptLoggerReference reference, SptLogMessage message)
+    {
+        var hasInclude = false;
+        var includeMatched = false;
+
+        foreach (var filter in reference.Filters)
+        {
+            if (filter.Type == SptLoggerFilterType.Exclude)
+            {
+                if (filter.Match(message))
+                {
+                    return false;
+                }
+            }
+            else
+            {
+                hasInclude = true;
+                includeMatched = includeMatched || filter.Match(message);
+            }
+        }
+
+        if (hasInclude && !includeMatched)
+        {
+            return false;
+        }
+
+        return reference.LogLevel.CanLog(message.LogLevel);
+    }
+
+    /// <summary>
+    /// The native tap: Rust-originated lines (generator diagnostics) re-enter here so handlers
+    /// see the full stream. The text is already rendered — there is no Exception object and the
+    /// tid is the native emitter's counter, accepted divergences both. Nothing may unwind across
+    /// the FFI boundary into Rust.
+    /// </summary>
+    private static void OnNativeLine(
+        nint categoryPtr,
+        nuint categoryLen,
+        nint messagePtr,
+        nuint messageLen,
+        nint threadNamePtr,
+        nuint threadNameLen,
+        int level,
+        int tid,
+        long unixMillis
+    )
+    {
+        try
+        {
+            var target = _tapTarget;
+
+            if (target == null)
+            {
+                return;
+            }
+
+            var message = new SptLogMessage(
+                categoryPtr == 0 ? string.Empty : Marshal.PtrToStringUTF8(categoryPtr, checked((int)categoryLen)),
+                DateTime.UnixEpoch.AddMilliseconds(unixMillis),
+                (LogLevel)level,
+                tid,
+                threadNamePtr == 0 ? null : Marshal.PtrToStringUTF8(threadNamePtr, checked((int)threadNameLen)),
+                messagePtr == 0 ? string.Empty : Marshal.PtrToStringUTF8(messagePtr, checked((int)messageLen))
+            );
+
+            target.FanOutToHandlers(message);
+        }
+        catch
+        {
+            // Swallow everything: an exception crossing into Rust would abort the process.
+        }
+    }
+
     public async ValueTask DisposeAsync()
     {
+        if (_tapRegistered)
+        {
+            if (ReferenceEquals(_tapTarget, this))
+            {
+                _tapTarget = null;
+            }
+
+            NativeMethods.LogSetTap(0);
+        }
+
         try
         {
             NativeMethods.LoggerClose();
@@ -145,7 +340,7 @@ public sealed class SPTLoggerDispatcher(SptLoggerConfiguration config, IEnumerab
             // Never loaded, so there is nothing to flush.
         }
 
-        foreach (var handler in logHandlers)
+        foreach (var handler in _logHandlers)
         {
             await handler.DisposeAsync();
         }

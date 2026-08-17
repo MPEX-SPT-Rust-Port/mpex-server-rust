@@ -148,4 +148,135 @@ public class SptLoggerDispatcherTests
             }
         }
     }
+
+    private sealed class CapturingHandler : ILogHandler
+    {
+        public List<(SptLogMessage Message, BaseSptLoggerReference Reference)> Received { get; } = [];
+
+        public LoggerType LoggerType
+        {
+            get { return LoggerType.File; }
+        }
+
+        public void Log(SptLogMessage message, BaseSptLoggerReference reference)
+        {
+            Received.Add((message, reference));
+        }
+
+        public ValueTask DisposeAsync()
+        {
+            return ValueTask.CompletedTask;
+        }
+    }
+
+    private FileSptLoggerReference HandlerReference(List<SptLoggerFilter>? filters = null)
+    {
+        return new FileSptLoggerReference
+        {
+            Type = LoggerType.File,
+            LogLevel = LogLevel.Information,
+            Format = "[%level%] %message%",
+            FilePath = _directory,
+            FilePattern = "spt.log",
+            MaxFileSizeMb = 10,
+            MaxRollingFiles = 10,
+            Filters = filters ?? [],
+        };
+    }
+
+    [Test]
+    public async Task HandlersReceiveRoutedMessagesAgain()
+    {
+        var handler = new CapturingHandler();
+        var reference = HandlerReference([
+            new SptLoggerFilter
+            {
+                Type = SptLoggerFilterType.Exclude,
+                Name = "Noise.*",
+                MatchingType = MatchingType.Regex,
+            },
+        ]);
+        var dispatcher = new SPTLoggerDispatcher(new SptLoggerConfiguration { Loggers = [reference] }, [handler]);
+
+        dispatcher.Log(Message(LogLevel.Information, "routed"));
+        dispatcher.Log(Message(LogLevel.Debug, "below the reference level"));
+        dispatcher.Log(new SptLogMessage("Noise.Chatter", DateTime.UtcNow, LogLevel.Error, 1, "test", "excluded"));
+        await dispatcher.DisposeAsync();
+
+        Assert.That(handler.Received, Has.Count.EqualTo(1));
+        Assert.That(handler.Received[0].Message.Message, Is.EqualTo("routed"));
+        Assert.That(handler.Received[0].Reference, Is.SameAs(reference));
+    }
+
+    private sealed class ReentrantHandler : ILogHandler
+    {
+        public SPTLoggerDispatcher? Dispatcher { get; set; }
+
+        public int Calls { get; private set; }
+
+        public LoggerType LoggerType
+        {
+            get { return LoggerType.File; }
+        }
+
+        public void Log(SptLogMessage message, BaseSptLoggerReference reference)
+        {
+            Calls++;
+            Dispatcher?.Log(new SptLogMessage("UnitTests.Nested", DateTime.UtcNow, LogLevel.Information, 1, "test", "nested"));
+        }
+
+        public ValueTask DisposeAsync()
+        {
+            return ValueTask.CompletedTask;
+        }
+    }
+
+    [Test]
+    public async Task AReentrantHandlerDoesNotRecurseAndItsLineStillLands()
+    {
+        var handler = new ReentrantHandler();
+        var dispatcher = new SPTLoggerDispatcher(new SptLoggerConfiguration { Loggers = [HandlerReference()] }, [handler]);
+        handler.Dispatcher = dispatcher;
+
+        dispatcher.Log(Message(LogLevel.Information, "outer"));
+        await dispatcher.DisposeAsync();
+
+        Assert.That(handler.Calls, Is.EqualTo(1), "nested fan-out must be skipped");
+
+        var contents = await File.ReadAllTextAsync(Path.Combine(_directory, "spt.log"));
+
+        Assert.That(contents, Does.Contain("outer"));
+        Assert.That(contents, Does.Contain("nested"), "the nested line still reaches the native sinks");
+    }
+
+    private sealed class ThrowingHandler : ILogHandler
+    {
+        public LoggerType LoggerType
+        {
+            get { return LoggerType.File; }
+        }
+
+        public void Log(SptLogMessage message, BaseSptLoggerReference reference)
+        {
+            throw new InvalidOperationException("broken mod handler");
+        }
+
+        public ValueTask DisposeAsync()
+        {
+            return ValueTask.CompletedTask;
+        }
+    }
+
+    [Test]
+    public async Task AThrowingHandlerDoesNotBreakTheEmitPath()
+    {
+        var dispatcher = new SPTLoggerDispatcher(new SptLoggerConfiguration { Loggers = [HandlerReference()] }, [new ThrowingHandler()]);
+
+        dispatcher.Log(Message(LogLevel.Information, "survives"));
+        await dispatcher.DisposeAsync();
+
+        var contents = await File.ReadAllTextAsync(Path.Combine(_directory, "spt.log"));
+
+        Assert.That(contents, Does.Contain("survives"));
+    }
 }

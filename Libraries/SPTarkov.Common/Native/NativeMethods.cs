@@ -42,6 +42,9 @@ internal static partial class NativeMethods
     [LibraryImport(LibraryName, EntryPoint = "spt_logger_reinit")]
     internal static partial int LoggerReinit(ReadOnlySpan<byte> configUtf8, nuint configLen, out nint outPtr, out nuint outLen);
 
+    [LibraryImport(LibraryName, EntryPoint = "spt_log_set_tap")]
+    internal static partial int LogSetTap(nint tapPtr);
+
     [LibraryImport(LibraryName, EntryPoint = "spt_log_emit")]
     internal static partial int LogEmit(
         ReadOnlySpan<byte> categoryUtf8,

@@ -59,9 +59,4 @@ public class SptBasicLogger<T> : ISptLogger<T>
     {
         return true;
     }
-
-    public void DumpAndStop()
-    {
-        throw new NotImplementedException();
-    }
 }

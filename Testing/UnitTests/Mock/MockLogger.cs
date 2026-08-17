@@ -48,24 +48,9 @@ public class MockLogger<T> : ISptLogger<T>, ILogger<T>
         Console.WriteLine(data);
     }
 
-    public void WriteToLogFile(string body, LogLevel level = LogLevel.Information)
-    {
-        throw new NotImplementedException();
-    }
-
     public bool IsLogEnabled(LogLevel level)
     {
         return true;
-    }
-
-    public void DumpAndStop()
-    {
-        throw new NotImplementedException();
-    }
-
-    public void WriteToLogFile(object body)
-    {
-        Console.WriteLine(body);
     }
 
     public IDisposable? BeginScope<TState>(TState state)
