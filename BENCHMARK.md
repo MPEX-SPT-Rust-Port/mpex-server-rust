@@ -11,6 +11,7 @@ plain `dotnet test` never runs them:
 | `BotBenchmarkTests.cs` | one bot's inventory — elapsed time per bot, with the payload projection timed separately |
 | `RagfairBenchmarkTests.cs` | a dynamic flea offer pass — elapsed time per pass, with the payload projection timed separately |
 | `RepeatableQuestBenchmarkTests.cs` | one repeatable quest of each type — elapsed time per quest, native measured with the invariant slice cold and warm, with the slice projection timed separately |
+| `ScavCaseBenchmarkTests.cs` | one scav case of each shipped recipe — elapsed time per call, with the request projection timed separately |
 
 There are no `cargo bench` targets. `Containerfile.dev` mentions `cargo bench` as a toolchain
 capability, not as a suite that exists.
@@ -42,6 +43,10 @@ dotnet test -c Release --filter "FullyQualifiedName~RagfairBenchmarkTests" \
 
 # one quest per type, legacy against native with the slice cold and warm, plus the slice on its own
 dotnet test -c Release --filter "FullyQualifiedName~RepeatableQuestBenchmarkTests" \
+  --logger "console;verbosity=detailed"
+
+# one scav case per shipped recipe, both paths, plus the request projection on its own
+dotnet test -c Release --filter "FullyQualifiedName~ScavCaseBenchmarkTests" \
   --logger "console;verbosity=detailed"
 ```
 
@@ -614,6 +619,120 @@ Repeatable-quest-specific caveats, on top of the general ones below:
   itself under ~100 KB, and it cancels out of the cold-minus-warm delta.
 - **Workstation GC**, as with the ragfair fixture: `<ServerGarbageCollection>` is set on
   `SPTarkov.Server.csproj`, not on `UnitTests.csproj`.
+
+## Results — scav case rewards
+
+Recorded 2026-08-17 on `d31a000` plus the working-tree fixture that produced them. Same machine as
+the bot-generation, ragfair and repeatable-quest figures above, not the machine the location-loot
+figures came from.
+
+| | |
+|---|---|
+| CPU | AMD Ryzen 5 5600H (6C/12T) |
+| RAM | 23 GB |
+| OS | Linux 7.1.8-200.fc44.x86_64 |
+| .NET SDK | 10.0.110 |
+| rustc | 1.97.1 |
+| Configuration | Release, n=20 after 2 warmups, per arm per recipe |
+
+**The design expected native to lose here, and it does.** Scav case rewards are a cold path — one
+`Generate` call per finished craft, behind a 41-minute-to-5-hour hideout timer — and the call
+produces 1 to 6 reward groups. The native path projects and serialises the whole items view plus a
+static price for every tpl in it on each call, with that handful of output items to amortise it
+against; the reward-loot port is the comparison class (~53 ms native vs ~17 ms legacy, 15-35 items).
+No parity gate was promised on this port and none is claimed.
+
+**Workload.** One `ScavCaseRewardGenerator.Generate(recipeId)` call per shipped recipe — all five in
+`hideout/production.json`'s `scavRecipes` — on the live shipped database, unseeded the way
+production runs. Between them the recipes cover an empty rarity, a fixed count and a ranged count.
+
+**Two arms per recipe**, asserted rather than assumed — the fixture checks `LastPathTaken` before it
+reports a number:
+
+- **native** — the default path.
+- **legacy** — `ScavCaseConfig.ForceLegacyScavCaseGeneration`, the retained 4.1.2 C# path.
+
+A third phase times `ScavCaseNativeRequestBuilder.Build()` on its own, on the first recipe — the
+request is identical for every recipe bar its `RecipeId`.
+
+Each arm is measured off a generator built for that arm and warmed twice first. The legacy path
+caches its two item pools on the instance, and those warmups build them: that is the state a
+production generator answers from. `ScavCaseRewardGenerator` is transient in DI, but the graph
+holding it hangs off the singleton `HttpServer`, so one instance serves every craft for the life of
+the process and pays the pool build once.
+
+### Elapsed time per call
+
+Two full invocations of the fixture; the second median is the error bar on the first. Recipes are in
+the order the shipped table lists them, which is the order they are measured in — the first one
+measured reads ~2x high on both arms, see below.
+
+| Recipe | End products (common/rare/superrare) | Arm | median | median (2nd run) | mean | min | max |
+|---|---|---|---|---|---|---|---|
+| `6271093e…` moonshine | 0 / 1 / 3-5 | native (rust) | 74.08 ms | 74.11 ms | 74.55 ms | 62.71 ms | 89.55 ms |
+| `6271093e…` moonshine | 0 / 1 / 3-5 | legacy (C# 4.1.2) | 1.64 ms | 1.93 ms | 2.10 ms | 1.80 ms | 3.83 ms |
+| `62710a8c…` 15,000 ₽ | 1 / 1-3 / 0 | native (rust) | 49.73 ms | 41.17 ms | 47.10 ms | 34.97 ms | 74.22 ms |
+| `62710a8c…` 15,000 ₽ | 1 / 1-3 / 0 | legacy (C# 4.1.2) | 0.77 ms | 0.78 ms | 0.83 ms | 0.71 ms | 1.59 ms |
+| `62710974…` 2,500 ₽ | 1-2 / 0-1 / 0 | **native (rust)** | **36.88 ms** | **37.50 ms** | 39.63 ms | 34.29 ms | 53.81 ms |
+| `62710974…` 2,500 ₽ | 1-2 / 0-1 / 0 | **legacy (C# 4.1.2)** | **0.41 ms** | **0.41 ms** | 0.43 ms | 0.38 ms | 0.81 ms |
+| `62710a69…` 95,000 ₽ | 0 / 1-3 / 1-2 | **native (rust)** | **37.38 ms** | **37.82 ms** | 39.61 ms | 33.91 ms | 54.87 ms |
+| `62710a69…` 95,000 ₽ | 0 / 1-3 / 1-2 | **legacy (C# 4.1.2)** | **0.44 ms** | **0.44 ms** | 0.46 ms | 0.40 ms | 0.81 ms |
+| `62710a0e…` intel folder | 0 / 2-4 / 2-3 | **native (rust)** | **37.59 ms** | **37.32 ms** | 39.72 ms | 34.37 ms | 52.57 ms |
+| `62710a0e…` intel folder | 0 / 2-4 / 2-3 | **legacy (C# 4.1.2)** | **0.45 ms** | **0.45 ms** | 0.51 ms | 0.40 ms | 1.20 ms |
+| — | — | `Build` (request only) | 6.69 ms | 6.84 ms | 9.26 ms | 4.46 ms | 17.80 ms |
+
+Steady state, off the three settled recipes: **~37.5 ms native against ~0.44 ms legacy — native is
+~85x slower per call**, and the ratio is flat across recipes because the cost is not the recipe. It
+is the widest native-versus-legacy gap in this file, and it was the expected outcome rather than a
+regression found afterwards.
+
+Where it goes: `Build()` alone is **6.7 / 6.8 ms** — the items view, a static price per tpl in it,
+every default preset, the blacklists and the recipe table. The remaining ~31 ms is the serialise of
+that request, the native side's parse of it, generation itself, and binding the response back into
+`Models` objects. Same shape as the bot path, where the equivalent split measured ~92% transport.
+
+The legacy path has nothing comparable to pay: it filters the item table once per generator instance
+into `DbItemsCache`/`DbAmmoItemsCache`, then a call is three price-range filters over that cached
+list plus 1-6 draws. Sub-millisecond is what a warm instance costs; a cold one pays the pool build
+first, which this fixture excludes from both arms by warming up.
+
+### The first recipe measured reads ~2x high
+
+`6271093e…` reads 74 ms native and ~1.8 ms legacy in both invocations — stable, so not spread, and
+its min (62.71 ms) never falls to the others' floor. Two warmups do not settle the first phase in
+the process.
+
+It is measurement order, not the recipe. Running the same fixture with the recipe list reversed
+moves the inflation onto whichever recipe goes first and leaves `6271093e…` at the ordinary figure:
+
+| Recipe (reversed order) | native median | legacy median |
+|---|---|---|
+| `62710a0e…` (measured first) | 76.54 ms | 1.67 ms |
+| `62710a69…` | 40.55 ms | 0.76 ms |
+| `62710974…` | 38.56 ms | 0.56 ms |
+| `62710a8c…` | 37.63 ms | 0.44 ms |
+| `6271093e…` (measured last) | **38.71 ms** | **0.46 ms** |
+
+Read the first two rows of the main table as ~37.5 ms native / ~0.44 ms legacy like the rest. The
+fixture keeps the two-warmup methodology of the other fixtures in this file rather than tuning it
+away; the same artifact is documented on the repeatable-quest Elimination cold arm above.
+
+### Why native stays the default anyway
+
+One call per finished craft, against production times of 41 minutes (`62710974…`) to 5h20m
+(`62710a0e…`). The absolute cost is ~37 ms once per craft on a path a player reaches a few times a
+day — nothing a player or a raid loop can observe. Native stays the default for family consistency
+with the other ported generators, and `ScavCaseConfig.ForceLegacyScavCaseGeneration` is the opt-out
+for anyone who disagrees.
+
+Scav-case-specific caveats, on top of the general ones below:
+
+- **No allocation or RSS figures.** This fixture times elapsed wall clock only.
+- **Unseeded.** Every timed run draws different rewards, and a draw that lands on a weapon or armor
+  template costs a preset clone that a plain item does not. The min/max columns include that.
+- **`Build()`'s mean is not its cost.** 9.26 ms against a 6.84 ms median and a 4.46 ms min, in both
+  invocations. Read the median; the phase is skewed by a few slow runs and no cause was measured.
+- **Workstation GC**, as with the ragfair and quest fixtures.
 
 ## Caveats
 
