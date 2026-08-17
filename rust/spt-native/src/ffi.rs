@@ -8,6 +8,7 @@ use rayon::prelude::*;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
+use crate::base_class::{self, BaseClassRequest, BaseClassResponse};
 use crate::bot::bot_inventory_generator::{generate_inventory, generate_inventory_batch};
 use crate::diag::DiagSink;
 use crate::logger::{LogLevel, LogRecord, Logger};
@@ -479,6 +480,41 @@ pub unsafe extern "C" fn spt_generate_scav_case_rewards(
     }
 }
 
+/// The success envelope of `spt_build_item_base_class_cache`: the response under `result`, the
+/// same shape `ScavCaseResponse` puts on the wire.
+#[derive(Serialize)]
+struct BaseClassEnvelope {
+    result: BaseClassResponse,
+}
+
+/// The whole `_itemBaseClassesCache` in one call, off the template table. The walk has no C# throw
+/// to port, so `STATUS_ERROR` is unreachable: only a parse error or a panic answers anything but
+/// `STATUS_OK`.
+///
+/// # Safety
+/// See `spt_generate_static_containers`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn spt_build_item_base_class_cache(
+    req_ptr: *const u8,
+    req_len: usize,
+    out_ptr: *mut *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    unsafe {
+        run_generator(
+            req_ptr,
+            req_len,
+            out_ptr,
+            out_len,
+            |request: BaseClassRequest| {
+                Ok(BaseClassEnvelope {
+                    result: base_class::build(&request),
+                })
+            },
+        )
+    }
+}
+
 /// The process-wide log pipeline and its init ref-count. A plain `Mutex<Option>` rather than a
 /// `OnceLock` so `spt_logger_close` can take it down (and tests can re-initialise afterwards); the
 /// count lives inside the same lock so init and close cannot race each other.
@@ -762,7 +798,7 @@ mod tests {
         assert_eq!(spt_native_abi_version(), crate::ABI_VERSION);
         assert_eq!(
             crate::ABI_VERSION,
-            18,
+            19,
             "bump SptNative.ExpectedAbiVersion too"
         );
     }
@@ -1624,6 +1660,41 @@ mod tests {
         assert_eq!(
             String::from_utf8(out).unwrap(),
             "No scav case recipe found with id: ffffffffffffffffffffffff"
+        );
+    }
+
+    /// `child` is an Item whose chain climbs through the `node` root to a `root` the view never
+    /// holds — the three-template shape `base_class`'s own tests pin, here across the boundary.
+    const BASE_CLASS_REQUEST: &[u8] = br#"{"itemsView":{
+        "child":{"parent":"node","type":"Item"},
+        "node":{"parent":"root","type":"Node"}
+    }}"#;
+
+    #[test]
+    fn build_item_base_class_cache_export_round_trips() {
+        let (status, out) = call_generate(spt_build_item_base_class_cache, BASE_CLASS_REQUEST);
+
+        assert_eq!(status, STATUS_OK);
+        let result: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        // A `HashSet` crosses as an array, so the chain is order-independent.
+        let chain = result["result"]["itemBaseClasses"]["child"]
+            .as_array()
+            .unwrap();
+        assert_eq!(chain.len(), 2);
+        assert!(chain.contains(&serde_json::json!("node")));
+        assert!(chain.contains(&serde_json::json!("root")));
+        assert_eq!(result["result"]["rootNodeIds"], serde_json::json!(["node"]));
+    }
+
+    #[test]
+    fn build_item_base_class_cache_rejects_malformed_json() {
+        let (status, out) = call_generate(spt_build_item_base_class_cache, b"not json");
+
+        assert_eq!(status, STATUS_BAD_ARGS);
+        let message = String::from_utf8(out).unwrap();
+        assert!(
+            message.contains("expected ident"),
+            "expected the serde error, got: {message}"
         );
     }
 
