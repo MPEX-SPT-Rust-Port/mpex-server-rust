@@ -47,6 +47,14 @@ public record ItemConfig : BaseConfig
     /// </summary>
     [JsonPropertyName("customItemGlobalPresets")]
     public required List<Preset> CustomItemGlobalPresets { get; set; }
+
+    /// <summary>
+    ///     Force the item base class cache build down the retained 4.1.2 C# path instead of
+    ///     spt-native. The escape hatch for hooks the patch detection cannot see - patches on the
+    ///     shared helpers the service calls into.
+    /// </summary>
+    [JsonPropertyName("forceLegacyItemBaseClassHydration")]
+    public bool ForceLegacyItemBaseClassHydration { get; set; }
 }
 
 public record HandbookPriceOverride
