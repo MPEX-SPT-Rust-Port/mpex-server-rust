@@ -14,9 +14,9 @@ Toolchain is pinned in `rust-toolchain.toml` (1.97.1, edition 2024). Dependencie
 `walkdir`, `xxhash-rust`, `base64` — plus `tempfile` as the only dev-dependency (the `verify` FFI
 tests need a real directory). `Cargo.lock` is committed.
 
-Roughly 46k lines across 49 files, tests included. `src/bot/` is ~37% of that and
-`bot_equipment_mod_generator.rs` alone ~4.2k; `src/loot/` ~27%, `src/ragfair/` ~17%,
-`src/quest/` ~13%.
+Roughly 48k lines across 50 files, tests included. `src/bot/` is ~35% of that and
+`bot_equipment_mod_generator.rs` alone ~4.2k; `src/loot/` ~25%, `src/ragfair/` ~15%,
+`src/quest/` ~12%, `src/scav_case/` ~4%.
 
 ## Layout
 
@@ -33,6 +33,7 @@ Roughly 46k lines across 49 files, tests included. `src/bot/` is ~37% of that an
 | `src/bot/` | One bot's entire inventory: equipment, mods, weapons, magazines, loot |
 | `src/ragfair/` | One batch of dynamic flea offers: the assort walk, pricing, barter schemes, the offers |
 | `src/quest/` | One repeatable quest of any of the four types, its rewards, and the mutated quest-type pool |
+| `src/scav_case/` | One scav case craft's rewards: the reward and ammo pools, the per-rarity picks, the money/ammo/preset arms |
 
 ## FFI boundary (`ffi.rs`)
 
@@ -46,7 +47,7 @@ than a JSON document, and `spt_logger_close` takes nothing — see *The log pipe
 
 ```
 C# SptNative → spt_generate_* (JSON in)
-  → serde deserialize into a request envelope from loot/, bot/, ragfair/ or quest/models.rs
+  → serde deserialize into a request envelope from loot/, bot/, ragfair/, quest/ or scav_case/models.rs
   → catch_unwind( generator )
   → serde serialize the result, or the LootError message, into an out-buffer
 ```
@@ -63,8 +64,8 @@ C# SptNative → spt_generate_* (JSON in)
   those families port a C#-sanctioned throw as an `.expect` and the C# message is what the caller has
   to log. The cost is that a real port bug in those families (an index panic in the Rust) also
   arrives as 3, indistinguishable from a sanctioned generation failure, instead of reaching
-  `SptNative.cs`'s "this indicates a native library bug"
-  wording. Deliberate: the message is worth more than the discrimination.
+  `SptNative.cs`'s "this indicates a native library bug" wording. Deliberate: the message is worth
+  more than the discrimination.
 - **Two requests have a cached half**, ragfair's and the repeatable quest's. Each arrives as
   `{invariantStamp, invariant?, varying}`; `src/ragfair/slice_cache.rs` and
   `src/quest/slice_cache.rs` each hold the last parsed invariant slice under the stamp it came with,
@@ -202,11 +203,13 @@ These are what keep the port correct; break one and output silently diverges fro
   family. A C#-*sanctioned* `throw` is ported one of two ways, by family: loot, bot and ragfair return it as a
   `LootError` (so does an unguarded null deref they would have NRE'd on); the quest family panics at the throw
   site — `panic!` or `.expect` — and catches it at the family entry point (`quest/mod.rs:120`), which carries
-  the message across as `STATUS_ERROR`. Panicking is not unsafe here: every export runs inside `catch_unwind`
+  the message across as `STATUS_ERROR`. Scav case does both: a `ScavCaseError` return where the C# throw is
+  reachable through a guard, a panic caught at its own entry point (`scav_case/mod.rs`) where the C# throws out
+  of a dictionary index. Panicking is not unsafe here: every export runs inside `catch_unwind`
   (`ffi.rs:195`), so nothing unwinds past the FFI boundary either way.
-- **Wire models come in four families** (`loot/models.rs`, `bot/models.rs`, `ragfair/models.rs`,
-  `quest/models.rs`). DB/EFT models mirror C# records field-for-field, pinned to the exact
-  `JsonPropertyName`, each with a `#[serde(flatten)] extra` map so
+- **Wire models come in five families** (`loot/models.rs`, `bot/models.rs`, `ragfair/models.rs`,
+  `quest/models.rs`, `scav_case/models.rs`). DB/EFT models mirror C# records field-for-field, pinned
+  to the exact `JsonPropertyName`, each with a `#[serde(flatten)] extra` map so
   mod-added fields survive the round trip — the counterpart to the `[JsonExtensionData]` that `Tools/Ceciler`
   injects. Request/response envelopes are a fresh contract and use plain camelCase with no passthrough map.
 - **One C# RNG lifetime can span two native calls.** Each generator entry point (not `ffi.rs`) opens the run
@@ -221,7 +224,8 @@ These are what keep the port correct; break one and output silently diverges fro
 
 ## Tests
 
-All tests are inline `#[cfg(test)]` modules (~670 of them); there is no `tests/` integration suite. Three kinds:
+Almost all tests are inline `#[cfg(test)]` modules (~700 of them); the only `tests/` target is
+`completion_whitelist_baseclass.rs`, the Completion whitelist shape guard. Three kinds:
 
 - **Parity fixtures** — replay a C# scenario and assert the exact item list.
 - **Seeded-RNG tests** — a `testSeed` field on every request envelope installs a `TestSeedGuard`, swapping
