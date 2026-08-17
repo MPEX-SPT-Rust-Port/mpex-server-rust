@@ -11,6 +11,7 @@ use serde::de::DeserializeOwned;
 use crate::base_class::{self, BaseClassRequest, BaseClassResponse};
 use crate::bot::bot_inventory_generator::{generate_inventory, generate_inventory_batch};
 use crate::diag::DiagSink;
+use crate::linked_items::{self, LinkedItemsRequest, LinkedItemsResponse};
 use crate::logger::{LogLevel, LogRecord, Logger};
 use crate::loot::item_helper::LootError;
 use crate::loot::location_loot_generator::{generate_dynamic_loot, generate_static_containers};
@@ -515,6 +516,41 @@ pub unsafe extern "C" fn spt_build_item_base_class_cache(
     }
 }
 
+/// The success envelope of `spt_build_ragfair_linked_item_table`: the response under `result`,
+/// the same shape `BaseClassEnvelope` puts on the wire.
+#[derive(Serialize)]
+struct LinkedItemsEnvelope {
+    result: LinkedItemsResponse,
+}
+
+/// The whole `linkedItemsCache` in one call, off the template table. The walk has no C# throw
+/// to port, so `STATUS_ERROR` is unreachable: only a parse error or a panic answers anything
+/// but `STATUS_OK`.
+///
+/// # Safety
+/// See `spt_generate_static_containers`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn spt_build_ragfair_linked_item_table(
+    req_ptr: *const u8,
+    req_len: usize,
+    out_ptr: *mut *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    unsafe {
+        run_generator(
+            req_ptr,
+            req_len,
+            out_ptr,
+            out_len,
+            |request: LinkedItemsRequest| {
+                Ok(LinkedItemsEnvelope {
+                    result: linked_items::build(&request),
+                })
+            },
+        )
+    }
+}
+
 /// The process-wide log pipeline and its init ref-count. A plain `Mutex<Option>` rather than a
 /// `OnceLock` so `spt_logger_close` can take it down (and tests can re-initialise afterwards); the
 /// count lives inside the same lock so init and close cannot race each other.
@@ -798,7 +834,7 @@ mod tests {
         assert_eq!(spt_native_abi_version(), crate::ABI_VERSION);
         assert_eq!(
             crate::ABI_VERSION,
-            19,
+            20,
             "bump SptNative.ExpectedAbiVersion too"
         );
     }
@@ -1692,6 +1728,41 @@ mod tests {
     #[test]
     fn build_item_base_class_cache_rejects_malformed_json() {
         let (status, out) = call_generate(spt_build_item_base_class_cache, b"not json");
+
+        assert_eq!(status, STATUS_BAD_ARGS);
+        let message = String::from_utf8(out).unwrap();
+        assert!(
+            message.contains("expected ident"),
+            "expected the serde error, got: {message}"
+        );
+    }
+
+    /// One weapon linking one stock — enough to see both directions cross the boundary.
+    const LINKED_ITEMS_REQUEST: &[u8] = br#"{"itemsView":{
+        "weapon":{"parent":"p","slots":[{"name":"mod_stock","filter":["stockA"]}]},
+        "stockA":{"parent":"p"}
+    }}"#;
+
+    #[test]
+    fn build_ragfair_linked_item_table_export_round_trips() {
+        let (status, out) =
+            call_generate(spt_build_ragfair_linked_item_table, LINKED_ITEMS_REQUEST);
+
+        assert_eq!(status, STATUS_OK);
+        let result: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        let linked = result["result"]["linkedItems"].as_object().unwrap();
+        assert_eq!(linked.len(), 2);
+        // A `HashSet` crosses as an array.
+        let weapon = linked["weapon"].as_array().unwrap();
+        assert_eq!(weapon.len(), 1);
+        assert!(weapon.contains(&serde_json::json!("stockA")));
+        let stock = linked["stockA"].as_array().unwrap();
+        assert!(stock.contains(&serde_json::json!("weapon")));
+    }
+
+    #[test]
+    fn build_ragfair_linked_item_table_rejects_malformed_json() {
+        let (status, out) = call_generate(spt_build_ragfair_linked_item_table, b"not json");
 
         assert_eq!(status, STATUS_BAD_ARGS);
         let message = String::from_utf8(out).unwrap();
