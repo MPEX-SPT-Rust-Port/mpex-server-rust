@@ -1,3 +1,4 @@
+pub mod base_class;
 pub mod bot;
 pub mod diag;
 pub mod ffi;

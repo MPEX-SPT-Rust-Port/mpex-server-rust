@@ -199,6 +199,13 @@ impl ItemBaseClassCache {
         Self { ancestors }
     }
 
+    /// `_itemBaseClassesCache` itself, moved out — what the bulk-build seam
+    /// ([`crate::base_class::build`]) partitions by template type. Every other caller answers
+    /// through the probe methods below instead.
+    pub fn into_ancestors(self) -> HashMap<String, HashSet<String>> {
+        self.ancestors
+    }
+
     /// `ItemHelper.IsOfBaseclass` answered from the cache
     /// (`ItemBaseClassService.ItemHasBaseClass`, single-candidate overload).
     pub fn is_of_baseclass(&self, tpl: &str, base_class_tpl: &str) -> bool {
