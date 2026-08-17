@@ -21,6 +21,7 @@ use crate::quest::{QuestError, generate_repeatable_quest};
 use crate::ragfair::models::{DynamicOffersHeader, DynamicOffersResult};
 use crate::ragfair::offer_generator::{RagfairError, generate_dynamic_offers};
 use crate::runtime::runtime;
+use crate::scav_case::{ScavCaseError, generate_scav_case_rewards};
 use crate::verify;
 
 pub const STATUS_OK: i32 = 0;
@@ -77,6 +78,16 @@ impl FfiFailure for QuestError {
             QuestError::Failed(message) => message,
             QuestError::StaleSlice => "no cached invariant slice for this stamp".to_string(),
         }
+    }
+}
+
+impl FfiFailure for ScavCaseError {
+    fn status(&self) -> i32 {
+        STATUS_ERROR
+    }
+
+    fn into_message(self) -> String {
+        self.message
     }
 }
 
@@ -443,6 +454,31 @@ pub unsafe extern "C" fn spt_generate_repeatable_quest(
     }
 }
 
+/// One scav case craft's rewards.
+///
+/// # Safety
+/// See `spt_generate_static_containers`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn spt_generate_scav_case_rewards(
+    req_ptr: *const u8,
+    req_len: usize,
+    out_ptr: *mut *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    unsafe {
+        run_generator_with(
+            req_ptr,
+            req_len,
+            out_ptr,
+            out_len,
+            |request| generate_scav_case_rewards(request, &mut DiagSink::Pipeline),
+            |response| {
+                serde_json::to_vec(&response).expect("scav case response serialization cannot fail")
+            },
+        )
+    }
+}
+
 /// The process-wide log pipeline and its init ref-count. A plain `Mutex<Option>` rather than a
 /// `OnceLock` so `spt_logger_close` can take it down (and tests can re-initialise afterwards); the
 /// count lives inside the same lock so init and close cannot race each other.
@@ -726,7 +762,7 @@ mod tests {
         assert_eq!(spt_native_abi_version(), crate::ABI_VERSION);
         assert_eq!(
             crate::ABI_VERSION,
-            17,
+            18,
             "bump SptNative.ExpectedAbiVersion too"
         );
     }
@@ -1532,6 +1568,62 @@ mod tests {
         assert_ne!(
             mask_minted_ids(&first, &request),
             mask_minted_ids(&other, &other_request)
+        );
+    }
+
+    /// A scav case craft off the generator's own synthetic table, seeded so the reward list is the
+    /// one its end-to-end KAT pins.
+    fn scav_case_request() -> Vec<u8> {
+        let mut request = crate::scav_case::generator::tests::container_request_json();
+        request["testSeed"] = serde_json::json!(42);
+
+        serde_json::to_vec(&request).expect("request serializes")
+    }
+
+    #[test]
+    fn scav_case_rewards_roundtrip_result_json() {
+        let (status, out) = call_generate(spt_generate_scav_case_rewards, &scav_case_request());
+
+        assert_eq!(status, STATUS_OK);
+        let result: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        let rewards = result["result"].as_array().unwrap();
+        assert!(!rewards.is_empty(), "the fixture craft draws rewards");
+        // Each entry is one reward item plus its children, so every group has a root with a tpl.
+        assert!(
+            rewards
+                .iter()
+                .all(|group| group[0]["_tpl"].is_string() && group[0]["_id"].is_string())
+        );
+    }
+
+    #[test]
+    fn unparseable_scav_case_request_returns_bad_args_with_the_parse_error() {
+        let (status, out) = call_generate(spt_generate_scav_case_rewards, b"{\"recipeId\":");
+
+        assert_eq!(status, STATUS_BAD_ARGS);
+        let message = String::from_utf8(out).unwrap();
+        assert!(
+            message.contains("EOF while parsing"),
+            "expected the serde error, got: {message}"
+        );
+    }
+
+    #[test]
+    fn a_scav_case_failure_returns_status_error_and_the_message() {
+        // `FirstOrDefault` (`:54`) answers null for a recipe id the table does not hold, which the
+        // C# then NREs dereferencing — reported here as an error naming the recipe.
+        let mut request: serde_json::Value = serde_json::from_slice(&scav_case_request()).unwrap();
+        request["recipeId"] = serde_json::json!("ffffffffffffffffffffffff");
+
+        let (status, out) = call_generate(
+            spt_generate_scav_case_rewards,
+            &serde_json::to_vec(&request).unwrap(),
+        );
+
+        assert_eq!(status, STATUS_ERROR);
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "No scav case recipe found with id: ffffffffffffffffffffffff"
         );
     }
 

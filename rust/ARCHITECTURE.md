@@ -30,9 +30,9 @@ Toolchain is pinned in `rust-toolchain.toml` (1.97.1, edition 2024). Dependencie
 pre-AVX2 hardware, and the mold linker on Linux. Both workspace profiles use one codegen unit; release adds fat
 LTO.
 
-Roughly 46k lines across the 47 files of `src/`, inline tests included. `src/bot/` is ~36% of that and
-`bot_equipment_mod_generator.rs` alone ~4.2k; `src/loot/` ~26%, `src/ragfair/` ~16%,
-`src/quest/` ~13%.
+Roughly 48k lines across the 50 files of `src/`, inline tests included. `src/bot/` is ~35% of that and
+`bot_equipment_mod_generator.rs` alone ~4.2k; `src/loot/` ~25%, `src/ragfair/` ~15%,
+`src/quest/` ~12%, `src/scav_case/` ~4%.
 
 ## Layout
 
@@ -50,37 +50,40 @@ Roughly 46k lines across the 47 files of `src/`, inline tests included. `src/bot
 | `src/bot/` | One bot's entire inventory: equipment, mods, weapons, magazines, loot |
 | `src/ragfair/` | One batch of dynamic flea offers: the assort walk, pricing, barter schemes, the offers |
 | `src/quest/` | One repeatable quest of any of the four types, its rewards, and the mutated quest-type pool |
+| `src/scav_case/` | One scav case craft's rewards: the reward and ammo pools, the per-rarity picks, the money/ammo/preset arms |
 
 ## FFI boundary (`ffi.rs`)
 
-Seventeen `extern "C"` exports. Two are trivial (`spt_native_abi_version`, `spt_buf_free`); ten take a UTF-8
-JSON generation request; `spt_verify_database` takes a UTF-8 directory path instead. All eleven of those hand
+Eighteen `extern "C"` exports. Two are trivial (`spt_native_abi_version`, `spt_buf_free`); eleven take a UTF-8
+JSON generation request; `spt_verify_database` takes a UTF-8 directory path instead. All twelve of those hand
 back a heap buffer the caller releases with `spt_buf_free`. `spt_locales_set` takes the resolved server-locale
-table as UTF-8 JSON and buffers a parse error, or panic text since ABI 17. The last three are the log pipeline
+table as UTF-8 JSON and buffers a parse error, or panic text since ABI 18. The last three are the log pipeline
 (`spt_logger_init`, `spt_log_emit`, `spt_logger_close`): `spt_logger_init` takes the raw `sptLogger.json`
 bytes and hands back a buffer only on failure, `spt_log_emit` passes one line's fields directly rather
 than a JSON document, and `spt_logger_close` takes nothing — see *The log pipeline* below.
 
 ```
 C# SptNative → spt_generate_* (JSON in)
-  → serde deserialize into a request envelope from loot/, bot/, ragfair/ or quest/models.rs
+  → serde deserialize into a request envelope from loot/, bot/, ragfair/, quest/ or scav_case/models.rs
   → catch_unwind( generator )
   → serde serialize the result, or the failure message (LootError or panic text), into an out-buffer
 ```
 
-- `run_generator_with` is the shared body of the ten generation exports; eight reach it through
-  `run_generator`, the JSON-response-plus-`LootError` wrapper. Ragfair and quest call it directly —
-  ragfair to frame its response instead of emitting one JSON document, quest for its own error type.
+- `run_generator_with` is the shared body of the eleven generation exports; eight reach it through
+  `run_generator`, the JSON-response-plus-`LootError` wrapper. Ragfair, quest and scav case call it
+  directly — ragfair to frame its response instead of emitting one JSON document, the other two for
+  their own error types.
   `spt_verify_database` is separate because it blocks on the tokio runtime.
 - Status codes: `STATUS_OK` 0, `STATUS_BAD_ARGS` 1 (null pointer, bad UTF-8, unparseable JSON),
-  `STATUS_PANIC` 2 (the panic message is in the out-buffer since ABI 17), `STATUS_ERROR` 3,
+  `STATUS_PANIC` 2 (the panic message is in the out-buffer since ABI 18), `STATUS_ERROR` 3,
   `STATUS_STALE_SLICE` 4 (ragfair and quest only — see below).
-  **Quest is the exception to 2**: `quest/mod.rs` catches the generator's panic itself and reports it
-  as `STATUS_ERROR` 3 carrying the panic message, because that family ports a C#-sanctioned throw as
-  an `.expect` — a generation failure, not a library bug. The cost is that a real port bug in
-  that family (an index panic in the Rust) also arrives as 3, indistinguishable from a sanctioned
-  generation failure, instead of reaching `SptNative.cs`'s "this indicates a native library bug"
-  wording. Deliberate: a sanctioned throw is a generation failure and must read as one.
+  **Quest and scav case are the exceptions to 2**: `quest/mod.rs` and `scav_case/mod.rs` catch the
+  generator's panic themselves and report it as `STATUS_ERROR` 3 carrying the panic message, because
+  those families port a C#-sanctioned throw as an `.expect` — a generation failure, not a library
+  bug. The cost is that a real port bug in those families (an index panic in the Rust) also arrives
+  as 3, indistinguishable from a sanctioned generation failure, instead of reaching `SptNative.cs`'s
+  "this indicates a native library bug" wording. Deliberate: a sanctioned throw is a generation
+  failure and must read as one.
 - **Two requests have a cached half**, ragfair's and the repeatable quest's. Each arrives as
   `{invariantStamp, invariant?, varying}`; `src/ragfair/slice_cache.rs` and
   `src/quest/slice_cache.rs` each hold the last parsed invariant slice under the stamp it came with,
@@ -89,7 +92,7 @@ C# SptNative → spt_generate_* (JSON in)
   two slices are the only request data the crate holds across calls; every other payload is still
   projected per call.
 - **A buffer is written on failure too** — the parse error, the `LootError` message, or (since
-  ABI 17) the panic text. Ownership is decided by the out-pointer being non-null, never by the
+  ABI 18) the panic text. Ownership is decided by the out-pointer being non-null, never by the
   status code. `spt_verify_database`'s free-on-success-only shape must not be copied into the
   generators.
 - `catch_unwind` on every fallible path: a Rust panic never unwinds into the CLR.
@@ -255,11 +258,13 @@ These are what keep the port correct; break one and output silently diverges fro
   family. A C#-*sanctioned* `throw` is ported one of two ways, by family: loot, bot and ragfair return it as a
   `LootError` (so does an unguarded null deref they would have NRE'd on); the quest family panics at the throw
   site — `panic!` or `.expect` — and catches it at the family entry point (`quest/mod.rs:128`), which carries
-  the message across as `STATUS_ERROR`. Panicking is not unsafe here: every export runs inside `catch_unwind`
-  (`ffi.rs:214`), so nothing unwinds past the FFI boundary either way.
-- **Wire models come in four families** (`loot/models.rs`, `bot/models.rs`, `ragfair/models.rs`,
-  `quest/models.rs`). DB/EFT models mirror C# records field-for-field, pinned to the exact
-  `JsonPropertyName`, each with a `#[serde(flatten)] extra` map so
+  the message across as `STATUS_ERROR`. Scav case does both: a `ScavCaseError` return where the C# throw is
+  reachable through a guard, a panic caught at its own entry point (`scav_case/mod.rs:52`) where the C# throws out
+  of a dictionary index. Panicking is not unsafe here: every export runs inside `catch_unwind`
+  (`ffi.rs:225`), so nothing unwinds past the FFI boundary either way.
+- **Wire models come in five families** (`loot/models.rs`, `bot/models.rs`, `ragfair/models.rs`,
+  `quest/models.rs`, `scav_case/models.rs`). DB/EFT models mirror C# records field-for-field, pinned
+  to the exact `JsonPropertyName`, each with a `#[serde(flatten)] extra` map so
   mod-added fields survive the round trip — the counterpart to the `[JsonExtensionData]` that `Tools/Ceciler`
   injects. Request/response envelopes are a fresh contract and use plain camelCase with no passthrough map.
 - **One C# RNG lifetime can span two native calls.** Each generator entry point (not `ffi.rs`) opens the run by
@@ -275,7 +280,8 @@ These are what keep the port correct; break one and output silently diverges fro
 
 ## Tests
 
-Almost every test is an inline `#[cfg(test)]` module (~660 of them). Three kinds:
+Almost all tests are inline `#[cfg(test)]` modules (~700 of them); the only `tests/` target is
+`completion_whitelist_baseclass.rs`, the Completion whitelist shape guard. Three kinds:
 
 - **Parity fixtures** — replay a C# scenario and assert the exact item list.
 - **Seeded-RNG tests** — an optional seed on every request envelope (`testSeed`, spelled `seed` on the quest

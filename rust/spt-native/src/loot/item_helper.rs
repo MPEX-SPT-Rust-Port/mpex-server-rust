@@ -323,6 +323,21 @@ pub fn armor_item_has_removable_plate_slots(
         })
 }
 
+/// `ItemHelper.ArmorItemHasRemovableOrSoftInsertSlots` (`ItemHelper.cs:339-347`). The
+/// `ArmorItemCanHoldMods` guard is what the plate half needs — [`item_requires_soft_inserts`]
+/// re-checks it itself, [`armor_item_has_removable_plate_slots`] does not.
+pub fn armor_item_has_removable_or_soft_insert_slots(
+    items_view: &IndexMap<String, ItemView>,
+    item_tpl: &str,
+) -> bool {
+    if !armor_item_can_hold_mods(items_view, item_tpl) {
+        return false;
+    }
+
+    armor_item_has_removable_plate_slots(items_view, item_tpl)
+        || item_requires_soft_inserts(items_view, item_tpl)
+}
+
 /// `ItemHelper.GetItemPrice` (`ItemHelper.cs:431-440`) — the handbook price when it is at least 1,
 /// the flea price otherwise, and `None` when neither table knows the tpl.
 pub(crate) fn get_item_price(
@@ -1541,6 +1556,12 @@ mod tests {
     const PLATELESS_ARMOR_TPL: &str = "a7a7a7a7a7a7a7a7a7a7a7a7";
     /// Armor carrying one removable plate slot plus a soft-insert slot that is not one.
     const PLATED_ARMOR_TPL: &str = "a8a8a8a8a8a8a8a8a8a8a8a8";
+    /// Armor whose only slot is a removable plate one.
+    const PLATE_ONLY_ARMOR_TPL: &str = "b3b3b3b3b3b3b3b3b3b3b3b3";
+    /// Armor whose only slot is a soft-insert one.
+    const SOFT_ONLY_ARMOR_TPL: &str = "b4b4b4b4b4b4b4b4b4b4b4b4";
+    /// A plate slot on a template that is not one of the mod-holding armor base classes.
+    const PLATED_NON_ARMOR_TPL: &str = "b5b5b5b5b5b5b5b5b5b5b5b5";
 
     fn quality_fixture() -> IndexMap<String, ItemView> {
         serde_json::from_value(json!({
@@ -1556,6 +1577,15 @@ mod tests {
             PLATED_ARMOR_TPL: {
                 "parent": ARMOR, "type": "Item", "maxDurability": 50,
                 "slots": [{ "name": "Soft_armor_front" }, { "name": "Front_plate" }]
+            },
+            PLATE_ONLY_ARMOR_TPL: {
+                "parent": ARMOR, "type": "Item", "slots": [{ "name": "Back_plate" }]
+            },
+            SOFT_ONLY_ARMOR_TPL: {
+                "parent": ARMOR, "type": "Item", "slots": [{ "name": "Soft_armor_back" }]
+            },
+            PLATED_NON_ARMOR_TPL: {
+                "parent": ITEM_NODE, "type": "Item", "slots": [{ "name": "Front_plate" }]
             },
             // A quest item, and one the base-type filter rejects.
             "a9a9a9a9a9a9a9a9a9a9a9a9": { "parent": ITEM_NODE, "type": "Item", "questItem": true },
@@ -1790,6 +1820,45 @@ mod tests {
             PLATELESS_ARMOR_TPL
         ));
         assert!(!armor_item_has_removable_plate_slots(&view, ORPHAN_TPL));
+    }
+
+    #[test]
+    fn armor_item_has_removable_or_soft_insert_slots_takes_either_kind() {
+        let view = quality_fixture();
+
+        // Either slot kind on its own is enough, as is both at once.
+        assert!(armor_item_has_removable_or_soft_insert_slots(
+            &view,
+            PLATE_ONLY_ARMOR_TPL
+        ));
+        assert!(armor_item_has_removable_or_soft_insert_slots(
+            &view,
+            SOFT_ONLY_ARMOR_TPL
+        ));
+        assert!(armor_item_has_removable_or_soft_insert_slots(
+            &view,
+            PLATED_ARMOR_TPL
+        ));
+
+        // Armor with no slots at all.
+        assert!(!armor_item_has_removable_or_soft_insert_slots(
+            &view,
+            PLATELESS_ARMOR_TPL
+        ));
+        // The `ArmorItemCanHoldMods` guard: plate slots on a non-armor tpl do not count, even
+        // though `armor_item_has_removable_plate_slots` alone says they do.
+        assert!(armor_item_has_removable_plate_slots(
+            &view,
+            PLATED_NON_ARMOR_TPL
+        ));
+        assert!(!armor_item_has_removable_or_soft_insert_slots(
+            &view,
+            PLATED_NON_ARMOR_TPL
+        ));
+        // A tpl the view does not know fails the guard first.
+        assert!(!armor_item_has_removable_or_soft_insert_slots(
+            &view, ORPHAN_TPL
+        ));
     }
 
     #[test]

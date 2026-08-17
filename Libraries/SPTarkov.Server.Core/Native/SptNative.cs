@@ -8,6 +8,7 @@ using SPTarkov.Server.Core.Native.Bot;
 using SPTarkov.Server.Core.Native.Loot;
 using SPTarkov.Server.Core.Native.Ragfair;
 using SPTarkov.Server.Core.Native.RepeatableQuests;
+using SPTarkov.Server.Core.Native.ScavCase;
 using SPTarkov.Server.Core.Utils;
 
 namespace SPTarkov.Server.Core.Native;
@@ -47,11 +48,12 @@ internal enum LootExport
     BotInventory,
     BotInventoryBatch,
     RepeatableQuest,
+    ScavCaseRewards,
 }
 
 public static class SptNative
 {
-    private const uint ExpectedAbiVersion = 17;
+    private const uint ExpectedAbiVersion = 18;
 
     // ffi.rs
     private const int StatusOk = 0;
@@ -164,6 +166,15 @@ public static class SptNative
     public static RewardLootResult GetRandomLootContainerLoot(RandomLootContainerRequest request)
     {
         return Generate<RewardLootResult>(LootExport.RandomLootContainer, JsonSerializer.SerializeToUtf8Bytes(request, LootJsonOptions));
+    }
+
+    /// <summary>
+    /// Rolls the rewards of one completed scav case craft.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">Generation failed, or the native side misbehaved.</exception>
+    public static ScavCaseRewardsResponse GenerateScavCaseRewards(ScavCaseRewardsRequest request)
+    {
+        return Generate<ScavCaseRewardsResponse>(LootExport.ScavCaseRewards, JsonSerializer.SerializeToUtf8Bytes(request, LootJsonOptions));
     }
 
     /// <summary>
@@ -445,6 +456,12 @@ public static class SptNative
                     &outPtr,
                     &outLen
                 ),
+                LootExport.ScavCaseRewards => NativeMethods.GenerateScavCaseRewards(
+                    requestPtr,
+                    (nuint)requestUtf8.Length,
+                    &outPtr,
+                    &outLen
+                ),
                 _ => throw new ArgumentOutOfRangeException(nameof(export), export, null),
             };
         }
@@ -529,7 +546,7 @@ public static class SptNative
         // success alone. Do NOT copy this shape into the generate exports (ABI 4): those also write
         // a message buffer on BAD_ARGS and ERROR, so their wrappers must branch on outPtr, never on
         // the status, and free whenever it is non-null (only a null-arg BAD_ARGS writes nothing;
-        // since ABI 17 PANIC carries the panic text).
+        // since ABI 18 PANIC carries the panic text).
         if (status != 0)
         {
             throw new InvalidOperationException(

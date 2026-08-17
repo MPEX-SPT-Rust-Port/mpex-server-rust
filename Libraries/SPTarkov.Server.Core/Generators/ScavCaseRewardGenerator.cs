@@ -1,7 +1,10 @@
+using System.Reflection;
+using HarmonyLib;
 using SPTarkov.Common.Extensions;
 using SPTarkov.Common.Models.Logging;
 using SPTarkov.DI.Annotations;
 using SPTarkov.Server.Core.Extensions;
+using SPTarkov.Server.Core.Generators.Loot;
 using SPTarkov.Server.Core.Helpers;
 using SPTarkov.Server.Core.Helpers.Items;
 using SPTarkov.Server.Core.Models.Common;
@@ -11,6 +14,8 @@ using SPTarkov.Server.Core.Models.Enums;
 using SPTarkov.Server.Core.Models.Spt.Config;
 using SPTarkov.Server.Core.Models.Spt.Hideout;
 using SPTarkov.Server.Core.Models.Spt.Tables;
+using SPTarkov.Server.Core.Native;
+using SPTarkov.Server.Core.Native.ScavCase;
 using SPTarkov.Server.Core.Services;
 using SPTarkov.Server.Core.Services.Commerce;
 using SPTarkov.Server.Core.Services.Items;
@@ -22,6 +27,15 @@ using SPTarkov.Server.Core.Utils.Cloners;
 
 namespace SPTarkov.Server.Core.Generators;
 
+/// <summary>
+/// Scav case reward generation runs in <c>rust/spt-native</c> by default; the request builder
+/// projects the live database and config into the native payload. The full 4.1.2 C# implementation
+/// is retained below as the legacy path - it is the frozen mod contract (constructor and protected
+/// members are apicompat-gated against the 4.1.2 baseline) and runs instead of the native path when
+/// a Harmony patch on any frozen member is detected, when a mod substituted the generator, when the
+/// frozen constructor built the instance or when ScavCaseConfig.ForceLegacyScavCaseGeneration is
+/// set, so mod hooks fire with genuine baseline semantics.
+/// </summary>
 [Injectable]
 public class ScavCaseRewardGenerator(
     ISptLogger<ScavCaseRewardGenerator> logger,
@@ -41,12 +55,129 @@ public class ScavCaseRewardGenerator(
     protected List<TemplateItem> DbAmmoItemsCache = [];
     protected List<TemplateItem> DbItemsCache = [];
 
+    private readonly ScavCaseNativeRequestBuilder? _requestBuilder;
+
+    /// <summary>
+    ///     The constructor the container uses: the frozen 4.1.2 one plus the native request builder.
+    ///     Additive and apicompat-verified.
+    /// </summary>
+    public ScavCaseRewardGenerator(
+        ISptLogger<ScavCaseRewardGenerator> logger,
+        HideoutTable hideoutTable,
+        TemplateTable templateTable,
+        RandomUtil randomUtil,
+        ItemHelper itemHelper,
+        PresetHelper presetHelper,
+        RagfairPriceService ragfairPriceService,
+        SeasonalEventService seasonalEventService,
+        ItemFilterService itemFilterService,
+        ServerLocalisationService localisationService,
+        ScavCaseConfig scavCaseConfig,
+        ICloner cloner,
+        ScavCaseNativeRequestBuilder requestBuilder
+    )
+        : this(
+            logger,
+            hideoutTable,
+            templateTable,
+            randomUtil,
+            itemHelper,
+            presetHelper,
+            ragfairPriceService,
+            seasonalEventService,
+            itemFilterService,
+            localisationService,
+            scavCaseConfig,
+            cloner
+        )
+    {
+        _requestBuilder = requestBuilder;
+    }
+
+    /// <summary>
+    ///     Which implementation the most recent generation call ran - the spt-native path or the
+    ///     retained 4.1.2 C# path. Test seam; also handy in a debugger.
+    /// </summary>
+    internal LootGenerationPath LastPathTaken { get; private set; }
+
+    /// <summary>
+    ///     Test-only seed forwarded as <see cref="ScavCaseRewardsRequest.TestSeed"/> on every native
+    ///     request.
+    /// </summary>
+    internal ulong? NativeTestSeed { get; set; }
+
+    /// <summary>
+    ///     The 4.1.2 members a mod can Harmony-patch. Public, protected and protected-internal
+    ///     methods declared on this class - exactly the surface the apicompat gate freezes, statics
+    ///     included. <see cref="Generate"/> is excluded: it is the dispatcher now, and a patch on it
+    ///     wraps whichever path runs. Everything else is never called natively, so a patch on one
+    ///     would silently do nothing.
+    /// </summary>
+    private static readonly List<MethodBase> _hookableMembers =
+    [
+        .. typeof(ScavCaseRewardGenerator)
+            .GetMethods(
+                BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly
+            )
+            // Property accessors and operators are IsSpecialName; constructors are not returned at all
+            .Where(method => !method.IsSpecialName && (method.IsPublic || method.IsFamily || method.IsFamilyOrAssembly))
+            .Where(method => method.Name != nameof(Generate)),
+    ];
+
+    /// <summary>
+    ///     The legacy path runs when the frozen 4.1.2 constructor built this instance (it has no
+    ///     native seam to dispatch to), when forced by config, when any of the frozen 4.1.2 members
+    ///     carries a live Harmony patch, or when a mod has substituted the generator itself - running
+    ///     the retained C# implementation is the only way those hooks and replacements can take
+    ///     effect with real baseline semantics.
+    /// </summary>
+    private bool UseLegacyPath()
+    {
+        if (_requestBuilder is null || scavCaseConfig.ForceLegacyScavCaseGeneration)
+        {
+            return true;
+        }
+
+        if (
+            _hookableMembers.Any(member =>
+                Harmony.GetPatchInfo(member) is { } patches
+                && (
+                    patches.Prefixes.Count > 0
+                    || patches.Postfixes.Count > 0
+                    || patches.Transpilers.Count > 0
+                    || patches.Finalizers.Count > 0
+                )
+            )
+        )
+        {
+            return true;
+        }
+
+        // A mod registered its own subclass with a higher TypePriority, so the container handed us
+        // an implementation the native side does not have
+        return GetType() != typeof(ScavCaseRewardGenerator);
+    }
+
     /// <summary>
     ///     Create an array of rewards that will be given to the player upon completing their scav case build
     /// </summary>
     /// <param name="recipeId">recipe of the scav case craft</param>
     /// <returns>Product array</returns>
     public IEnumerable<List<Item>> Generate(MongoId recipeId)
+    {
+        if (UseLegacyPath())
+        {
+            LastPathTaken = LootGenerationPath.Legacy;
+
+            return GenerateLegacy(recipeId);
+        }
+
+        LastPathTaken = LootGenerationPath.Native;
+
+        return SptNative.GenerateScavCaseRewards(_requestBuilder!.Build(recipeId, NativeTestSeed)).Result;
+    }
+
+    private IEnumerable<List<Item>> GenerateLegacy(MongoId recipeId)
     {
         CacheDbItems();
 

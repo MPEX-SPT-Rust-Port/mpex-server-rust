@@ -6,13 +6,14 @@ internals see [rust/ARCHITECTURE.md](rust/ARCHITECTURE.md); for the C# side of t
 
 ## Status
 
-The loot family, the bot family, dynamic ragfair offer generation and the repeatable-quest family are
-ported and run natively by default. Every ported class keeps its full 4.1.2 C# implementation as a
-**legacy path**, selected automatically when a mod hooks it or manually via a config flag. The log
-pipeline is ported too, and has no legacy path: `SPTLoggerDispatcher` hands every line to the crate.
-Seventeen C-ABI exports (`src/ffi.rs`) carry all of it, JSON in and JSON out — except the ragfair
+The loot family, the bot family, dynamic ragfair offer generation, the repeatable-quest family and
+scav case rewards are ported and run natively by default. Every ported class keeps its full 4.1.2 C#
+implementation as a **legacy path**, selected automatically when a mod hooks it or manually via a
+config flag. The log pipeline is ported too, and has no legacy path: `SPTLoggerDispatcher` hands
+every line to the crate.
+Eighteen C-ABI exports (`src/ffi.rs`) carry all of it, JSON in and JSON out — except the ragfair
 response, which is a framed MessagePack envelope, and `spt_log_emit`, which passes the fields of one
-line directly (current ABI 17).
+line directly (current ABI 18).
 
 ## Working
 
@@ -28,6 +29,7 @@ line directly (current ABI 17).
 | A whole bot wave in one call — shared views on the wire once, rayon-parallel per bot, one `{result \| error}` envelope each | `BotWaveBatcher.TryGenerateWave`, from `BotController.GenerateBotWave` | `spt_generate_bot_inventory_batch` |
 | A batch of dynamic flea offers (assort walk, pricing, barter schemes) | `RagfairOfferGenerator.GenerateDynamicOffers` | `spt_generate_dynamic_offers` |
 | Repeatable quests (all four types + rewards) | `*QuestGenerator.Generate` | `spt_generate_repeatable_quest` |
+| Scav case rewards | `ScavCaseRewardGenerator.Generate` | `spt_generate_scav_case_rewards` |
 | The whole log pipeline — filters, level gates, per-target formatting, console + file sinks | `SPTLoggerDispatcher.Log` | `spt_logger_init`, `spt_log_emit`, `spt_logger_close` |
 | Generator diagnostics, localised and logged natively as they happen | `DatabaseImporter` → `SptNative.SetServerLocales` | `spt_locales_set` |
 
@@ -72,6 +74,32 @@ the native pipeline; seeded-RNG parity at the primitive level (xoshiro256\*\*, t
 - **Exploration and Pickup quests are a wash** — a warm native call costs ~3.3 ms whatever it
   generates, and those two quests are ~3 ms of C# work, so native lands within a few tenths of a
   millisecond of legacy either way. The port pays on Elimination (4.7-6.3x) and Completion (~1.7x).
+- **Scav case rewards are ~85x slower per call** — ~37.5 ms native against ~0.44 ms legacy, flat
+  across the shipped recipes (the payload does not depend on the recipe), measured off the settled
+  positions; the first two positions measured in a run have not settled on either arm. `Build()`
+  alone is ~6.8 ms of that, and the rest is transport, serialisation and rebinding, not generation —
+  the same items-view projection every family pays, against a 1-7 item output and a legacy arm that
+  is sub-millisecond warm C#. It is a cold path — one call per finished scav case craft, behind a
+  41-minute-to-5-hour timer — so it lands in the same acceptance class as reward loot: native stays
+  the default, `ScavCaseConfig.ForceLegacyScavCaseGeneration` is the opt-out. See
+  [BENCHMARK.md](BENCHMARK.md) § *Results — scav case rewards*.
+- **An unknown scav case recipe id is an error natively, an NRE in legacy** — native returns
+  `No scav case recipe found with id: <id>`; the C# body dereferences the missing recipe and throws
+  at the same call site. A recipe whose `EndProducts` is missing any of the three ranges is
+  *dropped* from the projection by `ScavCaseNativeRequestBuilder` (sending a null would fail the
+  parse of the whole request), so asking for one gets that same "no recipe found" where legacy NREs.
+  C# was never able to generate it either. Never fires on vanilla data.
+- **An ammo pool with nothing in the rarity's price band is a message natively, an index throw in
+  legacy** — both warn first, then native fails with
+  `No cartridges found matching the price range for rarity: <rarity>` where the C# hands the empty
+  sequence on and throws indexing it. Same divergence class as the recipe id above: the failure is
+  the C#'s, only the text differs. Cannot fire on shipped data — all three rarity bands have ammo.
+- **The native scav case path is fresher than legacy for runtime-added items** — C# fills
+  `DbItemsCache`/`DbAmmoItemsCache` once per generator instance and refills them only when empty.
+  The generator is transient, but its holder graph bottoms out in a singleton, so in practice one
+  instance answers every craft for the life of the process; the native request rebuilds both pools
+  per call. Same shape as the ragfair `AllowedFleaPriceItemsForBarter` divergence — in native's
+  favour, but a divergence.
 - **`get_flea_prices_as_array` is O(offers × price table) if a mod enables barters** — it re-derives
   the whole filtered flea price list per barter offer, with an ancestor-cache probe per entry.
   Dead on shipped data (`ragfair.json` `dynamic.barter.chancePercent` is `0`, so no barter offer is
@@ -86,12 +114,14 @@ the native pipeline; seeded-RNG parity at the primitive level (xoshiro256\*\*, t
 - **Golden-test parity is normalised, not raw-byte** — every family now has a full-output golden
   gate (`LootParityTests` over all 13 loot-bearing maps, `BotParityTests` including level-20
   randomised buckets and the nighttime clamp, `RewardLootParityTests` over all five reward entry
-  points, `RagfairParityTests`, `RepeatableQuestParityTests` over all four quest types), all seeded
-  and byte-equal after id normalisation. The sanctioned gaps are minted `MongoId`s (outside the
-  seeded stream on both sides — a repeatable quest mints ~12-25 of them, all masked by the
-  normaliser) and, for ragfair only, `intId` (a live C#
-  counter) and `startTime`/`endTime` (one batch timestamp natively vs a per-offer clock in legacy,
-  so only the spread is compared).
+  points, `RagfairParityTests`, `RepeatableQuestParityTests` over all four quest types,
+  `ScavCaseParityTests` over every shipped recipe at two seeds), all seeded and byte-equal after id
+  normalisation. The sanctioned gaps are minted `MongoId`s (outside the seeded stream on both sides —
+  a repeatable quest mints ~12-25 of them, and a scav case mints from three sources: the reward
+  roots, a preset's `ReplaceIDs`, and the cartridge children `ItemHelper.AddCartridgesToAmmoBox` adds
+  (minted at `ItemHelper.cs:1516`); all masked by the normaliser) and, for ragfair only, `intId` (a
+  live C# counter) and `startTime`/`endTime` (one batch timestamp natively vs a per-offer clock in
+  legacy, so only the spread is compared).
 - **Patches on collaborators do not reach the native path** and do not flip to legacy — only the
   ported classes' own members are detected. Affected: `RandomUtil`, `ItemHelper`,
   `CounterTrackerHelper`, `BotGeneratorHelper`, `DurabilityLimitsHelper`, `RepairService.AddBuff`,
@@ -101,7 +131,12 @@ the native pipeline; seeded-RNG parity at the primitive level (xoshiro256\*\*, t
   list (its own four classes *are* detected — see *Exceptions in force*). Repeatable quests add
   `MathUtil`; their two folded-in collaborators, `RepeatableQuestHelper` and
   `RepeatableQuestRewardGenerator`, *are* detected — both their frozen members and a container
-  substitution of either flip the calling generator to legacy.
+  substitution of either flip the calling generator to legacy. Scav case adds
+  `RagfairPriceService.GetStaticPriceForItem` (already frozen *for ragfair*, but that scan flips
+  ragfair, not this family) and the `HideoutTable` recipe reads; `RandomUtil`, `ItemHelper`,
+  `PresetHelper`/`ItemFilterService`, `SeasonalEventService` and `ICloner` are already listed and
+  apply to it too. Its seam checks no collaborator *substitution* at all — see
+  *Exceptions in force*.
 - **Templates without `_props` read as "not in the db"** on the native path — they are dropped from
   `itemsView`. Vanilla data always has `_props`; this only bites mod-added props-less templates.
 - **Typed loose-loot path is slow** — ~1347 ms per raid start for `bigmap` vs ~345 ms raw, against
@@ -109,7 +144,7 @@ the native pipeline; seeded-RNG parity at the primitive level (xoshiro256\*\*, t
   forces it. Vanilla installs stay on the raw path.
 - **A failure crosses as a message for C# to throw with** — everything the run logged on the way
   down is already in the log, emitted as it happened; the error text itself stays the C# caller's
-  to log (one-buffer contract). Since ABI 17 a panic crosses with its message too, and the one
+  to log (one-buffer contract). Since ABI 18 a panic crosses with its message too, and the one
   4.1.2 throw that was localised (`location-critical_error_see_log`) renders through the native
   locale table. The error line carries no category — it arrives as an exception, not a log line.
 - **Hangs are mostly undiagnosable** — ported retry loops can spin exactly as 4.1.2 does, inside an
@@ -231,7 +266,7 @@ the native pipeline; seeded-RNG parity at the primitive level (xoshiro256\*\*, t
   effect on `PARKED_RNG`, whose only consumer is the loot dynamic entry point, which never runs on
   a rayon worker.
 - **The ragfair response is a framed MessagePack envelope, not a JSON buffer.** One length-prefixed
-  frame per offer behind a header frame (since ABI **10**, encoding tag 1; current ABI is 16), which
+  frame per offer behind a header frame (since ABI **10**, encoding tag 1; current ABI is 18), which
   C# deserialises with `Parallel.For` over the frames straight out of the native buffer — no
   whole-response JSON document is ever materialised. Only the ragfair response uses it; every other
   export is still JSON in / JSON out.
@@ -301,13 +336,36 @@ the native pipeline; seeded-RNG parity at the primitive level (xoshiro256\*\*, t
 - **The ported 4.1.2 quirks are documented at their call sites**, as numbered `Quirk N` comments in
   `rust/spt-native/src/quest/*.rs` (`reward_generator.rs` bolds them `**Quirk N, ported verbatim:**`;
   `elimination.rs` uses the plain form, and `helper.rs:161` carries an unnumbered
-  `Ported quirk, not a typo`). Grep case-insensitively for `quirk` under `src/quest/` to find all of
-  them; the behaviour they preserve is deliberate and reverting one silently diverges from C#.
+  `Ported quirk, not a typo`). `src/scav_case/generator.rs` numbers its own the same way. Grep
+  case-insensitively for `quirk` under `src/quest/` and `src/scav_case/` to find all of them; the
+  behaviour they preserve is deliberate and reverting one silently diverges from C#. The bare `:N`
+  line numbers in those comments — quirks and ordinary citations alike — are the 4.1.2 body the port
+  was written against, not the current file: where a native seam was inserted above the retained
+  legacy body, the C# line has since moved down by the size of that seam.
+- **Scav case took a constructor overload and freezes one class, its own.** The frozen 12-parameter
+  4.1.2 constructor stays (as the primary constructor); the container selects an additive
+  13-parameter overload adding `ScavCaseNativeRequestBuilder`. Additive only, and a generator built
+  through the frozen constructor gets a null builder and runs legacy unconditionally. The hookable
+  set is every declared public/protected member of `ScavCaseRewardGenerator` **except `Generate`**,
+  the dispatcher — 12 members; a live patch on any of them, or a subclass of the generator from the
+  container, flips to legacy. Same shape as the quest generators.
+- **One `ScavCaseConfig` flag, C# default only.** `ForceLegacyScavCaseGeneration` is not serialised
+  into `scavcase.json` — same as the ragfair and quest flags, it exists as a default on the config
+  object and a user who wants it adds it to the file.
+- **The scav case seam does not check for substituted collaborators**, unlike the quest one.
+  `ScavCaseNativeRequestBuilder` projects what `PresetHelper`, `RagfairPriceService`,
+  `ItemFilterService` and `SeasonalEventService` answer, and `ItemHelper`'s share of the work
+  (`IsOfBaseclass`, `AddCartridgesToAmmoBox`) is ported natively rather than projected at all — so a
+  container substitution of any of the five is silently ignored rather than flipping to legacy. The
+  collaborator-patch divergence above, with substitution folded in.
+- **Scav case caches nothing — guideline 3's default holds.** Every call reprojects the items view,
+  the static price table, the default presets, the blacklists and the recipe table. The ragfair and
+  quest invariant slices are still the only two exceptions in the crate.
 
 ## Roadmap
 
-1. Later candidates, in `todo/TODO.md` order: scav case rewards, weather, fence assorts, raid-time
-   adjustment, ragfair linked-item table.
+1. Later candidates, in `todo/TODO.md` order: weather, fence assorts, raid-time adjustment, ragfair
+   linked-item table.
 2. Convert `is_valid_reward_item`'s trader whitelist to the set form and measure.
    `quest/reward_generator.rs` builds it as a `Vec<&str>` of up to 14 candidates, consumed 4,673
    times per Completion pass; `ItemBaseClassCache::is_of_baseclasses_set` is the cheaper shape once

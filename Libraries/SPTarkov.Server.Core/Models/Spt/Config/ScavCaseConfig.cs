@@ -31,6 +31,14 @@ public record ScavCaseConfig : BaseConfig
 
     [JsonPropertyName("allowBossItemsAsRewards")]
     public bool AllowBossItemsAsRewards { get; set; }
+
+    /// <summary>
+    ///     Force scav case reward generation down the retained 4.1.2 C# path instead of spt-native.
+    ///     The escape hatch for hooks the patch detection cannot see - patches on the shared helpers
+    ///     the generator calls into.
+    /// </summary>
+    [JsonPropertyName("forceLegacyScavCaseGeneration")]
+    public bool ForceLegacyScavCaseGeneration { get; set; }
 }
 
 public record MoneyRewards
