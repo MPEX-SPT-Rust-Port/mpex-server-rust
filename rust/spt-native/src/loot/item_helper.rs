@@ -121,8 +121,8 @@ pub fn is_of_baseclass(
 ///
 /// The one C# behaviour not reproducible here is the `_rootNodeIds` short-circuit — the cache only
 /// covers templates with `_type == "Item"`, so C# returns false for a *node* tpl even though its
-/// parent chain would match. `ItemView` carries no `_type`, and the loot generator only ever asks
-/// about real item tpls, so nothing observable hangs on it.
+/// parent chain would match. This walk does not read `ItemView::item_type` at all, and the loot
+/// generator only ever asks about real item tpls, so nothing observable hangs on it.
 pub fn is_of_baseclasses(
     items_view: &IndexMap<String, ItemView>,
     tpl: &str,
