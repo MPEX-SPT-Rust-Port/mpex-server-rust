@@ -22,7 +22,7 @@ Roughly 46k lines across 49 files, tests included. `src/bot/` is ~37% of that an
 
 | Path | Role |
 |---|---|
-| `src/lib.rs` | Module roots and `ABI_VERSION` (currently 16; must equal `SptNative.ExpectedAbiVersion`) |
+| `src/lib.rs` | Module roots and `ABI_VERSION` (currently 17; must equal `SptNative.ExpectedAbiVersion`) |
 | `src/ffi.rs` | The C-ABI surface. The **only** module containing `unsafe` |
 | `src/runtime.rs` | Process-wide multi-thread tokio runtime, `OnceLock`-built. Used only by `verify` |
 | `src/verify.rs` | Hashes `SPT_Data` with XXH3-128 and diffs it against `checks.dat` |
@@ -36,8 +36,8 @@ Roughly 46k lines across 49 files, tests included. `src/bot/` is ~37% of that an
 
 ## FFI boundary (`ffi.rs`)
 
-Seventeen `extern "C"` exports. Two are trivial (`spt_native_abi_version`, `spt_buf_free`); ten take a UTF-8
-JSON generation request; `spt_verify_database` takes a UTF-8 directory path instead. All eleven of those hand
+Eighteen `extern "C"` exports. Two are trivial (`spt_native_abi_version`, `spt_buf_free`); eleven take a UTF-8
+JSON generation request; `spt_verify_database` takes a UTF-8 directory path instead. All twelve of those hand
 back a heap buffer the caller releases with `spt_buf_free`. `spt_locales_set` takes the resolved server-locale
 table as UTF-8 JSON and buffers only a parse error. The last three are the log pipeline
 (`spt_logger_init`, `spt_log_emit`, `spt_logger_close`): `spt_logger_init` takes the raw `sptLogger.json`
@@ -51,17 +51,19 @@ C# SptNative → spt_generate_* (JSON in)
   → serde serialize the result, or the LootError message, into an out-buffer
 ```
 
-- `run_generator_with` is the shared body of the ten generation exports; eight reach it through
-  `run_generator`, the JSON-response-plus-`LootError` wrapper. Ragfair and quest call it directly —
-  ragfair to frame its response instead of emitting one JSON document, quest for its own error type.
+- `run_generator_with` is the shared body of the eleven generation exports; eight reach it through
+  `run_generator`, the JSON-response-plus-`LootError` wrapper. Ragfair, quest and scav case call it
+  directly — ragfair to frame its response instead of emitting one JSON document, the other two for
+  their own error types.
   `spt_verify_database` is separate because it blocks on the tokio runtime.
 - Status codes: `STATUS_OK` 0, `STATUS_BAD_ARGS` 1 (null pointer, bad UTF-8, unparseable JSON),
   `STATUS_PANIC` 2, `STATUS_ERROR` 3, `STATUS_STALE_SLICE` 4 (ragfair and quest only — see below).
-  **Quest is the exception to 2**: `quest/mod.rs` catches the generator's panic itself and reports it
-  as `STATUS_ERROR` 3 carrying the panic message, because that family ports a C#-sanctioned throw as
-  an `.expect` and the C# message is what the caller has to log. The cost is that a real port bug in
-  that family (an index panic in the Rust) also arrives as 3, indistinguishable from a sanctioned
-  generation failure, instead of reaching `SptNative.cs`'s "this indicates a native library bug"
+  **Quest and scav case are the exceptions to 2**: `quest/mod.rs` and `scav_case/mod.rs` catch the
+  generator's panic themselves and report it as `STATUS_ERROR` 3 carrying the panic message, because
+  those families port a C#-sanctioned throw as an `.expect` and the C# message is what the caller has
+  to log. The cost is that a real port bug in those families (an index panic in the Rust) also
+  arrives as 3, indistinguishable from a sanctioned generation failure, instead of reaching
+  `SptNative.cs`'s "this indicates a native library bug"
   wording. Deliberate: the message is worth more than the discrimination.
 - **Two requests have a cached half**, ragfair's and the repeatable quest's. Each arrives as
   `{invariantStamp, invariant?, varying}`; `src/ragfair/slice_cache.rs` and

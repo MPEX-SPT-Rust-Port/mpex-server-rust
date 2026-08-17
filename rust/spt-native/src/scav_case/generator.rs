@@ -627,7 +627,7 @@ pub(crate) fn generate(
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use serde_json::{Value, json};
 
     use crate::diag::DiagSink;
@@ -1204,7 +1204,7 @@ mod tests {
     /// `AMMO_STACKING_TPL`, `BOX_TPL`, `PLAIN_TPL` and `ROUBLES`; rare 1000-5000 takes the two
     /// weapons; superrare 20000-50000 takes the armor. Everything else is priced at 500, which no
     /// band covers.
-    fn container_request_json() -> Value {
+    pub fn container_request_json() -> Value {
         json!({
             "recipeId": RECIPE_ID,
             "scavRecipes": [{"id": RECIPE_ID, "endProducts": {
