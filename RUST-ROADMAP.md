@@ -342,10 +342,11 @@ the native pipeline; seeded-RNG parity at the primitive level (xoshiro256\*\*, t
 - **One `ScavCaseConfig` flag, C# default only.** `ForceLegacyScavCaseGeneration` is not serialised
   into `scavcase.json` — same as the ragfair and quest flags, it exists as a default on the config
   object and a user who wants it adds it to the file.
-- **The scav case seam does not check for substituted collaborators**, unlike the quest one. The
-  native path folds in `PresetHelper`, `RagfairPriceService`, `ItemFilterService`,
-  `SeasonalEventService` and `ItemHelper` through `ScavCaseNativeRequestBuilder`, but a container
-  substitution of any of them is silently ignored rather than flipping to legacy — the
+- **The scav case seam does not check for substituted collaborators**, unlike the quest one.
+  `ScavCaseNativeRequestBuilder` projects what `PresetHelper`, `RagfairPriceService`,
+  `ItemFilterService` and `SeasonalEventService` answer, and `ItemHelper`'s share of the work
+  (`IsOfBaseclass`, `AddCartridgesToAmmoBox`) is ported natively rather than projected at all — so a
+  container substitution of any of the five is silently ignored rather than flipping to legacy. The
   collaborator-patch divergence above, with substitution folded in.
 - **Scav case caches nothing — guideline 3's default holds.** Every call reprojects the items view,
   the static price table, the default presets, the blacklists and the recipe table. The ragfair and
