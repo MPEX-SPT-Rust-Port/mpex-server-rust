@@ -103,4 +103,49 @@ public class SptLoggerDispatcherTests
         Assert.That(contents, Does.StartWith("[Error] boom\nkaput\n"));
         Assert.That(contents, Does.Contain("AnExceptionIsAppendedAfterTheFormattedLine"));
     }
+
+    [Test]
+    public async Task ReloadConfigurationRetargetsTheNativePipeline()
+    {
+        // SetUp initialised the pipeline at Information into _directory; this config is Debug
+        // into a second directory, so the line below proves both the retarget and the level swap.
+        var retargetDirectory = Path.Combine(Path.GetTempPath(), $"spt-log-{Guid.NewGuid():N}");
+        var configuration = new SptLoggerConfiguration
+        {
+            Loggers =
+            [
+                new FileSptLoggerReference
+                {
+                    Type = LoggerType.File,
+                    LogLevel = LogLevel.Debug,
+                    Format = "[%level%] %message%",
+                    FilePath = retargetDirectory,
+                    FilePattern = "spt.log",
+                    MaxFileSizeMb = 10,
+                    MaxRollingFiles = 10,
+                },
+            ],
+        };
+        var dispatcher = new SPTLoggerDispatcher(configuration, []);
+
+        try
+        {
+            Assert.That(dispatcher.ReloadConfiguration(), Is.True);
+            Assert.That(dispatcher.IsLogEnabled(LogLevel.Debug), Is.True);
+
+            dispatcher.Log(Message(LogLevel.Debug, "retargeted"));
+            await dispatcher.DisposeAsync();
+
+            var contents = await File.ReadAllTextAsync(Path.Combine(retargetDirectory, "spt.log"));
+
+            Assert.That(contents, Is.EqualTo("[Debug] retargeted\n"));
+        }
+        finally
+        {
+            if (Directory.Exists(retargetDirectory))
+            {
+                Directory.Delete(retargetDirectory, true);
+            }
+        }
+    }
 }

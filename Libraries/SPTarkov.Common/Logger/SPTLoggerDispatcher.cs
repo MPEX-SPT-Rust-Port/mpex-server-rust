@@ -1,4 +1,6 @@
+using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.Json;
 using SPTarkov.Common.Models.Logging;
 using SPTarkov.Common.Native;
 
@@ -81,6 +83,54 @@ public sealed class SPTLoggerDispatcher(SptLoggerConfiguration config, IEnumerab
             _disabled = true;
 
             Console.Error.WriteLine("The native log pipeline failed; logging is disabled.");
+        }
+    }
+
+    /// <summary>
+    /// Re-hands the current configuration object — including any runtime mutation a mod made to
+    /// Loggers — to the native pipeline, so what is written matches what IsLogEnabled reads again.
+    /// On success the failure latch resets; on failure (native rejects the config, or the library
+    /// is unloadable) one stderr notice, false, and the running pipeline is unchanged.
+    /// </summary>
+    public bool ReloadConfiguration()
+    {
+        var configBytes = JsonSerializer.SerializeToUtf8Bytes(config);
+        nint messagePtr = 0;
+        nuint messageLen = 0;
+
+        try
+        {
+            var status = NativeMethods.LoggerReinit(configBytes, (nuint)configBytes.Length, out messagePtr, out messageLen);
+
+            if (status != StatusOk)
+            {
+                var message = messagePtr == 0 ? $"internal status {status}" : Marshal.PtrToStringUTF8(messagePtr, checked((int)messageLen));
+
+                Console.Error.WriteLine($"Failed to reload the native log pipeline configuration: {message}.");
+
+                return false;
+            }
+
+            _disabled = false;
+
+            return true;
+        }
+        catch (Exception failure) when (failure is DllNotFoundException or EntryPointNotFoundException)
+        {
+            Console.Error.WriteLine(
+                $"Failed to load spt_native for logging: {failure.Message}. "
+                    + "Rebuild the native library (dotnet build runs cargo automatically)."
+            );
+
+            return false;
+        }
+        finally
+        {
+            // messagePtr stays 0 on the unloadable-library path, so this cannot re-throw there.
+            if (messagePtr != 0)
+            {
+                NativeMethods.BufFree(messagePtr, messageLen);
+            }
         }
     }
 

@@ -24,5 +24,23 @@ public sealed class BaseSptLoggerReferenceConverter : JsonConverter<BaseSptLogge
         }
     }
 
-    public override void Write(Utf8JsonWriter writer, BaseSptLoggerReference value, JsonSerializerOptions options) { }
+    public override void Write(Utf8JsonWriter writer, BaseSptLoggerReference value, JsonSerializerOptions options)
+    {
+        writer.WriteStartObject();
+        writer.WriteString("type", value.Type.ToString());
+        writer.WriteString("logLevel", value.LogLevel.ToString());
+        writer.WriteString("format", value.Format);
+        writer.WritePropertyName("filters");
+        JsonSerializer.Serialize(writer, value.Filters, options);
+
+        if (value is FileSptLoggerReference file)
+        {
+            writer.WriteString("filePath", file.FilePath);
+            writer.WriteString("filePattern", file.FilePattern);
+            writer.WriteNumber("maxFileSizeMB", file.MaxFileSizeMb);
+            writer.WriteNumber("maxRollingFiles", file.MaxRollingFiles);
+        }
+
+        writer.WriteEndObject();
+    }
 }
