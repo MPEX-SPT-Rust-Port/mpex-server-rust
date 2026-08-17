@@ -1,16 +1,39 @@
 # Follow-ups
 
-Two items left open by the Completion quest performance investigation (`49730f2`). Neither is
-started. Both are independent of that fix and of each other.
+Two items left open by the Completion quest performance investigation (`49730f2`). Both are
+independent of that fix and of each other.
 
-| | Item | Kind | Evidence |
-|---|---|---|---|
-| 1 | Port `ItemBaseClassService`'s ancestor cache | performance | measured |
-| 2 | `SptNative.QuestJsonOptions` publishes its memo unsafely | correctness | read, not reproduced |
+| | Item | Kind | Evidence | Status |
+|---|---|---|---|---|
+| 1 | Port `ItemBaseClassService`'s ancestor cache | performance | measured | **done** — `dc4e409`…`8963a41` |
+| 2 | `SptNative.QuestJsonOptions` publishes its memo unsafely | correctness | read, not reproduced | not started |
 
 ---
 
-## 1. Port `ItemBaseClassService`'s ancestor cache
+## 1. Port `ItemBaseClassService`'s ancestor cache — done
+
+**Resolved in `dc4e409`…`8963a41`. Completion warm: 12.80 → 5.02 / 4.75 ms**, against the other
+three quest types' ~2.4 ms in the same session. Numbers and methodology in
+[BENCHMARK.md](BENCHMARK.md), *What still costs*.
+
+The cache was built once per cached invariant slice (quest lazily behind a `OnceLock`, ragfair
+eagerly in `PreparedSlice::from`) and all 19 direct call sites in `quest/` and `ragfair/` answer
+from it. `bot/` and `loot/` keep the walk — they get their views per request, with nothing to
+amortise a build against.
+
+**The expectation below that a cache would "subsume both effects" was wrong**, and the correction is
+worth keeping. The two effects are independent: the cache removes the parent-chain *walk*, roughly
+four `IndexMap` probes per item, and that was never the dominant term. The 6x was the linear scan of
+the candidate list at each link, which caching does not touch — with Completion's 137-entry
+whitelist it is `chain_len × 137` string comparisons per item. The flattened cache alone
+(`52a27e0`) left Completion warm at 11.74 / 13.50 ms, i.e. unmoved. `8963a41` added
+`ItemBaseClassCache::is_of_baseclasses_set` and used it at the two Completion whitelist/blacklist
+sites, where the candidate list is already a `HashSet`; that is what produced the drop. Every other
+caller passes one to seven ids, where the slice scan is the cheaper form and is kept.
+
+Bot and ragfair were re-measured and neither moved, as anticipated below.
+
+The original write-up follows, unedited apart from this heading.
 
 ### What
 

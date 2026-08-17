@@ -473,8 +473,9 @@ server runs:
 | Pickup | 0.89x / 0.98x | |
 
 A warm native call costs ~3.3 ms for Elimination, Exploration and Pickup alike — the work is the
-FFI round trip, not the quest. Completion is the exception at ~13 ms, because it is the only type
-that filters the whole item table per call; see [What still costs](#what-still-costs).
+FFI round trip, not the quest. Completion was the exception at ~13 ms, because it is the only type
+that filters the whole item table per call; it has since come down to ~5 ms, see
+[What still costs](#what-still-costs).
 
 Exploration and Pickup generate ~3 ms of C# work in the legacy path, so native cannot beat them and
 lands at parity; Elimination generates 15-21 ms and Completion 20-23 ms, which is where the wins
@@ -505,16 +506,64 @@ the ~43 ms full-send cost, for servers ineligible for the native cache (mods loa
 
 ### What still costs
 
-Completion's warm call is ~13 ms against the other three types' ~3.3 ms. The ~10 ms difference is
+Completion's warm call was ~13 ms against the other three types' ~3.3 ms. The ~10 ms difference was
 `GetItemsToRetrievePool` (`:125-155`), which runs `IsValidRewardItem` over all 4,673 templates, and
-every one of those does at least two `is_of_baseclass` calls. C# answers each from
-`ItemBaseClassService`'s ancestor set, precomputed once at startup and O(1) per lookup;
-`item_helper::is_of_baseclasses` walks the parent chain live on every call.
+`GetWhitelistedItemSelection` (`:188-214`), which tests every survivor against a 137-entry
+whitelist. C# answers each base-class test from `ItemBaseClassService`'s ancestor set, precomputed
+once at startup and O(1) per lookup; `item_helper::is_of_baseclasses` walked the parent chain live
+on every call.
 
-Porting that cache is what closes the remaining gap. It is not Completion-specific — the uncached
-walk has 20 call sites across the bot, ragfair, loot and quest modules, plus seven more behind
-`item_helper`'s own wrappers, and Completion is only where
-the call volume makes it visible.
+Recorded 2026-08-17 on `8963a41`, same machine and configuration as the table above. Two full
+invocations, warm medians:
+
+| Type | `1819c0c` | `52a27e0` ancestor cache | `8963a41` set probe |
+|---|---|---|---|
+| Elimination | 3.52 / 3.38 ms | 2.64 / 2.63 ms | 2.62 / 2.70 ms |
+| **Completion** | **12.80 / 13.57 ms** | **11.74 / 13.50 ms** | **5.02 / 4.75 ms** |
+| Exploration | 3.38 / 3.26 ms | 2.34 / 2.47 ms | 2.42 / 2.33 ms |
+| Pickup | 3.32 / 3.16 ms | 2.27 / 2.38 ms | 2.35 / 2.28 ms |
+
+Completion's speedup over legacy is **4.89x** on the second invocation, from 1.82x / 1.67x. The
+first invocation reads 11.30x only because its legacy arm's early runs contaminated the median as
+well as the mean (56.77 ms against a 19.94 ms min); see the caveat below.
+
+Read Completion against the same-session floor, not across sessions: the other three types are
+~25-30% cheaper in both later sessions than in the `1819c0c` one, which is process and machine state
+— they make almost no base-class calls. Completion against that floor is **5.0 vs 2.4 ms**, from
+**12.8 vs 3.4**. Cold, legacy and `BuildInvariantSlice` medians and every alloc/run figure stayed
+within the spread of the table above.
+
+**The flattened ancestor cache alone did not move it.** `52a27e0` built
+`ItemBaseClassService`'s map once per cached invariant slice and answered all 19 quest and ragfair
+call sites from it, and Completion warm stayed at 11.74 / 13.50 ms. The cache removed the parent
+chain *walk* — about four `IndexMap` probes per item — which was never the dominant term. What
+remained was `is_of_baseclasses`' linear scan of the candidate list at each link: with a 137-entry
+whitelist that is `chain_len × 137` string comparisons per item, unchanged by any amount of caching.
+Measured in isolation on the shipped table by
+`tests/completion_whitelist_baseclass.rs`, which reports all three formulations: **67.6 ms** for a
+walk per candidate, **10.1 ms** for one walk with a slice scan, **1.3 ms** with the candidates in a
+set. `8963a41` added `ItemBaseClassCache::is_of_baseclasses_set` and used it at the two Completion
+whitelist/blacklist sites, where the candidate list is already a `HashSet` and every other caller
+passes one to seven ids. Same enumeration direction as the slice form — the short ancestor chain
+probes the candidates, not the C# `Overlaps` direction — so the answers are identical.
+
+`FOLLOWUPS.md` expected the cache to "subsume both effects". It did not: the two are independent,
+and the scan was the whole of it. The cache is what makes the chain lookup O(1) and is kept on that
+basis, but on its own it bought nothing measurable at any current call site.
+
+A residual ~2.5 ms over the other three types remains, presumed to be `GetItemsToRetrievePool`'s
+pass over all 4,673 templates now that the whitelist filter no longer dominates it. That
+attribution is inferred from what is left, not measured — the same kind of claim that proved wrong
+above, so treat it as a starting point rather than a finding.
+
+Bot and ragfair were re-measured on `8963a41` and neither moved. Ragfair matches on every arm: full
+pass 630.90 ms native / 440.85 legacy, regeneration 14.49 / 10.41, cache cold 80.92 against warm
+9.91, and every alloc/run figure identical to the section above. Bot per-bot medians are 84.05 ms
+(`assault`) and 53.99 ms (`usec`) against the recorded 88.04 and 54.43. Bot's `BuildRequest` arm
+read 15.23 / 15.58 ms against the recorded 9.89 / 5.09, which is not within spread — it is the
+payload projection, untouched by this change and unmeasured since, so read it as this session's
+figure rather than a regression. Both results are what was expected: bot and loot deliberately keep
+the walk, and the bot path is ~92% payload transport regardless.
 
 ### What the Completion figures used to be
 
@@ -549,7 +598,10 @@ Repeatable-quest-specific caveats, on top of the general ones below:
   (45.21 / 44.15 ms) matches the steady cold median of the other three types. Read Elimination's
   cold cost as ~45 ms like the rest.
 - **The Completion legacy arm's mean is not its cost.** Its early timed runs reach 98-101 ms against
-  a steady ~22 ms, which drags the mean to ~41 ms. The median (23.31 / 22.72 ms) is unaffected.
+  a steady ~22 ms, which drags the mean to ~41 ms. The median (23.31 / 22.72 ms) is usually
+  unaffected, but not reliably: one `8963a41` invocation had enough slow early runs to drag the
+  median itself to 56.77 ms against a 19.94 ms min. Check the min before trusting a Completion
+  legacy median.
 - **The Elimination legacy median moves between invocations** — 16.67 and 21.39 ms here, 15.60,
   16.69 and 21.25 ms on `b0a3e27`, each tight within itself (±3 ms). The warm native arm barely
   moves (3.52 / 3.38 ms), so the Elimination speedup is a **4.7-6.3x** band, not the single figure
