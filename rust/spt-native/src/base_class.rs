@@ -50,9 +50,15 @@ pub fn build(req: &BaseClassRequest) -> BaseClassResponse {
         {
             // Quirk 2, ported verbatim: `AddBaseItems` stores a parent id before looking it up, so
             // a chain keeps a final parent that is missing from the view
-            // (ItemBaseClassService.cs:73-74) — the reused walk stores in the same order. The
-            // `unwrap_or_default` stands in for C#'s empty-set seed (`:56`), which is what a
-            // parentless Item is left with.
+            // (ItemBaseClassService.cs:73-74) — the reused walk stores in the same order.
+            //
+            // Quirk 3, sanctioned divergence — `unwrap_or_default` is *not* C#'s empty-set seed
+            // (`:56`) surviving: that seed is always overwritten, because `AddBaseItems` runs
+            // unconditionally (`:57`) and opens with an unguarded `Add(item.Parent)` (`:73`). So an
+            // Item-type template with an empty `_parent` keeps `{ MongoId.Empty }` there, where the
+            // frozen walk breaks before storing (`loot/item_helper.rs:179-183`) and leaves `{}`.
+            // No shipped Item-type template is parentless; the parity test over the real table
+            // guards that.
             item_base_classes.insert(tpl.clone(), ancestors.remove(tpl).unwrap_or_default());
         } else {
             root_node_ids.push(tpl.clone());
