@@ -4,11 +4,14 @@ use std::collections::HashMap;
 
 use crate::bot::repair_service::MinMax;
 use crate::diag::DiagSink;
-use crate::loot::item_helper::{self, AMMO};
-use crate::loot::models::{Diagnostic, ItemView, WARNING};
+use crate::loot::item_helper::{self, AMMO, AMMO_BOX, MONEY, WEAPON};
+use crate::loot::models::{Diagnostic, Item, ItemView, Upd, WARNING};
+use crate::loot::mongo_id;
 use crate::loot::random_util::{get_array_value, get_chance_100, get_int};
 use crate::scav_case::ScavCaseError;
-use crate::scav_case::models::{ScavCaseConfigView, ScavCaseRequest, ScavRecipeView};
+use crate::scav_case::models::{
+    MoneyLevelsView, ScavCaseConfigView, ScavCaseRequest, ScavCaseResponse, ScavRecipeView,
+};
 
 /// The `typeof(T).FullName` this file's diagnostics log under.
 const CATEGORY: &str = "SPTarkov.Server.Core.Generators.ScavCaseRewardGenerator";
@@ -37,11 +40,7 @@ const SUPERRARE: &str = "superrare";
 ///
 /// `TemplateItem` carries its own `Id`, [`ItemView`] does not — hence the tpl in the tuple, which
 /// every caller of the pool needs (prices, presets, baseclass tests are all keyed by it).
-///
-/// Still `pub` rather than `pub(crate)` only because nothing outside the tests calls it yet;
-/// `Generate` is the caller that tightens it. [`build_ammo_pool`] already has one in
-/// [`get_random_ammo`].
-pub fn build_reward_pool(req: &ScavCaseRequest) -> Vec<(&str, &ItemView)> {
+pub(crate) fn build_reward_pool(req: &ScavCaseRequest) -> Vec<(&str, &ItemView)> {
     let parent_blacklist: Vec<&str> = req
         .config
         .reward_item_parent_blacklist
@@ -377,18 +376,268 @@ fn get_random_ammo<'a>(
     Ok(*get_array_value(&possible_ammo_pool))
 }
 
+/// `RandomiseContainerItemRewards` (`:318-368`) — the picks turned into reward groups: each is the
+/// reward item plus whatever children its branch gives it.
+///
+/// The branch order is the C#'s and the branches are exclusive: ammo box (`:335`), then armor or
+/// weapon (`:340-342`), then the `[AMMO, MONEY]` stack path (`:359`).
+///
+/// # Errors
+///
+/// Where the C# throws: `AddCartridgesToAmmoBox` on a box naming no cartridge or a cartridge with no
+/// stack size (`ItemHelper.cs:1245,1266`).
+fn randomise_container_item_rewards(
+    req: &ScavCaseRequest,
+    reward_items: &[(&str, &ItemView)],
+    rarity: &str,
+    diagnostics: &mut DiagSink,
+) -> Result<Vec<Vec<Item>>, ScavCaseError> {
+    // Each array is an item + children
+    let mut result: Vec<Vec<Item>> = Vec::new();
+    for (reward_item_tpl, reward_item_db) in reward_items {
+        // `:324-332`. `Upd` starts null and only the stack branch below fills it in.
+        let mut result_item = vec![Item {
+            id: mongo_id::generate(),
+            template: (*reward_item_tpl).to_owned(),
+            upd: None,
+            ..Default::default()
+        }];
+
+        if item_helper::is_of_baseclass(&req.items_view, reward_item_tpl, AMMO_BOX) {
+            // `:335-337`
+            item_helper::add_cartridges_to_ammo_box(
+                &req.items_view,
+                &mut result_item,
+                reward_item_tpl,
+            )
+            .map_err(|failure| ScavCaseError::new(failure.message.unwrap_or_default()))?;
+        }
+        // Armor or weapon = use default preset from globals.json (`:340-342`)
+        else if item_helper::armor_item_has_removable_or_soft_insert_slots(
+            &req.items_view,
+            reward_item_tpl,
+        ) || item_helper::is_of_baseclass(&req.items_view, reward_item_tpl, WEAPON)
+        {
+            // Quirk 5 (`:345-351`): a tpl with no default preset is warned about — in interpolated
+            // text, not a locale key — and skipped, so the reward is dropped outright.
+            let Some(preset) = req.default_presets_by_tpl.get(*reward_item_tpl) else {
+                diagnostics.push(Diagnostic {
+                    category: CATEGORY,
+                    level: WARNING.to_owned(),
+                    locale_key: None,
+                    args: None,
+                    message: Some(format!(
+                        "No preset for item: {reward_item_tpl} {}, skipping",
+                        // `TemplateItem.Name` is nullable and interpolates as the empty string.
+                        reward_item_db.name.as_deref().unwrap_or_default()
+                    )),
+                });
+
+                continue;
+            };
+
+            // Ensure preset has unique ids and is cloned so we don't alter the preset data stored
+            // in memory (`:354-357`) — the *whole* result item is replaced, minted root included.
+            //
+            // `RemapRootItemId` is a no-op on anything but the root's id value: `ReplaceIDs` has
+            // already re-idded the tree consistently, so all the second pass does is mint the root
+            // one more id and repoint its children at it. Ported because the C# does it.
+            let mut preset_and_mods = preset.items.clone();
+            item_helper::replace_ids(&mut preset_and_mods);
+            item_helper::remap_root_item_id(&mut preset_and_mods);
+
+            result_item = preset_and_mods;
+        } else if item_helper::is_of_baseclasses(&req.items_view, reward_item_tpl, &[AMMO, MONEY]) {
+            // `:359-362`. The gate is an ancestor walk but the draw below keys on the direct
+            // parent (quirk 4), so an item that only passes here through a grandparent still gets
+            // an `Upd` — carrying the else branch's 1.
+            result_item[0].upd = Some(Upd {
+                stack_objects_count: Some(f64::from(get_random_amount_reward_for_scav_case(
+                    req,
+                    reward_item_tpl,
+                    reward_item_db,
+                    rarity,
+                ))),
+                ..Default::default()
+            });
+        }
+
+        result.push(result_item);
+    }
+
+    Ok(result)
+}
+
+/// `GetRandomAmountRewardForScavCase` (`:431-447`).
+///
+/// Quirk 4: this keys on the item's **direct parent** (`:433`) where its `:359` gate walks the whole
+/// ancestor chain, so a grandchild of `AMMO` reaches neither branch and takes the else's 1.
+fn get_random_amount_reward_for_scav_case(
+    req: &ScavCaseRequest,
+    tpl: &str,
+    item_to_calculate: &ItemView,
+    rarity: &str,
+) -> i32 {
+    let parent_id = item_to_calculate.parent.as_deref().unwrap_or_default();
+
+    if parent_id == AMMO {
+        get_randomised_ammo_reward_stack_size(req, item_to_calculate)
+    } else if parent_id == MONEY {
+        get_randomised_money_reward_stack_size(req, tpl, rarity)
+    } else {
+        1
+    }
+}
+
+/// `GetRandomisedAmmoRewardStackSize` (`:454-457`).
+///
+/// A template with no `StackMaxSize` (quirk 6 lets one into the ammo pool) coalesces to a max of 0,
+/// which is below the floor — `GetInt` returns the floor without drawing at all
+/// (`RandomUtil.cs:48`).
+fn get_randomised_ammo_reward_stack_size(
+    req: &ScavCaseRequest,
+    item_to_calculate: &ItemView,
+) -> i32 {
+    get_int(
+        req.config.ammo_rewards.min_stack_size,
+        item_to_calculate.stack_max_size.unwrap_or(0),
+    )
+}
+
+/// `GetRandomisedMoneyRewardStackSize` (`:465-501`) — each currency reads its own count map, and
+/// `EUROS` reads `EurCount` while `DOLLARS` reads `UsdCount`.
+fn get_randomised_money_reward_stack_size(req: &ScavCaseRequest, tpl: &str, rarity: &str) -> i32 {
+    let money_rewards = &req.config.money_rewards;
+
+    let count = if tpl == ROUBLES {
+        money_level(&money_rewards.rub_count, rarity)
+    } else if tpl == EUROS {
+        money_level(&money_rewards.eur_count, rarity)
+    } else if tpl == DOLLARS {
+        money_level(&money_rewards.usd_count, rarity)
+    } else if tpl == GP {
+        money_level(&money_rewards.gp_count, rarity)
+    } else {
+        return 1;
+    };
+
+    get_int(count.min, count.max)
+}
+
+/// `GetByJsonProperty<MinMax<int>>(rarity)` (`:472`) — the rarity level under its JSON property
+/// name.
+///
+/// # Panics
+///
+/// On a rarity none of the three members is named after, where the C# reflection lookup answers
+/// null and the `.Min` that follows throws `NullReferenceException`. `Generate` only ever passes
+/// the three [`COMMON`]/[`RARE`]/[`SUPERRARE`] constants.
+fn money_level<'a>(money_levels: &'a MoneyLevelsView, rarity: &str) -> &'a MinMax<i32> {
+    match rarity {
+        COMMON => &money_levels.common,
+        RARE => &money_levels.rare,
+        SUPERRARE => &money_levels.superrare,
+        unknown => panic!("Money reward counts have no rarity level named: {unknown}"),
+    }
+}
+
+/// `Generate` (`:49-77`) — the three rarities picked, containerised, and concatenated in
+/// common/rare/superrare order.
+///
+/// The two passes are not interleaved: all three rarities are picked (`:63-67`) before any of them
+/// is containerised (`:70-72`), and both spend draws off the one stream.
+///
+/// Not the module's entry point — [`crate::scav_case::generate_scav_case_rewards`] is, and it is
+/// what installs the seed and catches the panics this path is allowed to raise.
+///
+/// # Errors
+///
+/// Quirk 8: a recipe id the table does not hold, where the C# `FirstOrDefault` answers null and
+/// `:403` throws dereferencing `EndProducts`. Plus whatever [`pick_random_rewards`] and
+/// [`randomise_container_item_rewards`] report.
+pub(crate) fn generate(
+    req: &ScavCaseRequest,
+    diagnostics: &mut DiagSink,
+) -> Result<ScavCaseResponse, ScavCaseError> {
+    // `CacheDbItems()` (`:51`); see [`build_reward_pool`] for why it is not cached.
+    let db_items_cache = build_reward_pool(req);
+
+    // Get scavcase details from hideout/scavcase.json (`:54`)
+    let scav_case_details = req
+        .scav_recipes
+        .iter()
+        .find(|recipe| recipe.id == req.recipe_id)
+        .ok_or_else(|| {
+            ScavCaseError::new(format!(
+                "No scav case recipe found with id: {}",
+                req.recipe_id
+            ))
+        })?;
+    let (common_counts, rare_counts, superrare_counts) =
+        get_reward_counts_and_prices(scav_case_details, &req.config);
+
+    // Get items that fit the price criteria as set by the scavCase config (`:58-60`)
+    let common_priced_items =
+        get_filtered_items_by_price(&db_items_cache, &common_counts, &req.static_prices);
+    let rare_priced_items =
+        get_filtered_items_by_price(&db_items_cache, &rare_counts, &req.static_prices);
+    let super_rare_priced_items =
+        get_filtered_items_by_price(&db_items_cache, &superrare_counts, &req.static_prices);
+
+    // Get randomly picked items from each item collection, the count range of which is defined in
+    // hideout/scavcase.json (`:63-67`)
+    let randomly_picked_common_rewards = pick_random_rewards(
+        req,
+        &common_priced_items,
+        &common_counts,
+        COMMON,
+        diagnostics,
+    )?;
+    let randomly_picked_rare_rewards =
+        pick_random_rewards(req, &rare_priced_items, &rare_counts, RARE, diagnostics)?;
+    let randomly_picked_super_rare_rewards = pick_random_rewards(
+        req,
+        &super_rare_priced_items,
+        &superrare_counts,
+        SUPERRARE,
+        diagnostics,
+    )?;
+
+    // Add randomised stack sizes to ammo and money rewards (`:70-72`)
+    let mut result = randomise_container_item_rewards(
+        req,
+        &randomly_picked_common_rewards,
+        COMMON,
+        diagnostics,
+    )?;
+    result.extend(randomise_container_item_rewards(
+        req,
+        &randomly_picked_rare_rewards,
+        RARE,
+        diagnostics,
+    )?);
+    result.extend(randomise_container_item_rewards(
+        req,
+        &randomly_picked_super_rare_rewards,
+        SUPERRARE,
+        diagnostics,
+    )?);
+
+    Ok(ScavCaseResponse { result })
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::{Value, json};
 
     use crate::diag::DiagSink;
-    use crate::loot::item_helper::{AMMO, MONEY};
-    use crate::loot::models::{ItemView, WARNING};
+    use crate::loot::item_helper::{self, AMMO, AMMO_BOX, ARMOR, MONEY, WEAPON};
+    use crate::loot::models::{Item, ItemView, WARNING};
     use crate::loot::random_util::{TestSeedGuard, get_chance_100, get_int};
     use crate::scav_case::generator::{
-        DOLLARS, EUROS, GP, ROUBLES, RewardCountAndPriceDetails, build_ammo_pool,
-        build_reward_pool, get_filtered_items_by_price, get_reward_counts_and_prices,
-        pick_random_rewards,
+        COMMON, DOLLARS, EUROS, GP, ROUBLES, RewardCountAndPriceDetails, SUPERRARE,
+        build_ammo_pool, build_reward_pool, generate, get_filtered_items_by_price,
+        get_reward_counts_and_prices, pick_random_rewards, randomise_container_item_rewards,
     };
     use crate::scav_case::models::ScavCaseRequest;
 
@@ -918,5 +1167,452 @@ mod tests {
         let _guard = TestSeedGuard::install(SEED);
 
         assert!(pick_random_rewards(&req, &[], &rewards(1.0), "common", &mut diagnostics).is_err());
+    }
+
+    // ---- Containerisation (`:318-368`), stack sizes (`:431-501`) and `Generate` (`:49-77`) ----
+
+    /// A node between [`AMMO`] and [`GRANDCHILD_AMMO_TPL`] — quirk 4's shape: an item the ancestor
+    /// walk at `:359` admits and the direct-parent test at `:433` does not.
+    const AMMO_SUB_NODE: &str = "aa0000000000000000000000";
+    const BOX_TPL: &str = "b00000000000000000000000";
+    const CARTRIDGE_TPL: &str = "c00000000000000000000000";
+    const AMMO_STACKING_TPL: &str = "a10000000000000000000000";
+    const AMMO_NO_STACK_MAX_TPL: &str = "a20000000000000000000000";
+    const GRANDCHILD_AMMO_TPL: &str = "a30000000000000000000000";
+    const WEAPON_TPL: &str = "d00000000000000000000000";
+    const WEAPON_NO_PRESET_TPL: &str = "d10000000000000000000000";
+    const MOD_TPL: &str = "d20000000000000000000000";
+    const ARMOR_TPL: &str = "e00000000000000000000000";
+    const SOFT_INSERT_TPL: &str = "e10000000000000000000000";
+    const PLAIN_TPL: &str = "f00000000000000000000000";
+
+    /// The ids the fixture's presets ship with; `ReplaceIDs` + `RemapRootItemId` (`:354-356`) must
+    /// leave none of them in the reward.
+    const PRESET_WEAPON_ROOT: &str = "aaaa000000000000000000w1";
+    const PRESET_WEAPON_MOD: &str = "aaaa000000000000000000w2";
+    const PRESET_ARMOR_ROOT: &str = "aaaa000000000000000000a1";
+    const PRESET_ARMOR_INSERT: &str = "aaaa000000000000000000a2";
+
+    const RECIPE_ID: &str = "aaaaaaaaaaaaaaaaaaaaaaaa";
+
+    /// One template per `RandomiseContainerItemRewards` branch, plus the two the stack draw keys
+    /// off. Money counts are fixed per currency *and* per rarity (rub 1000/1001/1002, usd
+    /// 2000/…, eur 3000/…, gp 4000/…) so a stack size names the map it came out of; `GetInt(n, n)`
+    /// returns without drawing, keeping the stream free of them.
+    ///
+    /// Prices sort the templates into three disjoint rarity bands: common 0-100 takes
+    /// `AMMO_STACKING_TPL`, `BOX_TPL`, `PLAIN_TPL` and `ROUBLES`; rare 1000-5000 takes the two
+    /// weapons; superrare 20000-50000 takes the armor. Everything else is priced at 500, which no
+    /// band covers.
+    fn container_request_json() -> Value {
+        json!({
+            "recipeId": RECIPE_ID,
+            "scavRecipes": [{"id": RECIPE_ID, "endProducts": {
+                "common": {"min": 4, "max": 4}, "rare": {"min": 2, "max": 2},
+                "superrare": {"min": 1, "max": 1}}}],
+            "config": {
+                "rewardItemValueRangeRub": {
+                    "common": {"min": 0.0, "max": 100.0},
+                    "rare": {"min": 1000.0, "max": 5000.0},
+                    "superrare": {"min": 20000.0, "max": 50000.0}},
+                "moneyRewards": {"moneyRewardChancePercent": 0,
+                    "rubCount": {"common": {"min": 1000, "max": 1000},
+                        "rare": {"min": 1001, "max": 1001},
+                        "superrare": {"min": 1002, "max": 1002}},
+                    "usdCount": {"common": {"min": 2000, "max": 2000},
+                        "rare": {"min": 2001, "max": 2001},
+                        "superrare": {"min": 2002, "max": 2002}},
+                    "eurCount": {"common": {"min": 3000, "max": 3000},
+                        "rare": {"min": 3001, "max": 3001},
+                        "superrare": {"min": 3002, "max": 3002}},
+                    "gpCount": {"common": {"min": 4000, "max": 4000},
+                        "rare": {"min": 4001, "max": 4001},
+                        "superrare": {"min": 4002, "max": 4002}}},
+                "ammoRewards": {"ammoRewardChancePercent": 0,
+                    "ammoRewardValueRangeRub": {"common": {"min": 0.0, "max": 80.0}},
+                    "minStackSize": 30},
+                "rewardItemParentBlacklist": [],
+                "rewardItemBlacklist": [],
+                "allowMultipleMoneyRewardsPerRarity": false,
+                "allowMultipleAmmoRewardsPerRarity": false,
+                "allowBossItemsAsRewards": true
+            },
+            "itemsView": {
+                ITEM_NODE: {"parent": null, "type": "Node"},
+                AMMO: {"parent": ITEM_NODE, "type": "Node"},
+                MONEY: {"parent": ITEM_NODE, "type": "Node"},
+                AMMO_BOX: {"parent": ITEM_NODE, "type": "Node"},
+                WEAPON: {"parent": ITEM_NODE, "type": "Node"},
+                ARMOR: {"parent": ITEM_NODE, "type": "Node"},
+                MISC_NODE: {"parent": ITEM_NODE, "type": "Node"},
+                AMMO_SUB_NODE: {"parent": AMMO, "type": "Node"},
+                AMMO_STACKING_TPL: {"parent": AMMO, "type": "Item", "name": "patron_545",
+                    "stackMaxSize": 60},
+                BOX_TPL: {"parent": AMMO_BOX, "type": "Item", "name": "ammo_box_545",
+                    "stackSlotMaxCount": 60.0, "stackSlotFirstFilterFirst": CARTRIDGE_TPL},
+                PLAIN_TPL: {"parent": MISC_NODE, "type": "Item", "name": "bandage"},
+                ROUBLES: {"parent": MONEY, "type": "Item", "name": "roubles",
+                    "stackMaxSize": 500000},
+                WEAPON_TPL: {"parent": WEAPON, "type": "Item", "name": "weapon_ak"},
+                WEAPON_NO_PRESET_TPL: {"parent": WEAPON, "type": "Item", "name": "weapon_mp5"},
+                ARMOR_TPL: {"parent": ARMOR, "type": "Item", "name": "armor_6b13",
+                    "slots": [{"name": "soft_armor_front"}]},
+                CARTRIDGE_TPL: {"parent": AMMO, "type": "Item", "name": "patron_9x19",
+                    "stackMaxSize": 30},
+                AMMO_NO_STACK_MAX_TPL: {"parent": AMMO, "type": "Item", "name": "patron_no_stack"},
+                GRANDCHILD_AMMO_TPL: {"parent": AMMO_SUB_NODE, "type": "Item",
+                    "name": "patron_grandchild", "stackMaxSize": 60},
+                MOD_TPL: {"parent": MISC_NODE, "type": "Item", "name": "mod_stock"},
+                SOFT_INSERT_TPL: {"parent": MISC_NODE, "type": "Item", "name": "soft_insert"},
+                EUROS: {"parent": MONEY, "type": "Item", "name": "euros", "stackMaxSize": 500000},
+                DOLLARS: {"parent": MONEY, "type": "Item", "name": "dollars",
+                    "stackMaxSize": 500000},
+                GP: {"parent": MONEY, "type": "Item", "name": "gp", "stackMaxSize": 500000}
+            },
+            "staticPrices": {
+                AMMO_STACKING_TPL: 50.0, BOX_TPL: 90.0, PLAIN_TPL: 60.0, ROUBLES: 10.0,
+                WEAPON_TPL: 2000.0, WEAPON_NO_PRESET_TPL: 3000.0, ARMOR_TPL: 30000.0,
+                CARTRIDGE_TPL: 500.0, AMMO_NO_STACK_MAX_TPL: 500.0, GRANDCHILD_AMMO_TPL: 500.0,
+                MOD_TPL: 500.0, SOFT_INSERT_TPL: 500.0,
+                EUROS: 500.0, DOLLARS: 500.0, GP: 500.0
+            },
+            "defaultPresetsByTpl": {
+                WEAPON_TPL: {"items": [
+                    {"_id": PRESET_WEAPON_ROOT, "_tpl": WEAPON_TPL},
+                    {"_id": PRESET_WEAPON_MOD, "_tpl": MOD_TPL, "parentId": PRESET_WEAPON_ROOT,
+                        "slotId": "mod_stock"}]},
+                ARMOR_TPL: {"items": [
+                    {"_id": PRESET_ARMOR_ROOT, "_tpl": ARMOR_TPL},
+                    {"_id": PRESET_ARMOR_INSERT, "_tpl": SOFT_INSERT_TPL,
+                        "parentId": PRESET_ARMOR_ROOT, "slotId": "soft_armor_front"}]}
+            },
+            "inactiveSeasonalItems": [],
+            "globalBlacklist": [],
+            "rewardItemBlacklist": [],
+            "bossItems": []
+        })
+    }
+
+    fn container_request() -> ScavCaseRequest {
+        serde_json::from_value(container_request_json()).unwrap()
+    }
+
+    /// The picks `PickRandomRewards` would have handed on, spelled as tpls.
+    fn picks<'a>(req: &'a ScavCaseRequest, tpls: &[&str]) -> Vec<(&'a str, &'a ItemView)> {
+        tpls.iter()
+            .map(|tpl| {
+                let (tpl, item) = req.items_view.get_key_value(*tpl).unwrap();
+
+                (tpl.as_str(), item)
+            })
+            .collect()
+    }
+
+    /// What a reward group is, ignoring the minted ids: root tpl, item count, root stack size.
+    fn shapes(rewards: &[Vec<Item>]) -> Vec<(String, usize, Option<f64>)> {
+        rewards
+            .iter()
+            .map(|group| {
+                (
+                    group[0].template.clone(),
+                    group.len(),
+                    group[0]
+                        .upd
+                        .as_ref()
+                        .and_then(|upd| upd.stack_objects_count),
+                )
+            })
+            .collect()
+    }
+
+    /// `:335-337` — an ammo box reward is hydrated with cartridge children, and nothing sets a stack
+    /// size on its root.
+    #[test]
+    fn an_ammo_box_reward_is_filled_with_cartridges() {
+        let req = container_request();
+        let mut diagnostics = DiagSink::capture();
+
+        let rewards = randomise_container_item_rewards(
+            &req,
+            &picks(&req, &[BOX_TPL]),
+            COMMON,
+            &mut diagnostics,
+        )
+        .unwrap();
+
+        // 60 cartridges of a 30-max template: two stacks, the second at location 0 (`:1266-1275`).
+        assert_eq!(shapes(&rewards), vec![(BOX_TPL.to_owned(), 3, None)]);
+        assert_eq!(rewards[0][1].template, CARTRIDGE_TPL);
+        assert_eq!(
+            rewards[0][1].parent_id.as_deref(),
+            Some(rewards[0][0].id.as_str())
+        );
+        assert_eq!(rewards[0][2].template, CARTRIDGE_TPL);
+        assert!(diagnostics.captured().is_empty());
+    }
+
+    /// `:340-357` — an armor with soft-insert slots is replaced *whole* by a clone of its default
+    /// preset, re-idded root and all, with the parent/child hierarchy intact.
+    #[test]
+    fn an_armor_reward_becomes_a_freshly_idded_clone_of_its_preset() {
+        let req = container_request();
+        let mut diagnostics = DiagSink::capture();
+
+        let rewards = randomise_container_item_rewards(
+            &req,
+            &picks(&req, &[ARMOR_TPL]),
+            COMMON,
+            &mut diagnostics,
+        )
+        .unwrap();
+
+        let group = &rewards[0];
+        assert_eq!(shapes(&rewards), vec![(ARMOR_TPL.to_owned(), 2, None)]);
+        assert_eq!(group[1].template, SOFT_INSERT_TPL);
+        assert_eq!(group[1].slot_id.as_deref(), Some("soft_armor_front"));
+        // Re-idded, and the child still points at the new root.
+        assert!(![PRESET_ARMOR_ROOT, PRESET_ARMOR_INSERT].contains(&group[0].id.as_str()));
+        assert!(![PRESET_ARMOR_ROOT, PRESET_ARMOR_INSERT].contains(&group[1].id.as_str()));
+        assert_eq!(group[1].parent_id.as_deref(), Some(group[0].id.as_str()));
+        assert!(diagnostics.captured().is_empty());
+    }
+
+    /// Quirk 5 (`:345-351`): a weapon with no default preset warns and `continue`s, so the reward
+    /// vanishes from the result rather than arriving bare.
+    #[test]
+    fn a_weapon_without_a_preset_is_dropped_with_a_warning() {
+        let req = container_request();
+        let mut diagnostics = DiagSink::capture();
+
+        let rewards = randomise_container_item_rewards(
+            &req,
+            &picks(&req, &[WEAPON_NO_PRESET_TPL, PLAIN_TPL]),
+            COMMON,
+            &mut diagnostics,
+        )
+        .unwrap();
+
+        // Two picks in, one reward out — and the survivor is the one that was not dropped.
+        assert_eq!(shapes(&rewards), vec![(PLAIN_TPL.to_owned(), 1, None)]);
+        assert_eq!(diagnostics.captured().len(), 1);
+        assert_eq!(diagnostics.captured()[0].level, WARNING);
+        // Interpolated text, not a locale key (`:348`).
+        assert_eq!(diagnostics.captured()[0].locale_key, None);
+        assert_eq!(
+            diagnostics.captured()[0].message.as_deref(),
+            Some(
+                format!("No preset for item: {WEAPON_NO_PRESET_TPL} weapon_mp5, skipping").as_str()
+            )
+        );
+    }
+
+    /// Quirk 4 (`:359` vs `:433-446`): the gate is an ancestor walk, the stack draw keys on the
+    /// direct parent. An item whose *grandparent* is `AMMO` therefore passes the gate, misses both
+    /// branches of `GetRandomAmountRewardForScavCase` — and still has its `Upd` set, to the else
+    /// branch's 1.
+    #[test]
+    fn a_grandchild_of_ammo_passes_the_gate_and_stacks_to_one() {
+        let req = container_request();
+        let mut diagnostics = DiagSink::capture();
+
+        let rewards = randomise_container_item_rewards(
+            &req,
+            &picks(&req, &[GRANDCHILD_AMMO_TPL]),
+            COMMON,
+            &mut diagnostics,
+        )
+        .unwrap();
+
+        assert!(item_helper::is_of_baseclasses(
+            &req.items_view,
+            GRANDCHILD_AMMO_TPL,
+            &[AMMO, MONEY]
+        ));
+        assert_eq!(
+            req.items_view[GRANDCHILD_AMMO_TPL].parent.as_deref(),
+            Some(AMMO_SUB_NODE)
+        );
+        assert_eq!(
+            shapes(&rewards),
+            vec![(GRANDCHILD_AMMO_TPL.to_owned(), 1, Some(1.0))]
+        );
+    }
+
+    /// `:359-362` gates on `[AMMO, MONEY]`, so anything else keeps the `Upd` of `null` `:330` gave
+    /// it.
+    #[test]
+    fn a_plain_reward_keeps_its_null_upd() {
+        let req = container_request();
+        let mut diagnostics = DiagSink::capture();
+
+        let rewards = randomise_container_item_rewards(
+            &req,
+            &picks(&req, &[PLAIN_TPL]),
+            COMMON,
+            &mut diagnostics,
+        )
+        .unwrap();
+
+        assert_eq!(shapes(&rewards), vec![(PLAIN_TPL.to_owned(), 1, None)]);
+    }
+
+    /// `:456` — `GetInt(MinStackSize, StackMaxSize ?? 0)`, drawn off the same stream the picks use.
+    #[test]
+    fn an_ammo_reward_stacks_between_the_config_floor_and_the_template_ceiling() {
+        let req = container_request();
+        let mut diagnostics = DiagSink::capture();
+
+        let rewards = {
+            let _guard = TestSeedGuard::install(SEED);
+            randomise_container_item_rewards(
+                &req,
+                &picks(&req, &[AMMO_STACKING_TPL]),
+                COMMON,
+                &mut diagnostics,
+            )
+            .unwrap()
+        };
+
+        // The one draw this reward costs, off a stream of its own: swapping the bounds or widening
+        // either end changes it.
+        let expected = {
+            let _guard = TestSeedGuard::install(SEED);
+            f64::from(get_int(30, 60))
+        };
+        assert_eq!(
+            shapes(&rewards),
+            vec![(AMMO_STACKING_TPL.to_owned(), 1, Some(expected))]
+        );
+    }
+
+    /// Quirk 6's other half: `StackMaxSize` is `int?`, `:456` coalesces it to 0, and `GetInt`'s
+    /// `max > min` guard (`RandomUtil.cs:48`) then returns the floor **without drawing** — so an
+    /// ammo template with no stack size at all costs the stream nothing.
+    #[test]
+    fn ammo_without_a_stack_max_size_takes_the_floor_without_drawing() {
+        let req = container_request();
+        let mut diagnostics = DiagSink::capture();
+
+        let _guard = TestSeedGuard::install(SEED);
+        let rewards = randomise_container_item_rewards(
+            &req,
+            &picks(&req, &[AMMO_NO_STACK_MAX_TPL]),
+            COMMON,
+            &mut diagnostics,
+        )
+        .unwrap();
+
+        assert!(
+            req.items_view[AMMO_NO_STACK_MAX_TPL]
+                .stack_max_size
+                .is_none()
+        );
+        assert_eq!(
+            shapes(&rewards),
+            vec![(AMMO_NO_STACK_MAX_TPL.to_owned(), 1, Some(30.0))]
+        );
+        // The stream is still at its first value, so nothing was drawn above.
+        assert_eq!(get_int(0, 1_000_000), {
+            let _guard = TestSeedGuard::install(SEED);
+            get_int(0, 1_000_000)
+        });
+    }
+
+    /// `:469-500` — each currency reads its own count map, and each map its own rarity level.
+    /// `EUROS` reads `EurCount` while `DOLLARS` reads **UsdCount**, which the fixture's disjoint
+    /// values pin.
+    #[test]
+    fn money_stacks_come_from_the_currencys_own_rarity_range() {
+        let req = container_request();
+        let mut diagnostics = DiagSink::capture();
+        let money = picks(&req, &[ROUBLES, EUROS, DOLLARS, GP]);
+
+        let common =
+            randomise_container_item_rewards(&req, &money, COMMON, &mut diagnostics).unwrap();
+        let superrare =
+            randomise_container_item_rewards(&req, &money, SUPERRARE, &mut diagnostics).unwrap();
+
+        assert_eq!(
+            shapes(&common),
+            vec![
+                (ROUBLES.to_owned(), 1, Some(1000.0)),
+                (EUROS.to_owned(), 1, Some(3000.0)),
+                (DOLLARS.to_owned(), 1, Some(2000.0)),
+                (GP.to_owned(), 1, Some(4000.0)),
+            ]
+        );
+        assert_eq!(
+            shapes(&superrare),
+            vec![
+                (ROUBLES.to_owned(), 1, Some(1002.0)),
+                (EUROS.to_owned(), 1, Some(3002.0)),
+                (DOLLARS.to_owned(), 1, Some(2002.0)),
+                (GP.to_owned(), 1, Some(4002.0)),
+            ]
+        );
+    }
+
+    /// Quirk 8 (`:54-55`): `FirstOrDefault` answers null for a recipe id the table does not hold and
+    /// C# then NREs dereferencing `EndProducts`. Reported as an error naming the id instead.
+    #[test]
+    fn an_unknown_recipe_id_fails_naming_the_recipe() {
+        let mut json = container_request_json();
+        json["recipeId"] = json!("ffffffffffffffffffffffff");
+        let req: ScavCaseRequest = serde_json::from_value(json).unwrap();
+        let mut diagnostics = DiagSink::capture();
+
+        let error = generate(&req, &mut diagnostics).unwrap_err();
+
+        assert!(
+            error.message.contains("ffffffffffffffffffffffff"),
+            "{}",
+            error.message
+        );
+    }
+
+    /// The end-to-end KAT: one seeded `Generate` (`:49-77`) over the synthetic table, pinned reward
+    /// for reward. This is the anchor later parity work triages against — a drift in draw order,
+    /// pool contents, branch order or stack sizes moves it.
+    ///
+    /// The stream: three draws per reward (money chance, ammo chance, pool index — both chances are
+    /// 0%, so every reward comes from the price-filtered pool), all three rarities picked before any
+    /// of them is containerised (`:63-72`), then the stack draws.
+    #[test]
+    fn generate_returns_the_seeded_reward_list() {
+        let req = container_request();
+        let mut diagnostics = DiagSink::capture();
+
+        let response = {
+            let _guard = TestSeedGuard::install(SEED);
+            generate(&req, &mut diagnostics).unwrap()
+        };
+
+        assert_eq!(
+            shapes(&response.result),
+            vec![
+                // Common: four draws over `[AMMO_STACKING, BOX, PLAIN, ROUBLES]`, landing on 1, 3,
+                // 2 and 0. The ammo box brought two cartridge stacks; the roubles took the money
+                // branch of the stack draw (`:439-441`) as an ordinary *pool* draw, the money
+                // chance being 0 here; the ammo's 54 is the only draw containerisation itself
+                // spends, which is what pins the pick-then-containerise order of `:63-72`.
+                (BOX_TPL.to_owned(), 3, None),
+                (ROUBLES.to_owned(), 1, Some(1000.0)),
+                (PLAIN_TPL.to_owned(), 1, None),
+                (AMMO_STACKING_TPL.to_owned(), 1, Some(54.0)),
+                // Rare: two draws over `[WEAPON_TPL, WEAPON_NO_PRESET_TPL]`. One reward survives —
+                // the other pick was the preset-less weapon quirk 5 drops.
+                (WEAPON_TPL.to_owned(), 2, None),
+                // Superrare: a one-item pool, containerised into its armor preset.
+                (ARMOR_TPL.to_owned(), 2, None),
+            ]
+        );
+        // Quirk 5's warning, and nothing else.
+        assert_eq!(diagnostics.captured().len(), 1);
+        assert_eq!(
+            diagnostics.captured()[0].message.as_deref(),
+            Some(
+                format!("No preset for item: {WEAPON_NO_PRESET_TPL} weapon_mp5, skipping").as_str()
+            )
+        );
     }
 }
