@@ -10,9 +10,9 @@ The loot family, the bot family, dynamic ragfair offer generation and the repeat
 ported and run natively by default. Every ported class keeps its full 4.1.2 C# implementation as a
 **legacy path**, selected automatically when a mod hooks it or manually via a config flag. The log
 pipeline is ported too, and has no legacy path: `SPTLoggerDispatcher` hands every line to the crate.
-Sixteen C-ABI exports (`src/ffi.rs`) carry all of it, JSON in and JSON out — except the ragfair
+Seventeen C-ABI exports (`src/ffi.rs`) carry all of it, JSON in and JSON out — except the ragfair
 response, which is a framed MessagePack envelope, and `spt_log_emit`, which passes the fields of one
-line directly (current ABI 15).
+line directly (current ABI 16).
 
 ## Working
 
@@ -29,10 +29,11 @@ line directly (current ABI 15).
 | A batch of dynamic flea offers (assort walk, pricing, barter schemes) | `RagfairOfferGenerator.GenerateDynamicOffers` | `spt_generate_dynamic_offers` |
 | Repeatable quests (all four types + rewards) | `*QuestGenerator.Generate` | `spt_generate_repeatable_quest` |
 | The whole log pipeline — filters, level gates, per-target formatting, console + file sinks | `SPTLoggerDispatcher.Log` | `spt_logger_init`, `spt_log_emit`, `spt_logger_close` |
+| Generator diagnostics, localised and logged natively as they happen | `DatabaseImporter` → `SptNative.SetServerLocales` | `spt_locales_set` |
 
 Also working: mod-added fields on game data survive the round trip (`#[serde(flatten)] extra` maps
-mirroring Ceciler's `[JsonExtensionData]`); native generator diagnostics are replayed through the C# logger;
-seeded-RNG parity at the primitive level (xoshiro256\*\*, twin known-answer tests both sides).
+mirroring Ceciler's `[JsonExtensionData]`); native generator diagnostics render and log themselves through
+the native pipeline; seeded-RNG parity at the primitive level (xoshiro256\*\*, twin known-answer tests both sides).
 
 ## Broken / known divergences
 
@@ -102,12 +103,28 @@ seeded-RNG parity at the primitive level (xoshiro256\*\*, twin known-answer test
 - **Typed loose-loot path is slow** — ~1347 ms per raid start for `bigmap` vs ~345 ms raw, against
   929 ms for the C# it replaced. Any registered `LazyLoad` transformer (seasonal events, mods)
   forces it. Vanilla installs stay on the raw path.
-- **Failures lose their diagnostics** — on error C# throws with the native message only; log lines
-  collected before the failure are dropped (one-buffer FFI contract).
-- **Hangs are undiagnosable** — ported retry loops can spin exactly as 4.1.2 does, but inside an FFI
-  call with no managed stack trace. Force legacy to get it back.
-- **Native bot logs collapse to one category** — all four generators log through
-  `ISptLogger<BotInventoryGenerator>`.
+- **A failure still crosses as a bare message** — everything the run logged on the way down is
+  already in the log, emitted as it happened, but the error itself is the one thing the FFI hands
+  back as text for C# to throw with (one-buffer contract). Localising and categorising that last
+  line is what remains.
+- **Hangs are mostly undiagnosable** — ported retry loops can spin exactly as 4.1.2 does, inside an
+  FFI call with no managed stack trace. Generator diagnostics stream now, so a hang beside a
+  diagnostic site shows its last line; a hang in a stretch with no diagnostic sites still shows
+  nothing. Force legacy to get the managed stack back.
+- **Generator lines carry one category per generator** — `typeof(T).FullName` of the C# class each
+  Rust module ports, where the replay era logged the whole bot family through
+  `ISptLogger<BotInventoryGenerator>`. A custom `sptLogger.json` filter written against that class
+  now matches far fewer lines.
+- **Generator lines use a different `%tid%` space** — a small process-local counter handed out per
+  thread in first-emit order, not the managed thread id C# lines carry, and `%tname%` is the Rust
+  thread name, usually empty. `%date%` is the moment of emission, where replayed lines were all
+  stamped at the end of the native call.
+- **Generator locale text is a startup snapshot** — `DatabaseImporter` pushes the resolved server
+  locales once (`spt_locales_set`), so a mod mutating them later no longer changes what a generator
+  line says. A failed push is one stderr notice and every generator line falls back to its locale key.
+- **Parallel generator lines interleave** — the ragfair and bot rayon workers emit as they run, so
+  lines no longer arrive grouped per bot or per assort entry. Each takes the global logger lock,
+  which is fine at diagnostic rates.
 - **Console output is now asynchronous and drops on a full queue** — the native pipeline hands each
   line to a writer thread behind an 8192-line bounded channel (file sinks always did; the console
   does now too). A hard crash can lose whatever is still queued, and a burst deeper than the queue
@@ -208,7 +225,7 @@ seeded-RNG parity at the primitive level (xoshiro256\*\*, twin known-answer test
   effect on `PARKED_RNG`, whose only consumer is the loot dynamic entry point, which never runs on
   a rayon worker.
 - **The ragfair response is a framed MessagePack envelope, not a JSON buffer.** One length-prefixed
-  frame per offer behind a header frame (since ABI **10**, encoding tag 1; current ABI is 15), which
+  frame per offer behind a header frame (since ABI **10**, encoding tag 1; current ABI is 16), which
   C# deserialises with `Parallel.For` over the frames straight out of the native buffer — no
   whole-response JSON document is ever materialised. Only the ragfair response uses it; every other
   export is still JSON in / JSON out.
@@ -285,7 +302,10 @@ seeded-RNG parity at the primitive level (xoshiro256\*\*, twin known-answer test
 
 1. Later candidates, in `todo/TODO.md` order: scav case rewards, weather, fence assorts, raid-time
    adjustment, ragfair linked-item table.
-2. Profile Completion's two whole-items-table passes through
+2. Re-scope the logging port's phase 3. Live emission made "`STATUS_ERROR` carries the run's
+   accumulated diagnostics" moot; what is left is the error envelope itself — the message and its
+   localisation.
+3. Profile Completion's two whole-items-table passes through
    `reward_generator::is_valid_reward_item`, and `loot/item_helper.rs`'s uncached
    `is_of_baseclasses` walk under them, against `ItemBaseClassService`'s prebuilt parent map — the
    named candidate for Completion's 3.1x, unmeasured so far.

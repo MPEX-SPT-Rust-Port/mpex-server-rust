@@ -14,7 +14,7 @@ Toolchain is pinned in `rust-toolchain.toml` (1.97.1, edition 2024). Dependencie
 `walkdir`, `xxhash-rust`, `base64` — plus `tempfile` as the only dev-dependency (the `verify` FFI
 tests need a real directory). `Cargo.lock` is committed.
 
-Roughly 45k lines across 46 files, tests included. `src/bot/` is ~37% of that and
+Roughly 46k lines across 49 files, tests included. `src/bot/` is ~37% of that and
 `bot_equipment_mod_generator.rs` alone ~4.2k; `src/loot/` ~27%, `src/ragfair/` ~17%,
 `src/quest/` ~13%.
 
@@ -22,12 +22,13 @@ Roughly 45k lines across 46 files, tests included. `src/bot/` is ~37% of that an
 
 | Path | Role |
 |---|---|
-| `src/lib.rs` | Module roots and `ABI_VERSION` (currently 15; must equal `SptNative.ExpectedAbiVersion`) |
+| `src/lib.rs` | Module roots and `ABI_VERSION` (currently 16; must equal `SptNative.ExpectedAbiVersion`) |
 | `src/ffi.rs` | The C-ABI surface. The **only** module containing `unsafe` |
 | `src/runtime.rs` | Process-wide multi-thread tokio runtime, `OnceLock`-built. Used only by `verify` |
 | `src/verify.rs` | Hashes `SPT_Data` with XXH3-128 and diffs it against `checks.dat` |
 | `src/logger.rs` | The log pipeline: `sptLogger.json`, filters, level gates, per-target formatting |
 | `src/log_sink.rs` | Where a formatted line lands: the console writer, and the file writer with its rotation and archiving |
+| `src/diag.rs` | The generator families' way into that pipeline: the locale table, the render, and `DiagSink` |
 | `src/loot/` | Location loot (static containers, loose loot) and reward loot (airdrops, cases, containers) |
 | `src/bot/` | One bot's entire inventory: equipment, mods, weapons, magazines, loot |
 | `src/ragfair/` | One batch of dynamic flea offers: the assort walk, pricing, barter schemes, the offers |
@@ -35,9 +36,10 @@ Roughly 45k lines across 46 files, tests included. `src/bot/` is ~37% of that an
 
 ## FFI boundary (`ffi.rs`)
 
-Sixteen `extern "C"` exports. Two are trivial (`spt_native_abi_version`, `spt_buf_free`); ten take a UTF-8
+Seventeen `extern "C"` exports. Two are trivial (`spt_native_abi_version`, `spt_buf_free`); ten take a UTF-8
 JSON generation request; `spt_verify_database` takes a UTF-8 directory path instead. All eleven of those hand
-back a heap buffer the caller releases with `spt_buf_free`. The last three are the log pipeline
+back a heap buffer the caller releases with `spt_buf_free`. `spt_locales_set` takes the resolved server-locale
+table as UTF-8 JSON and buffers only a parse error. The last three are the log pipeline
 (`spt_logger_init`, `spt_log_emit`, `spt_logger_close`): `spt_logger_init` takes the raw `sptLogger.json`
 bytes and hands back a buffer only on failure, `spt_log_emit` passes one line's fields directly rather
 than a JSON document, and `spt_logger_close` takes nothing — see *The log pipeline* below.
@@ -72,9 +74,10 @@ C# SptNative → spt_generate_* (JSON in)
   the out-pointer being non-null, never by the status code. `spt_verify_database`'s free-on-success-only shape
   must not be copied into the generators.
 - `catch_unwind` on every fallible path: a Rust panic never unwinds into the CLR.
-- **Diagnostics do not survive a failure.** On the `LootError` path `run_generator` writes only
-  `error.message`; everything the run had accumulated in `LootContext`/`BotContext`/`RagfairContext`
-  is dropped, so a failed call tells the C# caller nothing about what it logged on the way down.
+- **Only the failure message crosses the buffer.** On the `LootError` path `run_generator` writes
+  `error.message` and nothing else — but the run's diagnostics are already in the log, emitted as
+  they happened through `diag::DiagSink`, so a failure no longer loses what led up to it. The error
+  text itself is still the C# caller's to log.
 
 Adding an export means bumping `ABI_VERSION` and `SptNative.ExpectedAbiVersion` together; a test in `ffi.rs`
 asserts the constant so the bump can't be forgotten.
@@ -109,6 +112,12 @@ gets a background writer thread fed over a bounded channel that drops lines rath
 `log_sink.rs` also owns rotation and the archive cap — one owner for both, so the cap is enforced at the
 rotation rather than on a timer.
 
+The generator families feed the same pipeline from the inside rather than over `spt_log_emit`. `diag.rs`
+renders a locale-keyed diagnostic against the table C# pushes once over `spt_locales_set` after the database
+import — a startup snapshot, and a missing table or key leaves the key itself as the text — then hands the
+line to the logger through `ffi::emit_pipeline`. Those lines carry a process-local per-thread counter as
+`%tid%` rather than a managed thread id, and the Rust thread name (usually empty) as `%tname%`.
+
 ## `src/loot/`
 
 | Module | Stands in for | What it does |
@@ -125,7 +134,7 @@ rotation rather than on a timer.
 ## `src/bot/`
 
 `mod.rs` defines `BotContext<'a>` — the read-only views (items, presets, blacklists, durability config,
-equipment filters…) one generation run borrows, plus the `Diagnostic` list it accumulates. It is the bot
+equipment filters…) one generation run borrows, plus the `DiagSink` its diagnostics emit through. It is the bot
 family's analog of `loot::item_helper::LootContext`.
 
 | Module | Stands in for | What it does |
@@ -146,7 +155,7 @@ family's analog of `loot::item_helper::LootContext`.
 ## `src/ragfair/`
 
 `mod.rs` defines `RagfairContext<'a>` — the items view, presets, handbook and flea price tables,
-resolved trader prices and the `dynamic` config block one batch borrows, plus its `Diagnostic` list.
+resolved trader prices and the `dynamic` config block one batch borrows, plus its `DiagSink`.
 One native call generates a whole batch of offers, not one offer.
 
 | Module | Stands in for | What it does |
@@ -183,9 +192,11 @@ These are what keep the port correct; break one and output silently diverges fro
   discards. The loot family documents each draw inline at its call site instead, against the C# line. Adding,
   removing, or reordering a draw desynchronises the whole sequence, so a "harmless" early-out that skips a roll
   is a bug.
-- **The generator families never log, and have one rule for throws.** They do not reach for the log pipeline
-  above; C# `ISptLogger` calls become `Diagnostic` values the caller replays
-  through its own logger. A C# *return-null-and-log* path is ported as a `Diagnostic` plus `None`, in every
+- **The generator families log for themselves, and have one rule for throws.** C# `ISptLogger` calls become
+  `Diagnostic` values pushed onto the run's `diag::DiagSink`, which renders and emits each one into the log
+  pipeline above as it happens, under the porting module's `CATEGORY` — the `typeof(T).FullName` of the C#
+  class it stands in for, so one category per generator. (Tests swap in the sink's `Capture` variant and
+  assert the diagnostics as data.) A C# *return-null-and-log* path is ported as a `Diagnostic` plus `None`, in every
   family. A C#-*sanctioned* `throw` is ported one of two ways, by family: loot, bot and ragfair return it as a
   `LootError` (so does an unguarded null deref they would have NRE'd on); the quest family panics at the throw
   site — `panic!` or `.expect` — and catches it at the family entry point (`quest/mod.rs:120`), which carries
@@ -208,7 +219,7 @@ These are what keep the port correct; break one and output silently diverges fro
 
 ## Tests
 
-All tests are inline `#[cfg(test)]` modules (~565 of them); there is no `tests/` integration suite. Three kinds:
+All tests are inline `#[cfg(test)]` modules (~670 of them); there is no `tests/` integration suite. Three kinds:
 
 - **Parity fixtures** — replay a C# scenario and assert the exact item list.
 - **Seeded-RNG tests** — a `testSeed` field on every request envelope installs a `TestSeedGuard`, swapping

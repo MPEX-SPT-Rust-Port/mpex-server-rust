@@ -156,7 +156,7 @@ startup outside DEBUG. That format is a contract shared with `rust/spt-native/sr
 `Libraries/SPTarkov.Common/Native/NativeMethods.cs`, because `SPTarkov.Common` cannot reference
 Server.Core. It owns database hash verification, the ported generation
 paths — location loot, reward loot, whole-bot inventory, dynamic ragfair offers, repeatable quests —
-and the whole log pipeline. Sixteen exports, JSON in / JSON out — except the ragfair response, which
+and the whole log pipeline. Seventeen exports, JSON in / JSON out — except the ragfair response, which
 comes back as a framed MessagePack envelope, and the log exports, where `spt_logger_init` takes the
 raw `sptLogger.json` bytes and `spt_log_emit` passes one line's fields directly — with
 `spt_native_abi_version` handshaking against `SptNative.ExpectedAbiVersion`.
@@ -176,7 +176,10 @@ or ABI-mismatched library fails fast.
 Logging is the exception with no legacy path: `AddSptLogger` initialises the native pipeline from the
 raw `sptLogger.json` bytes and `SPTLoggerDispatcher.Log` emits straight into it, so the C# side keeps
 only the `ISptLogger`/`SptLogger` front end. It is failure-tolerant by contract — a broken library or
-config produces one stderr notice and logging stays off rather than stopping the server.
+config produces one stderr notice and logging stays off rather than stopping the server. The ported
+generators log into that pipeline directly rather than handing lines back for C# to replay, so
+`DatabaseImporter` pushes the resolved server locales over `spt_locales_set` before anything can generate;
+a failed push is one stderr notice and generator lines fall back to their locale keys.
 
 Verification scope is manifest-driven and exact in both directions (`configs/`, `database/`), so
 deletions and symlink swaps are caught; `images/` and build-relocated artifacts are unverified by

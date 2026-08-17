@@ -143,8 +143,9 @@ Convention: **Services** hold state, **Helpers** don't, **Generators** create da
 | `Locales/` | 3 | `ServerLocalisationService` (server messages), `LocaleService` (client locales) |
 | `Items/`, `Hideout/`, `Hosted/`, `Image/` | 7 | Item blacklists/base classes, cultist circle + map markers, startup hosted service, image routing |
 
-`ServerLocalisationService.GetText(key, args)` produces every user-visible server string, including
-the diagnostics the Rust port replays back across the FFI.
+`ServerLocalisationService.GetText(key, args)` produces every user-visible server string. Its resolved
+table is also flattened and pushed to the Rust port at database import (`spt_locales_set`), which renders
+its own generator diagnostics against that startup snapshot.
 
 ### `Helpers/` (68) — stateless computation
 
