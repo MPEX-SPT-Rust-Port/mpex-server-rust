@@ -200,10 +200,14 @@ impl ItemBaseClassCache {
     /// (`ItemBaseClassService.ItemHasBaseClass`, `Overlaps` overload) — one probe for the chain,
     /// then a scan of it.
     ///
-    /// `Overlaps` enumerates the shorter side, and here that is always the stored chain: it holds
-    /// one id per link of a parent walk (single digits), where the candidate list is a whole
-    /// levelled whitelist (hundreds). Hashing each candidate instead costs more than the walk this
-    /// replaces, which the `completion` walk-ratio guard measures.
+    /// The enumeration direction is deliberately flipped relative to the C#, which is why this
+    /// scans rather than probes: `baseClassList.Overlaps(baseClasses)`
+    /// (`ItemBaseClassService.cs:115`) enumerates its argument and probes the receiver, so C#
+    /// hashes each candidate against the chain set. Same intersection either way, but the sizes
+    /// here are inverted — the chain holds one id per link of a parent walk (single digits), where
+    /// the candidate list is a whole levelled whitelist (hundreds), and hashing each candidate
+    /// costs more than the walk this replaces. The `completion` walk-ratio guard measures exactly
+    /// that, so restoring the C# direction fails it.
     pub fn is_of_baseclasses(&self, tpl: &str, base_class_tpls: &[&str]) -> bool {
         self.ancestors.get(tpl).is_some_and(|chain| {
             chain
