@@ -55,6 +55,7 @@ public static class SptNative
 
     // ffi.rs
     private const int StatusOk = 0;
+    private const int StatusPanic = 2;
     private const int StatusError = 3;
 
     // ffi.rs: a slice-less request named a stamp the native cache does not hold
@@ -262,7 +263,7 @@ public static class SptNative
     {
         // Unlike verify, these exports also write a buffer when they fail - the error message - so
         // ownership is decided by the pointer, never by the status. BufFree ignores the null pointer
-        // a null-argument rejection or a panic leaves behind.
+        // a null-argument rejection leaves behind.
         try
         {
             if (status == StatusOk)
@@ -279,6 +280,13 @@ public static class SptNative
             if (status == StatusError)
             {
                 throw new InvalidOperationException($"spt_native {export} generation failed: {message}");
+            }
+
+            if (status == StatusPanic)
+            {
+                throw new InvalidOperationException(
+                    $"spt_native {export} panicked: {message}; this indicates a native library bug, not corrupt game data."
+                );
             }
 
             throw new InvalidOperationException(
@@ -517,7 +525,8 @@ public static class SptNative
         // Throwing before the try/finally is safe here only because verify writes a buffer on
         // success alone. Do NOT copy this shape into the generate exports (ABI 4): those also write
         // a message buffer on BAD_ARGS and ERROR, so their wrappers must branch on outPtr, never on
-        // the status, and free whenever it is non-null (null-arg BAD_ARGS and PANIC write nothing).
+        // the status, and free whenever it is non-null (only a null-arg BAD_ARGS writes nothing;
+        // since ABI 17 PANIC carries the panic text).
         if (status != 0)
         {
             throw new InvalidOperationException(
