@@ -11,9 +11,9 @@ scav case rewards are ported and run natively by default. Every ported class kee
 implementation as a **legacy path**, selected automatically when a mod hooks it or manually via a
 config flag. The log pipeline is ported too, and has no legacy path: `SPTLoggerDispatcher` hands
 every line to the crate.
-Eighteen C-ABI exports (`src/ffi.rs`) carry all of it, JSON in and JSON out — except the ragfair
+Twenty C-ABI exports (`src/ffi.rs`) carry all of it, JSON in and JSON out — except the ragfair
 response, which is a framed MessagePack envelope, and `spt_log_emit`, which passes the fields of one
-line directly (current ABI 18).
+line directly (current ABI 19).
 
 ## Working
 
@@ -178,15 +178,31 @@ the native pipeline; seeded-RNG parity at the primitive level (xoshiro256\*\*, t
   parser would have tolerated but Rust rejects fails the same way; the known cases (a UTF-8 BOM, and
   case-insensitive `logLevel`/filter `type`/`matchingType` values) are handled, the `type` tag of a
   `loggers` entry stays case-sensitive on both sides.
-- **The pipeline snapshots `sptLogger.json` at startup** — mutating
-  `SptLoggerConfiguration.Loggers` at runtime (a mod adding or retargeting a logger) no longer
-  changes what is written, while `IsLogEnabled` still reads the mutated list, so the two can
-  disagree. A re-init export is future work.
+- **The pipeline reads `sptLogger.json` once; runtime mutation needs an explicit reload** —
+  mutating `SptLoggerConfiguration.Loggers` alone changes what `IsLogEnabled` answers but not what
+  is written. `SPTLoggerDispatcher.ReloadConfiguration()` (additive, post-port) re-hands the
+  mutated object to `spt_logger_reinit` and the two agree again; a reload the native parser
+  rejects leaves the running pipeline untouched.
 - **Excluded categories still pay the per-line marshaling cost** — filtering moved native-side, so
   every line is encoded, crosses the FFI boundary and takes the pipeline mutex before it is dropped.
 - **Line terminators are always `\n` and dates always Gregorian, culture-independent** — the C#
   handlers used `Environment.NewLine` and `CurrentCulture`, so a Windows log file loses its `\r` and
   a non-Gregorian locale no longer shows in `%date%`.
+- **File rotation was redesigned, not ported** — ZLogger rolled with an ascending sequence
+  (`spt.1.log` was the *next* file created) plus a minute-polling retention monitor; the native
+  sink keeps the configured name as the live file and cascades on every process start, size roll
+  and date change, so `.1` is always the *most recent* archive and `spt.log` only ever holds the
+  current run (`log_sink.rs` module header). Anyone comparing `spt.N.log` across the upgrade reads
+  the sequence in the opposite order.
+- **Lowering `maxRollingFiles` does not sweep the old high indices** — the cascade touches only
+  indices below the cap, so a config change from 10 to 3 strands `spt.3.log`..`spt.9.log` until
+  deleted by hand (the `ponytail:` note in `log_sink.rs`'s `cascade`).
+- **Mod `ILogHandler` routing was cut at the port and is now restored through a hybrid tap** —
+  `af58d5f` left handlers accepted-but-unrouted; the dispatcher fans C#-originated lines out to
+  them again (original message and `Exception` object, per-reference filters and level), and
+  `spt_log_set_tap`'s callback delivers Rust-originated generator lines. Native-origin lines
+  arrive as rendered text with no `Exception` object and the native `%tid%` counter — accepted.
+  `BaseLogHandler`/`GetCompiledFormat`/`Match` are live mod-support surface again.
 
 ## Guidelines
 

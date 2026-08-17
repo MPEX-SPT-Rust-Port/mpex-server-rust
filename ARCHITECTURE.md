@@ -156,7 +156,7 @@ startup outside DEBUG. That format is a contract shared with `rust/spt-native/sr
 `Libraries/SPTarkov.Common/Native/NativeMethods.cs`, because `SPTarkov.Common` cannot reference
 Server.Core. It owns database hash verification, the ported generation
 paths — location loot, reward loot, whole-bot inventory, dynamic ragfair offers, repeatable quests,
-scav case rewards — and the whole log pipeline. Eighteen exports, JSON in / JSON out — except the
+scav case rewards — and the whole log pipeline. Twenty exports, JSON in / JSON out — except the
 ragfair response, which comes back as a framed MessagePack envelope, and the log exports, where
 `spt_logger_init` takes the raw `sptLogger.json` bytes and `spt_log_emit` passes one line's fields
 directly — with `spt_native_abi_version` handshaking against `SptNative.ExpectedAbiVersion`.
