@@ -25,9 +25,7 @@
 use indexmap::IndexSet;
 
 use super::RagfairContext;
-use crate::loot::item_helper::{
-    AMMO_BOX, DEFAULT_INVALID_BASE_TYPES, LootError, is_of_baseclasses, is_valid_item,
-};
+use crate::loot::item_helper::{AMMO_BOX, DEFAULT_INVALID_BASE_TYPES, LootError, is_valid_item};
 use crate::loot::random_util::{get_double, get_int, get_percent_of_value, get_weighted_value};
 
 /// `RagfairServerHelper.CalculateDynamicStackCount` (`:138-169`).
@@ -60,7 +58,11 @@ pub fn calculate_dynamic_stack_count(
         .iter()
         .map(String::as_str)
         .collect();
-    if is_preset || is_of_baseclasses(ctx.items, tpl, &show_as_single_stack) {
+    if is_preset
+        || ctx
+            .base_classes
+            .is_of_baseclasses(tpl, &show_as_single_stack)
+    {
         return Ok(1);
     }
 
@@ -145,6 +147,7 @@ pub fn is_item_valid_ragfair_item(
 
     if !is_valid_item(
         ctx.items,
+        ctx.base_classes,
         ctx.config_blacklist,
         ctx.handbook_prices,
         ctx.flea_prices,
@@ -204,7 +207,7 @@ mod tests {
 
     use super::*;
     use crate::diag::DiagSink;
-    use crate::loot::item_helper::STASH;
+    use crate::loot::item_helper::{ItemBaseClassCache, STASH};
     use crate::loot::models::{ItemView, PresetView};
     use crate::loot::random_util::TestSeedGuard;
     use crate::ragfair::models::DynamicConfigWire;
@@ -239,6 +242,7 @@ mod tests {
 
     struct Fixture {
         items: IndexMap<String, ItemView>,
+        base_classes: ItemBaseClassCache,
         dynamic: DynamicConfigWire,
         prices: IndexMap<String, f64>,
         config_blacklist: HashSet<String>,
@@ -248,42 +252,46 @@ mod tests {
 
     impl Fixture {
         fn new() -> Self {
+            let items: IndexMap<String, ItemView> = serde_json::from_value(json!({
+                STACKABLE_TPL: {"name": "stackable", "type": "Item", "stackMaxSize": 60,
+                    "canSellOnRagfair": true},
+                NON_STACKABLE_TPL: {"name": "non stackable", "type": "Item",
+                    "stackMaxSize": 1, "canSellOnRagfair": true},
+                NO_STACK_SIZE_TPL: {"name": "no stack size", "type": "Item",
+                    "canSellOnRagfair": true},
+                SINGLE_STACK_TPL: {"name": "single stack", "type": "Item",
+                    "parent": SINGLE_STACK_PARENT, "stackMaxSize": 60,
+                    "canSellOnRagfair": true},
+                CUSTOM_BLACKLIST_TPL: {"name": "custom blacklisted", "type": "Item",
+                    "canSellOnRagfair": true},
+                CATEGORY_BLACKLIST_TPL: {"name": "category blacklisted", "type": "Item",
+                    "parent": CATEGORY_PARENT, "canSellOnRagfair": true},
+                QUEST_ITEM_TPL: {"name": "quest item", "type": "Item", "questItem": true,
+                    "canSellOnRagfair": true},
+                DAMAGED_AMMO_BOX_TPL: {"name": "patron_762x39_damaged", "type": "Item",
+                    "parent": AMMO_BOX, "canSellOnRagfair": true},
+                CLEAN_AMMO_BOX_TPL: {"name": "patron_762x39", "type": "Item",
+                    "parent": AMMO_BOX, "canSellOnRagfair": true},
+                NOT_SELLABLE_TPL: {"name": "not sellable", "type": "Item",
+                    "canSellOnRagfair": false},
+                CONFIG_BLACKLIST_TPL: {"name": "config blacklisted", "type": "Item",
+                    "canSellOnRagfair": true},
+                PRICELESS_TPL: {"name": "priceless", "type": "Item",
+                    "canSellOnRagfair": true},
+                STASH_CHILD_TPL: {"name": "a stash", "type": "Item", "parent": STASH,
+                    "canSellOnRagfair": true},
+                // The parents themselves, so the base-class walk has somewhere to land.
+                SINGLE_STACK_PARENT: {"name": "single stack parent", "type": "Node"},
+                CATEGORY_PARENT: {"name": "blacklisted category", "type": "Node"},
+                AMMO_BOX: {"name": "ammo box base", "type": "Node"},
+                STASH: {"name": "stash base", "type": "Node"},
+            }))
+            .expect("items view parses");
+            let base_classes = ItemBaseClassCache::build(&items);
+
             Self {
-                items: serde_json::from_value(json!({
-                    STACKABLE_TPL: {"name": "stackable", "type": "Item", "stackMaxSize": 60,
-                        "canSellOnRagfair": true},
-                    NON_STACKABLE_TPL: {"name": "non stackable", "type": "Item",
-                        "stackMaxSize": 1, "canSellOnRagfair": true},
-                    NO_STACK_SIZE_TPL: {"name": "no stack size", "type": "Item",
-                        "canSellOnRagfair": true},
-                    SINGLE_STACK_TPL: {"name": "single stack", "type": "Item",
-                        "parent": SINGLE_STACK_PARENT, "stackMaxSize": 60,
-                        "canSellOnRagfair": true},
-                    CUSTOM_BLACKLIST_TPL: {"name": "custom blacklisted", "type": "Item",
-                        "canSellOnRagfair": true},
-                    CATEGORY_BLACKLIST_TPL: {"name": "category blacklisted", "type": "Item",
-                        "parent": CATEGORY_PARENT, "canSellOnRagfair": true},
-                    QUEST_ITEM_TPL: {"name": "quest item", "type": "Item", "questItem": true,
-                        "canSellOnRagfair": true},
-                    DAMAGED_AMMO_BOX_TPL: {"name": "patron_762x39_damaged", "type": "Item",
-                        "parent": AMMO_BOX, "canSellOnRagfair": true},
-                    CLEAN_AMMO_BOX_TPL: {"name": "patron_762x39", "type": "Item",
-                        "parent": AMMO_BOX, "canSellOnRagfair": true},
-                    NOT_SELLABLE_TPL: {"name": "not sellable", "type": "Item",
-                        "canSellOnRagfair": false},
-                    CONFIG_BLACKLIST_TPL: {"name": "config blacklisted", "type": "Item",
-                        "canSellOnRagfair": true},
-                    PRICELESS_TPL: {"name": "priceless", "type": "Item",
-                        "canSellOnRagfair": true},
-                    STASH_CHILD_TPL: {"name": "a stash", "type": "Item", "parent": STASH,
-                        "canSellOnRagfair": true},
-                    // The parents themselves, so the base-class walk has somewhere to land.
-                    SINGLE_STACK_PARENT: {"name": "single stack parent", "type": "Node"},
-                    CATEGORY_PARENT: {"name": "blacklisted category", "type": "Node"},
-                    AMMO_BOX: {"name": "ammo box base", "type": "Node"},
-                    STASH: {"name": "stash base", "type": "Node"},
-                }))
-                .expect("items view parses"),
+                items,
+                base_classes,
                 dynamic: dynamic_config(),
                 // One map behind the flea, handbook and trader views: nothing here prices an
                 // offer, the tables only have to answer "has a price" for `is_valid_item`.
@@ -313,6 +321,7 @@ mod tests {
         fn ctx(&self) -> RagfairContext<'_> {
             RagfairContext {
                 items: &self.items,
+                base_classes: &self.base_classes,
                 dynamic: &self.dynamic,
                 item_presets: &self.presets,
                 default_presets: &NO_DEFAULT_PRESETS,

@@ -55,21 +55,25 @@ the native pipeline; seeded-RNG parity at the primitive level (xoshiro256\*\*, t
   ~2%): it is the C# side binding ~367k `Models` objects out of the response, plus GC. Absolute
   cost is small (once at startup, then per-expiry bursts) and native stays the default for family
   consistency; `RagfairConfig.ForceLegacyRagfairGeneration` is the opt-out.
-- **Completion quests are ~3.1x slower on the warm native path** — 67.50 ms native against 21.64 ms
-  legacy at the median, holding across two invocations. It is not transport: Completion's
-  cold-minus-warm gap (~44 ms) is the same as every other quest type's, so the extra time sits inside
-  the native call after the slice is already parsed. The unprofiled candidate cause is recorded in
-  [BENCHMARK.md](BENCHMARK.md) § *The honest verdict* — the per-tpl work Completion does over the
-  whole items table twice (`get_items_to_retrieve_pool` → `reward_generator::is_valid_reward_item`,
-  then the reward pass), where `loot/item_helper.rs`'s `is_of_baseclasses` walks a template's parent
-  chain on every call with no cache and the C# path reads `ItemBaseClassService`'s prebuilt one.
-  Named follow-up work; nothing measured proves it
-  yet. `QuestConfig.ForceLegacyRepeatableQuestGeneration` is the opt-out.
-- **Exploration and Pickup quests are a wash** — a warm native call costs ~3.2 ms whatever it
-  generates, and those two quests are ~2.9 ms of C# work, so native lands 0.2-0.3 ms behind legacy.
-  The port pays on Elimination (4.6-6.2x) and nowhere else.
+- **Completion quests are ~4.9x faster on the warm native path** — ~5 ms native at the median,
+  from ~13 ms and a 1.7x before the ancestor cache landed. They were **3.1x slower** (67.50 ms)
+  until the base-class walk in `GetWhitelistedItemSelection` was measured: C# tests all 137
+  whitelisted candidates per item as O(1) hits on `ItemBaseClassService`'s prebuilt parent map, and
+  the port kept that shape while answering each call with a fresh parent-chain walk. See
+  [BENCHMARK.md](BENCHMARK.md) § *What still costs* and § *What the Completion figures used to be*
+  for the numbers. `QuestConfig.ForceLegacyRepeatableQuestGeneration` is the opt-out.
+- **Completion carries ~2.4 ms the other quest types do not**, down from ~10 ms.
+  `ItemBaseClassService`'s prebuilt map is ported (`loot/item_helper.rs`'s `ItemBaseClassCache`,
+  built once per cached invariant slice), but the ~10 ms was never the parent-chain *walk* — it was
+  the linear scan of the candidate list at each link, and the cache alone moved nothing. The drop
+  came from switching the two Completion whitelist/blacklist sites to the set-probing form. The
+  residual is presumed to be `is_valid_reward_item`'s pass over all 4,673 templates, inferred
+  rather than measured; see [BENCHMARK.md](BENCHMARK.md) § *What still costs*.
+- **Exploration and Pickup quests are a wash** — a warm native call costs ~3.3 ms whatever it
+  generates, and those two quests are ~3 ms of C# work, so native lands within a few tenths of a
+  millisecond of legacy either way. The port pays on Elimination (4.7-6.3x) and Completion (~1.7x).
 - **`get_flea_prices_as_array` is O(offers × price table) if a mod enables barters** — it re-derives
-  the whole filtered flea price list per barter offer, with an `is_of_baseclasses` walk per entry.
+  the whole filtered flea price list per barter offer, with an ancestor-cache probe per entry.
   Dead on shipped data (`ragfair.json` `dynamic.barter.chancePercent` is `0`, so no barter offer is
   ever rolled), but a mod that raises that percentage pays it on every barter offer of a ~58k-offer
   pass. Legacy avoids it by caching the list in `AllowedFleaPriceItemsForBarter` — the same cache
@@ -304,7 +308,9 @@ the native pipeline; seeded-RNG parity at the primitive level (xoshiro256\*\*, t
 
 1. Later candidates, in `todo/TODO.md` order: scav case rewards, weather, fence assorts, raid-time
    adjustment, ragfair linked-item table.
-2. Profile Completion's two whole-items-table passes through
-   `reward_generator::is_valid_reward_item`, and `loot/item_helper.rs`'s uncached
-   `is_of_baseclasses` walk under them, against `ItemBaseClassService`'s prebuilt parent map — the
-   named candidate for Completion's 3.1x, unmeasured so far.
+2. Convert `is_valid_reward_item`'s trader whitelist to the set form and measure.
+   `quest/reward_generator.rs` builds it as a `Vec<&str>` of up to 14 candidates, consumed 4,673
+   times per Completion pass; `ItemBaseClassCache::is_of_baseclasses_set` is the cheaper shape once
+   a candidate list is long enough, and 14 is the point where that is worth checking rather than
+   assuming. Narrow and unmeasured — the "~10 ms" attribution this item used to carry was disproved
+   (see *Broken / known divergences*, Completion).

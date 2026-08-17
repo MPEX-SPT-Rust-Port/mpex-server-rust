@@ -10,6 +10,7 @@ use std::collections::HashSet;
 use indexmap::IndexMap;
 
 use crate::diag::DiagSink;
+use crate::loot::item_helper::ItemBaseClassCache;
 use crate::loot::models::{ItemView, PresetView};
 use crate::ragfair::models::DynamicConfigWire;
 
@@ -22,6 +23,9 @@ pub struct RagfairContext<'a> {
     /// The `TemplateItem` slice, flattened by the C# caller. There is no `ItemsView` type; the map
     /// itself is the view, matching `loot::item_helper`'s helpers.
     pub items: &'a IndexMap<String, ItemView>,
+    /// [`ItemBaseClassCache`] over [`Self::items`] — what `ItemHelper.IsOfBaseclass(es)` answers
+    /// from in C# (`ItemBaseClassService`), so the ported call sites probe it instead of walking.
+    pub base_classes: &'a ItemBaseClassCache,
     /// `RagfairConfig.Dynamic`, whole.
     pub dynamic: &'a DynamicConfigWire,
     /// `GlobalTable.ItemPresets`, keyed by preset `_id` — what `PresetHelper.IsPreset`/`GetPreset`
@@ -64,6 +68,7 @@ impl<'a> RagfairContext<'a> {
     pub fn fork(&self) -> RagfairContext<'a> {
         RagfairContext {
             items: self.items,
+            base_classes: self.base_classes,
             dynamic: self.dynamic,
             item_presets: self.item_presets,
             default_presets: self.default_presets,

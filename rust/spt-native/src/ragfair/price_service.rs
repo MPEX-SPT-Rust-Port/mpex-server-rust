@@ -27,9 +27,7 @@
 
 use super::RagfairContext;
 use super::models::{MinMaxDoubleWire, UnreasonableModPricesWire};
-use crate::loot::item_helper::{
-    BUILT_IN_INSERTS, LootError, WEAPON, get_item_quality_modifier, is_of_baseclass,
-};
+use crate::loot::item_helper::{BUILT_IN_INSERTS, LootError, WEAPON, get_item_quality_modifier};
 use crate::loot::models::{DEBUG, Diagnostic, Item, PresetView};
 use crate::loot::random_util::{get_biased_random_number, round_half_even};
 
@@ -98,7 +96,10 @@ pub fn get_dynamic_offer_price_for_offer(
     // Iterate over each item in the offer.
     for item in offer_items {
         // Skip over armor inserts as those are not factored into item prices.
-        if is_of_baseclass(ctx.items, &item.template, BUILT_IN_INSERTS) {
+        if ctx
+            .base_classes
+            .is_of_baseclass(&item.template, BUILT_IN_INSERTS)
+        {
             continue;
         }
 
@@ -192,7 +193,7 @@ pub fn get_dynamic_item_price(
 
     // Make adjustments for unreasonably priced items.
     for (key, value) in &dynamic.unreasonable_mod_prices {
-        if !value.enabled || !is_of_baseclass(ctx.items, item_template_id, key) {
+        if !value.enabled || !ctx.base_classes.is_of_baseclass(item_template_id, key) {
             continue;
         }
 
@@ -488,7 +489,7 @@ fn is_preset_base_class(
         )));
     };
 
-    Ok(is_of_baseclass(ctx.items, encyclopedia, base_class))
+    Ok(ctx.base_classes.is_of_baseclass(encyclopedia, base_class))
 }
 
 /// `Item.Upd.SptPresetId` — `loot::models::Upd` does not name the member, so it rides in its
@@ -504,7 +505,9 @@ mod tests {
 
     use super::*;
     use crate::diag::DiagSink;
-    use crate::loot::item_helper::{AMMO_BOX, BUILT_IN_INSERTS, LootError, MOD, MONEY, WEAPON};
+    use crate::loot::item_helper::{
+        AMMO_BOX, BUILT_IN_INSERTS, ItemBaseClassCache, LootError, MOD, MONEY, WEAPON,
+    };
     use crate::loot::models::{ItemView, Upd, UpdRepairable};
     use crate::loot::random_util::{TestSeedGuard, get_biased_random_number, get_double};
     use crate::ragfair::models::DynamicConfigWire;
@@ -530,6 +533,7 @@ mod tests {
 
     struct Fixture {
         items: IndexMap<String, ItemView>,
+        base_classes: ItemBaseClassCache,
         dynamic: DynamicConfigWire,
         item_presets: IndexMap<String, PresetView>,
         default_presets_by_tpl: IndexMap<String, PresetView>,
@@ -541,22 +545,26 @@ mod tests {
 
     impl Fixture {
         fn new() -> Self {
+            let items: IndexMap<String, ItemView> = serde_json::from_value(json!({
+                PLAIN_TPL: {"name": "plain", "maxDurability": 100.0},
+                HANDBOOK_ONLY_TPL: {"name": "handbook only"},
+                ZERO_PRICE_TPL: {"name": "zero priced"},
+                WEAPON_DEFAULT_TPL: {"name": "akm", "parent": WEAPON, "maxDurability": 100.0},
+                WEAPON_NO_DEFAULT_TPL: {"name": "mp5", "parent": WEAPON,
+                    "maxDurability": 100.0},
+                AMMO_BOX_TPL: {"name": "ammo box", "parent": AMMO_BOX},
+                CURRENCY_TPL: {"name": "dollars", "parent": MONEY},
+                QUALITY_BLACKLIST_TPL: {"name": "blacklisted", "maxDurability": 100.0},
+                STOCK_TPL: {"name": "stock", "parent": MOD},
+                SCOPE_TPL: {"name": "scope", "parent": MOD},
+                INSERT_TPL: {"name": "insert", "parent": BUILT_IN_INSERTS},
+            }))
+            .expect("items view parses");
+            let base_classes = ItemBaseClassCache::build(&items);
+
             Self {
-                items: serde_json::from_value(json!({
-                    PLAIN_TPL: {"name": "plain", "maxDurability": 100.0},
-                    HANDBOOK_ONLY_TPL: {"name": "handbook only"},
-                    ZERO_PRICE_TPL: {"name": "zero priced"},
-                    WEAPON_DEFAULT_TPL: {"name": "akm", "parent": WEAPON, "maxDurability": 100.0},
-                    WEAPON_NO_DEFAULT_TPL: {"name": "mp5", "parent": WEAPON,
-                        "maxDurability": 100.0},
-                    AMMO_BOX_TPL: {"name": "ammo box", "parent": AMMO_BOX},
-                    CURRENCY_TPL: {"name": "dollars", "parent": MONEY},
-                    QUALITY_BLACKLIST_TPL: {"name": "blacklisted", "maxDurability": 100.0},
-                    STOCK_TPL: {"name": "stock", "parent": MOD},
-                    SCOPE_TPL: {"name": "scope", "parent": MOD},
-                    INSERT_TPL: {"name": "insert", "parent": BUILT_IN_INSERTS},
-                }))
-                .expect("items view parses"),
+                items,
+                base_classes,
                 dynamic: dynamic_config(),
                 item_presets: serde_json::from_value(json!({
                     DEFAULT_PRESET_ID: {
@@ -627,6 +635,7 @@ mod tests {
         fn ctx(&self) -> RagfairContext<'_> {
             RagfairContext {
                 items: &self.items,
+                base_classes: &self.base_classes,
                 dynamic: &self.dynamic,
                 item_presets: &self.item_presets,
                 default_presets: &NO_DEFAULT_PRESETS,

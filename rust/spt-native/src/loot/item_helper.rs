@@ -148,6 +148,98 @@ pub fn is_of_baseclasses(
     false
 }
 
+/// `Services/Items/ItemBaseClassService.cs` — every template's parent chain flattened into one
+/// set at build time, so a base-class test is a hash probe per candidate instead of a chain walk
+/// per call. Built once per cached invariant slice (quest's `OnceLock`, ragfair's
+/// `PreparedSlice`); bot and loot receive their views per request and keep the walk.
+///
+/// Answer-equivalent to [`is_of_baseclasses`]: `build` performs that exact walk once per template
+/// and stores every parent id the walk would have tested — including a final parent missing from
+/// the view. The C# `_rootNodeIds` short-circuit is not reproduced, for the reason given on
+/// [`is_of_baseclasses`], and no lazy fill on miss (`ItemBaseClassService.cs:107-110`) is needed:
+/// the view is projected from the live table, so mod-added templates are already in it.
+#[derive(Debug, Default, Clone)]
+pub struct ItemBaseClassCache {
+    /// Key = item tpl, values = ids of its parents (`_itemBaseClassesCache`).
+    ancestors: HashMap<String, HashSet<String>>,
+}
+
+impl ItemBaseClassCache {
+    /// `ItemBaseClassService.HydrateItemBaseClassCache` (`ItemBaseClassService.cs:31-40`) over
+    /// `items_view` — one [`is_of_baseclasses`] walk per template, stored.
+    pub fn build(items_view: &IndexMap<String, ItemView>) -> Self {
+        let mut ancestors: HashMap<String, HashSet<String>> =
+            HashMap::with_capacity(items_view.len());
+
+        for tpl in items_view.keys() {
+            let mut chain = HashSet::new();
+            let mut current = items_view.get(tpl);
+
+            while let Some(item) = current {
+                let parent = match item.parent.as_deref() {
+                    Some(parent) if !parent.is_empty() => parent,
+                    // Root node reached, chain exhausted.
+                    _ => break,
+                };
+
+                // A re-seen parent means a cyclic chain (mod-added data only) the free walk would
+                // spin on, and contributes nothing new either way.
+                if !chain.insert(parent.to_owned()) {
+                    break;
+                }
+
+                // A parent that is not in the view ends the walk on the next pass, after it was
+                // stored — the walk tests a parent before looking it up.
+                current = items_view.get(parent);
+            }
+
+            ancestors.insert(tpl.clone(), chain);
+        }
+
+        Self { ancestors }
+    }
+
+    /// `ItemHelper.IsOfBaseclass` answered from the cache
+    /// (`ItemBaseClassService.ItemHasBaseClass`, single-candidate overload).
+    pub fn is_of_baseclass(&self, tpl: &str, base_class_tpl: &str) -> bool {
+        self.is_of_baseclasses(tpl, &[base_class_tpl])
+    }
+
+    /// `ItemHelper.IsOfBaseclasses` answered from the cache
+    /// (`ItemBaseClassService.ItemHasBaseClass`, `Overlaps` overload) — one probe for the chain,
+    /// then a scan of it.
+    ///
+    /// The enumeration direction is deliberately flipped relative to the C#, which is why this
+    /// scans rather than probes: `baseClassList.Overlaps(baseClasses)`
+    /// (`ItemBaseClassService.cs:115`) enumerates its argument and probes the receiver, so C#
+    /// hashes each candidate against the chain set. Same intersection either way.
+    pub fn is_of_baseclasses(&self, tpl: &str, base_class_tpls: &[&str]) -> bool {
+        self.ancestors.get(tpl).is_some_and(|chain| {
+            chain
+                .iter()
+                .any(|ancestor| base_class_tpls.contains(&ancestor.as_str()))
+        })
+    }
+
+    /// [`Self::is_of_baseclasses`] with the candidates in a set — the scan of the candidate list
+    /// becomes one probe per chain link, which is what the Completion whitelist/blacklist sites
+    /// need: their candidate lists are whole levelled whitelists (hundreds of ids) where every
+    /// other caller passes one to fourteen. Same enumeration direction as the slice form, so the
+    /// answers are identical.
+    ///
+    /// Keeping that direction matters here: the chain holds one id per link of a parent walk
+    /// (single digits) against hundreds of candidates, so probing the candidates costs less than
+    /// the C# direction's hash per candidate. The `completion` walk-ratio guard routes through
+    /// this form and measures exactly that, so restoring the C# direction fails it.
+    pub fn is_of_baseclasses_set(&self, tpl: &str, base_class_tpls: &HashSet<&str>) -> bool {
+        self.ancestors.get(tpl).is_some_and(|chain| {
+            chain
+                .iter()
+                .any(|ancestor| base_class_tpls.contains(ancestor.as_str()))
+        })
+    }
+}
+
 /// `ItemHelper.ArmorItemCanHoldMods` (`ItemHelper.cs:319-322`) — `_armorSlotsThatCanHoldMods`
 /// (`ItemHelper.cs:102`).
 pub fn armor_item_can_hold_mods(items_view: &IndexMap<String, ItemView>, tpl: &str) -> bool {
@@ -250,8 +342,11 @@ pub(crate) fn get_item_price(
 ///
 /// `invalid_base_types` is the caller's list; the C# `_defaultInvalidBaseTypes` fallback
 /// (`ItemHelper.cs:35-44`) is not reproduced because every ported call site passes its own.
+///
+/// Base-class tests are answered from `base_classes`, which must be built over the same view.
 pub fn is_valid_item(
     items_view: &IndexMap<String, ItemView>,
+    base_classes: &ItemBaseClassCache,
     blacklist: &HashSet<String>,
     handbook_prices: &IndexMap<String, f64>,
     flea_prices: &IndexMap<String, f64>,
@@ -270,7 +365,7 @@ pub fn is_valid_item(
         && get_item_price(handbook_prices, flea_prices, tpl).is_some_and(|price| price > 0.0)
         && !blacklist.contains(tpl)
         // `baseTypes.All(x => !IsOfBaseclass(...))` — none of them may match.
-        && !is_of_baseclasses(items_view, tpl, invalid_base_types)
+        && !base_classes.is_of_baseclasses(tpl, invalid_base_types)
 }
 
 /// `ItemHelper.GetItemQualityModifier` (`ItemHelper.cs:582-646`) — a 0-1 condition ratio, `-1` for
@@ -1387,6 +1482,46 @@ mod tests {
     }
 
     #[test]
+    fn the_base_class_cache_answers_exactly_as_the_walk_does() {
+        let view = fixture();
+        let cache = ItemBaseClassCache::build(&view);
+
+        // Every tpl in the view, plus the orphan's missing parent — the walk tests a parent id
+        // before looking it up, so the cache must contain it too — plus a fully unknown tpl.
+        let mut candidates: Vec<&str> = view.keys().map(String::as_str).collect();
+        candidates.push("999999999999999999999999");
+        candidates.push("aaaaaaaaaaaaaaaaaaaaaaaa");
+
+        let candidate_set: HashSet<&str> = candidates.iter().copied().collect();
+
+        for tpl in &candidates {
+            for base in &candidates {
+                assert_eq!(
+                    cache.is_of_baseclass(tpl, base),
+                    is_of_baseclass(&view, tpl, base),
+                    "cache and walk disagree for tpl {tpl} against base {base}"
+                );
+            }
+
+            assert_eq!(
+                cache.is_of_baseclasses(tpl, &candidates),
+                is_of_baseclasses(&view, tpl, &candidates),
+                "cache and walk disagree for tpl {tpl} against the full candidate list"
+            );
+
+            assert_eq!(
+                cache.is_of_baseclasses_set(tpl, &candidate_set),
+                is_of_baseclasses(&view, tpl, &candidates),
+                "set-probing cache and walk disagree for tpl {tpl}"
+            );
+        }
+
+        // The set argument has to discriminate: HELMET_TPL's chain is HEADWEAR → ITEM_NODE.
+        assert!(cache.is_of_baseclasses_set(HELMET_TPL, &HashSet::from([HEADWEAR])));
+        assert!(!cache.is_of_baseclasses_set(HELMET_TPL, &HashSet::from([VEST])));
+    }
+
+    #[test]
     fn armor_item_can_hold_mods_covers_headwear_vest_and_armor() {
         let view = fixture();
 
@@ -1596,7 +1731,9 @@ mod tests {
             .map(|tpl| (tpl.clone(), 100.0))
             .collect::<IndexMap<_, _>>();
         let flea = IndexMap::new();
-        let valid = |tpl: &str| is_valid_item(&view, &blacklist, &handbook, &flea, tpl, &[ARMOR]);
+        let cache = ItemBaseClassCache::build(&view);
+        let valid =
+            |tpl: &str| is_valid_item(&view, &cache, &blacklist, &handbook, &flea, tpl, &[ARMOR]);
 
         assert!(valid(MEDKIT_TPL));
         // Quest item, blacklisted, an excluded base type, a node, and an unknown tpl.
@@ -1612,8 +1749,9 @@ mod tests {
         let view = quality_fixture();
         let blacklist = HashSet::new();
         let flea = IndexMap::from([(MEDKIT_TPL.to_owned(), 250.0)]);
+        let cache = ItemBaseClassCache::build(&view);
         let valid = |handbook: &IndexMap<String, f64>| {
-            is_valid_item(&view, &blacklist, handbook, &flea, MEDKIT_TPL, &[])
+            is_valid_item(&view, &cache, &blacklist, handbook, &flea, MEDKIT_TPL, &[])
         };
 
         // A handbook price of at least 1 is taken as-is.
@@ -1624,6 +1762,7 @@ mod tests {
         // Neither table knows the tpl, so there is no price at all.
         assert!(!is_valid_item(
             &view,
+            &cache,
             &blacklist,
             &IndexMap::new(),
             &IndexMap::new(),

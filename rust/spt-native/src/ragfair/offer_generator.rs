@@ -66,7 +66,7 @@ use crate::diag::DiagSink;
 use crate::loot::item_helper::{
     AMMO_BOX, ARMOR_PLATE, ARMORED_EQUIPMENT, FUEL, LootError, WEAPON, add_cartridges_to_ammo_box,
     armor_item_can_hold_mods, armor_item_has_removable_plate_slots, get_item,
-    get_removable_plate_slot_ids, is_of_baseclass, is_of_baseclasses,
+    get_removable_plate_slot_ids,
 };
 use crate::loot::models::{
     Diagnostic, Item, UpdFoodDrink, UpdKey, UpdMedKit, UpdRepairKit, UpdRepairable, UpdResource,
@@ -201,7 +201,11 @@ pub fn create_offer(
 
     // Hydrate ammo boxes with cartridges + ensure only 1 item is present (ammo box)
     // On offer refresh don't re-add cartridges to ammo box that already has cartridges
-    if items.len() == 1 && is_of_baseclass(ctx.items, &items[0].template, AMMO_BOX) {
+    if items.len() == 1
+        && ctx
+            .base_classes
+            .is_of_baseclass(&items[0].template, AMMO_BOX)
+    {
         let ammo_box_tpl = items[0].template.clone();
         if let Err(diagnostic) = add_cartridges_to_ammo_box(ctx.items, &mut items, &ammo_box_tpl) {
             ctx.diagnostics.push(diagnostic);
@@ -458,6 +462,7 @@ pub fn generate_with_slice(
 
     let mut ctx = RagfairContext {
         items: &slice.items,
+        base_classes: &slice.base_classes,
         dynamic: &slice.dynamic,
         item_presets: &slice.item_presets,
         default_presets: &slice.default_presets,
@@ -745,8 +750,7 @@ fn create_single_offer_for_item(
     let is_pack_offer = !is_barter_offer
         && get_chance_100(dynamic.pack.chance_percent)
         && item_with_children.len() == 1
-        && is_of_baseclasses(
-            ctx.items,
+        && ctx.base_classes.is_of_baseclasses(
             &root_tpl,
             &dynamic
                 .pack
@@ -858,7 +862,7 @@ pub fn randomise_offer_item_upd_properties(
 fn get_dynamic_condition_id_for_tpl(ctx: &RagfairContext, tpl: &str) -> Option<String> {
     // Get keys from condition config dictionary
     for base_class in ctx.dynamic.condition.keys() {
-        if is_of_baseclass(ctx.items, tpl, base_class) {
+        if ctx.base_classes.is_of_baseclass(tpl, base_class) {
             return Some(base_class.clone());
         }
     }
@@ -906,7 +910,9 @@ fn randomise_item_condition(
 
     // Randomise armor + plates + armor related things
     if armor_item_can_hold_mods(ctx.items, &root_tpl)
-        || is_of_baseclasses(ctx.items, &root_tpl, &[ARMOR_PLATE, ARMORED_EQUIPMENT])
+        || ctx
+            .base_classes
+            .is_of_baseclasses(&root_tpl, &[ARMOR_PLATE, ARMORED_EQUIPMENT])
     {
         randomise_armor_durability_values(ctx, item_with_mods, current_multiplier, max_multiplier);
 
@@ -932,7 +938,7 @@ fn randomise_item_condition(
     }
 
     // Randomise Weapons
-    if is_of_baseclass(ctx.items, item_details_tpl, WEAPON) {
+    if ctx.base_classes.is_of_baseclass(item_details_tpl, WEAPON) {
         randomise_weapon_durability(
             ctx,
             &mut item_with_mods[0],
@@ -994,7 +1000,7 @@ fn randomise_item_condition(
         return Ok(());
     }
 
-    if is_of_baseclass(ctx.items, item_details_tpl, FUEL) {
+    if ctx.base_classes.is_of_baseclass(item_details_tpl, FUEL) {
         let total_capacity = f64::from(max_resource.unwrap_or_default());
 
         // Randomise multi between value in config and 1 (100%)
@@ -1328,7 +1334,10 @@ fn get_flea_prices_as_array<'a>(ctx: &RagfairContext<'a>) -> Vec<TplWithFleaPric
         .iter()
         // Only get prices for items that also exist in items.json
         .filter(|(tpl, _)| get_item(ctx.items, tpl).is_some())
-        .filter(|(tpl, _)| !is_of_baseclasses(ctx.items, tpl, &item_type_blacklist))
+        .filter(|(tpl, _)| {
+            !ctx.base_classes
+                .is_of_baseclasses(tpl, &item_type_blacklist)
+        })
         .filter(|(tpl, _)| !barter_config.item_tpl_blacklist.contains(*tpl))
         .map(|(tpl, price)| TplWithFleaPrice {
             tpl: tpl.as_str(),
@@ -1381,7 +1390,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::loot::item_helper::{ARMOR, BUILT_IN_INSERTS};
+    use crate::loot::item_helper::{ARMOR, BUILT_IN_INSERTS, ItemBaseClassCache};
     use crate::loot::models::{ItemView, PresetView, Upd};
     use crate::loot::random_util::TestSeedGuard;
     use crate::ragfair::models::{DynamicConfigWire, InvariantSlice, MinMaxIntWire};
@@ -1437,6 +1446,7 @@ mod tests {
 
     struct Fixture {
         items: IndexMap<String, ItemView>,
+        base_classes: ItemBaseClassCache,
         dynamic: DynamicConfigWire,
         prices: IndexMap<String, f64>,
         blacklist: HashSet<String>,
@@ -1452,65 +1462,69 @@ mod tests {
         }
 
         fn with_condition_chance(condition_chance: f64) -> Self {
+            let items: IndexMap<String, ItemView> = serde_json::from_value(json!({
+                WEAPON_TPL: {"name": "weapon", "type": "Item", "parent": WEAPON,
+                    "maxDurability": 100.0, "durability": 100.0},
+                ARMOR_TPL: {"name": "armor", "type": "Item", "parent": ARMOR, "armorClass": 0,
+                    "durability": 50.0, "maxDurability": 50.0,
+                    "slots": [{"name": "front_plate"}, {"name": "back_plate"},
+                        {"name": "left_side_plate"}, {"name": "soft_armor_front"}]},
+                ARMOR_NO_PLATE_SLOTS_TPL: {"name": "plateless armor", "type": "Item",
+                    "parent": ARMOR, "armorClass": 0,
+                    "slots": [{"name": "soft_armor_front"}]},
+                PLATE_CLASS_4_TPL: {"name": "class 4 plate", "type": "Item",
+                    "parent": ARMOR_PLATE, "armorClass": 4, "maxDurability": 40.0},
+                PLATE_CLASS_6_TPL: {"name": "class 6 plate", "type": "Item",
+                    "parent": ARMOR_PLATE, "armorClass": 6, "maxDurability": 60.0},
+                SOFT_INSERT_TPL: {"name": "soft insert", "type": "Item",
+                    "parent": BUILT_IN_INSERTS, "armorClass": 3, "maxDurability": 30.0},
+                MEDKIT_TPL: {"name": "medkit", "type": "Item", "maxHpResource": 400},
+                KEY_TPL: {"name": "key", "type": "Item", "maximumNumberOfUsage": 10},
+                FOOD_TPL: {"name": "food", "type": "Item", "maxResource": 100,
+                    "foodUseTime": 5.0},
+                REPAIR_KIT_TPL: {"name": "repair kit", "type": "Item",
+                    "maxRepairResource": 60.0},
+                FUEL_TPL: {"name": "fuel", "type": "Item", "parent": FUEL, "maxResource": 100},
+                PLAIN_TPL: {"name": "plain", "type": "Item"},
+                REPAIRABLE_MEDKIT_TPL: {"name": "two arms", "type": "Item",
+                    "durability": 50.0, "maxHpResource": 400},
+                // The four `canSellOnRagfair` tpls are the whole sellable set of a full batch
+                // pass: every other priced tpl is filtered by the BSG-list arm of
+                // `is_item_valid_ragfair_item`.
+                AMMO_BOX_TPL: {"name": "ammo box", "type": "Item", "parent": AMMO_BOX,
+                    "stackSlotMaxCount": 30.0, "stackSlotFirstFilterFirst": CARTRIDGE_TPL,
+                    "canSellOnRagfair": true},
+                CARTRIDGE_TPL: {"name": "cartridge", "type": "Item", "stackMaxSize": 30},
+                BARTER_ROOT_TPL: {"name": "barter root", "type": "Item"},
+                CHEAP_ROOT_TPL: {"name": "cheap root", "type": "Item",
+                    "canSellOnRagfair": true},
+                EXPENSIVE_ROOT_TPL: {"name": "expensive root", "type": "Item"},
+                IN_RANGE_A_TPL: {"name": "in range a", "type": "Item",
+                    "canSellOnRagfair": true},
+                IN_RANGE_B_TPL: {"name": "in range b", "type": "Item"},
+                TOO_CHEAP_TPL: {"name": "too cheap", "type": "Item",
+                    "canSellOnRagfair": true},
+                TOO_PRICEY_TPL: {"name": "too pricey", "type": "Item"},
+                TPL_BLACKLISTED_TPL: {"name": "tpl blacklisted", "type": "Item"},
+                TYPE_BLACKLISTED_TPL: {"name": "type blacklisted", "type": "Item",
+                    "parent": BLACKLISTED_TYPE},
+                BLACKLISTED_TYPE: {"name": "blacklisted type base", "type": "Node"},
+                AMMO_BOX: {"name": "ammo box base", "type": "Node"},
+                // The base classes themselves, so the parent walk has somewhere to land.
+                WEAPON: {"name": "weapon base", "type": "Node"},
+                ARMOR: {"name": "armor base", "type": "Node"},
+                ARMOR_PLATE: {"name": "plate base", "type": "Node",
+                    "parent": ARMORED_EQUIPMENT},
+                ARMORED_EQUIPMENT: {"name": "armored equipment base", "type": "Node"},
+                BUILT_IN_INSERTS: {"name": "soft insert base", "type": "Node"},
+                FUEL: {"name": "fuel base", "type": "Node"},
+            }))
+            .expect("items view parses");
+            let base_classes = ItemBaseClassCache::build(&items);
+
             Self {
-                items: serde_json::from_value(json!({
-                    WEAPON_TPL: {"name": "weapon", "type": "Item", "parent": WEAPON,
-                        "maxDurability": 100.0, "durability": 100.0},
-                    ARMOR_TPL: {"name": "armor", "type": "Item", "parent": ARMOR, "armorClass": 0,
-                        "durability": 50.0, "maxDurability": 50.0,
-                        "slots": [{"name": "front_plate"}, {"name": "back_plate"},
-                            {"name": "left_side_plate"}, {"name": "soft_armor_front"}]},
-                    ARMOR_NO_PLATE_SLOTS_TPL: {"name": "plateless armor", "type": "Item",
-                        "parent": ARMOR, "armorClass": 0,
-                        "slots": [{"name": "soft_armor_front"}]},
-                    PLATE_CLASS_4_TPL: {"name": "class 4 plate", "type": "Item",
-                        "parent": ARMOR_PLATE, "armorClass": 4, "maxDurability": 40.0},
-                    PLATE_CLASS_6_TPL: {"name": "class 6 plate", "type": "Item",
-                        "parent": ARMOR_PLATE, "armorClass": 6, "maxDurability": 60.0},
-                    SOFT_INSERT_TPL: {"name": "soft insert", "type": "Item",
-                        "parent": BUILT_IN_INSERTS, "armorClass": 3, "maxDurability": 30.0},
-                    MEDKIT_TPL: {"name": "medkit", "type": "Item", "maxHpResource": 400},
-                    KEY_TPL: {"name": "key", "type": "Item", "maximumNumberOfUsage": 10},
-                    FOOD_TPL: {"name": "food", "type": "Item", "maxResource": 100,
-                        "foodUseTime": 5.0},
-                    REPAIR_KIT_TPL: {"name": "repair kit", "type": "Item",
-                        "maxRepairResource": 60.0},
-                    FUEL_TPL: {"name": "fuel", "type": "Item", "parent": FUEL, "maxResource": 100},
-                    PLAIN_TPL: {"name": "plain", "type": "Item"},
-                    REPAIRABLE_MEDKIT_TPL: {"name": "two arms", "type": "Item",
-                        "durability": 50.0, "maxHpResource": 400},
-                    // The four `canSellOnRagfair` tpls are the whole sellable set of a full batch
-                    // pass: every other priced tpl is filtered by the BSG-list arm of
-                    // `is_item_valid_ragfair_item`.
-                    AMMO_BOX_TPL: {"name": "ammo box", "type": "Item", "parent": AMMO_BOX,
-                        "stackSlotMaxCount": 30.0, "stackSlotFirstFilterFirst": CARTRIDGE_TPL,
-                        "canSellOnRagfair": true},
-                    CARTRIDGE_TPL: {"name": "cartridge", "type": "Item", "stackMaxSize": 30},
-                    BARTER_ROOT_TPL: {"name": "barter root", "type": "Item"},
-                    CHEAP_ROOT_TPL: {"name": "cheap root", "type": "Item",
-                        "canSellOnRagfair": true},
-                    EXPENSIVE_ROOT_TPL: {"name": "expensive root", "type": "Item"},
-                    IN_RANGE_A_TPL: {"name": "in range a", "type": "Item",
-                        "canSellOnRagfair": true},
-                    IN_RANGE_B_TPL: {"name": "in range b", "type": "Item"},
-                    TOO_CHEAP_TPL: {"name": "too cheap", "type": "Item",
-                        "canSellOnRagfair": true},
-                    TOO_PRICEY_TPL: {"name": "too pricey", "type": "Item"},
-                    TPL_BLACKLISTED_TPL: {"name": "tpl blacklisted", "type": "Item"},
-                    TYPE_BLACKLISTED_TPL: {"name": "type blacklisted", "type": "Item",
-                        "parent": BLACKLISTED_TYPE},
-                    BLACKLISTED_TYPE: {"name": "blacklisted type base", "type": "Node"},
-                    AMMO_BOX: {"name": "ammo box base", "type": "Node"},
-                    // The base classes themselves, so the parent walk has somewhere to land.
-                    WEAPON: {"name": "weapon base", "type": "Node"},
-                    ARMOR: {"name": "armor base", "type": "Node"},
-                    ARMOR_PLATE: {"name": "plate base", "type": "Node",
-                        "parent": ARMORED_EQUIPMENT},
-                    ARMORED_EQUIPMENT: {"name": "armored equipment base", "type": "Node"},
-                    BUILT_IN_INSERTS: {"name": "soft insert base", "type": "Node"},
-                    FUEL: {"name": "fuel base", "type": "Node"},
-                }))
-                .expect("items view parses"),
+                items,
+                base_classes,
                 dynamic: dynamic_config(condition_chance),
                 // One map behind `flea_prices`, `handbook_prices` and `highest_trader_prices`, the
                 // way the other ragfair fixtures wire it. Insertion order is the order
@@ -1542,6 +1556,7 @@ mod tests {
         fn ctx(&self) -> RagfairContext<'_> {
             RagfairContext {
                 items: &self.items,
+                base_classes: &self.base_classes,
                 dynamic: &self.dynamic,
                 item_presets: &self.presets,
                 default_presets: &NO_DEFAULT_PRESETS,

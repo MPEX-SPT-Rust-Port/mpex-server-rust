@@ -483,30 +483,33 @@ public static class SptNative
     ///
     /// Derived once per source instance rather than once per process: <see cref="JsonUtil"/> replaces
     /// the static it reads on every container build, so a permanent memo would keep serialising with
-    /// the converters of a container that is gone. Two threads racing a rebuild both produce
-    /// equivalent options and the loser's copy is dropped; the derived field is written before the
-    /// source it is keyed on, so a reader that sees the new source sees the options built from it.
+    /// the converters of a container that is gone. Source and derived options publish as one
+    /// reference, so a reader can never pair a source with options built from a different one; two
+    /// threads racing a rebuild both produce equivalent options and the loser's copy is dropped.
     /// </summary>
     internal static JsonSerializerOptions QuestJsonOptions
     {
         get
         {
             var source = LootJsonOptions;
-            if (!ReferenceEquals(_questJsonOptionsSource, source))
+            var cached = _questJsonOptions;
+
+            if (cached is null || !ReferenceEquals(cached.Source, source))
             {
                 var options = new JsonSerializerOptions(source);
                 // Appending would leave the global enum factory ahead of it: first match wins
                 options.Converters.Insert(0, new JsonStringEnumConverter<ELocationName>());
-                _questJsonOptions = options;
-                _questJsonOptionsSource = source;
+                cached = new QuestOptions(source, options);
+                _questJsonOptions = cached;
             }
 
-            return _questJsonOptions!;
+            return cached.Derived;
         }
     }
 
-    private static JsonSerializerOptions? _questJsonOptions;
-    private static JsonSerializerOptions? _questJsonOptionsSource;
+    private sealed record QuestOptions(JsonSerializerOptions Source, JsonSerializerOptions Derived);
+
+    private static QuestOptions? _questJsonOptions;
 
     private static unsafe VerifyResult VerifyDatabase(string sptDataDir)
     {

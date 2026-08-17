@@ -18,11 +18,13 @@
 //! `PlayerGroup` are echoed verbatim rather than re-declared.
 
 use std::collections::HashSet;
+use std::sync::OnceLock;
 
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
 use crate::bot::repair_service::MinMax;
+use crate::loot::item_helper::ItemBaseClassCache;
 use crate::loot::models::{Item, ItemView, PresetView, deserialize_string_or_number};
 
 /// Mod-added members captured on the way in and replayed on the way out.
@@ -920,6 +922,18 @@ pub struct QuestInvariantSlice {
     pub repeatable_quest_template_ids: RepeatableQuestTemplates,
     /// `QuestConfig.LocationIdMap` — `GetQuestLocationByMapId` (`RepeatableQuestHelper.cs:204`).
     pub location_id_map: IndexMap<String, String>,
+    /// [`ItemBaseClassCache`] over [`Self::items`], built on first use and reused by every warm
+    /// call on the cached slice. Never crosses the wire.
+    #[serde(skip)]
+    base_classes: OnceLock<ItemBaseClassCache>,
+}
+
+impl QuestInvariantSlice {
+    /// The flattened ancestor cache for [`Self::items`] — built once per slice, on first use.
+    pub fn base_classes(&self) -> &ItemBaseClassCache {
+        self.base_classes
+            .get_or_init(|| ItemBaseClassCache::build(&self.items))
+    }
 }
 
 /// `Models/Eft/Common/Tables/RepeatableQuests.cs:57-70`. The C# member names are the wire names;
