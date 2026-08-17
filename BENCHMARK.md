@@ -664,8 +664,8 @@ the process and pays the pool build once.
 ### Elapsed time per call
 
 Two full invocations of the fixture; the second median is the error bar on the first. Recipes are in
-the order the shipped table lists them, which is the order they are measured in — the first one
-measured reads ~2x high on both arms, see below.
+the order the shipped table lists them, which is the order they are measured in — the first two
+positions have not settled, on both arms, so only positions 3-5 are steady-state figures. See below.
 
 | Recipe | End products (common/rare/superrare) | Arm | median | median (2nd run) | mean | min | max |
 |---|---|---|---|---|---|---|---|
@@ -681,10 +681,11 @@ measured reads ~2x high on both arms, see below.
 | `62710a0e…` intel folder | 0 / 2-4 / 2-3 | **legacy (C# 4.1.2)** | **0.45 ms** | **0.45 ms** | 0.51 ms | 0.40 ms | 1.20 ms |
 | — | — | `Build` (request only) | 6.69 ms | 6.84 ms | 9.26 ms | 4.46 ms | 17.80 ms |
 
-Steady state, off the three settled recipes: **~37.5 ms native against ~0.44 ms legacy — native is
-~85x slower per call**, and the ratio is flat across recipes because the cost is not the recipe. It
-is the widest native-versus-legacy gap in this file, and it was the expected outcome rather than a
-regression found afterwards.
+Steady state is taken off `62710974…`, `62710a69…` and `62710a0e…` — the three measured in positions
+3-5. The first two positions are still settling on both arms and are excluded; see below.
+**~37.5 ms native against ~0.44 ms legacy — native is ~85x slower per call**, and the ratio is flat
+across those three because the cost is not the recipe. It is the widest native-versus-legacy gap
+in this file, and it was the expected outcome rather than a regression found afterwards.
 
 Where it goes: `Build()` alone is **6.7 / 6.8 ms** — the items view, a static price per tpl in it,
 every default preset, the blacklists and the recipe table. The remaining ~31 ms is the serialise of
@@ -696,24 +697,29 @@ into `DbItemsCache`/`DbAmmoItemsCache`, then a call is three price-range filters
 list plus 1-6 draws. Sub-millisecond is what a warm instance costs; a cold one pays the pool build
 first, which this fixture excludes from both arms by warming up.
 
-### The first recipe measured reads ~2x high
+### The first two positions measured have not settled
 
-`6271093e…` reads 74 ms native and ~1.8 ms legacy in both invocations — stable, so not spread, and
-its min (62.71 ms) never falls to the others' floor. Two warmups do not settle the first phase in
-the process.
+`6271093e…`, measured first, reads 74 ms native and ~1.8 ms legacy in both invocations — stable, so
+not spread, and its min (62.71 ms) never falls to the others' floor. `62710a8c…`, measured second,
+is elevated too and by less: 49.73 / 41.17 ms native against the settled ~37.5, and 0.77 / 0.78 ms
+legacy against the settled ~0.44. It is a gradient over the first two positions, not a single bad
+phase — two warmups do not settle the process.
 
 It is measurement order, not the recipe. Running the same fixture with the recipe list reversed
-moves the inflation onto whichever recipe goes first and leaves `6271093e…` at the ordinary figure:
+reproduces the gradient positionally — inflated first row, part-settled second row — and leaves
+`6271093e…` and `62710a8c…` at ordinary figures once they are measured late:
 
 | Recipe (reversed order) | native median | legacy median |
 |---|---|---|
 | `62710a0e…` (measured first) | 76.54 ms | 1.67 ms |
-| `62710a69…` | 40.55 ms | 0.76 ms |
+| `62710a69…` (measured second) | 40.55 ms | 0.76 ms |
 | `62710974…` | 38.56 ms | 0.56 ms |
 | `62710a8c…` | 37.63 ms | 0.44 ms |
 | `6271093e…` (measured last) | **38.71 ms** | **0.46 ms** |
 
-Read the first two rows of the main table as ~37.5 ms native / ~0.44 ms legacy like the rest. The
+Position for position, that is the same gradient: ~76 / ~1.7 ms first, ~40 / ~0.76 ms second, then
+settled. Read the first two recipe rows of the main table — `6271093e…` and `62710a8c…`, both arms —
+as ~37.5 ms native / ~0.44 ms legacy like the rest, which is what they read when measured late. The
 fixture keeps the two-warmup methodology of the other fixtures in this file rather than tuning it
 away; the same artifact is documented on the repeatable-quest Elimination cold arm above.
 
