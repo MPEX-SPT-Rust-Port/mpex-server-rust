@@ -8,6 +8,7 @@ using SPTarkov.Server.Core.Native.Bot;
 using SPTarkov.Server.Core.Native.Loot;
 using SPTarkov.Server.Core.Native.Ragfair;
 using SPTarkov.Server.Core.Native.RepeatableQuests;
+using SPTarkov.Server.Core.Native.ScavCase;
 using SPTarkov.Server.Core.Utils;
 
 namespace SPTarkov.Server.Core.Native;
@@ -47,11 +48,12 @@ internal enum LootExport
     BotInventory,
     BotInventoryBatch,
     RepeatableQuest,
+    ScavCaseRewards,
 }
 
 public static class SptNative
 {
-    private const uint ExpectedAbiVersion = 16;
+    private const uint ExpectedAbiVersion = 17;
 
     // ffi.rs
     private const int StatusOk = 0;
@@ -163,6 +165,15 @@ public static class SptNative
     public static RewardLootResult GetRandomLootContainerLoot(RandomLootContainerRequest request)
     {
         return Generate<RewardLootResult>(LootExport.RandomLootContainer, JsonSerializer.SerializeToUtf8Bytes(request, LootJsonOptions));
+    }
+
+    /// <summary>
+    /// Rolls the rewards of one completed scav case craft.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">Generation failed, or the native side misbehaved.</exception>
+    public static ScavCaseRewardsResponse GenerateScavCaseRewards(ScavCaseRewardsRequest request)
+    {
+        return Generate<ScavCaseRewardsResponse>(LootExport.ScavCaseRewards, JsonSerializer.SerializeToUtf8Bytes(request, LootJsonOptions));
     }
 
     /// <summary>
@@ -432,6 +443,12 @@ public static class SptNative
                     &outLen
                 ),
                 LootExport.RepeatableQuest => NativeMethods.GenerateRepeatableQuest(
+                    requestPtr,
+                    (nuint)requestUtf8.Length,
+                    &outPtr,
+                    &outLen
+                ),
+                LootExport.ScavCaseRewards => NativeMethods.GenerateScavCaseRewards(
                     requestPtr,
                     (nuint)requestUtf8.Length,
                     &outPtr,
