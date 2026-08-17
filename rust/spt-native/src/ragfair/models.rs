@@ -14,6 +14,7 @@ use std::collections::HashSet;
 use indexmap::{IndexMap, IndexSet};
 use serde::{Deserialize, Serialize};
 
+use crate::loot::item_helper::ItemBaseClassCache;
 use crate::loot::models::{Diagnostic, Item, ItemView, PresetView};
 
 /// Mod-added fields captured on the way in.
@@ -102,10 +103,15 @@ pub struct PreparedSlice {
     pub pmc_names_usec: Vec<String>,
     pub pmc_names_bear: Vec<String>,
     pub items: IndexMap<String, ItemView>,
+    /// [`ItemBaseClassCache`] over [`Self::items`] — what `ItemHelper.IsOfBaseclass(es)` answers
+    /// from in C# (`ItemBaseClassService`), so the ported call sites probe it instead of walking.
+    pub base_classes: ItemBaseClassCache,
 }
 
 impl From<InvariantSlice> for PreparedSlice {
     fn from(slice: InvariantSlice) -> Self {
+        let base_classes = ItemBaseClassCache::build(&slice.items);
+
         Self {
             dynamic: slice.dynamic,
             item_presets: slice.item_presets,
@@ -121,6 +127,7 @@ impl From<InvariantSlice> for PreparedSlice {
             pmc_names_usec: slice.pmc_names_usec,
             pmc_names_bear: slice.pmc_names_bear,
             items: slice.items,
+            base_classes,
         }
     }
 }

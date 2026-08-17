@@ -176,7 +176,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::loot::item_helper::{BUILT_IN_INSERTS, MOB_CONTAINER};
+    use crate::loot::item_helper::{BUILT_IN_INSERTS, ItemBaseClassCache, MOB_CONTAINER};
     use crate::loot::models::{Item, ItemView, PresetView};
     use crate::loot::random_util::{TestSeedGuard, get_double};
     use crate::ragfair::NO_NAMES;
@@ -202,6 +202,7 @@ mod tests {
 
     struct Fixture {
         items: IndexMap<String, ItemView>,
+        base_classes: ItemBaseClassCache,
         dynamic: DynamicConfigWire,
         prices: IndexMap<String, f64>,
         config_blacklist: HashSet<String>,
@@ -239,23 +240,27 @@ mod tests {
                 .expect("default preset parses"),
             ];
 
+            let items: IndexMap<String, ItemView> = serde_json::from_value(json!({
+                NODE_TPL: {"name": "a node", "type": "Node"},
+                CONFIG_BLACKLIST_TPL: {"name": "config blacklisted", "type": "Item"},
+                SEASONAL_TPL: {"name": "seasonal", "type": "Item"},
+                PRESET_ROOT_TPL: {"name": "preset root", "type": "Item"},
+                PLAIN_A_TPL: {"name": "plain a", "type": "Item"},
+                PLAIN_B_TPL: {"name": "plain b", "type": "Item"},
+                MOB_CONTAINER_CHILD_TPL: {"name": "secure container", "type": "Item",
+                    "parent": MOB_CONTAINER},
+                BUILT_IN_INSERT_CHILD_TPL: {"name": "built in insert", "type": "Item",
+                    "parent": BUILT_IN_INSERTS},
+                // The base classes themselves, so the base-class walk has somewhere to land.
+                MOB_CONTAINER: {"name": "mob container base", "type": "Node"},
+                BUILT_IN_INSERTS: {"name": "built in inserts base", "type": "Node"},
+            }))
+            .expect("items view parses");
+            let base_classes = ItemBaseClassCache::build(&items);
+
             Self {
-                items: serde_json::from_value(json!({
-                    NODE_TPL: {"name": "a node", "type": "Node"},
-                    CONFIG_BLACKLIST_TPL: {"name": "config blacklisted", "type": "Item"},
-                    SEASONAL_TPL: {"name": "seasonal", "type": "Item"},
-                    PRESET_ROOT_TPL: {"name": "preset root", "type": "Item"},
-                    PLAIN_A_TPL: {"name": "plain a", "type": "Item"},
-                    PLAIN_B_TPL: {"name": "plain b", "type": "Item"},
-                    MOB_CONTAINER_CHILD_TPL: {"name": "secure container", "type": "Item",
-                        "parent": MOB_CONTAINER},
-                    BUILT_IN_INSERT_CHILD_TPL: {"name": "built in insert", "type": "Item",
-                        "parent": BUILT_IN_INSERTS},
-                    // The base classes themselves, so the base-class walk has somewhere to land.
-                    MOB_CONTAINER: {"name": "mob container base", "type": "Node"},
-                    BUILT_IN_INSERTS: {"name": "built in inserts base", "type": "Node"},
-                }))
-                .expect("items view parses"),
+                items,
+                base_classes,
                 dynamic: dynamic_config(),
                 prices: [
                     CONFIG_BLACKLIST_TPL,
@@ -281,6 +286,7 @@ mod tests {
         fn ctx(&self) -> RagfairContext<'_> {
             RagfairContext {
                 items: &self.items,
+                base_classes: &self.base_classes,
                 dynamic: &self.dynamic,
                 item_presets: &self.item_presets,
                 default_presets: &self.default_presets,
