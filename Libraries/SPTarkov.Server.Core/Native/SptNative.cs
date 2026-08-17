@@ -51,7 +51,7 @@ internal enum LootExport
 
 public static class SptNative
 {
-    private const uint ExpectedAbiVersion = 14;
+    private const uint ExpectedAbiVersion = 16;
 
     // ffi.rs
     private const int StatusOk = 0;
@@ -79,6 +79,34 @@ public static class SptNative
             throw new InvalidOperationException(
                 $"spt_native ABI version mismatch: expected {ExpectedAbiVersion}, found {actual}. Rebuild the native library (dotnet build runs cargo automatically)."
             );
+        }
+    }
+
+    /// <summary>
+    /// Hands the resolved server-locale table to the native side, where generator diagnostics
+    /// render. Never throws: a failed push means generator log lines show locale keys instead of
+    /// text, which must not stop the server.
+    /// </summary>
+    public static unsafe void SetServerLocales(Dictionary<string, string> locales)
+    {
+        // Default options on purpose: LootJsonOptions carries naming policies that would rewrite
+        // the locale keys the native renderer looks up.
+        var json = JsonSerializer.SerializeToUtf8Bytes(locales);
+        byte* outPtr = null;
+        nuint outLen = 0;
+
+        fixed (byte* jsonPtr = json)
+        {
+            var status = NativeMethods.LocalesSet(jsonPtr, (nuint)json.Length, &outPtr, &outLen);
+            if (status != StatusOk)
+            {
+                var message = outPtr == null ? $"internal status {status}" : Encoding.UTF8.GetString(outPtr, checked((int)outLen));
+                Console.Error.WriteLine(
+                    $"Failed to hand the server locales to spt_native: {message}. Generator log lines will show locale keys."
+                );
+            }
+
+            NativeMethods.BufFree(outPtr, outLen);
         }
     }
 
@@ -314,12 +342,7 @@ public static class SptNative
             }
         );
 
-        return new FramedOffersResult
-        {
-            Offers = [.. offers],
-            RejectedCanSellTemplates = header.RejectedCanSellTemplates,
-            Diagnostics = header.Diagnostics,
-        };
+        return new FramedOffersResult { Offers = [.. offers], RejectedCanSellTemplates = header.RejectedCanSellTemplates };
     }
 
     private static DynamicOffersHeader? DeserializeHeader(byte encoding, ReadOnlySpan<byte> payload)

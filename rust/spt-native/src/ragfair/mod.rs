@@ -9,12 +9,13 @@ use std::collections::HashSet;
 
 use indexmap::IndexMap;
 
+use crate::diag::DiagSink;
 use crate::loot::item_helper::ItemBaseClassCache;
-use crate::loot::models::{Diagnostic, ItemView, PresetView};
+use crate::loot::models::{ItemView, PresetView};
 use crate::ragfair::models::DynamicConfigWire;
 
-/// The read-only views one dynamic ragfair pass consults, plus the diagnostics the C# caller
-/// replays through its logger — the ragfair family's analog of [`crate::bot::BotContext`].
+/// The read-only views one dynamic ragfair pass consults, plus the [`DiagSink`] its diagnostics
+/// emit through — the ragfair family's analog of [`crate::bot::BotContext`].
 ///
 /// Every view is borrowed for `'a`, so copying one out (`let items = ctx.items;`) releases the
 /// `&mut ctx` and leaves the diagnostics writable.
@@ -58,12 +59,12 @@ pub struct RagfairContext<'a> {
     pub timestamp: i64,
     /// `SeasonalEventService.SeasonalEventEnabled()`.
     pub seasonal_event_active: bool,
-    pub diagnostics: Vec<Diagnostic>,
+    pub diagnostics: DiagSink,
 }
 
 impl<'a> RagfairContext<'a> {
-    /// A worker's view of the same pass: every shared reference copied, a fresh diagnostics
-    /// buffer of its own — what lets the batch walk fan out without sharing `&mut self`.
+    /// A worker's view of the same pass: every shared reference copied, a forked sink of its own
+    /// — what lets the batch walk fan out without sharing `&mut self`.
     pub fn fork(&self) -> RagfairContext<'a> {
         RagfairContext {
             items: self.items,
@@ -82,7 +83,7 @@ impl<'a> RagfairContext<'a> {
             pmc_names_bear: self.pmc_names_bear,
             timestamp: self.timestamp,
             seasonal_event_active: self.seasonal_event_active,
-            diagnostics: Vec::new(),
+            diagnostics: self.diagnostics.fork(),
         }
     }
 }
@@ -96,14 +97,3 @@ pub(crate) static NO_NAMES: std::sync::LazyLock<Vec<String>> = std::sync::LazyLo
 #[cfg(test)]
 pub(crate) static NO_DEFAULT_PRESETS: std::sync::LazyLock<Vec<PresetView>> =
     std::sync::LazyLock::new(Vec::new);
-
-/// The [`Diagnostic`] constructor the ragfair modules share. The bot modules re-declare their own
-/// per file; here it lives once and is imported.
-pub(crate) fn plain(level: &str, message: String) -> Diagnostic {
-    Diagnostic {
-        level: level.to_owned(),
-        locale_key: None,
-        args: None,
-        message: Some(message),
-    }
-}

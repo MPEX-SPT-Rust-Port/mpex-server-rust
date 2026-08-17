@@ -15,7 +15,7 @@ namespace SPTarkov.Server.Core.Native.Ragfair;
 /// Config and database models are the existing records from <c>Models</c>, whose
 /// <c>JsonPropertyName</c>s are what the Rust wire names were pinned to, so their shape stays
 /// authoritative by construction - <see cref="Dynamic"/> rides across whole. The game-data views
-/// (<see cref="PresetView"/>, <see cref="ItemView"/>, <see cref="Diagnostic"/>) are the loot port's.
+/// (<see cref="PresetView"/>, <see cref="ItemView"/>) are the loot port's.
 ///
 /// Members Rust declares as <c>Option&lt;T&gt;</c> are nullable, everything else is
 /// <c>required</c>: <see cref="Utils.JsonUtil"/> serialises with
@@ -175,9 +175,6 @@ internal record DynamicOffersHeader
     /// </summary>
     [JsonPropertyName("rejectedCanSellTemplates")]
     public required List<MongoId> RejectedCanSellTemplates { get; set; }
-
-    [JsonPropertyName("diagnostics")]
-    public required List<Diagnostic> Diagnostics { get; set; }
 }
 
 /// <summary>
@@ -189,6 +186,4 @@ internal record FramedOffersResult
     public required List<RagfairOffer> Offers { get; set; }
 
     public required List<MongoId> RejectedCanSellTemplates { get; set; }
-
-    public required List<Diagnostic> Diagnostics { get; set; }
 }

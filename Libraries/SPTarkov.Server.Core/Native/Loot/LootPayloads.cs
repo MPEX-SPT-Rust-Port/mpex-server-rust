@@ -582,30 +582,6 @@ public sealed class LooseLootPayloadConverter : JsonConverter<LooseLootPayload>
     }
 }
 
-/// <summary>
-/// One log line the native side would have written itself. <c>Level</c> is one of <c>debug</c>,
-/// <c>warning</c>, <c>error</c> or <c>success</c>; either <see cref="LocaleKey"/> or
-/// <see cref="Message"/> is set, and the other members are written as explicit nulls.
-/// </summary>
-public record Diagnostic
-{
-    [JsonPropertyName("level")]
-    public required string Level { get; set; }
-
-    [JsonPropertyName("localeKey")]
-    public string? LocaleKey { get; set; }
-
-    /// <summary>
-    /// Arguments for <see cref="LocaleKey"/> - an object of named replacements, or a bare scalar for
-    /// the single-value locale overload.
-    /// </summary>
-    [JsonPropertyName("args")]
-    public JsonElement? Args { get; set; }
-
-    [JsonPropertyName("message")]
-    public string? Message { get; set; }
-}
-
 public record StaticContainersResult
 {
     [JsonPropertyName("spawnpoints")]
@@ -619,9 +595,6 @@ public record StaticContainersResult
 
     [JsonPropertyName("staticContainerCount")]
     public required int StaticContainerCount { get; set; }
-
-    [JsonPropertyName("diagnostics")]
-    public required List<Diagnostic> Diagnostics { get; set; }
 }
 
 public record DynamicLootResult
@@ -631,7 +604,4 @@ public record DynamicLootResult
 
     [JsonPropertyName("trackedCounts")]
     public required Dictionary<MongoId, int> TrackedCounts { get; set; }
-
-    [JsonPropertyName("diagnostics")]
-    public required List<Diagnostic> Diagnostics { get; set; }
 }

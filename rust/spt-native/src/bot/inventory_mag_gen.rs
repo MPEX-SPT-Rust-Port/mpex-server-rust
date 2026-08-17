@@ -40,6 +40,9 @@ use crate::loot::item_helper::{LAUNCHER, LootError, MAGAZINE, SHOTGUN, get_item,
 use crate::loot::models::{DEBUG, Diagnostic, ERROR, Item};
 use crate::loot::random_util::{get_array_value, get_int};
 
+/// The `typeof(T).FullName` this file's diagnostics log under.
+const CATEGORY: &str = "SPTarkov.Server.Core.Generators.Weapons.InventoryMagGen";
+
 /// `ReloadMode.InternalMagazine`.
 const INTERNAL_MAGAZINE: &str = "InternalMagazine";
 /// `ReloadMode.OnlyBarrel`.
@@ -350,6 +353,7 @@ fn process_external(
             magazine_tpl = default_magazine_tpl.to_owned();
             let Some(mag_template) = get_item(items, &magazine_tpl) else {
                 ctx.diagnostics.push(Diagnostic {
+                    category: CATEGORY,
                     level: ERROR.to_owned(),
                     locale_key: Some("bot-unable_to_find_default_magazine_item".to_owned()),
                     args: Some(serde_json::Value::String(magazine_tpl.clone())),
@@ -473,6 +477,7 @@ fn get_random_external_magazine_for_internal_magazine_gun(
 
 fn debug(message: String) -> Diagnostic {
     Diagnostic {
+        category: CATEGORY,
         level: DEBUG.to_owned(),
         locale_key: None,
         args: None,
@@ -485,6 +490,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::diag::DiagSink;
 
     use crate::bot::durability_limits_helper::BotDurability;
     use crate::bot::models::{EquipmentFilters, RandomisedResourceDetails};
@@ -568,7 +574,7 @@ mod tests {
                 secure_container_ammo_stack_count: 0,
                 mod_pool_slot_order: &crate::bot::NO_MOD_POOL_ORDER,
                 is_night_time: false,
-                diagnostics: Vec::new(),
+                diagnostics: DiagSink::capture(),
             }
         }
     }

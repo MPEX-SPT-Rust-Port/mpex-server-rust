@@ -1,17 +1,12 @@
-using System.Text.Json;
-using Microsoft.Extensions.Logging;
-using SPTarkov.Common.Models.Logging;
 using SPTarkov.Server.Core.Models.Common;
 using SPTarkov.Server.Core.Models.Eft.Common.Tables;
 using SPTarkov.Server.Core.Models.Spt.Tables;
-using SPTarkov.Server.Core.Services.Locales;
 
 namespace SPTarkov.Server.Core.Native.Loot;
 
 /// <summary>
-/// The parts of building a native loot request and consuming its result that every generator does
-/// the same way: projecting the items table into <see cref="ItemView"/>s, and replaying the log
-/// lines the native side collected instead of writing itself.
+/// The parts of building a native loot request that every generator does the same way: projecting
+/// the items table into <see cref="ItemView"/>s.
 /// </summary>
 internal static class PayloadProjection
 {
@@ -163,76 +158,6 @@ internal static class PayloadProjection
                 Plate = slot.Properties?.Filters?.FirstOrDefault()?.Plate,
             })
             .ToList();
-    }
-
-    /// <summary>
-    /// Write out the log lines the native generator collected instead of logging itself, so the
-    /// server log reads as it did before the cutover
-    /// </summary>
-    internal static void ReplayDiagnostics<T>(
-        List<Diagnostic> diagnostics,
-        ISptLogger<T> logger,
-        ServerLocalisationService serverLocalisationService
-    )
-    {
-        foreach (var diagnostic in diagnostics)
-        {
-            if (diagnostic.Level == "debug" && !logger.IsLogEnabled(LogLevel.Debug))
-            {
-                continue;
-            }
-
-            var message = LocaliseDiagnostic(diagnostic, serverLocalisationService);
-            switch (diagnostic.Level)
-            {
-                case "debug":
-                    logger.Debug(message);
-                    break;
-                case "warning":
-                    logger.Warning(message);
-                    break;
-                case "error":
-                    logger.Error(message);
-                    break;
-                case "success":
-                    logger.Success(message);
-                    break;
-                default:
-                    // Never drop a line a future native version tags with a level we don't know
-                    logger.Warning($"[{diagnostic.Level}] {message}");
-                    break;
-            }
-        }
-    }
-
-    private static string LocaliseDiagnostic(Diagnostic diagnostic, ServerLocalisationService serverLocalisationService)
-    {
-        if (diagnostic.LocaleKey is null)
-        {
-            return diagnostic.Message ?? string.Empty;
-        }
-
-        if (diagnostic.Args is not { } args)
-        {
-            return serverLocalisationService.GetText(diagnostic.LocaleKey);
-        }
-
-        // A scalar argument is the `%s` overload
-        if (args.ValueKind != JsonValueKind.Object)
-        {
-            return serverLocalisationService.GetText(diagnostic.LocaleKey, args.ToString());
-        }
-
-        // Named arguments are substituted here rather than by ServerLocalisationService: it reads its
-        // args object's *properties* by reflection, which only works for the anonymous types the C#
-        // call sites passed - a dictionary would leave every `{{placeholder}}` in place
-        var text = serverLocalisationService.GetText(diagnostic.LocaleKey);
-        foreach (var argument in args.EnumerateObject())
-        {
-            text = text.Replace($"{{{{{argument.Name}}}}}", argument.Value.ToString());
-        }
-
-        return text;
     }
 
     /// <summary>

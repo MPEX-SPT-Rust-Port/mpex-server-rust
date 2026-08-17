@@ -19,6 +19,9 @@ use crate::quest::models::{
 };
 use crate::quest::{helper, reward_generator};
 
+/// The `typeof(T).FullName` this file's diagnostics log under.
+const CATEGORY: &str = "SPTarkov.Server.Core.Generators.RepeatableQuests.EliminationQuestGenerator";
+
 /// `Models/Enums/Traders.cs:9`.
 const FENCE: &str = "579dc571d53a0658a154fbec";
 
@@ -47,6 +50,7 @@ const MAX_DIST_DIFFICULTY: i32 = 2;
 /// A `ServerLocalisationService.GetText` line the C# caller replays through its logger.
 fn localised(level: &str, locale_key: &str, args: Option<serde_json::Value>) -> Diagnostic {
     Diagnostic {
+        category: CATEGORY,
         level: level.to_owned(),
         locale_key: Some(locale_key.to_owned()),
         args,
@@ -57,6 +61,7 @@ fn localised(level: &str, locale_key: &str, args: Option<serde_json::Value>) -> 
 /// A plain interpolated log line (`:381`).
 fn plain(level: &str, message: String) -> Diagnostic {
     Diagnostic {
+        category: CATEGORY,
         level: level.to_owned(),
         locale_key: None,
         args: None,
@@ -886,6 +891,7 @@ pub fn generate(
 
 #[cfg(test)]
 mod tests {
+    use crate::diag::DiagSink;
     use crate::loot::random_util::TestSeedGuard;
     use crate::quest::QuestContext;
     use crate::quest::helper::PRAPOR;
@@ -943,6 +949,7 @@ mod tests {
     fn a_seeded_elimination_quest_draws_one_or_two_body_parts_and_empties_the_target_pool() {
         let slice = slice();
         let mut ctx = QuestContext::from_slice(&slice);
+        ctx.diagnostics = DiagSink::capture();
         let config = daily_config();
         let mut pool = pool();
 
@@ -1065,6 +1072,7 @@ mod tests {
 
         let slice = slice();
         let mut ctx = QuestContext::from_slice(&slice);
+        ctx.diagnostics = DiagSink::capture();
         let mut pool = pool();
 
         let _guard = TestSeedGuard::install(7);

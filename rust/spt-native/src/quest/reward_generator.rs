@@ -19,6 +19,10 @@ use crate::loot::random_util::{
 use crate::quest::QuestContext;
 use crate::quest::models::{RepeatableQuestConfig, Reward, RewardScaling};
 
+/// The `typeof(T).FullName` this file's diagnostics log under.
+const CATEGORY: &str =
+    "SPTarkov.Server.Core.Generators.RepeatableQuests.RepeatableQuestRewardGenerator";
+
 /// `Models/Enums/Money.cs:7`.
 const ROUBLES: &str = "5449016a4bdc2d6f028b456f";
 /// `Models/Enums/Money.cs:8`.
@@ -40,6 +44,7 @@ const TRADER_STANDING: &str = "TraderStanding";
 /// A plain interpolated log line the C# caller replays through its logger.
 fn plain(level: &str, message: String) -> Diagnostic {
     Diagnostic {
+        category: CATEGORY,
         level: level.to_owned(),
         locale_key: None,
         args: None,
@@ -51,6 +56,7 @@ fn plain(level: &str, message: String) -> Diagnostic {
 /// and its arguments cross.
 fn localised(level: &str, locale_key: &str, args: serde_json::Value) -> Diagnostic {
     Diagnostic {
+        category: CATEGORY,
         level: level.to_owned(),
         locale_key: Some(locale_key.to_owned()),
         args: Some(args),
@@ -966,6 +972,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
+    use crate::diag::DiagSink;
     use crate::loot::random_util::TestSeedGuard;
     use crate::quest::QuestContext;
     use crate::quest::helper::PRAPOR;
@@ -1038,6 +1045,7 @@ mod tests {
             "aa": 100.0, "bb": 100.0, "cc": 100.0, "dd": 100.0, "ee": 100.0
         }));
         let mut ctx = QuestContext::from_slice(&slice);
+        ctx.diagnostics = DiagSink::capture();
         let config = daily_config();
 
         let _guard = TestSeedGuard::install(SEED);
@@ -1058,6 +1066,7 @@ mod tests {
     fn a_seeded_reward_leads_with_experience_then_money() {
         let slice = crate::quest::models::tests::slice();
         let mut ctx = QuestContext::from_slice(&slice);
+        ctx.diagnostics = DiagSink::capture();
         let config = daily_config();
         let skill_rewards = &config.quest_config.elimination[0].possible_skill_rewards;
 

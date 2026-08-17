@@ -31,6 +31,12 @@ public sealed class DatabaseImporter(
             // letting a missing or stale library surface as a DllNotFoundException mid-request.
             SptNative.EnsureLoadable();
 
+            // Generator diagnostics render natively now; bake the ServerLocale -> en fallback
+            // chain into a flat table once, before anything can invoke a generator.
+            SptNative.SetServerLocales(
+                serverLocalisationService.GetLocaleKeys().ToDictionary(key => key, serverLocalisationService.GetLocalisedValue)
+            );
+
             if (shouldVerifyDatabase)
             {
                 await VerifyDatabaseAsync();

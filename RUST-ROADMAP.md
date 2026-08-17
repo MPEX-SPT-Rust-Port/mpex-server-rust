@@ -8,9 +8,11 @@ internals see [rust/ARCHITECTURE.md](rust/ARCHITECTURE.md); for the C# side of t
 
 The loot family, the bot family, dynamic ragfair offer generation and the repeatable-quest family are
 ported and run natively by default. Every ported class keeps its full 4.1.2 C# implementation as a
-**legacy path**, selected automatically when a mod hooks it or manually via a config flag. Thirteen
-C-ABI exports (`src/ffi.rs`) carry it, JSON in and JSON out — except the ragfair response, which is a
-framed MessagePack envelope (current ABI 14) the C# side parses in parallel.
+**legacy path**, selected automatically when a mod hooks it or manually via a config flag. The log
+pipeline is ported too, and has no legacy path: `SPTLoggerDispatcher` hands every line to the crate.
+Seventeen C-ABI exports (`src/ffi.rs`) carry all of it, JSON in and JSON out — except the ragfair
+response, which is a framed MessagePack envelope, and `spt_log_emit`, which passes the fields of one
+line directly (current ABI 16).
 
 ## Working
 
@@ -26,10 +28,12 @@ framed MessagePack envelope (current ABI 14) the C# side parses in parallel.
 | A whole bot wave in one call — shared views on the wire once, rayon-parallel per bot, one `{result \| error}` envelope each | `BotWaveBatcher.TryGenerateWave`, from `BotController.GenerateBotWave` | `spt_generate_bot_inventory_batch` |
 | A batch of dynamic flea offers (assort walk, pricing, barter schemes) | `RagfairOfferGenerator.GenerateDynamicOffers` | `spt_generate_dynamic_offers` |
 | Repeatable quests (all four types + rewards) | `*QuestGenerator.Generate` | `spt_generate_repeatable_quest` |
+| The whole log pipeline — filters, level gates, per-target formatting, console + file sinks | `SPTLoggerDispatcher.Log` | `spt_logger_init`, `spt_log_emit`, `spt_logger_close` |
+| Generator diagnostics, localised and logged natively as they happen | `DatabaseImporter` → `SptNative.SetServerLocales` | `spt_locales_set` |
 
 Also working: mod-added fields on game data survive the round trip (`#[serde(flatten)] extra` maps
-mirroring Ceciler's `[JsonExtensionData]`); native log lines are replayed through the C# logger;
-seeded-RNG parity at the primitive level (xoshiro256\*\*, twin known-answer tests both sides).
+mirroring Ceciler's `[JsonExtensionData]`); native generator diagnostics render and log themselves through
+the native pipeline; seeded-RNG parity at the primitive level (xoshiro256\*\*, twin known-answer tests both sides).
 
 ## Broken / known divergences
 
@@ -103,12 +107,49 @@ seeded-RNG parity at the primitive level (xoshiro256\*\*, twin known-answer test
 - **Typed loose-loot path is slow** — ~1347 ms per raid start for `bigmap` vs ~345 ms raw, against
   929 ms for the C# it replaced. Any registered `LazyLoad` transformer (seasonal events, mods)
   forces it. Vanilla installs stay on the raw path.
-- **Failures lose their diagnostics** — on error C# throws with the native message only; log lines
-  collected before the failure are dropped (one-buffer FFI contract).
-- **Hangs are undiagnosable** — ported retry loops can spin exactly as 4.1.2 does, but inside an FFI
-  call with no managed stack trace. Force legacy to get it back.
-- **Native bot logs collapse to one category** — all four generators log through
-  `ISptLogger<BotInventoryGenerator>`.
+- **A failure still crosses as a bare message** — everything the run logged on the way down is
+  already in the log, emitted as it happened, but the error itself is the one thing the FFI hands
+  back as text for C# to throw with (one-buffer contract). Localising and categorising that last
+  line is what remains.
+- **Hangs are mostly undiagnosable** — ported retry loops can spin exactly as 4.1.2 does, inside an
+  FFI call with no managed stack trace. Generator diagnostics stream now, so a hang beside a
+  diagnostic site shows its last line; a hang in a stretch with no diagnostic sites still shows
+  nothing. Force legacy to get the managed stack back.
+- **Generator lines carry one category per generator** — `typeof(T).FullName` of the C# class each
+  Rust module ports, where the replay era logged the whole bot family through
+  `ISptLogger<BotInventoryGenerator>`. A custom `sptLogger.json` filter written against that class
+  now matches far fewer lines.
+- **Generator lines use a different `%tid%` space** — a small process-local counter handed out per
+  thread in first-emit order, not the managed thread id C# lines carry, and `%tname%` is the Rust
+  thread name, usually empty. `%date%` is the moment of emission, where replayed lines were all
+  stamped at the end of the native call.
+- **Generator locale text is a startup snapshot** — `DatabaseImporter` pushes the resolved server
+  locales once (`spt_locales_set`), so a mod mutating them later no longer changes what a generator
+  line says. A failed push is one stderr notice and every generator line falls back to its locale key.
+- **Parallel generator lines interleave** — the ragfair and bot rayon workers emit as they run, so
+  lines no longer arrive grouped per bot or per assort entry. Each takes the global logger lock,
+  which is fine at diagnostic rates.
+- **Console output is now asynchronous and drops on a full queue** — the native pipeline hands each
+  line to a writer thread behind an 8192-line bounded channel (file sinks always did; the console
+  does now too). A hard crash can lose whatever is still queued, and a burst deeper than the queue
+  drops lines rather than blocking the caller.
+- **Filter regexes are regex-lite** — no lookarounds, no backreferences, ASCII-only character
+  classes, against .NET's fuller `Regex`. A pattern that will not compile is reported to stderr once
+  at startup and then never matches.
+- **A native logging failure has no C# fallback** — the managed handlers are gone, so a failed
+  `spt_logger_init` means one stderr notice and no logging at all for the run. A config the C#
+  parser would have tolerated but Rust rejects fails the same way; the known cases (a UTF-8 BOM, and
+  case-insensitive `logLevel`/filter `type`/`matchingType` values) are handled, the `type` tag of a
+  `loggers` entry stays case-sensitive on both sides.
+- **The pipeline snapshots `sptLogger.json` at startup** — mutating
+  `SptLoggerConfiguration.Loggers` at runtime (a mod adding or retargeting a logger) no longer
+  changes what is written, while `IsLogEnabled` still reads the mutated list, so the two can
+  disagree. A re-init export is future work.
+- **Excluded categories still pay the per-line marshaling cost** — filtering moved native-side, so
+  every line is encoded, crosses the FFI boundary and takes the pipeline mutex before it is dropped.
+- **Line terminators are always `\n` and dates always Gregorian, culture-independent** — the C#
+  handlers used `Environment.NewLine` and `CurrentCulture`, so a Windows log file loses its `\r` and
+  a non-Gregorian locale no longer shows in `%date%`.
 
 ## Guidelines
 
@@ -188,7 +229,7 @@ seeded-RNG parity at the primitive level (xoshiro256\*\*, twin known-answer test
   effect on `PARKED_RNG`, whose only consumer is the loot dynamic entry point, which never runs on
   a rayon worker.
 - **The ragfair response is a framed MessagePack envelope, not a JSON buffer.** One length-prefixed
-  frame per offer behind a header frame (since ABI **10**, encoding tag 1; current ABI is 14), which
+  frame per offer behind a header frame (since ABI **10**, encoding tag 1; current ABI is 16), which
   C# deserialises with `Parallel.For` over the frames straight out of the native buffer — no
   whole-response JSON document is ever materialised. Only the ragfair response uses it; every other
   export is still JSON in / JSON out.
@@ -248,7 +289,7 @@ seeded-RNG parity at the primitive level (xoshiro256\*\*, twin known-answer test
   the stamp. A modded (ineligible) server therefore full-sends every call, ~43 ms and ~10.6 MB of
   managed allocation per quest, the same figure for every quest type
   ([BENCHMARK.md](BENCHMARK.md) § *The slice, and what a C#-side memo could buy*).
-- **The quest request is `{invariantStamp, invariant?, varying}` (ABI 14)**, the same shape and the
+- **The quest request is `{invariantStamp, invariant?, varying}` (since ABI 14)**, the same shape and the
   same status codes as ragfair's: `0` OK, `3` ERROR, `4` `STATUS_STALE_SLICE` — which surfaces as
   `NativeStaleSliceException` and self-heals with one full-send retry.
 - **The `QuestTypePool` round-trips.** The generators consume the pool they are handed, so the
@@ -265,7 +306,10 @@ seeded-RNG parity at the primitive level (xoshiro256\*\*, twin known-answer test
 
 1. Later candidates, in `todo/TODO.md` order: scav case rewards, weather, fence assorts, raid-time
    adjustment, ragfair linked-item table.
-2. Convert `is_valid_reward_item`'s trader whitelist to the set form and measure.
+2. Re-scope the logging port's phase 3. Live emission made "`STATUS_ERROR` carries the run's
+   accumulated diagnostics" moot; what is left is the error envelope itself — the message and its
+   localisation.
+3. Convert `is_valid_reward_item`'s trader whitelist to the set form and measure.
    `quest/reward_generator.rs` builds it as a `Vec<&str>` of up to 14 candidates, consumed 4,673
    times per Completion pass; `ItemBaseClassCache::is_of_baseclasses_set` is the cheaper shape once
    a candidate list is long enough, and 14 is the point where that is worth checking rather than

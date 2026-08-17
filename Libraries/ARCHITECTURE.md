@@ -45,14 +45,16 @@ a game type — no `MongoId`, no `Item`, no config record. Logging, semver and g
 | Folder | Contents |
 |---|---|
 | `Logger/` | `SptLogger`, `SptLoggerProvider`, `SPTLoggerDispatcher`, `SptEarlyLoggerFactory` (the pre-DI logger used during startup), `SPTLoggerWrapper` (adapts the dispatcher to `Microsoft.Extensions.Logging.ILogger`) |
-| `Logger/Handlers/` | `BaseLogHandler` → `ConsoleLogHandler`, `FileLogHandler` |
+| `Logger/Handlers/` | `BaseLogHandler` only. Its two implementations moved to Rust; the abstract class stays because the 4.1.2 public surface is frozen |
+| `Native/` | `NativeMethods` — the `spt_logger_init` / `spt_log_emit` / `spt_logger_close` P/Invokes the dispatcher writes through |
 | `Models/Logging/` | `ISptLogger`, `ILogHandler`, `SptLogMessage`, `SptLoggerConfiguration` (bound from `sptLogger.json`), `FileLogger` (empty marker type used as a log category) |
 | `Semver/` | `ISemVer` + `SemanticVersioningSemVer` — used for mod `SptVersion` range checks |
 | `Extensions/` | `String`, `List`, `Object`, `MemberInfo`, `HttpContext`, and two logger extension sets |
 | `Json/Converters/` | `BaseSptLoggerReferenceConverter` — resolves a logger config entry's `"type"` to `File`/`Console` |
 
 The `sptLogger.json` / `sptLogger.Development.json` files the server refuses to start without are
-this project's config.
+this project's config. It is the front end only: `AddSptLogger` hands the raw config bytes to
+`rust/spt-native`, which owns the filters, the level gate, formatting and the console/file sinks.
 
 ## SPTarkov.DI
 

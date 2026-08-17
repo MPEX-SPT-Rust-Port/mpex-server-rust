@@ -23,7 +23,7 @@ Detail lives in the per-directory documents:
 | `Libraries/SPTarkov.Server.Web` | Blazor Server admin panel (MudBlazor) |
 | `Libraries/SPTarkov.Server.Assets` | `SPT_Data/`: configs, JSON database, images; the largest files ship compressed as `looseLoot.7z` |
 | `Libraries/SPTarkov.DI` | Attribute-driven DI container: `[Injectable]`, `DependencyInjectionHandler` |
-| `Libraries/SPTarkov.Common` | Shared primitives and logging (`SptLogger`, log handlers) |
+| `Libraries/SPTarkov.Common` | Shared primitives and the logging front end (`SptLogger`, `SPTLoggerDispatcher`) |
 | `Libraries/SPTarkov.Reflection` | Runtime method patching for mods (`AbstractPatch`, `PatchManager`) |
 | `rust/` | Cargo workspace: the `spt-native` cdylib called over C ABI |
 | `Tools/Ceciler` + `Patches/Ceciler.JsonExtensionData` | Mono.Cecil IL rewriter run on Release builds, and the patch assembly it applies |
@@ -152,10 +152,14 @@ startup outside DEBUG. That format is a contract shared with `rust/spt-native/sr
 ## Native Rust layer
 
 `rust/spt-native` is a `cdylib` called over C ABI from `Libraries/SPTarkov.Server.Core/Native/`
-(`NativeMethods.cs`, `SptNative.cs`). It owns database hash verification and the ported generation
-paths: location loot, reward loot, whole-bot inventory, and dynamic ragfair offers. Twelve exports,
-JSON in / JSON out — except the ragfair response, which comes back as a framed MessagePack envelope
-— with `spt_native_abi_version` handshaking against `SptNative.ExpectedAbiVersion`.
+(`NativeMethods.cs`, `SptNative.cs`) — and, for the log exports, from the twin
+`Libraries/SPTarkov.Common/Native/NativeMethods.cs`, because `SPTarkov.Common` cannot reference
+Server.Core. It owns database hash verification, the ported generation
+paths — location loot, reward loot, whole-bot inventory, dynamic ragfair offers, repeatable quests —
+and the whole log pipeline. Seventeen exports, JSON in / JSON out — except the ragfair response, which
+comes back as a framed MessagePack envelope, and the log exports, where `spt_logger_init` takes the
+raw `sptLogger.json` bytes and `spt_log_emit` passes one line's fields directly — with
+`spt_native_abi_version` handshaking against `SptNative.ExpectedAbiVersion`.
 
 Payloads are projected from the live database on every call, with one exception: the ragfair
 request's call-invariant half is sent only when `DatabaseMutationStamp` — a singleton the
@@ -164,10 +168,18 @@ parsed copy keyed by that stamp. Because a mod writing an injected table directl
 those bump sites, the skip is gated on no mods being loaded, with opt-in and kill-switch flags on
 `RagfairConfig`; a cache miss self-heals by resending. See `RUST-ROADMAP.md` § *Exceptions in force*.
 
-Every ported class keeps its complete 4.1.2 C# implementation as a **legacy path**, taken
+Every ported *generator* keeps its complete 4.1.2 C# implementation as a **legacy path**, taken
 automatically when a mod hooks it or forced by config — so a Rust cutover never removes a mod's
 extension point. `DatabaseImporter` calls `SptNative.EnsureLoadable()` on every startup, so a missing
 or ABI-mismatched library fails fast.
+
+Logging is the exception with no legacy path: `AddSptLogger` initialises the native pipeline from the
+raw `sptLogger.json` bytes and `SPTLoggerDispatcher.Log` emits straight into it, so the C# side keeps
+only the `ISptLogger`/`SptLogger` front end. It is failure-tolerant by contract — a broken library or
+config produces one stderr notice and logging stays off rather than stopping the server. The ported
+generators log into that pipeline directly rather than handing lines back for C# to replay, so
+`DatabaseImporter` pushes the resolved server locales over `spt_locales_set` before anything can generate;
+a failed push is one stderr notice and generator lines fall back to their locale keys.
 
 Verification scope is manifest-driven and exact in both directions (`configs/`, `database/`), so
 deletions and symlink swaps are caught; `images/` and build-relocated artifacts are unverified by

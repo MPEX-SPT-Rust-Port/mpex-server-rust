@@ -93,6 +93,9 @@ use crate::loot::models::{
 use crate::loot::mongo_id;
 use crate::loot::random_util::{get_array_value, get_chance_100, get_int, get_weighted_value};
 
+/// The `typeof(T).FullName` this file's diagnostics log under.
+const CATEGORY: &str = "SPTarkov.Server.Core.Generators.Loot.BotLootGenerator";
+
 /// `EquipmentSlots` member names, as strings (see [`crate::bot::bot_weapon_generator`]).
 const POCKETS: &str = "Pockets";
 const TACTICAL_VEST: &str = "TacticalVest";
@@ -1366,6 +1369,7 @@ fn key_not_found(key: &str) -> LootError {
 
 fn plain(level: &str, message: String) -> Diagnostic {
     Diagnostic {
+        category: CATEGORY,
         level: level.to_owned(),
         locale_key: None,
         args: None,
@@ -1375,6 +1379,7 @@ fn plain(level: &str, message: String) -> Diagnostic {
 
 fn localised(level: &str, locale_key: &str, args: serde_json::Value) -> Diagnostic {
     Diagnostic {
+        category: CATEGORY,
         level: level.to_owned(),
         locale_key: Some(locale_key.to_owned()),
         args: Some(args),
@@ -1389,6 +1394,7 @@ mod tests {
     use super::*;
     use crate::bot::durability_limits_helper::BotDurability;
     use crate::bot::models::{EquipmentFilters, RandomisedResourceDetails};
+    use crate::diag::DiagSink;
     use crate::loot::models::PresetView;
     use crate::loot::random_util::{TestSeedGuard, get_double};
 
@@ -1588,7 +1594,7 @@ mod tests {
                 secure_container_ammo_stack_count: 0,
                 mod_pool_slot_order: &crate::bot::NO_MOD_POOL_ORDER,
                 is_night_time: false,
-                diagnostics: Vec::new(),
+                diagnostics: DiagSink::capture(),
             }
         }
 
@@ -1818,7 +1824,7 @@ mod tests {
         assert_eq!(after_run, stream_position_after(|| {}));
         assert!(inventory.is_empty());
         assert_eq!(
-            ctx.diagnostics[0].locale_key.as_deref(),
+            ctx.diagnostics.captured()[0].locale_key.as_deref(),
             Some("bot-unable_to_generate_bot_loot")
         );
     }
@@ -2277,6 +2283,7 @@ mod tests {
         // Two calls to `GetItemSpawnLimitsForBotType`, so two warnings.
         assert_eq!(
             ctx.diagnostics
+                .captured()
                 .iter()
                 .filter(|diagnostic| diagnostic.locale_key.as_deref()
                     == Some("bot-unable_to_find_spawn_limits_fallback_to_defaults"))

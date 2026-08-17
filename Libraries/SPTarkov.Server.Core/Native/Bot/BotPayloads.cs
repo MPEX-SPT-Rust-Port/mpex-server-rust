@@ -389,9 +389,6 @@ internal record BotInventoryResult
     [JsonPropertyName("inventory")]
     public required BotBaseInventory Inventory { get; set; }
 
-    [JsonPropertyName("diagnostics")]
-    public required List<Diagnostic> Diagnostics { get; set; }
-
     /// <summary>
     /// Equipment slot <i>name</i> - not the enum, which System.Text.Json keys numerically - to the
     /// container state <c>BotInventoryContainerService</c> would have cached. Empty when the request

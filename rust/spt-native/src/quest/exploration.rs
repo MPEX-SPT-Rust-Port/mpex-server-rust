@@ -15,9 +15,13 @@ use crate::quest::models::{
 };
 use crate::quest::{QuestContext, helper, reward_generator};
 
+/// The `typeof(T).FullName` this file's diagnostics log under.
+const CATEGORY: &str = "SPTarkov.Server.Core.Generators.RepeatableQuests.ExplorationQuestGenerator";
+
 /// A `ServerLocalisationService.GetText` line the C# caller replays through its logger.
 fn localised(level: &str, locale_key: &str, args: Option<serde_json::Value>) -> Diagnostic {
     Diagnostic {
+        category: CATEGORY,
         level: level.to_owned(),
         locale_key: Some(locale_key.to_owned()),
         args,
@@ -145,6 +149,7 @@ fn try_generate_available_for_finish(
         .is_some_and(|conditions| conditions[0].counter.is_some())
     {
         ctx.diagnostics.push(Diagnostic {
+            category: CATEGORY,
             level: ERROR.to_owned(),
             locale_key: None,
             args: None,
@@ -396,6 +401,7 @@ pub fn generate(
 mod tests {
     use std::collections::BTreeSet;
 
+    use crate::diag::DiagSink;
     use crate::loot::random_util::TestSeedGuard;
     use crate::quest::QuestContext;
     use crate::quest::helper::PRAPOR;
@@ -483,6 +489,7 @@ mod tests {
 
         for seed in 1..=120u64 {
             let mut ctx = QuestContext::from_slice(&slice);
+            ctx.diagnostics = DiagSink::capture();
             let mut pool = pool();
             let _guard = TestSeedGuard::install(seed);
             let quest = super::generate(
@@ -563,6 +570,7 @@ mod tests {
     fn an_empty_location_pool_drops_the_quest_type() {
         let slice = slice();
         let mut ctx = QuestContext::from_slice(&slice);
+        ctx.diagnostics = DiagSink::capture();
         let mut pool = pool();
         pool.pool
             .exploration
@@ -586,6 +594,7 @@ mod tests {
         assert_eq!(pool.types, ["Completion"]);
         assert_eq!(
             ctx.diagnostics
+                .captured()
                 .iter()
                 .map(|diagnostic| diagnostic.locale_key.as_deref().unwrap())
                 .collect::<Vec<_>>(),

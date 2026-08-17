@@ -67,6 +67,9 @@ internal static unsafe partial class NativeMethods
     [LibraryImport(LibraryName, EntryPoint = "spt_generate_repeatable_quest")]
     internal static partial int GenerateRepeatableQuest(byte* requestUtf8, nuint requestLen, byte** outPtr, nuint* outLen);
 
+    [LibraryImport(LibraryName, EntryPoint = "spt_locales_set")]
+    internal static partial int LocalesSet(byte* jsonUtf8, nuint jsonLen, byte** outPtr, nuint* outLen);
+
     [LibraryImport(LibraryName, EntryPoint = "spt_buf_free")]
     internal static partial void BufFree(byte* ptr, nuint len);
 }

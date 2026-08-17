@@ -90,10 +90,14 @@ use crate::bot::models::{
     GenerateEquipmentPropertiesWire, GenerationWire, PmcConfigWire, RandomisationDetails,
     SharedBotViewsWire,
 };
+use crate::diag::DiagSink;
 use crate::loot::item_helper::{LootError, get_item};
 use crate::loot::models::{DEBUG, Diagnostic, ERROR, Item, ItemView, WARNING};
 use crate::loot::mongo_id;
 use crate::loot::random_util::{TestSeedGuard, get_chance_100, get_weighted_value};
+
+/// The `typeof(T).FullName` this file's diagnostics log under.
+const CATEGORY: &str = "SPTarkov.Server.Core.Generators.Bot.BotInventoryGenerator";
 
 /// The six `ItemTpl` roots `GenerateInventoryBase` (`:126-156`) plants.
 const INVENTORY_DEFAULT: &str = "55d7217a4bdc2d86028b456d";
@@ -332,7 +336,7 @@ fn generate_one(
         weapon_has_enhancement_chance_percent: pmc_config.weapon_has_enhancement_chance_percent,
         repair_kit_weapon,
         secure_container_ammo_stack_count: *secure_container_ammo_stack_count,
-        diagnostics: Vec::new(),
+        diagnostics: DiagSink::Pipeline,
     };
     let mut grids = ContainerGrids::default();
 
@@ -393,7 +397,6 @@ fn generate_one(
 
     Ok(BotInventoryResult {
         inventory: bot_inventory,
-        diagnostics: ctx.diagnostics,
         container_grids,
         randomisation_clamps,
     })
@@ -1140,6 +1143,7 @@ fn key_not_found(key: &str) -> LootError {
 
 fn plain(level: &str, message: String) -> Diagnostic {
     Diagnostic {
+        category: CATEGORY,
         level: level.to_owned(),
         locale_key: None,
         args: None,
@@ -1149,6 +1153,7 @@ fn plain(level: &str, message: String) -> Diagnostic {
 
 fn localised(level: &str, locale_key: &str, args: serde_json::Value) -> Diagnostic {
     Diagnostic {
+        category: CATEGORY,
         level: level.to_owned(),
         locale_key: Some(locale_key.to_owned()),
         args: Some(args),
@@ -1669,10 +1674,6 @@ mod tests {
 
         let result = generate(request).unwrap();
 
-        assert_eq!(
-            result.diagnostics[0].message.as_deref(),
-            Some("Bot Equipment generation failed, unable to find equipment filters for: assault")
-        );
         // The `:187` early return skips every slot, so the bot is left with the six roots only.
         assert!(worn(&result).is_empty());
     }
@@ -1680,20 +1681,15 @@ mod tests {
     #[test]
     fn a_pool_tpl_missing_from_the_database_is_dropped_and_redrawn() {
         let mut request = base_request();
+        // The ghost outweighs the real tpl 1000:1, so the pinned seed draws it first; it is then
+        // `shift_remove`d from the pool, leaving the redraw with only `HEADWEAR_TPL` to find.
+        // Worn headwear therefore proves the drop-and-redraw ran, with the diagnostics it logs
+        // now going straight to the pipeline.
         request["template"]["inventory"]["equipment"]["Headwear"] =
-            json!({"headwear_ghost": 1, HEADWEAR_TPL: 1});
+            json!({"headwear_ghost": 1000, HEADWEAR_TPL: 1});
 
         let result = generate(request).unwrap();
 
-        assert!(result.diagnostics.iter().any(
-            |diagnostic| diagnostic.locale_key.as_deref() == Some("bot-missing_item_template")
-        ));
-        assert!(
-            result
-                .diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.message.as_deref() == Some("EquipmentSlot-> Headwear"))
-        );
         assert!(worn(&result).contains(&("Headwear".to_owned(), HEADWEAR_TPL.to_owned())));
     }
 

@@ -11,6 +11,10 @@ use super::models::{
 };
 use super::probability_object_array::{ProbabilityObject, ProbabilityObjectArray};
 use super::{mongo_id, random_util};
+use crate::diag::DiagSink;
+
+/// The `typeof(T).FullName` this file's diagnostics log under.
+const CATEGORY: &str = "SPTarkov.Server.Core.Helpers.Items.ItemHelper";
 
 // Base-class tpls, copied verbatim from `Models/Enums/BaseClasses.cs`. They live here rather than in
 // their own module because `item_helper` is the only place base classes are ever tested against.
@@ -802,7 +806,7 @@ pub fn set_found_in_raid(items_view: &IndexMap<String, ItemView>, items: &mut [I
 // ---------------------------------------------------------------------------
 
 /// The read-only views a generation run consults, plus the two things it mutates as it goes: the
-/// spawn-limit counters and the diagnostics the C# caller replays through its logger.
+/// spawn-limit counters and the [`DiagSink`] its diagnostics emit through.
 ///
 /// Every view is borrowed for `'a`, so copying one out (`let items_view = ctx.items_view;`) releases
 /// the `&mut ctx` and leaves the diagnostics writable — the ported functions lean on that.
@@ -816,7 +820,7 @@ pub struct LootContext<'a> {
     pub seasonal: &'a SeasonalView,
     /// `CounterTrackerHelper`'s state, moved in for the run and handed back in the result.
     pub counter: CounterState,
-    pub diagnostics: Vec<Diagnostic>,
+    pub diagnostics: DiagSink,
 }
 
 /// A fatal failure — the C# equivalent throws (`ItemHelperException`) or dereferences a null and
@@ -837,6 +841,7 @@ impl LootError {
 /// A plain interpolated log line, the shape most of the ported call sites use.
 fn diagnostic(level: &str, message: String) -> Diagnostic {
     Diagnostic {
+        category: CATEGORY,
         level: level.to_owned(),
         locale_key: None,
         args: None,
@@ -1037,7 +1042,7 @@ pub fn fill_magazine_with_random_cartridge(
 /// calls it with a `BotContext`'s fields.
 pub fn fill_magazine_with_cartridge(
     items_view: &IndexMap<String, ItemView>,
-    diagnostics: &mut Vec<Diagnostic>,
+    diagnostics: &mut DiagSink,
     magazine: &mut Vec<Item>,
     mag_tpl: &str,
     cartridge_tpl: &str,
@@ -1052,6 +1057,7 @@ pub fn fill_magazine_with_cartridge(
     let cartridge_details = get_item(items_view, cartridge_tpl);
     if cartridge_details.is_none() {
         diagnostics.push(Diagnostic {
+            category: CATEGORY,
             level: ERROR.to_owned(),
             locale_key: Some("item-invalid_tpl_item".to_owned()),
             args: Some(serde_json::Value::String(cartridge_tpl.to_owned())),
@@ -1159,7 +1165,7 @@ pub fn fill_magazine_with_cartridge(
 /// its own ([`crate::bot::BotContext`]) and calls this from `AddRequiredChildItemsToParent`.
 pub fn add_child_slot_items(
     items_view: &IndexMap<String, ItemView>,
-    diagnostics: &mut Vec<Diagnostic>,
+    diagnostics: &mut DiagSink,
     item_to_add: Vec<Item>,
     item_tpl: &str,
     mod_spawn_chance_dict: Option<&HashMap<String, f64>>,
@@ -2279,7 +2285,7 @@ mod tests {
             config: &CONFIG,
             seasonal: &SEASONAL,
             counter: CounterState::default(),
-            diagnostics: Vec::new(),
+            diagnostics: DiagSink::capture(),
         }
     }
 
@@ -2301,6 +2307,7 @@ mod tests {
 
     fn levels<'a>(ctx: &'a LootContext<'a>) -> Vec<&'a str> {
         ctx.diagnostics
+            .captured()
             .iter()
             .map(|entry| entry.level.as_str())
             .collect()
@@ -2308,6 +2315,7 @@ mod tests {
 
     fn messages(ctx: &LootContext) -> String {
         ctx.diagnostics
+            .captured()
             .iter()
             .filter_map(|entry| entry.message.as_deref())
             .collect::<Vec<_>>()
@@ -2450,7 +2458,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(magazine.len(), 1);
-        assert!(ctx.diagnostics.is_empty());
+        assert!(ctx.diagnostics.captured().is_empty());
     }
 
     #[test]
@@ -2588,11 +2596,11 @@ mod tests {
 
         assert_eq!(levels(&ctx), vec![ERROR, ERROR]);
         assert_eq!(
-            ctx.diagnostics[0].locale_key.as_deref(),
+            ctx.diagnostics.captured()[0].locale_key.as_deref(),
             Some("item-invalid_tpl_item")
         );
-        assert_eq!(ctx.diagnostics[0].args, Some(json!(unknown)));
-        assert!(ctx.diagnostics[0].message.is_none());
+        assert_eq!(ctx.diagnostics.captured()[0].args, Some(json!(unknown)));
+        assert!(ctx.diagnostics.captured()[0].message.is_none());
     }
 
     #[test]
@@ -2678,7 +2686,7 @@ mod tests {
                 .iter()
                 .all(|item| item.template == CARTRIDGE_A_TPL)
         );
-        assert!(ctx.diagnostics.is_empty());
+        assert!(ctx.diagnostics.captured().is_empty());
     }
 
     #[test]

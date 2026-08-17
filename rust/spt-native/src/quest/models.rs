@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::bot::repair_service::MinMax;
 use crate::loot::item_helper::ItemBaseClassCache;
-use crate::loot::models::{Diagnostic, Item, ItemView, PresetView, deserialize_string_or_number};
+use crate::loot::models::{Item, ItemView, PresetView, deserialize_string_or_number};
 
 /// Mod-added members captured on the way in and replayed on the way out.
 type Extra = serde_json::Map<String, serde_json::Value>;
@@ -1002,9 +1002,7 @@ pub struct QuestVaryingRequest {
     pub seed: Option<u64>,
 }
 
-/// One generated quest and the pool it was drawn from, which the generators mutate. Diagnostics
-/// ride the response the way every other export in this crate replays its log lines
-/// (`loot::models::StaticContainersResult`, `ragfair::models::DynamicOffersResult`).
+/// One generated quest and the pool it was drawn from, which the generators mutate.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QuestNativeResponse {
@@ -1012,7 +1010,6 @@ pub struct QuestNativeResponse {
     /// on the same paths.
     pub quest: Option<RepeatableQuest>,
     pub pool: QuestTypePool,
-    pub diagnostics: Vec<Diagnostic>,
 }
 
 /// `Utils/Json/Converters/StringToNumberFactoryConverter.cs` for the `int?` members that carry it.
@@ -1361,11 +1358,9 @@ pub mod tests {
                     .expect("parses"),
             ),
             pool: parsed.quest_type_pool,
-            diagnostics: Vec::new(),
         };
         let written = serde_json::to_value(&response).expect("serializes");
         assert_eq!(written["quest"]["_id"], "68690637c1394a820efc27ca");
         assert_eq!(written["pool"]["types"][0], "Elimination");
-        assert!(written["diagnostics"].as_array().unwrap().is_empty());
     }
 }

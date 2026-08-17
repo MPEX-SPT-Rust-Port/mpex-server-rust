@@ -1,12 +1,15 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicI32, Ordering};
 
 use rayon::prelude::*;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use crate::bot::bot_inventory_generator::{generate_inventory, generate_inventory_batch};
-use crate::log_sink::FileSink;
+use crate::diag::DiagSink;
+use crate::logger::{LogLevel, LogRecord, Logger};
 use crate::loot::item_helper::LootError;
 use crate::loot::location_loot_generator::{generate_dynamic_loot, generate_static_containers};
 use crate::loot::loot_generator::{
@@ -255,7 +258,11 @@ pub unsafe extern "C" fn spt_create_random_loot(
     out_ptr: *mut *mut u8,
     out_len: *mut usize,
 ) -> i32 {
-    unsafe { run_generator(req_ptr, req_len, out_ptr, out_len, create_random_loot) }
+    unsafe {
+        run_generator(req_ptr, req_len, out_ptr, out_len, |request| {
+            create_random_loot(request, &mut DiagSink::Pipeline)
+        })
+    }
 }
 
 /// # Safety
@@ -280,13 +287,9 @@ pub unsafe extern "C" fn spt_get_sealed_weapon_case_loot(
     out_len: *mut usize,
 ) -> i32 {
     unsafe {
-        run_generator(
-            req_ptr,
-            req_len,
-            out_ptr,
-            out_len,
-            get_sealed_weapon_case_loot,
-        )
+        run_generator(req_ptr, req_len, out_ptr, out_len, |request| {
+            get_sealed_weapon_case_loot(request, &mut DiagSink::Pipeline)
+        })
     }
 }
 
@@ -341,7 +344,6 @@ pub unsafe extern "C" fn spt_generate_bot_inventory_batch(
 fn write_framed_offers(result: DynamicOffersResult) -> Vec<u8> {
     let header = rmp_serde::to_vec_named(&DynamicOffersHeader {
         rejected_can_sell_templates: result.rejected_can_sell_templates,
-        diagnostics: result.diagnostics,
     })
     .expect("header serialization cannot fail");
     let payloads: Vec<Vec<u8>> = result
@@ -421,107 +423,240 @@ pub unsafe extern "C" fn spt_generate_repeatable_quest(
     }
 }
 
-/// Opens a log file sink, writing its handle to `out_handle`. On failure the handle is left null
-/// and the `io::Error` text goes to the out-buffer, which the caller releases with `spt_buf_free`.
+/// The process-wide log pipeline and its init ref-count. A plain `Mutex<Option>` rather than a
+/// `OnceLock` so `spt_logger_close` can take it down (and tests can re-initialise afterwards); the
+/// count lives inside the same lock so init and close cannot race each other.
+static LOGGER: Mutex<(usize, Option<Logger>)> = Mutex::new((0, None));
+
+fn logger_guard() -> std::sync::MutexGuard<'static, (usize, Option<Logger>)> {
+    LOGGER
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Native emitters get a small process-local id per thread — the managed thread id never crosses
+/// the boundary for lines Rust originates, but worker threads still stay distinguishable.
+static NEXT_EMIT_TID: AtomicI32 = AtomicI32::new(1);
+thread_local! {
+    static EMIT_TID: i32 = NEXT_EMIT_TID.fetch_add(1, Ordering::Relaxed);
+}
+
+/// The native-side entry to the same pipeline `spt_log_emit` feeds: filters, level gate, format,
+/// sinks. Uninitialised pipeline is a silent no-op, matching the export's contract.
+pub(crate) fn emit_pipeline(category: &str, level: LogLevel, message: &str) {
+    let unix_millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as i64)
+        .unwrap_or(0);
+    let thread = std::thread::current();
+    let record = LogRecord {
+        category,
+        message,
+        exception: "",
+        thread_name: thread.name().unwrap_or(""),
+        level,
+        tid: EMIT_TID.with(|tid| *tid),
+        unix_millis,
+    };
+    if let Some(logger) = logger_guard().1.as_ref() {
+        logger.emit(&record);
+    }
+}
+
+/// Initialises the log pipeline from the raw bytes of `sptLogger.json`. Ref-counted: a call while
+/// already initialised keeps the running pipeline, ignores the new config, bumps the count and
+/// returns `STATUS_OK`. It takes as many `spt_logger_close` calls as there were successful inits to
+/// tear the pipeline down - the prepatcher's nested `Program.Main` disposes its own container while
+/// the outer host keeps logging. On `STATUS_ERROR` the parse-error text is in the out-buffer, the
+/// count is untouched, the pipeline stays uninitialised and every later emit is a silent no-op - a
+/// broken log config must not stop the server.
 ///
 /// # Safety
-/// `dir_ptr`/`pattern_ptr` must point to `dir_len`/`pattern_len` readable bytes of UTF-8;
-/// `out_handle`, `out_ptr` and `out_len` must be valid for writes. The returned handle must be
-/// released exactly once with `spt_log_close`.
+/// `config_ptr` must point to `config_len` readable bytes of UTF-8; `out_ptr` and `out_len` must
+/// be valid for writes. A returned buffer is released with `spt_buf_free`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn spt_log_open(
-    dir_ptr: *const u8,
-    dir_len: usize,
-    pattern_ptr: *const u8,
-    pattern_len: usize,
-    max_file_size_mb: u32,
-    max_rolling_files: u32,
-    out_handle: *mut *mut FileSink,
+pub unsafe extern "C" fn spt_logger_init(
+    config_ptr: *const u8,
+    config_len: usize,
     out_ptr: *mut *mut u8,
     out_len: *mut usize,
 ) -> i32 {
-    if dir_ptr.is_null() || pattern_ptr.is_null() || out_handle.is_null() {
-        return STATUS_BAD_ARGS;
-    }
     if out_ptr.is_null() || out_len.is_null() {
         return STATUS_BAD_ARGS;
     }
 
+    // Zeroed before the `config_ptr` guard: a bad-args return still leaves the caller's out-params
+    // written, never stale.
     unsafe {
-        *out_handle = std::ptr::null_mut();
         *out_ptr = std::ptr::null_mut();
         *out_len = 0;
     }
 
-    let dir_bytes = unsafe { std::slice::from_raw_parts(dir_ptr, dir_len) };
-    let pattern_bytes = unsafe { std::slice::from_raw_parts(pattern_ptr, pattern_len) };
-    let (Ok(dir), Ok(pattern)) = (
-        std::str::from_utf8(dir_bytes),
-        std::str::from_utf8(pattern_bytes),
-    ) else {
+    if config_ptr.is_null() {
         return STATUS_BAD_ARGS;
-    };
+    }
+
+    let bytes = unsafe { std::slice::from_raw_parts(config_ptr, config_len) };
 
     match catch_unwind(AssertUnwindSafe(|| {
-        FileSink::open(dir, pattern, max_file_size_mb, max_rolling_files)
-    })) {
-        Ok(Ok(sink)) => {
-            unsafe { *out_handle = Box::into_raw(Box::new(sink)) };
-            STATUS_OK
+        let mut guard = logger_guard();
+        if guard.1.is_some() {
+            guard.0 += 1;
+            return Ok(());
         }
+        Logger::from_json(bytes).map(|logger| {
+            *guard = (1, Some(logger));
+        })
+    })) {
+        Ok(Ok(())) => STATUS_OK,
         Ok(Err(error)) => {
-            unsafe { write_buffer(error.to_string().into_bytes(), out_ptr, out_len) };
+            unsafe { write_buffer(error.into_bytes(), out_ptr, out_len) };
             STATUS_ERROR
         }
         Err(_) => STATUS_PANIC,
     }
 }
 
-/// Queues one already-formatted line. Never blocks on the filesystem, and drops the line rather
-/// than failing if the writer thread is gone - a lost log line must not fail a request.
+/// Queues one log message through the pipeline: filters, level gate, per-target formatting, and
+/// the console/file writer threads. `STATUS_OK` no-op when the pipeline is uninitialised - init
+/// failure was already reported once, per-line noise would drown it.
 ///
 /// # Safety
-/// `handle` must come from a successful `spt_log_open` and not yet have been closed; `line_ptr`
-/// must point to `line_len` readable bytes, unless `line_len` is 0 - an empty `ReadOnlySpan<byte>`
-/// marshals as a null pointer, and that must not be rejected as a bad argument.
+/// Each pointer must point to its length in readable UTF-8 bytes, unless the length is 0 - an
+/// empty `ReadOnlySpan<byte>` marshals as a null pointer, which must not be rejected.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn spt_log_write(
-    handle: *mut FileSink,
-    line_ptr: *const u8,
-    line_len: usize,
+pub unsafe extern "C" fn spt_log_emit(
+    category_ptr: *const u8,
+    category_len: usize,
+    message_ptr: *const u8,
+    message_len: usize,
+    exception_ptr: *const u8,
+    exception_len: usize,
+    thread_name_ptr: *const u8,
+    thread_name_len: usize,
+    level: i32,
+    tid: i32,
+    unix_millis: i64,
 ) -> i32 {
-    if handle.is_null() || (line_ptr.is_null() && line_len > 0) {
-        return STATUS_BAD_ARGS;
+    fn as_str<'a>(ptr: *const u8, len: usize) -> Option<&'a str> {
+        if len == 0 {
+            return Some("");
+        }
+        if ptr.is_null() {
+            return None;
+        }
+        std::str::from_utf8(unsafe { std::slice::from_raw_parts(ptr, len) }).ok()
     }
 
-    // `slice::from_raw_parts` requires a non-null pointer even for a zero-length slice, which a
-    // null `line_ptr` (an empty `ReadOnlySpan<byte>`) is not.
-    let line = if line_len == 0 {
-        Vec::new()
-    } else {
-        unsafe { std::slice::from_raw_parts(line_ptr, line_len) }.to_vec()
+    let (Some(category), Some(message), Some(exception), Some(thread_name)) = (
+        as_str(category_ptr, category_len),
+        as_str(message_ptr, message_len),
+        as_str(exception_ptr, exception_len),
+        as_str(thread_name_ptr, thread_name_len),
+    ) else {
+        return STATUS_BAD_ARGS;
     };
 
-    match catch_unwind(AssertUnwindSafe(|| unsafe { (*handle).write(line) })) {
+    let Some(level) = LogLevel::from_i32(level) else {
+        return STATUS_BAD_ARGS;
+    };
+
+    let record = LogRecord {
+        category,
+        message,
+        exception,
+        thread_name,
+        level,
+        tid,
+        unix_millis,
+    };
+
+    match catch_unwind(AssertUnwindSafe(|| {
+        if let Some(logger) = logger_guard().1.as_ref() {
+            logger.emit(&record);
+        }
+    })) {
         Ok(()) => STATUS_OK,
         Err(_) => STATUS_PANIC,
     }
 }
 
-/// Flushes the sink and joins its writer thread, consuming the handle.
+/// Drops one `spt_logger_init` reference; on the last one, flushes every sink and joins the writer
+/// threads. Closing more often than init was called is an idempotent `STATUS_OK` no-op, and a later
+/// `spt_logger_init` re-initialises from zero.
 ///
 /// # Safety
-/// `handle` must come from a successful `spt_log_open` and be closed at most once.
+/// No pointer arguments; marked unsafe only for symmetry with the export family.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn spt_log_close(handle: *mut FileSink) -> i32 {
-    if handle.is_null() {
+pub unsafe extern "C" fn spt_logger_close() -> i32 {
+    match catch_unwind(AssertUnwindSafe(|| {
+        // The guard drops at the end of this block: the writer-thread join below must not hold the
+        // lock, or a concurrent emit blocks until the join finishes.
+        let taken = {
+            let mut guard = logger_guard();
+            match guard.0 {
+                0 => None,
+                1 => {
+                    guard.0 = 0;
+                    guard.1.take()
+                }
+                count => {
+                    guard.0 = count - 1;
+                    None
+                }
+            }
+        };
+        if let Some(logger) = taken {
+            logger.close();
+        }
+    })) {
+        Ok(()) => STATUS_OK,
+        Err(_) => STATUS_PANIC,
+    }
+}
+
+/// Stores the resolved server-locale table generator diagnostics render against. Overwrites any
+/// previous table — the prepatch host pushing twice is harmless. On `STATUS_ERROR` the parse-error
+/// text is in the out-buffer and the previously stored table (if any) is untouched; generator
+/// lines then fall back to their locale keys, which must not stop the server.
+///
+/// # Safety
+/// `json_ptr` must point to `json_len` readable bytes of UTF-8; `out_ptr` and `out_len` must be
+/// valid for writes. A returned buffer is released with `spt_buf_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn spt_locales_set(
+    json_ptr: *const u8,
+    json_len: usize,
+    out_ptr: *mut *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    if out_ptr.is_null() || out_len.is_null() {
         return STATUS_BAD_ARGS;
     }
 
-    let sink = unsafe { Box::from_raw(handle) };
+    // Zeroed before the `json_ptr` guard: a bad-args return still leaves the caller's out-params
+    // written, never stale.
+    unsafe {
+        *out_ptr = std::ptr::null_mut();
+        *out_len = 0;
+    }
 
-    match catch_unwind(AssertUnwindSafe(move || sink.close())) {
-        Ok(()) => STATUS_OK,
+    if json_ptr.is_null() {
+        return STATUS_BAD_ARGS;
+    }
+
+    let bytes = unsafe { std::slice::from_raw_parts(json_ptr, json_len) };
+
+    match catch_unwind(AssertUnwindSafe(|| {
+        serde_json::from_slice::<std::collections::HashMap<String, String>>(bytes)
+            .map(crate::diag::set_locales)
+            .map_err(|error| format!("locale table did not parse: {error}"))
+    })) {
+        Ok(Ok(())) => STATUS_OK,
+        Ok(Err(error)) => {
+            unsafe { write_buffer(error.into_bytes(), out_ptr, out_len) };
+            STATUS_ERROR
+        }
         Err(_) => STATUS_PANIC,
     }
 }
@@ -563,7 +698,7 @@ mod tests {
         assert_eq!(spt_native_abi_version(), crate::ABI_VERSION);
         assert_eq!(
             crate::ABI_VERSION,
-            14,
+            16,
             "bump SptNative.ExpectedAbiVersion too"
         );
     }
@@ -605,37 +740,6 @@ mod tests {
     #[test]
     fn freeing_null_is_a_no_op() {
         unsafe { spt_buf_free(std::ptr::null_mut(), 0) };
-    }
-
-    /// An empty `ReadOnlySpan<byte>` marshals as a null pointer with a zero length - that must not
-    /// be rejected as a bad argument, or a single empty formatted line would poison the sink.
-    #[test]
-    fn an_empty_line_with_a_null_pointer_is_not_bad_args() {
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().to_str().unwrap();
-
-        let mut out_handle: *mut FileSink = std::ptr::null_mut();
-        let mut out_ptr: *mut u8 = std::ptr::null_mut();
-        let mut out_len: usize = 0;
-        let status = unsafe {
-            spt_log_open(
-                path.as_ptr(),
-                path.len(),
-                b"spt.log".as_ptr(),
-                7,
-                0,
-                0,
-                &mut out_handle,
-                &mut out_ptr,
-                &mut out_len,
-            )
-        };
-        assert_eq!(status, STATUS_OK);
-
-        let status = unsafe { spt_log_write(out_handle, std::ptr::null(), 0) };
-        assert_eq!(status, STATUS_OK);
-
-        assert_eq!(unsafe { spt_log_close(out_handle) }, STATUS_OK);
     }
 
     /// The container tpl the error-path request below spawns; matches the `itemsView` key in
@@ -788,7 +892,6 @@ mod tests {
         assert_eq!(status, STATUS_OK);
         let result: serde_json::Value = serde_json::from_slice(&out).unwrap();
         assert_eq!(result["items"], serde_json::json!([]));
-        assert_eq!(result["diagnostics"], serde_json::json!([]));
     }
 
     #[test]
@@ -807,10 +910,6 @@ mod tests {
         assert_eq!(status, STATUS_OK);
         let result: serde_json::Value = serde_json::from_slice(&out).unwrap();
         assert_eq!(result["items"], serde_json::json!([]));
-        assert_eq!(
-            result["diagnostics"][0]["localeKey"],
-            "loot-non_item_picked_as_sealed_weapon_crate_reward"
-        );
     }
 
     #[test]
@@ -1391,5 +1490,193 @@ mod tests {
 
         assert_eq!(status, STATUS_BAD_ARGS);
         assert_eq!(out_len, 0, "nothing may be written when out_ptr is null");
+    }
+
+    #[test]
+    fn logger_exports_roundtrip() {
+        /// The messages this test emits; everything else in the file belongs to a generator.
+        const MINE: [&str; 7] = [
+            "hello",
+            "nullspans",
+            "still up",
+            "after teardown",
+            "before init",
+            "Unable to find an item with tpl of: 54009119af1c881c07000029 in Db",
+            "plain line",
+        ];
+
+        let dir = TempDir::new().unwrap();
+        let config = format!(
+            r#"{{ "loggers": [ {{ "type": "File", "logLevel": "Information",
+                "format": "%message%", "filePath": {path:?}, "filePattern": "spt.log",
+                "maxFileSizeMB": 10, "maxRollingFiles": 10, "filters": [] }} ] }}"#,
+            path = dir.path().display().to_string(),
+        );
+
+        let mut out_ptr: *mut u8 = std::ptr::null_mut();
+        let mut out_len: usize = 0;
+
+        // Bad JSON: error status, message in the buffer, pipeline stays uninitialised.
+        let status = unsafe { spt_logger_init(b"nope".as_ptr(), 4, &mut out_ptr, &mut out_len) };
+        assert_eq!(status, STATUS_ERROR);
+        assert!(!out_ptr.is_null());
+        unsafe { spt_buf_free(out_ptr, out_len) };
+
+        // Emit before init is an OK no-op.
+        let status = emit("Cat", "dropped", "", "main");
+        assert_eq!(status, STATUS_OK);
+
+        // Same for a generator diagnostic: a run before the host initialised logging drops its
+        // lines rather than panicking on the empty pipeline.
+        crate::diag::DiagSink::Pipeline.push(crate::loot::models::Diagnostic {
+            category: "SPTarkov.Server.Core.Generators.Loot.LootGenerator",
+            level: crate::loot::models::WARNING.to_owned(),
+            locale_key: None,
+            args: None,
+            message: Some("before init".to_owned()),
+        });
+
+        // Real init; the second init keeps the running pipeline and takes a reference.
+        let mut out_ptr: *mut u8 = std::ptr::null_mut();
+        let mut out_len: usize = 0;
+        let status =
+            unsafe { spt_logger_init(config.as_ptr(), config.len(), &mut out_ptr, &mut out_len) };
+        assert_eq!(status, STATUS_OK);
+        let status =
+            unsafe { spt_logger_init(config.as_ptr(), config.len(), &mut out_ptr, &mut out_len) };
+        assert_eq!(status, STATUS_OK);
+
+        assert_eq!(emit("Cat", "hello", "", "main"), STATUS_OK);
+
+        // An empty `ReadOnlySpan<byte>` marshals as a null pointer with a zero length - the empty
+        // spans must arrive as an empty string, not as a bad argument.
+        let status = unsafe {
+            spt_log_emit(
+                "Cat".as_ptr(),
+                3,
+                "nullspans".as_ptr(),
+                9,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                2, // Information
+                1,
+                0,
+            )
+        };
+        assert_eq!(status, STATUS_OK);
+
+        // An invalid UTF-8 message is rejected.
+        let bad = [0xFFu8, 0xFE];
+        let status = unsafe {
+            spt_log_emit(
+                "Cat".as_ptr(),
+                3,
+                bad.as_ptr(),
+                bad.len(),
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                2, // Information
+                1,
+                0,
+            )
+        };
+        assert_eq!(status, STATUS_BAD_ARGS);
+
+        // A bad level is rejected.
+        let status = unsafe {
+            spt_log_emit(
+                "Cat".as_ptr(),
+                3,
+                "x".as_ptr(),
+                1,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                42,
+                1,
+                0,
+            )
+        };
+        assert_eq!(status, STATUS_BAD_ARGS);
+
+        // Locale table + live diagnostic emission share the same run: bad JSON first.
+        let status = unsafe { spt_locales_set(b"nope".as_ptr(), 4, &mut out_ptr, &mut out_len) };
+        assert_eq!(status, STATUS_ERROR);
+        assert!(!out_ptr.is_null());
+        unsafe { spt_buf_free(out_ptr, out_len) };
+
+        let locales =
+            br#"{ "roundtrip-test-key": "Unable to find an item with tpl of: %s in Db" }"#;
+        let status =
+            unsafe { spt_locales_set(locales.as_ptr(), locales.len(), &mut out_ptr, &mut out_len) };
+        assert_eq!(status, STATUS_OK);
+
+        let mut sink = crate::diag::DiagSink::Pipeline;
+        sink.push(crate::loot::models::Diagnostic {
+            category: "SPTarkov.Server.Core.Helpers.Items.ItemHelper",
+            level: crate::loot::models::ERROR.to_owned(),
+            locale_key: Some("roundtrip-test-key".to_owned()),
+            args: Some(serde_json::json!("54009119af1c881c07000029")),
+            message: None,
+        });
+        sink.push(crate::loot::models::Diagnostic {
+            category: "SPTarkov.Server.Core.Generators.Loot.LootGenerator",
+            level: crate::loot::models::WARNING.to_owned(),
+            locale_key: None,
+            args: None,
+            message: Some("plain line".to_owned()),
+        });
+
+        // The first close drops the second init's reference - the nested `Program.Main` disposing
+        // its container must not take the outer host's logging down with it.
+        assert_eq!(unsafe { spt_logger_close() }, STATUS_OK);
+        assert_eq!(emit("Cat", "still up", "", "main"), STATUS_OK);
+
+        // The matching close flushes and tears down; further closes are no-ops.
+        assert_eq!(unsafe { spt_logger_close() }, STATUS_OK);
+        assert_eq!(unsafe { spt_logger_close() }, STATUS_OK);
+        assert_eq!(emit("Cat", "after teardown", "", "main"), STATUS_OK);
+
+        // Generators in other tests emit their diagnostics through the same process-global
+        // pipeline, so only this test's own lines can be asserted on.
+        let contents = fs::read_to_string(dir.path().join("spt.log")).unwrap();
+        let mine: Vec<&str> = contents
+            .lines()
+            .filter(|line| MINE.contains(line))
+            .collect();
+        // "before init" and "after teardown" never reach the file: no pipeline, nothing written.
+        assert_eq!(
+            mine,
+            [
+                "hello",
+                "nullspans",
+                "Unable to find an item with tpl of: 54009119af1c881c07000029 in Db",
+                "plain line",
+                "still up",
+            ]
+        );
+    }
+
+    fn emit(category: &str, message: &str, exception: &str, tname: &str) -> i32 {
+        unsafe {
+            spt_log_emit(
+                category.as_ptr(),
+                category.len(),
+                message.as_ptr(),
+                message.len(),
+                exception.as_ptr(),
+                exception.len(),
+                tname.as_ptr(),
+                tname.len(),
+                2, // Information
+                1,
+                0,
+            )
+        }
     }
 }

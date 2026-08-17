@@ -53,6 +53,7 @@ use crate::bot::models::{
     ChooseRandomCompatibleModResult, ContainerDetailsWire, ContainerMapDetailsWire,
     EquipmentFilters, RandomisedResourceValues,
 };
+use crate::diag::DiagSink;
 use crate::loot::container_extensions::{container_is_full, find_slot_for_item};
 use crate::loot::item_helper::{LootError, get_item};
 use crate::loot::models::{
@@ -60,6 +61,9 @@ use crate::loot::models::{
     UpdLight, UpdMedKit, UpdRepairable, UpdTogglable, WARNING,
 };
 use crate::loot::random_util::{get_chance_100, get_double, get_percent_of_value, round_to_digits};
+
+/// The `typeof(T).FullName` this file's diagnostics log under.
+const CATEGORY: &str = "SPTarkov.Server.Core.Helpers.Bot.BotGeneratorHelper";
 
 /// `BaseClasses.FLASHLIGHT` (`Models/Enums/BaseClasses.cs:39`).
 pub(crate) const FLASHLIGHT: &str = "55818b084bdc2d5b648b4571";
@@ -396,6 +400,7 @@ pub fn is_item_incompatible_with_current_items(
 
     let Some(item_to_equip) = get_item(items, tpl_to_check) else {
         ctx.diagnostics.push(Diagnostic {
+            category: CATEGORY,
             level: WARNING.to_owned(),
             locale_key: Some("bot-invalid_item_compatibility_check".to_owned()),
             args: Some(serde_json::json!({
@@ -682,6 +687,7 @@ impl ContainerGrids {
             // Get container details from db
             let Some(container_db_details) = get_item(ctx.items, &container.template) else {
                 ctx.diagnostics.push(Diagnostic {
+                    category: CATEGORY,
                     level: WARNING.to_owned(),
                     locale_key: Some("bot-missing_container_with_tpl".to_owned()),
                     args: Some(serde_json::Value::String(container.template.clone())),
@@ -975,7 +981,7 @@ pub(crate) fn get_item_size(
     item_tpl: &str,
     item_id: &str,
     items: &[Item],
-    diagnostics: &mut Vec<Diagnostic>,
+    diagnostics: &mut DiagSink,
 ) -> (i32, i32) {
     // Invalid item
     let Some(item_template) = get_item(items_view, item_tpl) else {
@@ -985,6 +991,7 @@ pub(crate) fn get_item_size(
             "inventory-return_default_size",
         ] {
             diagnostics.push(Diagnostic {
+                category: CATEGORY,
                 level: ERROR.to_owned(),
                 locale_key: Some(locale_key.to_owned()),
                 args: Some(serde_json::Value::String(item_tpl.to_owned())),
@@ -998,6 +1005,7 @@ pub(crate) fn get_item_size(
 
     let Some(root_item) = items.iter().find(|item| item.id == item_id) else {
         diagnostics.push(Diagnostic {
+            category: CATEGORY,
             level: ERROR.to_owned(),
             locale_key: None,
             args: None,
@@ -1053,6 +1061,7 @@ pub(crate) fn get_item_size(
 
                 let Some(template) = get_item(items_view, &child_item.template) else {
                     diagnostics.push(Diagnostic {
+                        category: CATEGORY,
                         level: ERROR.to_owned(),
                         locale_key: Some(
                             "inventory-get_item_size_item_not_found_by_tpl".to_owned(),
@@ -1112,6 +1121,7 @@ fn is_folded(item: &Item) -> bool {
 
 fn debug_diagnostic(message: String) -> Diagnostic {
     Diagnostic {
+        category: CATEGORY,
         level: crate::loot::models::DEBUG.to_owned(),
         locale_key: None,
         args: None,
@@ -1226,7 +1236,7 @@ mod tests {
                 secure_container_ammo_stack_count: 0,
                 mod_pool_slot_order: &crate::bot::NO_MOD_POOL_ORDER,
                 is_night_time,
-                diagnostics: Vec::new(),
+                diagnostics: DiagSink::capture(),
             }
         }
     }
@@ -1781,7 +1791,7 @@ mod tests {
                 ..Default::default()
             }
         );
-        assert!(ctx.diagnostics.is_empty());
+        assert!(ctx.diagnostics.captured().is_empty());
     }
 
     #[test]
@@ -1796,9 +1806,9 @@ mod tests {
             result.reason.as_deref(),
             Some("item: nope does not exist in the database")
         );
-        assert_eq!(ctx.diagnostics.len(), 1);
+        assert_eq!(ctx.diagnostics.captured().len(), 1);
         assert_eq!(
-            ctx.diagnostics[0].locale_key.as_deref(),
+            ctx.diagnostics.captured()[0].locale_key.as_deref(),
             Some("bot-invalid_item_compatibility_check")
         );
     }
@@ -1946,9 +1956,9 @@ mod tests {
             add(&mut grids, &mut ctx, &slots, "i1", "i1x1", &mut inventory).0,
             ItemAddedResult::NoContainers
         );
-        assert_eq!(ctx.diagnostics.len(), 1);
+        assert_eq!(ctx.diagnostics.captured().len(), 1);
         assert!(
-            ctx.diagnostics[0]
+            ctx.diagnostics.captured()[0]
                 .message
                 .as_deref()
                 .unwrap()
@@ -1993,6 +2003,7 @@ mod tests {
         );
         assert_eq!(
             ctx.diagnostics
+                .captured()
                 .iter()
                 .map(|diagnostic| (diagnostic.level.as_str(), diagnostic.locale_key.as_deref()))
                 .collect::<Vec<_>>(),
@@ -2003,7 +2014,7 @@ mod tests {
         );
 
         // Root id absent from the item list is the other 1x1 fallback (`:644`), a plain message.
-        ctx.diagnostics.clear();
+        ctx.diagnostics = DiagSink::capture();
         let mut orphan = vec![inventory_item("i2", "i2x1", None)];
         grids.add_item_with_children_to_equipment_slot(
             &mut ctx,
@@ -2014,10 +2025,10 @@ mod tests {
             &mut inventory,
         );
 
-        assert_eq!(ctx.diagnostics.len(), 1);
-        assert_eq!(ctx.diagnostics[0].level, ERROR);
+        assert_eq!(ctx.diagnostics.captured().len(), 1);
+        assert_eq!(ctx.diagnostics.captured()[0].level, ERROR);
         assert!(
-            ctx.diagnostics[0]
+            ctx.diagnostics.captured()[0]
                 .message
                 .as_deref()
                 .unwrap()

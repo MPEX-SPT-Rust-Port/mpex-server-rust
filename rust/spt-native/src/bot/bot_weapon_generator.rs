@@ -71,6 +71,9 @@ use crate::loot::models::{DEBUG, Diagnostic, ERROR, Item, ItemView, Upd, WARNING
 use crate::loot::mongo_id;
 use crate::loot::random_util::{get_chance_100, get_weighted_value};
 
+/// The `typeof(T).FullName` this file's diagnostics log under.
+const CATEGORY: &str = "SPTarkov.Server.Core.Generators.Bot.BotWeaponGenerator";
+
 /// `BotWeaponGenerator.ModMagazineSlotId` (`:44`).
 const MOD_MAGAZINE_SLOT_ID: &str = "mod_magazine";
 
@@ -1192,6 +1195,7 @@ fn fill_camoras_with_ammo(weapon_mods: &mut [Item], magazine_id: &str, ammo_tpl:
 
 fn plain(level: &str, message: String) -> Diagnostic {
     Diagnostic {
+        category: CATEGORY,
         level: level.to_owned(),
         locale_key: None,
         args: None,
@@ -1201,6 +1205,7 @@ fn plain(level: &str, message: String) -> Diagnostic {
 
 fn localised(level: &str, locale_key: &str, args: serde_json::Value) -> Diagnostic {
     Diagnostic {
+        category: CATEGORY,
         level: level.to_owned(),
         locale_key: Some(locale_key.to_owned()),
         args: Some(args),
@@ -1213,6 +1218,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::diag::DiagSink;
 
     use crate::bot::durability_limits_helper::BotDurability;
     use crate::bot::models::{EquipmentFilters, RandomisedResourceDetails};
@@ -1381,7 +1387,7 @@ mod tests {
                 secure_container_ammo_stack_count: self.secure_container_ammo_stack_count,
                 mod_pool_slot_order: &crate::bot::NO_MOD_POOL_ORDER,
                 is_night_time: false,
-                diagnostics: Vec::new(),
+                diagnostics: DiagSink::capture(),
             }
         }
     }
@@ -1515,6 +1521,7 @@ mod tests {
 
         assert_eq!(
             ctx.diagnostics
+                .captured()
                 .iter()
                 .filter_map(|diagnostic| diagnostic.locale_key.as_deref())
                 .collect::<Vec<_>>(),
@@ -1555,7 +1562,7 @@ mod tests {
                 ),
             ]
         );
-        assert!(ctx.diagnostics.is_empty());
+        assert!(ctx.diagnostics.captured().is_empty());
     }
 
     #[test]
@@ -1576,11 +1583,11 @@ mod tests {
 
         assert!(result.is_none());
         assert_eq!(
-            ctx.diagnostics[0].locale_key.as_deref(),
+            ctx.diagnostics.captured()[0].locale_key.as_deref(),
             Some("bot-missing_item_template")
         );
         assert_eq!(
-            ctx.diagnostics[1].message.as_deref(),
+            ctx.diagnostics.captured()[1].message.as_deref(),
             Some("WeaponSlot -> Holster")
         );
     }
@@ -1678,7 +1685,7 @@ mod tests {
             &[satisfied.clone(), magazine.clone(), starved.clone()],
             "assault"
         ));
-        assert!(ctx.diagnostics.is_empty());
+        assert!(ctx.diagnostics.captured().is_empty());
 
         // Starved first: the same list in the other order fails.
         assert!(!is_weapon_valid(
@@ -1687,7 +1694,7 @@ mod tests {
             "assault"
         ));
         assert_eq!(
-            ctx.diagnostics[0].locale_key.as_deref(),
+            ctx.diagnostics.captured()[0].locale_key.as_deref(),
             Some("bot-weapons_required_slot_missing_item")
         );
     }

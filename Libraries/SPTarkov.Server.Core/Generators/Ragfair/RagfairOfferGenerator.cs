@@ -22,7 +22,6 @@ using SPTarkov.Server.Core.Models.Spt.Mod;
 using SPTarkov.Server.Core.Models.Spt.Ragfair;
 using SPTarkov.Server.Core.Models.Spt.Tables;
 using SPTarkov.Server.Core.Native;
-using SPTarkov.Server.Core.Native.Loot;
 using SPTarkov.Server.Core.Native.Ragfair;
 using SPTarkov.Server.Core.Servers;
 using SPTarkov.Server.Core.Services;
@@ -492,8 +491,6 @@ public class RagfairOfferGenerator(
         }
 
         LastSentSliceStamp = eligible ? stamp : null;
-
-        PayloadProjection.ReplayDiagnostics(result.Diagnostics, logger, localisationService);
 
         // The native side decided these templates are unsellable and, unlike everything else it
         // touched, that decision belongs to the live database (RagfairServerHelper.cs:61). A write

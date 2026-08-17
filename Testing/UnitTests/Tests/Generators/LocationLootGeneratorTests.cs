@@ -13,8 +13,8 @@ using SPTarkov.Server.Core.Utils.Json;
 namespace UnitTests.Tests.Generators;
 
 /// <summary>
-/// Smoke test for the whole native loot path: the payload builder reading the live database, the two
-/// generation calls, and the diagnostic replay through <c>ServerLocalisationService</c>.
+/// Smoke test for the whole native loot path: the payload builder reading the live database and the two
+/// generation calls.
 /// <see cref="LocationLootGeneratorNativeTests"/> pins the wire contract on synthetic data; this
 /// fixture is what catches a projection that is wrong only for real game data.
 /// </summary>

@@ -784,13 +784,15 @@ pub const ERROR: &str = "error";
 /// See [`DEBUG`].
 pub const SUCCESS: &str = "success";
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug)]
 pub struct Diagnostic {
+    /// The `typeof(T).FullName` category this line logs under — the C# class the emitting Rust
+    /// file ports. Set by each file's helper from its `CATEGORY` const.
+    pub category: &'static str,
     /// One of [`DEBUG`], [`WARNING`], [`ERROR`], [`SUCCESS`].
     pub level: String,
     pub locale_key: Option<String>,
-    /// Object; C# replays it via `ServerLocalisationService`.
+    /// Object; rendered by `diag::localise`.
     pub args: Option<serde_json::Value>,
     /// Plain interpolated messages.
     pub message: Option<String>,
@@ -803,7 +805,6 @@ pub struct StaticContainersResult {
     pub tracked_counts: BTreeMap<String, i32>,
     pub static_loot_item_count: i32,
     pub static_container_count: i32,
-    pub diagnostics: Vec<Diagnostic>,
 }
 
 #[derive(Debug, Serialize)]
@@ -811,7 +812,6 @@ pub struct StaticContainersResult {
 pub struct DynamicLootResult {
     pub spawnpoints: Vec<SpawnpointTemplate>,
     pub tracked_counts: BTreeMap<String, i32>,
-    pub diagnostics: Vec<Diagnostic>,
 }
 
 // ---------------------------------------------------------------------------
@@ -972,7 +972,6 @@ pub struct RandomLootContainerRequest {
 #[serde(rename_all = "camelCase")]
 pub struct RewardLootResult {
     pub items: Vec<Vec<Item>>,
-    pub diagnostics: Vec<Diagnostic>,
 }
 
 #[cfg(test)]
@@ -1393,21 +1392,14 @@ mod tests {
                 template: "bbbbbbbbbbbbbbbbbbbbbbbb".to_owned(),
                 ..Default::default()
             }]],
-            diagnostics: vec![Diagnostic {
-                level: DEBUG.to_owned(),
-                locale_key: None,
-                args: None,
-                message: Some("no items found".to_owned()),
-            }],
         })
         .unwrap();
 
         assert_eq!(
             out.as_object().unwrap().keys().collect::<Vec<_>>(),
-            vec!["items", "diagnostics"]
+            vec!["items"]
         );
         assert_eq!(out["items"][0][0]["_id"], "aaaaaaaaaaaaaaaaaaaaaaaa");
-        assert_eq!(out["diagnostics"][0]["message"], "no items found");
     }
 
     #[test]
@@ -1417,19 +1409,11 @@ mod tests {
             tracked_counts: BTreeMap::from([("tpl".to_owned(), 1)]),
             static_loot_item_count: 4,
             static_container_count: 2,
-            diagnostics: vec![Diagnostic {
-                level: "warning".to_owned(),
-                locale_key: Some("loot-missing_item".to_owned()),
-                args: Some(serde_json::json!({"tpl":"x"})),
-                message: None,
-            }],
         })
         .unwrap();
 
         assert_eq!(out["staticLootItemCount"], 4);
         assert_eq!(out["staticContainerCount"], 2);
         assert_eq!(out["trackedCounts"]["tpl"], 1);
-        assert_eq!(out["diagnostics"][0]["localeKey"], "loot-missing_item");
-        assert_eq!(out["diagnostics"][0]["args"]["tpl"], "x");
     }
 }

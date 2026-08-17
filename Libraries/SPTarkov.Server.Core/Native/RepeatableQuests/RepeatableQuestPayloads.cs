@@ -16,7 +16,7 @@ namespace SPTarkov.Server.Core.Native.RepeatableQuests;
 /// Config and database models are the existing records from <c>Models</c>, whose
 /// <c>JsonPropertyName</c>s are what the Rust wire names were pinned to, so their shape stays
 /// authoritative by construction. The game-data views (<see cref="ItemView"/>,
-/// <see cref="PresetView"/>, <see cref="Diagnostic"/>) are the loot port's, and the quest slice
+/// <see cref="PresetView"/>) are the loot port's, and the quest slice
 /// deliberately reuses them so one C# projection serves both families.
 ///
 /// Members Rust declares as <c>Option&lt;T&gt;</c> are nullable, everything else is
@@ -228,7 +228,4 @@ internal record RepeatableQuestResult
 
     [JsonPropertyName("pool")]
     public required QuestTypePool Pool { get; set; }
-
-    [JsonPropertyName("diagnostics")]
-    public required List<Diagnostic> Diagnostics { get; set; }
 }

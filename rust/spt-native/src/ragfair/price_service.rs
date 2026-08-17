@@ -25,11 +25,25 @@
 //!   and `IsPresetBaseClass`'s `Encyclopedia!.Value`) surface as [`LootError`], so everything
 //!   downstream of them returns `Result` where the C# returns a bare `double`.
 
+use super::RagfairContext;
 use super::models::{MinMaxDoubleWire, UnreasonableModPricesWire};
-use super::{RagfairContext, plain};
 use crate::loot::item_helper::{BUILT_IN_INSERTS, LootError, WEAPON, get_item_quality_modifier};
-use crate::loot::models::{DEBUG, Item, PresetView};
+use crate::loot::models::{DEBUG, Diagnostic, Item, PresetView};
 use crate::loot::random_util::{get_biased_random_number, round_half_even};
+
+/// The `typeof(T).FullName` this file's diagnostics log under.
+const CATEGORY: &str = "SPTarkov.Server.Core.Services.Ragfair.RagfairPriceService";
+
+/// A plain interpolated log line the pipeline renders under this file's category.
+fn plain(level: &str, message: String) -> Diagnostic {
+    Diagnostic {
+        category: CATEGORY,
+        level: level.to_owned(),
+        locale_key: None,
+        args: None,
+        message: Some(message),
+    }
+}
 
 /// `Models/Enums/Money.cs` — the four currency tpls, kept here because this is the module that
 /// already converts between them.
@@ -490,6 +504,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::diag::DiagSink;
     use crate::loot::item_helper::{
         AMMO_BOX, BUILT_IN_INSERTS, ItemBaseClassCache, LootError, MOD, MONEY, WEAPON,
     };
@@ -635,7 +650,7 @@ mod tests {
                 pmc_names_bear: &NO_NAMES,
                 timestamp: 1_700_000_000,
                 seasonal_event_active: false,
-                diagnostics: Vec::new(),
+                diagnostics: DiagSink::capture(),
             }
         }
     }
@@ -746,7 +761,7 @@ mod tests {
         let ctx = fixture.ctx();
 
         assert_eq!(get_flea_price_for_item(&ctx, PLAIN_TPL), 25_000.0);
-        assert!(ctx.diagnostics.is_empty());
+        assert!(ctx.diagnostics.captured().is_empty());
     }
 
     #[test]
@@ -755,7 +770,7 @@ mod tests {
         let ctx = fixture.ctx();
 
         assert_eq!(get_flea_price_for_item(&ctx, HANDBOOK_ONLY_TPL), 7_000.0);
-        assert!(ctx.diagnostics.is_empty());
+        assert!(ctx.diagnostics.captured().is_empty());
     }
 
     #[test]
@@ -766,7 +781,7 @@ mod tests {
         // The `0 -> 1` floor is applied *after* the warning check, and a tpl the handbook knows
         // about at a price of zero is not a missing price.
         assert_eq!(get_flea_price_for_item(&ctx, ZERO_PRICE_TPL), 1.0);
-        assert!(ctx.diagnostics.is_empty());
+        assert!(ctx.diagnostics.captured().is_empty());
     }
 
     #[test]
@@ -778,7 +793,7 @@ mod tests {
         // this case is unreachable there (its coalesce is non-nullable), so it is unreachable here
         // too: the handbook miss is `0`, and the `0 -> 1` floor takes it from there.
         assert_eq!(get_flea_price_for_item(&ctx, AMMO_BOX_TPL), 1.0);
-        assert!(ctx.diagnostics.is_empty());
+        assert!(ctx.diagnostics.captured().is_empty());
     }
 
     #[test]
@@ -1231,8 +1246,8 @@ mod tests {
 
         assert!(!preset.is_default);
         assert_eq!(preset.preset.id.as_deref(), Some(NON_DEFAULT_PRESET_ID));
-        assert_eq!(ctx.diagnostics.len(), 1);
-        assert_eq!(ctx.diagnostics[0].level, "debug");
+        assert_eq!(ctx.diagnostics.captured().len(), 1);
+        assert_eq!(ctx.diagnostics.captured()[0].level, "debug");
     }
 
     #[test]

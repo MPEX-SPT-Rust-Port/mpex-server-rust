@@ -1,4 +1,5 @@
-//! The file sink behind `FileLogHandler`.
+//! The file sink of the native log pipeline: one of these backs every `File` entry of
+//! `sptLogger.json` (C#'s `FileSptLoggerReference`).
 //!
 //! One background writer thread per configured log file, owning the file handle, the rotation and
 //! the archive cap. On the C# side those were split between ZLogger's rolling provider, which chose
@@ -73,8 +74,8 @@ impl FileSink {
     }
 }
 
-/// `spt_log_write` shares one sink across every logging thread through a raw pointer, which opts
-/// out of the checking that would otherwise catch a field going non-`Sync`. Assert it here.
+/// The pipeline shares one sink across every logging thread, so a field going non-`Sync` would
+/// break `spt_log_emit`. Assert it here.
 const _: fn() = || {
     fn assert_sync<T: Sync>() {}
     assert_sync::<FileSink>();
@@ -203,10 +204,11 @@ impl Writer {
 
 /// Paths this process has already started a fresh file for.
 ///
-/// A prepatcher mod hands `SPTarkov.Common` a second copy in its own `AssemblyLoadContext`, so one
-/// server start builds two `FileLogHandler`s aimed at the same file. This library is loaded once
-/// per process however many managed copies exist, which makes it the only place that can tell that
-/// second open apart from a genuine restart.
+/// One process can open the same file twice without having restarted: two `loggers` entries can
+/// name the same path, and a close-then-reinit within one process (the prepatcher's nested
+/// `Program.Main`, a second `AssemblyLoadContext` copy of `SPTarkov.Common`) reopens every target.
+/// This library is loaded once per process however many managed copies exist, which makes it the
+/// only place that can tell those opens apart from a genuine restart.
 fn freshened_paths() -> &'static Mutex<HashSet<PathBuf>> {
     static FRESHENED: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
 
@@ -337,7 +339,7 @@ fn format_date(days: i64) -> String {
 
 /// Howard Hinnant's `civil_from_days`: days since the Unix epoch to a proleptic Gregorian date.
 /// Only the date is needed, so this is cheaper than taking on a calendar crate.
-fn civil_from_days(days: i64) -> (i64, u32, u32) {
+pub(crate) fn civil_from_days(days: i64) -> (i64, u32, u32) {
     let shifted = days + 719_468;
     let era = shifted.div_euclid(146_097);
     let day_of_era = shifted.rem_euclid(146_097);

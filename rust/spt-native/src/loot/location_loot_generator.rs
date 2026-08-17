@@ -23,6 +23,10 @@ use super::models::{
 };
 use super::probability_object_array::{ProbabilityObject, ProbabilityObjectArray};
 use super::{mongo_id, random_util};
+use crate::diag::DiagSink;
+
+/// The `typeof(T).FullName` this file's diagnostics log under.
+const CATEGORY: &str = "SPTarkov.Server.Core.Generators.Loot.LocationLootGenerator";
 
 /// `LocationLootGenerator.cs:1269-1276`. C# types `ChosenCount` as `double?`; the empty group is
 /// seeded with -1 and every other value comes out of `GetInt`.
@@ -47,6 +51,7 @@ struct ContainerItem {
 /// A plain interpolated log line.
 fn diagnostic(level: &str, message: String) -> Diagnostic {
     Diagnostic {
+        category: CATEGORY,
         level: level.to_owned(),
         locale_key: None,
         args: None,
@@ -58,6 +63,7 @@ fn diagnostic(level: &str, message: String) -> Diagnostic {
 /// (a bare value for the `%s` keys, an object whose members match the C# anonymous type otherwise).
 fn localised(level: &str, locale_key: &str, args: serde_json::Value) -> Diagnostic {
     Diagnostic {
+        category: CATEGORY,
         level: level.to_owned(),
         locale_key: Some(locale_key.to_owned()),
         args: Some(args),
@@ -99,7 +105,7 @@ fn loot_context(common: &LootCommon, counter: CounterState) -> LootContext<'_> {
         config: &common.config,
         seasonal: &common.seasonal,
         counter,
-        diagnostics: Vec::new(),
+        diagnostics: DiagSink::Pipeline,
     }
 }
 
@@ -115,7 +121,6 @@ fn into_result(
         tracked_counts: ctx.counter.tracked_counts,
         static_loot_item_count,
         static_container_count,
-        diagnostics: ctx.diagnostics,
     }
 }
 
@@ -1155,7 +1160,6 @@ pub fn generate_dynamic_loot(
     Ok(DynamicLootResult {
         spawnpoints: loot,
         tracked_counts: ctx.counter.tracked_counts,
-        diagnostics: ctx.diagnostics,
     })
 }
 
@@ -1989,6 +1993,7 @@ mod tests {
     fn adding_loot_leaves_the_request_container_untouched() {
         let request = fixture_request();
         let mut ctx = loot_context(&request.common, CounterState::default());
+        ctx.diagnostics = DiagSink::capture();
         let container = &request.static_containers.as_ref().unwrap()[0];
         let before = serde_json::to_value(container).unwrap();
 
@@ -2022,6 +2027,7 @@ mod tests {
     fn weighted_count_errors_when_the_container_is_absent_from_the_loot_dist() {
         let request = fixture_request();
         let mut ctx = loot_context(&request.common, CounterState::default());
+        ctx.diagnostics = DiagSink::capture();
 
         assert!(
             get_weighted_count_of_container_items(
@@ -2038,6 +2044,7 @@ mod tests {
     fn containers_by_probability_returns_the_whole_pool_when_it_is_too_small() {
         let request = fixture_request();
         let mut ctx = loot_context(&request.common, CounterState::default());
+        ctx.diagnostics = DiagSink::capture();
         let container_data = ContainerGroupCount {
             container_ids_with_probability: IndexMap::from([("r1".to_owned(), 0.5)]),
             chosen_count: 3.0,
@@ -2058,6 +2065,7 @@ mod tests {
         // index each one takes in the probability array on the drawing path.
         let request = fixture_request();
         let mut ctx = loot_context(&request.common, CounterState::default());
+        ctx.diagnostics = DiagSink::capture();
         let container_data = ContainerGroupCount {
             container_ids_with_probability: IndexMap::from([
                 ("r3".to_owned(), 0.5),
@@ -2140,10 +2148,6 @@ mod tests {
 
         assert_eq!(spawnpoint_ids(&result), vec!["w1", "c1", "c2"]);
         assert_eq!(result.static_container_count, 2);
-        assert!(result.diagnostics.iter().any(|entry| {
-            entry.level == WARNING
-                && entry.locale_key.as_deref() == Some("location-unable_to_generate_static_loot")
-        }));
     }
 
     #[test]
@@ -2199,6 +2203,7 @@ mod tests {
         }))
         .unwrap();
         let mut ctx = loot_context(&request.common, CounterState::default());
+        ctx.diagnostics = DiagSink::capture();
 
         let weapon = create_static_loot_item(&mut ctx, WEAPON_TPL, Some("container"))
             .unwrap()
@@ -2228,9 +2233,10 @@ mod tests {
         request.common.default_presets =
             serde_json::from_value(json!({ WEAPON_TPL: { "items": [] } })).unwrap();
         let mut ctx = loot_context(&request.common, CounterState::default());
+        ctx.diagnostics = DiagSink::capture();
 
         assert!(create_static_loot_item(&mut ctx, WEAPON_TPL, None).is_err());
-        assert!(ctx.diagnostics.iter().any(|entry| {
+        assert!(ctx.diagnostics.captured().iter().any(|entry| {
             entry.level == ERROR && entry.locale_key.as_deref() == Some("location-preset_not_found")
         }));
     }
@@ -2244,6 +2250,7 @@ mod tests {
             .unwrap()
             .item_count_distribution = None;
         let mut ctx = loot_context(&request.common, CounterState::default());
+        ctx.diagnostics = DiagSink::capture();
 
         let count = get_weighted_count_of_container_items(
             &mut ctx,
@@ -2254,7 +2261,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(count, 0);
-        let warning = &ctx.diagnostics[0];
+        let warning = &ctx.diagnostics.captured()[0];
         assert_eq!(warning.level, WARNING);
         assert_eq!(
             warning.locale_key.as_deref(),
@@ -2270,6 +2277,7 @@ mod tests {
     fn static_loot_items_are_hydrated_by_base_class() {
         let request = fixture_request();
         let mut ctx = loot_context(&request.common, CounterState::default());
+        ctx.diagnostics = DiagSink::capture();
 
         let money = create_static_loot_item(&mut ctx, MONEY_TPL, Some("parent"))
             .unwrap()
@@ -2294,7 +2302,7 @@ mod tests {
             .unwrap();
         assert_eq!(weapon.items.len(), 1);
         assert_eq!((weapon.width, weapon.height), (Some(2), Some(1)));
-        assert!(ctx.diagnostics.iter().any(|entry| {
+        assert!(ctx.diagnostics.captured().iter().any(|entry| {
             entry.level == DEBUG
                 && entry.message.as_deref()
                     == Some(&format!(
@@ -2308,6 +2316,7 @@ mod tests {
         // No preset: the base item made by the caller keeps its parent and gains its slot mods.
         let request = fixture_request();
         let mut ctx = loot_context(&request.common, CounterState::default());
+        ctx.diagnostics = DiagSink::capture();
 
         let armor = create_static_loot_item(&mut ctx, ARMOR_TPL, Some("container"))
             .unwrap()
@@ -2328,6 +2337,7 @@ mod tests {
         }))
         .unwrap();
         let mut ctx = loot_context(&request.common, CounterState::default());
+        ctx.diagnostics = DiagSink::capture();
 
         let armor = create_static_loot_item(&mut ctx, ARMOR_TPL, Some("container"))
             .unwrap()
@@ -2512,14 +2522,6 @@ mod tests {
             // 2 forced + 4 guaranteed (5 less the deduped one) + 1 of the 2 weighted points.
             assert_eq!(result.spawnpoints.len(), 7, "{ids:?}");
         }
-
-        let result = generate_dynamic_loot(fixture_dynamic_request()).unwrap();
-        assert!(result.diagnostics.iter().any(|entry| {
-            entry.level == DEBUG
-                && entry.message.as_deref().is_some_and(|message| {
-                    message.starts_with("Attempted to add a forced loot location with Id: forced_1")
-                })
-        }));
     }
 
     #[test]
@@ -2548,12 +2550,6 @@ mod tests {
             assert!(!ids.contains(&"Christmas_1"), "{ids:?}");
             assert!(!ids.contains(&"blacklisted_1"), "{ids:?}");
         }
-
-        let result = generate_dynamic_loot(fixture_dynamic_request()).unwrap();
-        assert!(result.diagnostics.iter().any(|entry| {
-            entry.level == DEBUG
-                && entry.message.as_deref() == Some("Ignoring loose loot location: blacklisted_1")
-        }));
 
         // The christmas point comes back for the event, the blacklisted one never does.
         let mut request = fixture_dynamic_request();
@@ -2709,6 +2705,7 @@ mod tests {
             .lootable_item_blacklist
             .insert(AMMO_BOX_TPL.to_owned());
         let mut ctx = loot_context(&request.common, CounterState::default());
+        ctx.diagnostics = DiagSink::capture();
 
         let pool = get_possible_loot_items_for_container(
             &mut ctx,
