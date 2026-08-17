@@ -1539,9 +1539,10 @@ fn create_weapon_root_and_children(
             json!({ "tpl": chosen_tpl, "parentId": parent_id }),
         ));
 
-        return Err(LootError::new(
-            "A critical error occurred when generating loot, see server log for details",
-        ));
+        return Err(LootError::new(crate::diag::localise(
+            "location-critical_error_see_log",
+            None,
+        )));
     };
 
     if !children.is_empty() {
@@ -2238,6 +2239,29 @@ mod tests {
         assert!(create_static_loot_item(&mut ctx, WEAPON_TPL, None).is_err());
         assert!(ctx.diagnostics.captured().iter().any(|entry| {
             entry.level == ERROR && entry.locale_key.as_deref() == Some("location-preset_not_found")
+        }));
+    }
+
+    #[test]
+    fn a_missing_weapon_root_carries_the_critical_error_locale_key() {
+        let request = fixture_request();
+        let mut ctx = loot_context(&request.common, CounterState::default());
+        ctx.diagnostics = DiagSink::capture();
+
+        // The arm guards an empty item list, which `create_static_loot_item` never produces —
+        // reach it directly, as C#'s guard would be reached.
+        let error =
+            match create_weapon_root_and_children(&mut ctx, WEAPON_TPL, None, &mut Vec::new()) {
+                Err(error) => error,
+                Ok(_) => panic!("expected the missing-root failure"),
+            };
+
+        // `localise` falls back to the key when the process-global table lacks it, and no test
+        // installs this key — deterministic under any interleaving with `logger_exports_roundtrip`.
+        assert_eq!(error.message, "location-critical_error_see_log");
+        assert!(ctx.diagnostics.captured().iter().any(|entry| {
+            entry.level == ERROR
+                && entry.locale_key.as_deref() == Some("location-missing_root_item")
         }));
     }
 
