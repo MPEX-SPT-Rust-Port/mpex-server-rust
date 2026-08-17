@@ -1,4 +1,5 @@
-//! The file sink behind `FileLogHandler`.
+//! The file sink of the native log pipeline: one of these backs every `File` entry of
+//! `sptLogger.json` (C#'s `FileSptLoggerReference`).
 //!
 //! One background writer thread per configured log file, owning the file handle, the rotation and
 //! the archive cap. On the C# side those were split between ZLogger's rolling provider, which chose
@@ -203,10 +204,11 @@ impl Writer {
 
 /// Paths this process has already started a fresh file for.
 ///
-/// A prepatcher mod hands `SPTarkov.Common` a second copy in its own `AssemblyLoadContext`, so one
-/// server start builds two `FileLogHandler`s aimed at the same file. This library is loaded once
-/// per process however many managed copies exist, which makes it the only place that can tell that
-/// second open apart from a genuine restart.
+/// One process can open the same file twice without having restarted: two `loggers` entries can
+/// name the same path, and a close-then-reinit within one process (the prepatcher's nested
+/// `Program.Main`, a second `AssemblyLoadContext` copy of `SPTarkov.Common`) reopens every target.
+/// This library is loaded once per process however many managed copies exist, which makes it the
+/// only place that can tell those opens apart from a genuine restart.
 fn freshened_paths() -> &'static Mutex<HashSet<PathBuf>> {
     static FRESHENED: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
 

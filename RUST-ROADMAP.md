@@ -108,6 +108,27 @@ seeded-RNG parity at the primitive level (xoshiro256\*\*, twin known-answer test
   call with no managed stack trace. Force legacy to get it back.
 - **Native bot logs collapse to one category** — all four generators log through
   `ISptLogger<BotInventoryGenerator>`.
+- **Console output is now asynchronous and drops on a full queue** — the native pipeline hands each
+  line to a writer thread behind an 8192-line bounded channel (file sinks always did; the console
+  does now too). A hard crash can lose whatever is still queued, and a burst deeper than the queue
+  drops lines rather than blocking the caller.
+- **Filter regexes are regex-lite** — no lookarounds, no backreferences, ASCII-only character
+  classes, against .NET's fuller `Regex`. A pattern that will not compile is reported to stderr once
+  at startup and then never matches.
+- **A native logging failure has no C# fallback** — the managed handlers are gone, so a failed
+  `spt_logger_init` means one stderr notice and no logging at all for the run. A config the C#
+  parser would have tolerated but Rust rejects fails the same way; the known cases (a UTF-8 BOM, and
+  case-insensitive `logLevel`/filter `type`/`matchingType` values) are handled, the `type` tag of a
+  `loggers` entry stays case-sensitive on both sides.
+- **The pipeline snapshots `sptLogger.json` at startup** — mutating
+  `SptLoggerConfiguration.Loggers` at runtime (a mod adding or retargeting a logger) no longer
+  changes what is written, while `IsLogEnabled` still reads the mutated list, so the two can
+  disagree. A re-init export is future work.
+- **Excluded categories still pay the per-line marshaling cost** — filtering moved native-side, so
+  every line is encoded, crosses the FFI boundary and takes the pipeline mutex before it is dropped.
+- **Line terminators are always `\n` and dates always Gregorian, culture-independent** — the C#
+  handlers used `Environment.NewLine` and `CurrentCulture`, so a Windows log file loses its `\r` and
+  a non-Gregorian locale no longer shows in `%date%`.
 
 ## Guidelines
 
