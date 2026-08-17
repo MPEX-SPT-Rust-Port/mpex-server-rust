@@ -684,6 +684,16 @@ mod tests {
         serde_json::from_value(pick_request_json(money_chance, ammo_chance)).unwrap()
     }
 
+    /// [`pick_request`] with both caps lifted. `allowMultipleAmmoRewardsPerRarity` ships **true**
+    /// (`SPT_Data/configs/scavcase.json:111`), so this is the production path for ammo.
+    fn pick_request_allowing_multiple(money_chance: i32, ammo_chance: i32) -> ScavCaseRequest {
+        let mut json = pick_request_json(money_chance, ammo_chance);
+        json["config"]["allowMultipleMoneyRewardsPerRarity"] = json!(true);
+        json["config"]["allowMultipleAmmoRewardsPerRarity"] = json!(true);
+
+        serde_json::from_value(json).unwrap()
+    }
+
     /// The common-rarity pool the C# hands `PickRandomRewards`: the reward cache, price-filtered.
     fn common_pool(req: &ScavCaseRequest) -> Vec<(&str, &ItemView)> {
         let (common, _, _) = get_reward_counts_and_prices(&req.scav_recipes[0], &req.config);
@@ -691,12 +701,12 @@ mod tests {
         get_filtered_items_by_price(&build_reward_pool(req), &common, &req.static_prices)
     }
 
-    /// Exactly one reward, over a pool the test hands in ready-filtered — `GetInt(1, 1)` returns
+    /// A fixed reward count, over a pool the test hands in ready-filtered — `GetInt(n, n)` returns
     /// without drawing, so the stream starts on the first chance roll.
-    fn one_reward() -> RewardCountAndPriceDetails {
+    fn rewards(count: f64) -> RewardCountAndPriceDetails {
         RewardCountAndPriceDetails {
-            min_count: 1.0,
-            max_count: 1.0,
+            min_count: count,
+            max_count: count,
             min_price_rub: 0.0,
             max_price_rub: 0.0,
         }
@@ -815,7 +825,7 @@ mod tests {
 
         let _guard = TestSeedGuard::install(SEED);
         let picked =
-            pick_random_rewards(&req, &pool, &one_reward(), "common", &mut diagnostics).unwrap();
+            pick_random_rewards(&req, &pool, &rewards(1.0), "common", &mut diagnostics).unwrap();
 
         assert_eq!(tpls(&picked), vec![DOLLARS]);
     }
@@ -829,7 +839,7 @@ mod tests {
 
         let _guard = TestSeedGuard::install(SEED);
         let picked =
-            pick_random_rewards(&req, &[], &one_reward(), "common", &mut diagnostics).unwrap();
+            pick_random_rewards(&req, &[], &rewards(1.0), "common", &mut diagnostics).unwrap();
 
         // 5000 rub is outside the 0-80 range, so `AMMO_DEAR` cannot come out. What survives is
         // `[AMMO_MID, AMMO_CHEAP]` in `itemsView` order and the draw takes index 1 — `AMMO_CHEAP`
@@ -847,7 +857,7 @@ mod tests {
         let mut diagnostics = DiagSink::capture();
 
         let _guard = TestSeedGuard::install(SEED);
-        let picked = pick_random_rewards(&req, &[], &one_reward(), "rare", &mut diagnostics);
+        let picked = pick_random_rewards(&req, &[], &rewards(1.0), "rare", &mut diagnostics);
 
         assert!(picked.is_err());
         assert!(
@@ -864,6 +874,40 @@ mod tests {
         );
     }
 
+    /// `:231-234` — the ammo cap is only applied when `AllowMultipleAmmoRewardsPerRarity` is false,
+    /// and the shipped config sets it **true** (`SPT_Data/configs/scavcase.json:111`), so two ammo
+    /// rewards in one rarity is the production path. Setting the flag unconditionally would send the
+    /// second iteration to the pool branch instead, over a differently sized pool.
+    #[test]
+    fn multiple_ammo_rewards_land_in_one_rarity_when_the_config_allows_them() {
+        let req = pick_request_allowing_multiple(0, 100);
+        let pool = common_pool(&req);
+        let mut diagnostics = DiagSink::capture();
+
+        let _guard = TestSeedGuard::install(SEED);
+        let picked =
+            pick_random_rewards(&req, &pool, &rewards(2.0), "common", &mut diagnostics).unwrap();
+
+        assert!(req.config.allow_multiple_ammo_rewards_per_rarity);
+        assert_eq!(tpls(&picked), vec![AMMO_CHEAP, AMMO_CHEAP]);
+    }
+
+    /// `:222-225`, the money twin of the test above: no cap, so every iteration takes the money
+    /// branch and the pool is never reached.
+    #[test]
+    fn multiple_money_rewards_land_in_one_rarity_when_the_config_allows_them() {
+        let req = pick_request_allowing_multiple(100, 0);
+        let pool = common_pool(&req);
+        let mut diagnostics = DiagSink::capture();
+
+        let _guard = TestSeedGuard::install(SEED);
+        let picked =
+            pick_random_rewards(&req, &pool, &rewards(2.0), "common", &mut diagnostics).unwrap();
+
+        assert!(req.config.allow_multiple_money_rewards_per_rarity);
+        assert_eq!(tpls(&picked), vec![DOLLARS, EUROS]);
+    }
+
     /// `:238` — `GetArrayValue` over the reward pool, which is a `List`: an empty one throws
     /// `InvalidOperationException` before any draw.
     #[test]
@@ -873,6 +917,6 @@ mod tests {
 
         let _guard = TestSeedGuard::install(SEED);
 
-        assert!(pick_random_rewards(&req, &[], &one_reward(), "common", &mut diagnostics).is_err());
+        assert!(pick_random_rewards(&req, &[], &rewards(1.0), "common", &mut diagnostics).is_err());
     }
 }
