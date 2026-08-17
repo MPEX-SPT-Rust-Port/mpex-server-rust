@@ -374,8 +374,9 @@ the native pipeline; seeded-RNG parity at the primitive level (xoshiro256\*\*, t
   `HydrateItemBaseClassCache`, is that hydrate resets only the cache dictionary and never
   `_rootNodeIds`, so the native arm unions the response's root ids into the existing set rather than
   replacing it. Grep case-insensitively for `quirk` under `src/quest/`, `src/scav_case/` and
-  `src/base_class.rs` to find the rest (that grep turns up base-class quirks 1, 2, 3 and 5 only:
-  quirk 4 has no code site, its quirk being an unreachable error path — nothing to port); the
+  `src/base_class.rs` to find the rest (that grep turns up base-class quirks 2, 3 and 5 only:
+  quirk 1's comment sits on the C# side just described, and quirk 4 has no code site, its quirk
+  being an unreachable error path — nothing to port); the
   behaviour they preserve is deliberate and reverting one silently diverges from C#. The bare `:N`
   line numbers in those comments — quirks and ordinary citations alike — are the 4.1.2 body the port
   was written against, not the current file: where a native seam was inserted above the retained
