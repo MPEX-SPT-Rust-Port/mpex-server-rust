@@ -922,6 +922,7 @@ pub fn is_valid_reward_item(
     // Return early if not valid item to give as reward
     if !item_helper::is_valid_item(
         ctx.items,
+        ctx.base_classes,
         ctx.item_blacklist,
         ctx.handbook_prices,
         ctx.flea_prices,

@@ -147,6 +147,7 @@ pub fn is_item_valid_ragfair_item(
 
     if !is_valid_item(
         ctx.items,
+        ctx.base_classes,
         ctx.config_blacklist,
         ctx.handbook_prices,
         ctx.flea_prices,

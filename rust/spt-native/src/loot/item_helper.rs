@@ -319,8 +319,11 @@ pub(crate) fn get_item_price(
 ///
 /// `invalid_base_types` is the caller's list; the C# `_defaultInvalidBaseTypes` fallback
 /// (`ItemHelper.cs:35-44`) is not reproduced because every ported call site passes its own.
+///
+/// Base-class tests are answered from `base_classes`, which must be built over the same view.
 pub fn is_valid_item(
     items_view: &IndexMap<String, ItemView>,
+    base_classes: &ItemBaseClassCache,
     blacklist: &HashSet<String>,
     handbook_prices: &IndexMap<String, f64>,
     flea_prices: &IndexMap<String, f64>,
@@ -339,7 +342,7 @@ pub fn is_valid_item(
         && get_item_price(handbook_prices, flea_prices, tpl).is_some_and(|price| price > 0.0)
         && !blacklist.contains(tpl)
         // `baseTypes.All(x => !IsOfBaseclass(...))` — none of them may match.
-        && !is_of_baseclasses(items_view, tpl, invalid_base_types)
+        && !base_classes.is_of_baseclasses(tpl, invalid_base_types)
 }
 
 /// `ItemHelper.GetItemQualityModifier` (`ItemHelper.cs:582-646`) — a 0-1 condition ratio, `-1` for
@@ -1691,7 +1694,9 @@ mod tests {
             .map(|tpl| (tpl.clone(), 100.0))
             .collect::<IndexMap<_, _>>();
         let flea = IndexMap::new();
-        let valid = |tpl: &str| is_valid_item(&view, &blacklist, &handbook, &flea, tpl, &[ARMOR]);
+        let cache = ItemBaseClassCache::build(&view);
+        let valid =
+            |tpl: &str| is_valid_item(&view, &cache, &blacklist, &handbook, &flea, tpl, &[ARMOR]);
 
         assert!(valid(MEDKIT_TPL));
         // Quest item, blacklisted, an excluded base type, a node, and an unknown tpl.
@@ -1707,8 +1712,9 @@ mod tests {
         let view = quality_fixture();
         let blacklist = HashSet::new();
         let flea = IndexMap::from([(MEDKIT_TPL.to_owned(), 250.0)]);
+        let cache = ItemBaseClassCache::build(&view);
         let valid = |handbook: &IndexMap<String, f64>| {
-            is_valid_item(&view, &blacklist, handbook, &flea, MEDKIT_TPL, &[])
+            is_valid_item(&view, &cache, &blacklist, handbook, &flea, MEDKIT_TPL, &[])
         };
 
         // A handbook price of at least 1 is taken as-is.
@@ -1719,6 +1725,7 @@ mod tests {
         // Neither table knows the tpl, so there is no price at all.
         assert!(!is_valid_item(
             &view,
+            &cache,
             &blacklist,
             &IndexMap::new(),
             &IndexMap::new(),

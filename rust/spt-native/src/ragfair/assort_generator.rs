@@ -95,6 +95,7 @@ pub fn generate_ragfair_assort_items(ctx: &RagfairContext) -> Result<Vec<Vec<Ite
     for (tpl, _) in db_items {
         if !is_valid_item(
             ctx.items,
+            ctx.base_classes,
             ctx.config_blacklist,
             ctx.handbook_prices,
             ctx.flea_prices,
