@@ -577,6 +577,71 @@ pub unsafe extern "C" fn spt_logger_init(
     }
 }
 
+/// Replaces the running pipeline's configuration in place: the C# side's answer to a mod mutating
+/// `SptLoggerConfiguration.Loggers` at runtime. Parse failure (`STATUS_ERROR`, message in the
+/// out-buffer) leaves the running pipeline untouched, as does calling before `spt_logger_init` has
+/// run. The init ref-count is untouched — a reinit is not an init. New sinks open under the
+/// pipeline lock, so a same-path target reopens in append mode (`freshened_paths`) rather than
+/// cascading the archives a second time; the old sinks flush and join after the swap.
+///
+/// # Safety
+/// `config_ptr` must point to `config_len` readable bytes of UTF-8; `out_ptr` and `out_len` must
+/// be valid for writes. A returned buffer is released with `spt_buf_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn spt_logger_reinit(
+    config_ptr: *const u8,
+    config_len: usize,
+    out_ptr: *mut *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    if out_ptr.is_null() || out_len.is_null() {
+        return STATUS_BAD_ARGS;
+    }
+
+    // Zeroed before the `config_ptr` guard: a bad-args return still leaves the caller's out-params
+    // written, never stale.
+    unsafe {
+        *out_ptr = std::ptr::null_mut();
+        *out_len = 0;
+    }
+
+    if config_ptr.is_null() {
+        return STATUS_BAD_ARGS;
+    }
+
+    let bytes = unsafe { std::slice::from_raw_parts(config_ptr, config_len) };
+
+    match catch_unwind(AssertUnwindSafe(|| {
+        // Parsing and opening the new sinks under the lock keeps the swap atomic against emits -
+        // reinit is rare, so briefly blocking the pipeline is the cheap side of that trade.
+        let mut guard = logger_guard();
+        if guard.1.is_none() {
+            return Err(
+                "the log pipeline is not initialised; call spt_logger_init first".to_owned(),
+            );
+        }
+        let new_logger = Logger::from_json(bytes)?;
+        let old = guard.1.replace(new_logger);
+        drop(guard);
+        // Join the old writer threads outside the lock, same rule as `spt_logger_close`.
+        if let Some(old) = old {
+            old.close();
+        }
+        Ok(())
+    })) {
+        Ok(Ok(())) => STATUS_OK,
+        Ok(Err(error)) => {
+            unsafe { write_buffer(error.into_bytes(), out_ptr, out_len) };
+            STATUS_ERROR
+        }
+        Err(payload) => {
+            unsafe { write_buffer(panic_message(payload).into_bytes(), out_ptr, out_len) };
+
+            STATUS_PANIC
+        }
+    }
+}
+
 /// Queues one log message through the pipeline: filters, level gate, per-target formatting, and
 /// the console/file writer threads. `STATUS_OK` no-op when the pipeline is uninitialised - init
 /// failure was already reported once, per-line noise would drown it.
@@ -762,7 +827,7 @@ mod tests {
         assert_eq!(spt_native_abi_version(), crate::ABI_VERSION);
         assert_eq!(
             crate::ABI_VERSION,
-            18,
+            19,
             "bump SptNative.ExpectedAbiVersion too"
         );
     }
@@ -1673,7 +1738,7 @@ mod tests {
     #[test]
     fn logger_exports_roundtrip() {
         /// The messages this test emits; everything else in the file belongs to a generator.
-        const MINE: [&str; 7] = [
+        const MINE: [&str; 9] = [
             "hello",
             "nullspans",
             "still up",
@@ -1681,6 +1746,8 @@ mod tests {
             "before init",
             "Unable to find an item with tpl of: 54009119af1c881c07000029 in Db",
             "plain line",
+            "moved",
+            "survives reinit failure",
         ];
 
         let dir = TempDir::new().unwrap();
@@ -1703,6 +1770,13 @@ mod tests {
         // Emit before init is an OK no-op.
         let status = emit("Cat", "dropped", "", "main");
         assert_eq!(status, STATUS_OK);
+
+        // Reinit before init: an error naming the missing init, pipeline stays down.
+        let status =
+            unsafe { spt_logger_reinit(config.as_ptr(), config.len(), &mut out_ptr, &mut out_len) };
+        assert_eq!(status, STATUS_ERROR);
+        assert!(!out_ptr.is_null());
+        unsafe { spt_buf_free(out_ptr, out_len) };
 
         // Same for a generator diagnostic: a run before the host initialised logging drops its
         // lines rather than panicking on the empty pipeline.
@@ -1782,6 +1856,43 @@ mod tests {
         };
         assert_eq!(status, STATUS_BAD_ARGS);
 
+        // Reinit with unparseable JSON: error reported, the running pipeline is untouched.
+        let mut out_ptr: *mut u8 = std::ptr::null_mut();
+        let mut out_len: usize = 0;
+        let status = unsafe { spt_logger_reinit(b"nope".as_ptr(), 4, &mut out_ptr, &mut out_len) };
+        assert_eq!(status, STATUS_ERROR);
+        assert!(!out_ptr.is_null());
+        unsafe { spt_buf_free(out_ptr, out_len) };
+        assert_eq!(
+            emit("Cat", "survives reinit failure", "", "main"),
+            STATUS_OK
+        );
+
+        // Reinit to a second directory: later lines land there, not in the first file.
+        let moved_dir = TempDir::new().unwrap();
+        let moved_config = format!(
+            r#"{{ "loggers": [ {{ "type": "File", "logLevel": "Information",
+                "format": "%message%", "filePath": {path:?}, "filePattern": "spt.log",
+                "maxFileSizeMB": 10, "maxRollingFiles": 10, "filters": [] }} ] }}"#,
+            path = moved_dir.path().display().to_string(),
+        );
+        let status = unsafe {
+            spt_logger_reinit(
+                moved_config.as_ptr(),
+                moved_config.len(),
+                &mut out_ptr,
+                &mut out_len,
+            )
+        };
+        assert_eq!(status, STATUS_OK);
+        assert_eq!(emit("Cat", "moved", "", "main"), STATUS_OK);
+
+        // Reinit back to the first directory: a path this process already freshened reopens in
+        // append mode - no second cascade, so no spt.1.log appears beside the live file.
+        let status =
+            unsafe { spt_logger_reinit(config.as_ptr(), config.len(), &mut out_ptr, &mut out_len) };
+        assert_eq!(status, STATUS_OK);
+
         // Locale table + live diagnostic emission share the same run: bad JSON first.
         let status = unsafe { spt_locales_set(b"nope".as_ptr(), 4, &mut out_ptr, &mut out_len) };
         assert_eq!(status, STATUS_ERROR);
@@ -1822,6 +1933,18 @@ mod tests {
 
         // Generators in other tests emit their diagnostics through the same process-global
         // pipeline, so only this test's own lines can be asserted on.
+        // Same shared-pipeline caveat as the first file below: other tests' generator diagnostics
+        // land here too for as long as the reinit pointed the pipeline at this directory.
+        let moved_contents = fs::read_to_string(moved_dir.path().join("spt.log")).unwrap();
+        let moved_mine: Vec<&str> = moved_contents
+            .lines()
+            .filter(|line| MINE.contains(line))
+            .collect();
+        assert_eq!(moved_mine, ["moved"]);
+        assert!(
+            !dir.path().join("spt.1.log").exists(),
+            "reinit to an already-freshened path must append, not cascade"
+        );
         let contents = fs::read_to_string(dir.path().join("spt.log")).unwrap();
         let mine: Vec<&str> = contents
             .lines()
@@ -1833,6 +1956,7 @@ mod tests {
             [
                 "hello",
                 "nullspans",
+                "survives reinit failure",
                 "Unable to find an item with tpl of: 54009119af1c881c07000029 in Db",
                 "plain line",
                 "still up",
