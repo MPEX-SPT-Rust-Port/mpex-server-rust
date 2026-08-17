@@ -39,7 +39,7 @@ Roughly 46k lines across 49 files, tests included. `src/bot/` is ~37% of that an
 Seventeen `extern "C"` exports. Two are trivial (`spt_native_abi_version`, `spt_buf_free`); ten take a UTF-8
 JSON generation request; `spt_verify_database` takes a UTF-8 directory path instead. All eleven of those hand
 back a heap buffer the caller releases with `spt_buf_free`. `spt_locales_set` takes the resolved server-locale
-table as UTF-8 JSON and buffers only a parse error. The last three are the log pipeline
+table as UTF-8 JSON and buffers a parse error, or panic text since ABI 17. The last three are the log pipeline
 (`spt_logger_init`, `spt_log_emit`, `spt_logger_close`): `spt_logger_init` takes the raw `sptLogger.json`
 bytes and hands back a buffer only on failure, `spt_log_emit` passes one line's fields directly rather
 than a JSON document, and `spt_logger_close` takes nothing — see *The log pipeline* below.
@@ -203,7 +203,7 @@ These are what keep the port correct; break one and output silently diverges fro
   `LootError` (so does an unguarded null deref they would have NRE'd on); the quest family panics at the throw
   site — `panic!` or `.expect` — and catches it at the family entry point (`quest/mod.rs:120`), which carries
   the message across as `STATUS_ERROR`. Panicking is not unsafe here: every export runs inside `catch_unwind`
-  (`ffi.rs:195`), so nothing unwinds past the FFI boundary either way.
+  (`ffi.rs:214`), so nothing unwinds past the FFI boundary either way.
 - **Wire models come in four families** (`loot/models.rs`, `bot/models.rs`, `ragfair/models.rs`,
   `quest/models.rs`). DB/EFT models mirror C# records field-for-field, pinned to the exact
   `JsonPropertyName`, each with a `#[serde(flatten)] extra` map so

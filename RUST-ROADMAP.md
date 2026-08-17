@@ -122,7 +122,8 @@ the native pipeline; seeded-RNG parity at the primitive level (xoshiro256\*\*, t
   stamped at the end of the native call.
 - **Generator locale text is a startup snapshot** — `DatabaseImporter` pushes the resolved server
   locales once (`spt_locales_set`), so a mod mutating them later no longer changes what a generator
-  line says. A failed push is one stderr notice and every generator line falls back to its locale key.
+  line says. A failed push is one stderr notice and every generator line falls back to its locale key
+  (so does the one localised failure message, `location-critical_error_see_log`).
 - **Parallel generator lines interleave** — the ragfair and bot rayon workers emit as they run, so
   lines no longer arrive grouped per bot or per assort entry. Each takes the global logger lock,
   which is fine at diagnostic rates.
