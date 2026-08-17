@@ -6,7 +6,7 @@ independent of that fix and of each other.
 | | Item | Kind | Evidence | Status |
 |---|---|---|---|---|
 | 1 | Port `ItemBaseClassService`'s ancestor cache | performance | measured | **done** — `dc4e409`…`8963a41` |
-| 2 | `SptNative.QuestJsonOptions` publishes its memo unsafely | correctness | read, not reproduced | not started |
+| 2 | `SptNative.QuestJsonOptions` publishes its memo unsafely | correctness | read, not reproduced | **done** — see below |
 
 ---
 
@@ -112,7 +112,15 @@ single-digit milliseconds, paid once per slice rather than per call.
 
 ---
 
-## 2. `SptNative.QuestJsonOptions` publishes its memo unsafely
+## 2. `SptNative.QuestJsonOptions` publishes its memo unsafely — done
+
+**Resolved by "fix: publish QuestJsonOptions memo as one atomic reference".** The suggested fix went
+in verbatim: the two static fields are now one `private sealed record QuestOptions(Source, Derived)`
+behind a single nullable static, and the getter reads it into a local. Both hazards below are closed
+by construction — publication is one reference write, and the returned options are the ones whose
+source was checked. No threading test was added, per *How to verify*; `dotnet test` stayed at 595.
+
+The original write-up follows, unedited apart from this heading.
 
 ### What
 
