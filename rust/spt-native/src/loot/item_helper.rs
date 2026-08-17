@@ -178,7 +178,12 @@ impl ItemBaseClassCache {
                     _ => break,
                 };
 
-                chain.insert(parent.to_owned());
+                // A re-seen parent means a cyclic chain (mod-added data only) the free walk would
+                // spin on, and contributes nothing new either way.
+                if !chain.insert(parent.to_owned()) {
+                    break;
+                }
+
                 // A parent that is not in the view ends the walk on the next pass, after it was
                 // stored — the walk tests a parent before looking it up.
                 current = items_view.get(parent);
@@ -203,11 +208,7 @@ impl ItemBaseClassCache {
     /// The enumeration direction is deliberately flipped relative to the C#, which is why this
     /// scans rather than probes: `baseClassList.Overlaps(baseClasses)`
     /// (`ItemBaseClassService.cs:115`) enumerates its argument and probes the receiver, so C#
-    /// hashes each candidate against the chain set. Same intersection either way, but the sizes
-    /// here are inverted — the chain holds one id per link of a parent walk (single digits), where
-    /// the candidate list is a whole levelled whitelist (hundreds), and hashing each candidate
-    /// costs more than the walk this replaces. The `completion` walk-ratio guard measures exactly
-    /// that, so restoring the C# direction fails it.
+    /// hashes each candidate against the chain set. Same intersection either way.
     pub fn is_of_baseclasses(&self, tpl: &str, base_class_tpls: &[&str]) -> bool {
         self.ancestors.get(tpl).is_some_and(|chain| {
             chain
@@ -218,8 +219,14 @@ impl ItemBaseClassCache {
 
     /// [`Self::is_of_baseclasses`] with the candidates in a set — the scan of the candidate list
     /// becomes one probe per chain link, which is what the Completion whitelist/blacklist sites
-    /// need: their candidate lists run to hundreds of ids where every other caller passes one to
-    /// seven. Same enumeration direction as the slice form, so the answers are identical.
+    /// need: their candidate lists are whole levelled whitelists (hundreds of ids) where every
+    /// other caller passes one to fourteen. Same enumeration direction as the slice form, so the
+    /// answers are identical.
+    ///
+    /// Keeping that direction matters here: the chain holds one id per link of a parent walk
+    /// (single digits) against hundreds of candidates, so probing the candidates costs less than
+    /// the C# direction's hash per candidate. The `completion` walk-ratio guard routes through
+    /// this form and measures exactly that, so restoring the C# direction fails it.
     pub fn is_of_baseclasses_set(&self, tpl: &str, base_class_tpls: &HashSet<&str>) -> bool {
         self.ancestors.get(tpl).is_some_and(|chain| {
             chain
@@ -1502,6 +1509,10 @@ mod tests {
                 "set-probing cache and walk disagree for tpl {tpl}"
             );
         }
+
+        // The set argument has to discriminate: HELMET_TPL's chain is HEADWEAR → ITEM_NODE.
+        assert!(cache.is_of_baseclasses_set(HELMET_TPL, &HashSet::from([HEADWEAR])));
+        assert!(!cache.is_of_baseclasses_set(HELMET_TPL, &HashSet::from([VEST])));
     }
 
     #[test]

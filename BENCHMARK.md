@@ -513,7 +513,7 @@ whitelist. C# answers each base-class test from `ItemBaseClassService`'s ancesto
 once at startup and O(1) per lookup; `item_helper::is_of_baseclasses` walked the parent chain live
 on every call.
 
-Recorded 2026-08-17 on `8963a41`, same machine and configuration as the table above. Two full
+Recorded 2026-08-16 on `8963a41`, same machine and configuration as the table above. Two full
 invocations, warm medians:
 
 | Type | `1819c0c` | `52a27e0` ancestor cache | `8963a41` set probe |
@@ -544,7 +544,7 @@ Measured in isolation on the shipped table by
 walk per candidate, **10.1 ms** for one walk with a slice scan, **1.3 ms** with the candidates in a
 set. `8963a41` added `ItemBaseClassCache::is_of_baseclasses_set` and used it at the two Completion
 whitelist/blacklist sites, where the candidate list is already a `HashSet` and every other caller
-passes one to seven ids. Same enumeration direction as the slice form — the short ancestor chain
+passes one to fourteen ids. Same enumeration direction as the slice form — the short ancestor chain
 probes the candidates, not the C# `Overlaps` direction — so the answers are identical.
 
 `FOLLOWUPS.md` expected the cache to "subsume both effects". It did not: the two are independent,
@@ -558,8 +558,8 @@ above, so treat it as a starting point rather than a finding.
 
 Bot and ragfair were re-measured on `8963a41` and neither moved. Ragfair matches on every arm: full
 pass 630.90 ms native / 440.85 legacy, regeneration 14.49 / 10.41, cache cold 80.92 against warm
-9.91, and every alloc/run figure identical to the section above. Bot per-bot medians are 84.05 ms
-(`assault`) and 53.99 ms (`usec`) against the recorded 88.04 and 54.43. Bot's `BuildRequest` arm
+9.91, and every alloc/run figure unchanged to within 0.1 MB of the section above. Bot per-bot
+medians are 84.05 ms (`assault`) and 53.99 ms (`usec`) against the recorded 88.04 and 54.43. Bot's `BuildRequest` arm
 read 15.23 / 15.58 ms against the recorded 9.89 / 5.09, which is not within spread — it is the
 payload projection, untouched by this change and unmeasured since, so read it as this session's
 figure rather than a regression. Both results are what was expected: bot and loot deliberately keep

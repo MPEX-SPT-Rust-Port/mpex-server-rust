@@ -1,7 +1,7 @@
 # Follow-ups
 
-Two items left open by the Completion quest performance investigation (`49730f2`). Both are
-independent of that fix and of each other.
+Two items left open by the Completion quest performance investigation (`49730f2`), both now closed.
+Each was independent of that fix and of the other.
 
 | | Item | Kind | Evidence | Status |
 |---|---|---|---|---|
@@ -18,8 +18,8 @@ three quest types' ~2.4 ms in the same session. Numbers and methodology in
 
 The cache was built once per cached invariant slice (quest lazily behind a `OnceLock`, ragfair
 eagerly in `PreparedSlice::from`) and all 19 direct call sites in `quest/` and `ragfair/` answer
-from it. `bot/` and `loot/` keep the walk — they get their views per request, with nothing to
-amortise a build against.
+from it — 19, not the 10 the table below counts: that grep missed multiline call shapes. `bot/` and
+`loot/` keep the walk — they get their views per request, with nothing to amortise a build against.
 
 **The expectation below that a cache would "subsume both effects" was wrong**, and the correction is
 worth keeping. The two effects are independent: the cache removes the parent-chain *walk*, roughly
@@ -29,7 +29,7 @@ whitelist it is `chain_len × 137` string comparisons per item. The flattened ca
 (`52a27e0`) left Completion warm at 11.74 / 13.50 ms, i.e. unmoved. `8963a41` added
 `ItemBaseClassCache::is_of_baseclasses_set` and used it at the two Completion whitelist/blacklist
 sites, where the candidate list is already a `HashSet`; that is what produced the drop. Every other
-caller passes one to seven ids, where the slice scan is the cheaper form and is kept.
+caller passes one to fourteen ids, where the slice scan is the cheaper form and is kept.
 
 Bot and ragfair were re-measured and neither moved, as anticipated below.
 
