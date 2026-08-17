@@ -615,6 +615,52 @@ pub unsafe extern "C" fn spt_logger_close() -> i32 {
     }
 }
 
+/// Stores the resolved server-locale table generator diagnostics render against. Overwrites any
+/// previous table — the prepatch host pushing twice is harmless. On `STATUS_ERROR` the parse-error
+/// text is in the out-buffer and the previously stored table (if any) is untouched; generator
+/// lines then fall back to their locale keys, which must not stop the server.
+///
+/// # Safety
+/// `json_ptr` must point to `json_len` readable bytes of UTF-8; `out_ptr` and `out_len` must be
+/// valid for writes. A returned buffer is released with `spt_buf_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn spt_locales_set(
+    json_ptr: *const u8,
+    json_len: usize,
+    out_ptr: *mut *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    if out_ptr.is_null() || out_len.is_null() {
+        return STATUS_BAD_ARGS;
+    }
+
+    // Zeroed before the `json_ptr` guard: a bad-args return still leaves the caller's out-params
+    // written, never stale.
+    unsafe {
+        *out_ptr = std::ptr::null_mut();
+        *out_len = 0;
+    }
+
+    if json_ptr.is_null() {
+        return STATUS_BAD_ARGS;
+    }
+
+    let bytes = unsafe { std::slice::from_raw_parts(json_ptr, json_len) };
+
+    match catch_unwind(AssertUnwindSafe(|| {
+        serde_json::from_slice::<std::collections::HashMap<String, String>>(bytes)
+            .map(crate::diag::set_locales)
+            .map_err(|error| format!("locale table did not parse: {error}"))
+    })) {
+        Ok(Ok(())) => STATUS_OK,
+        Ok(Err(error)) => {
+            unsafe { write_buffer(error.into_bytes(), out_ptr, out_len) };
+            STATUS_ERROR
+        }
+        Err(_) => STATUS_PANIC,
+    }
+}
+
 /// # Safety
 /// `ptr` and `len` must come from a successful `spt_*` call that handed back a buffer, and be
 /// freed at most once.
