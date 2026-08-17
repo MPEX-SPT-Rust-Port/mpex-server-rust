@@ -144,6 +144,67 @@ pub fn is_of_baseclasses(
     false
 }
 
+/// `Services/Items/ItemBaseClassService.cs` — every template's parent chain flattened into one
+/// set at build time, so a base-class test is a hash probe per candidate instead of a chain walk
+/// per call. Built once per cached invariant slice (quest's `OnceLock`, ragfair's
+/// `PreparedSlice`); bot and loot receive their views per request and keep the walk.
+///
+/// Answer-equivalent to [`is_of_baseclasses`]: `build` performs that exact walk once per template
+/// and stores every parent id the walk would have tested — including a final parent missing from
+/// the view. The C# `_rootNodeIds` short-circuit is not reproduced, for the reason given on
+/// [`is_of_baseclasses`], and no lazy fill on miss (`ItemBaseClassService.cs:107-110`) is needed:
+/// the view is projected from the live table, so mod-added templates are already in it.
+#[derive(Debug, Default, Clone)]
+pub struct ItemBaseClassCache {
+    /// Key = item tpl, values = ids of its parents (`_itemBaseClassesCache`).
+    ancestors: HashMap<String, HashSet<String>>,
+}
+
+impl ItemBaseClassCache {
+    /// `ItemBaseClassService.HydrateItemBaseClassCache` (`ItemBaseClassService.cs:31-40`) over
+    /// `items_view` — one [`is_of_baseclasses`] walk per template, stored.
+    pub fn build(items_view: &IndexMap<String, ItemView>) -> Self {
+        let mut ancestors: HashMap<String, HashSet<String>> =
+            HashMap::with_capacity(items_view.len());
+
+        for tpl in items_view.keys() {
+            let mut chain = HashSet::new();
+            let mut current = items_view.get(tpl);
+
+            while let Some(item) = current {
+                let parent = match item.parent.as_deref() {
+                    Some(parent) if !parent.is_empty() => parent,
+                    // Root node reached, chain exhausted.
+                    _ => break,
+                };
+
+                chain.insert(parent.to_owned());
+                // A parent that is not in the view ends the walk on the next pass, after it was
+                // stored — the walk tests a parent before looking it up.
+                current = items_view.get(parent);
+            }
+
+            ancestors.insert(tpl.clone(), chain);
+        }
+
+        Self { ancestors }
+    }
+
+    /// `ItemHelper.IsOfBaseclass` answered from the cache
+    /// (`ItemBaseClassService.ItemHasBaseClass`, single-candidate overload).
+    pub fn is_of_baseclass(&self, tpl: &str, base_class_tpl: &str) -> bool {
+        self.is_of_baseclasses(tpl, &[base_class_tpl])
+    }
+
+    /// `ItemHelper.IsOfBaseclasses` answered from the cache
+    /// (`ItemBaseClassService.ItemHasBaseClass`, `Overlaps` overload) — one probe per candidate.
+    pub fn is_of_baseclasses(&self, tpl: &str, base_class_tpls: &[&str]) -> bool {
+        self.ancestors
+            .get(tpl)
+            .is_some_and(|chain| base_class_tpls.iter().any(|base| chain.contains(*base)))
+    }
+}
+
 /// `ItemHelper.ArmorItemCanHoldMods` (`ItemHelper.cs:319-322`) — `_armorSlotsThatCanHoldMods`
 /// (`ItemHelper.cs:102`).
 pub fn armor_item_can_hold_mods(items_view: &IndexMap<String, ItemView>, tpl: &str) -> bool {
@@ -1378,6 +1439,34 @@ mod tests {
         assert!(is_of_baseclasses(&view, HELMET_TPL, &[ARMOR, HEADWEAR]));
         assert!(!is_of_baseclasses(&view, HELMET_TPL, &[ARMOR, VEST]));
         assert!(!is_of_baseclasses(&view, HELMET_TPL, &[]));
+    }
+
+    #[test]
+    fn the_base_class_cache_answers_exactly_as_the_walk_does() {
+        let view = fixture();
+        let cache = ItemBaseClassCache::build(&view);
+
+        // Every tpl in the view, plus the orphan's missing parent — the walk tests a parent id
+        // before looking it up, so the cache must contain it too — plus a fully unknown tpl.
+        let mut candidates: Vec<&str> = view.keys().map(String::as_str).collect();
+        candidates.push("999999999999999999999999");
+        candidates.push("aaaaaaaaaaaaaaaaaaaaaaaa");
+
+        for tpl in &candidates {
+            for base in &candidates {
+                assert_eq!(
+                    cache.is_of_baseclass(tpl, base),
+                    is_of_baseclass(&view, tpl, base),
+                    "cache and walk disagree for tpl {tpl} against base {base}"
+                );
+            }
+
+            assert_eq!(
+                cache.is_of_baseclasses(tpl, &candidates),
+                is_of_baseclasses(&view, tpl, &candidates),
+                "cache and walk disagree for tpl {tpl} against the full candidate list"
+            );
+        }
     }
 
     #[test]
