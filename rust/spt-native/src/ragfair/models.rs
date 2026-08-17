@@ -5,7 +5,7 @@
 //! `#[serde(flatten)] extra` map so mod-added members survive), and the request/response envelopes,
 //! a fresh contract between the C# caller and this crate and so plain camelCase.
 //!
-//! The game-data types (`Item`, `ItemView`, `PresetView`, `Diagnostic`) are reused from
+//! The game-data types (`Item`, `ItemView`, `PresetView`) are reused from
 //! `loot::models` rather than redeclared. There is no `ItemsView` type: the
 //! `IndexMap<String, ItemView>` *is* the view, which is what `loot::item_helper`'s helpers take.
 
@@ -14,7 +14,7 @@ use std::collections::HashSet;
 use indexmap::{IndexMap, IndexSet};
 use serde::{Deserialize, Serialize};
 
-use crate::loot::models::{Diagnostic, Item, ItemView, PresetView};
+use crate::loot::models::{Item, ItemView, PresetView};
 
 /// Mod-added fields captured on the way in.
 type Extra = serde_json::Map<String, serde_json::Value>;
@@ -309,7 +309,6 @@ pub struct DynamicOffersResult {
     /// (`RagfairServerHelper.cs:61`) set to `false`. The caller replays these onto the live
     /// `templateTable`; nothing else in this port mutates the database.
     pub rejected_can_sell_templates: Vec<String>,
-    pub diagnostics: Vec<Diagnostic>,
 }
 
 /// The non-offer sections of a framed response — everything except the offer frames.
@@ -317,7 +316,6 @@ pub struct DynamicOffersResult {
 #[serde(rename_all = "camelCase")]
 pub struct DynamicOffersHeader {
     pub rejected_can_sell_templates: Vec<String>,
-    pub diagnostics: Vec<Diagnostic>,
 }
 
 /// `Models/Eft/Ragfair/RagfairOffer.cs:8-91`, only the members `CreateOffer` (`:118-138`) sets.
@@ -711,13 +709,12 @@ pub mod tests {
                 ..Default::default()
             }])],
             rejected_can_sell_templates: vec!["cccccccccccccccccccccccc".to_owned()],
-            diagnostics: vec![],
         };
         let out = serde_json::to_value(&result).unwrap();
 
         assert_eq!(
             out.as_object().unwrap().keys().collect::<Vec<_>>(),
-            vec!["offers", "rejectedCanSellTemplates", "diagnostics"]
+            vec!["offers", "rejectedCanSellTemplates"]
         );
         let offer = &out["offers"][0];
         assert_eq!(

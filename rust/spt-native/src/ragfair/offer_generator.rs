@@ -560,7 +560,6 @@ pub fn generate_with_slice(
     Ok(DynamicOffersResult {
         offers,
         rejected_can_sell_templates: rejected.into_iter().collect(),
-        diagnostics: Vec::new(),
     })
 }
 

@@ -271,10 +271,7 @@ pub fn create_random_loot(
         }
     }
 
-    Ok(RewardLootResult {
-        items: result,
-        diagnostics: Vec::new(),
-    })
+    Ok(RewardLootResult { items: result })
 }
 
 /// The `globalDefaultPresets.Where(preset => ...(preset.Encyclopedia.Value...))` filters
@@ -347,10 +344,7 @@ pub fn create_forced_loot(request: CreateForcedLootRequest) -> Result<RewardLoot
         }
     }
 
-    Ok(RewardLootResult {
-        items: result,
-        diagnostics: Vec::new(),
-    })
+    Ok(RewardLootResult { items: result })
 }
 
 /// `LootGenerator.GetItemRewardPool` (`:207-251`) — the blacklist union, then the pool that survives
@@ -729,7 +723,6 @@ pub fn get_sealed_weapon_case_loot(
 
         return Ok(RewardLootResult {
             items: items_to_return,
-            diagnostics: Vec::new(),
         });
     };
 
@@ -801,7 +794,6 @@ pub fn get_sealed_weapon_case_loot(
 
     Ok(RewardLootResult {
         items: items_to_return,
-        diagnostics: Vec::new(),
     })
 }
 
@@ -1028,7 +1020,6 @@ pub fn get_random_loot_container_loot(
 
     Ok(RewardLootResult {
         items: items_to_return,
-        diagnostics: Vec::new(),
     })
 }
 

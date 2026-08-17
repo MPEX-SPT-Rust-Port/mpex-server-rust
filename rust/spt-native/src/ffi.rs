@@ -344,7 +344,6 @@ pub unsafe extern "C" fn spt_generate_bot_inventory_batch(
 fn write_framed_offers(result: DynamicOffersResult) -> Vec<u8> {
     let header = rmp_serde::to_vec_named(&DynamicOffersHeader {
         rejected_can_sell_templates: result.rejected_can_sell_templates,
-        diagnostics: result.diagnostics,
     })
     .expect("header serialization cannot fail");
     let payloads: Vec<Vec<u8>> = result
@@ -699,7 +698,7 @@ mod tests {
         assert_eq!(spt_native_abi_version(), crate::ABI_VERSION);
         assert_eq!(
             crate::ABI_VERSION,
-            15,
+            16,
             "bump SptNative.ExpectedAbiVersion too"
         );
     }
@@ -893,7 +892,6 @@ mod tests {
         assert_eq!(status, STATUS_OK);
         let result: serde_json::Value = serde_json::from_slice(&out).unwrap();
         assert_eq!(result["items"], serde_json::json!([]));
-        assert_eq!(result["diagnostics"], serde_json::json!([]));
     }
 
     #[test]

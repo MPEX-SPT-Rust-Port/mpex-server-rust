@@ -57,7 +57,6 @@ public class LootGeneratorNativeTests
         var result = SptNative.CreateForcedLoot(request);
 
         Assert.That(result.Items, Has.Count.EqualTo(2));
-        Assert.That(result.Diagnostics, Is.Empty);
         foreach (var group in result.Items)
         {
             Assert.That(group, Is.Not.Empty);

@@ -121,7 +121,6 @@ fn into_result(
         tracked_counts: ctx.counter.tracked_counts,
         static_loot_item_count,
         static_container_count,
-        diagnostics: Vec::new(),
     }
 }
 
@@ -1161,7 +1160,6 @@ pub fn generate_dynamic_loot(
     Ok(DynamicLootResult {
         spawnpoints: loot,
         tracked_counts: ctx.counter.tracked_counts,
-        diagnostics: Vec::new(),
     })
 }
 

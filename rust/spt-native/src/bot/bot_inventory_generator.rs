@@ -397,7 +397,6 @@ fn generate_one(
 
     Ok(BotInventoryResult {
         inventory: bot_inventory,
-        diagnostics: Vec::new(),
         container_grids,
         randomisation_clamps,
     })

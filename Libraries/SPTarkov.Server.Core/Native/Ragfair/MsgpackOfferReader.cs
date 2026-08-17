@@ -71,7 +71,6 @@ internal static class MsgpackOfferReader
     private static readonly HashSet<string> _wireKeys =
     [
         "rejectedCanSellTemplates",
-        "diagnostics",
         "_id",
         "intId",
         "user",
@@ -104,9 +103,6 @@ internal static class MsgpackOfferReader
         "desc",
         "location",
         "upd",
-        "localeKey",
-        "message",
-        "args",
     ];
 
     private static readonly HashSet<string>.AlternateLookup<ReadOnlySpan<char>> _wireKeyLookup = _wireKeys.GetAlternateLookup<
@@ -117,7 +113,6 @@ internal static class MsgpackOfferReader
     {
         var reader = new MessagePackReader(CopyToScratch(payload));
         List<MongoId> rejectedCanSellTemplates = [];
-        List<Diagnostic> diagnostics = [];
 
         var memberCount = reader.ReadMapHeader();
         for (var i = 0; i < memberCount; i++)
@@ -133,22 +128,13 @@ internal static class MsgpackOfferReader
                     }
 
                     break;
-                case "diagnostics":
-                    var diagnosticCount = reader.ReadArrayHeader();
-                    diagnostics = new List<Diagnostic>(diagnosticCount);
-                    for (var j = 0; j < diagnosticCount; j++)
-                    {
-                        diagnostics.Add(ReadDiagnostic(ref reader));
-                    }
-
-                    break;
                 default:
                     reader.Skip();
                     break;
             }
         }
 
-        return new DynamicOffersHeader { RejectedCanSellTemplates = rejectedCanSellTemplates, Diagnostics = diagnostics };
+        return new DynamicOffersHeader { RejectedCanSellTemplates = rejectedCanSellTemplates };
     }
 
     internal static RagfairOffer ReadOffer(ReadOnlySpan<byte> payload)
@@ -442,44 +428,6 @@ internal static class MsgpackOfferReader
         }
 
         return item;
-    }
-
-    private static Diagnostic ReadDiagnostic(ref MessagePackReader reader)
-    {
-        var diagnostic = new Diagnostic { Level = string.Empty };
-
-        var memberCount = reader.ReadMapHeader();
-        for (var i = 0; i < memberCount; i++)
-        {
-            switch (ReadKey(ref reader))
-            {
-                case "level":
-                    diagnostic.Level = reader.ReadString() ?? string.Empty;
-                    break;
-                case "localeKey":
-                    diagnostic.LocaleKey = reader.ReadString();
-                    break;
-                case "message":
-                    diagnostic.Message = reader.ReadString();
-                    break;
-                case "args":
-                    if (reader.TryReadNil())
-                    {
-                        diagnostic.Args = null;
-                    }
-                    else
-                    {
-                        diagnostic.Args = Materialize<JsonElement>(ref reader);
-                    }
-
-                    break;
-                default:
-                    reader.Skip();
-                    break;
-            }
-        }
-
-        return diagnostic;
     }
 
     /// <summary>

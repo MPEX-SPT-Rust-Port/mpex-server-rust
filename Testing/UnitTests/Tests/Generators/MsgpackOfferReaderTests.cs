@@ -384,37 +384,16 @@ public class MsgpackOfferReaderTests
         var payload = Build(
             (ref MessagePackWriter writer) =>
             {
-                writer.WriteMapHeader(2);
+                writer.WriteMapHeader(1);
                 writer.Write("rejectedCanSellTemplates");
                 writer.WriteArrayHeader(1);
                 writer.Write(TemplateId);
-                writer.Write("diagnostics");
-                writer.WriteArrayHeader(1);
-                writer.WriteMapHeader(4);
-                writer.Write("level");
-                writer.Write("warning");
-                writer.Write("localeKey");
-                writer.Write("ragfair-unable_to_find_item");
-                writer.Write("args");
-                writer.WriteMapHeader(1);
-                writer.Write("tpl");
-                writer.Write(TemplateId);
-                writer.Write("message");
-                writer.WriteNil();
             }
         );
 
         var header = MsgpackOfferReader.ReadHeader(payload);
 
-        Assert.Multiple(() =>
-        {
-            Assert.That(header.RejectedCanSellTemplates.Single().ToString(), Is.EqualTo(TemplateId));
-            var diagnostic = header.Diagnostics.Single();
-            Assert.That(diagnostic.Level, Is.EqualTo("warning"));
-            Assert.That(diagnostic.LocaleKey, Is.EqualTo("ragfair-unable_to_find_item"));
-            Assert.That(diagnostic.Message, Is.Null);
-            Assert.That(diagnostic.Args!.Value.GetProperty("tpl").GetString(), Is.EqualTo(TemplateId));
-        });
+        Assert.That(header.RejectedCanSellTemplates.Single().ToString(), Is.EqualTo(TemplateId));
     }
 
     private delegate void WriteAction(ref MessagePackWriter writer);

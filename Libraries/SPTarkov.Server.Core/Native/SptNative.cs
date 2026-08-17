@@ -51,7 +51,7 @@ internal enum LootExport
 
 public static class SptNative
 {
-    private const uint ExpectedAbiVersion = 15;
+    private const uint ExpectedAbiVersion = 16;
 
     // ffi.rs
     private const int StatusOk = 0;
@@ -314,12 +314,7 @@ public static class SptNative
             }
         );
 
-        return new FramedOffersResult
-        {
-            Offers = [.. offers],
-            RejectedCanSellTemplates = header.RejectedCanSellTemplates,
-            Diagnostics = header.Diagnostics,
-        };
+        return new FramedOffersResult { Offers = [.. offers], RejectedCanSellTemplates = header.RejectedCanSellTemplates };
     }
 
     private static DynamicOffersHeader? DeserializeHeader(byte encoding, ReadOnlySpan<byte> payload)

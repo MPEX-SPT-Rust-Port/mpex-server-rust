@@ -89,25 +89,6 @@ public class LocationLootGeneratorNativeTests
     }
 
     [Test]
-    public void DiagnosticsKeepTheirExplicitNulls()
-    {
-        var result = SptNative.GenerateStaticContainers(BuildStaticRequest());
-
-        // Plain messages are written with `localeKey` and `args` explicitly null.
-        var plain = result.Diagnostics.First(diagnostic => diagnostic.Message is not null);
-        Assert.That(plain.Level, Is.Not.Empty);
-        Assert.That(plain.LocaleKey, Is.Null);
-        Assert.That(plain.Args, Is.Null);
-
-        // `statics` was left null, so the map-wide warning fires with the location as its argument -
-        // a bare string, not an object, which is why `args` cannot be typed as a map.
-        var localised = result.Diagnostics.First(diagnostic => diagnostic.LocaleKey == "location-unable_to_generate_static_loot");
-        Assert.That(localised.Level, Is.EqualTo("warning"));
-        Assert.That(localised.Message, Is.Null);
-        Assert.That(localised.Args!.Value.GetString(), Is.EqualTo(TestLocationId));
-    }
-
-    [Test]
     public void ModAddedFieldsOnTheInputTemplateSurviveTheRoundTrip()
     {
         // Mod-added fields reach Rust through the [JsonExtensionData] property Ceciler injects into

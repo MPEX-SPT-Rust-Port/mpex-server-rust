@@ -132,11 +132,7 @@ pub fn generate_repeatable_quest(
     }))
     .map_err(panic_message)?;
 
-    Ok(QuestNativeResponse {
-        quest,
-        pool,
-        diagnostics: Vec::new(),
-    })
+    Ok(QuestNativeResponse { quest, pool })
 }
 
 /// The text a caught panic carries — `expect`/`panic!` payloads are a `String` or a `&str`.

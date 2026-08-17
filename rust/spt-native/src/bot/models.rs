@@ -14,7 +14,7 @@ use indexmap::{IndexMap, IndexSet};
 use serde::{Deserialize, Serialize};
 
 use crate::bot::repair_service::MinMax;
-use crate::loot::models::{Diagnostic, Item, ItemView, PresetView};
+use crate::loot::models::{Item, ItemView, PresetView};
 
 /// Mod-added fields captured on the way in and replayed on the way out.
 type Extra = serde_json::Map<String, serde_json::Value>;
@@ -776,7 +776,6 @@ pub struct BotBaseInventoryWire {
 #[serde(rename_all = "camelCase")]
 pub struct BotInventoryResult {
     pub inventory: BotBaseInventoryWire,
-    pub diagnostics: Vec<Diagnostic>,
     /// Slot → grid state, from `bot_generator_helper::ContainerGrids::into_wire`. Empty when the
     /// request asked for the cache to be cleared (`BotInventoryGenerator.cs:114-117`).
     pub container_grids: IndexMap<String, ContainerDetailsWire>,
@@ -1038,13 +1037,6 @@ mod tests {
                 equipment: "aaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
                 ..Default::default()
             },
-            diagnostics: vec![Diagnostic {
-                category: "SPTarkov.Server.Core.Generators.Bot.BotInventoryGenerator",
-                level: crate::loot::models::DEBUG.to_owned(),
-                locale_key: Some("bot-missing_item".to_owned()),
-                args: Some(serde_json::json!({"tpl":"x"})),
-                message: None,
-            }],
             container_grids: IndexMap::from([(
                 "TacticalVest".to_owned(),
                 ContainerDetailsWire {
@@ -1062,12 +1054,7 @@ mod tests {
 
         assert_eq!(
             out.as_object().unwrap().keys().collect::<Vec<_>>(),
-            vec![
-                "inventory",
-                "diagnostics",
-                "containerGrids",
-                "randomisationClamps"
-            ]
+            vec!["inventory", "containerGrids", "randomisationClamps"]
         );
         assert_eq!(out["inventory"]["equipment"], "aaaaaaaaaaaaaaaaaaaaaaaa");
         // `BotBaseInventory` member order, so the C# deserializer sees its own shape back.
@@ -1090,8 +1077,6 @@ mod tests {
                 "hideoutCustomizationStashId"
             ]
         );
-        assert_eq!(out["diagnostics"][0]["localeKey"], "bot-missing_item");
-        assert_eq!(out["diagnostics"][0]["args"]["tpl"], "x");
         let grids = &out["containerGrids"]["TacticalVest"];
         assert_eq!(grids["containerTpl"], "aaaaaaaaaaaaaaaaaaaaaac1");
         assert_eq!(grids["containerItemId"], "aaaaaaaaaaaaaaaaaaaaaac2");

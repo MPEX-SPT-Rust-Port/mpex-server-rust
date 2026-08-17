@@ -151,7 +151,4 @@ public record RewardLootResult
 {
     [JsonPropertyName("items")]
     public required List<List<Item>> Items { get; set; }
-
-    [JsonPropertyName("diagnostics")]
-    public required List<Diagnostic> Diagnostics { get; set; }
 }
