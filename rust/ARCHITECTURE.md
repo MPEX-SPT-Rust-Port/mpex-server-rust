@@ -1,21 +1,37 @@
 # Architecture — `rust/`
 
-A Cargo workspace with one crate, `spt-native`, built as a `cdylib` (plus `rlib`, so the tests can link it).
-It is a **port of C# server logic**, not a new subsystem: every module stands in for a named
-`SPTarkov.Server.Core` file and is expected to produce byte-identical output. The C# side of the boundary is
-`Libraries/SPTarkov.Server.Core/Native/` (`NativeMethods.cs`, `SptNative.cs`).
+A Cargo workspace with two members. `spt-native` is the port, built as a `cdylib` (plus `rlib`, so the tests
+can link it). It is a **port of C# server logic**, not a new subsystem: every module
+stands in for a named `SPTarkov.Server.Core` file and is expected to produce byte-identical output. The C# side
+of the boundary is `Libraries/SPTarkov.Server.Core/Native/` — `NativeMethods.cs` and `SptNative.cs`, plus the
+per-family payload projections under `Bot/`, `Loot/`, `Ragfair/`, `RepeatableQuests/` — **except the log
+pipeline**, whose P/Invoke lives in a different assembly: `Libraries/SPTarkov.Common/Native/NativeMethods.cs`
+and `Common/Logger/SPTLoggerDispatcher.cs`.
+
+`spectre-facade` has nothing to do with the port. It is a `dotnetdll` program that emits a facade
+`Spectre.Console.Ansi.dll` exposing only `Spectre.Console.Color`, because the frozen 4.1.2 mod surface has that
+type baked into `ISptLogger<T>`, `SptLogMessage`, `ClientLogRequest` and `Watermark.Draw`, and a compiled mod's
+typeref can only be satisfied by an assembly of that name. ~520 lines, built by the `BuildSpectreFacade` target
+in `SPTarkov.Common.csproj` — every build, but incrementally, so an unchanged facade is not re-emitted. Its own
+header covers the fidelity gaps. Everything below is about `spt-native`.
 
 Build coupling and cross-RID rules live in [CLAUDE.md](../CLAUDE.md); the boundary as seen from C# is in
-[ARCHITECTURE.md](../ARCHITECTURE.md) under *Native Rust layer*. This file covers what's inside the crate.
+[ARCHITECTURE.md](../ARCHITECTURE.md) under *Native Rust layer*. This file covers what's inside `spt-native`.
 
 Toolchain is pinned in `rust-toolchain.toml` (1.97.1, edition 2024). Dependencies are:
 `serde`/`serde_json` (with `preserve_order`, so untyped maps keep C# `Dictionary` insertion order),
 `rmp-serde` (the ragfair MessagePack envelope), `indexmap`, `rand`/`rand_xoshiro`, `rayon`, `tokio`,
-`walkdir`, `xxhash-rust`, `base64` — plus `tempfile` as the only dev-dependency (the `verify` FFI
-tests need a real directory). `Cargo.lock` is committed.
+`walkdir`, `xxhash-rust`, `base64`, `regex-lite` (the `sptLogger.json` filter patterns — deliberately
+-lite, so .NET-only syntax degrades to never-match) — plus `tempfile` as the only dev-dependency (the
+`verify` FFI tests need a real directory). `spectre-facade` pulls in `dotnetdll` and nothing else.
+`Cargo.lock` is committed.
 
-Roughly 46k lines across 49 files, tests included. `src/bot/` is ~37% of that and
-`bot_equipment_mod_generator.rs` alone ~4.2k; `src/loot/` ~27%, `src/ragfair/` ~17%,
+`.cargo/config.toml` pins `-C target-cpu=x86-64-v3` on both x64 targets, so the built library will not run on
+pre-AVX2 hardware, and the mold linker on Linux. Both workspace profiles use one codegen unit; release adds fat
+LTO.
+
+Roughly 46k lines across the 47 files of `src/`, inline tests included. `src/bot/` is ~36% of that and
+`bot_equipment_mod_generator.rs` alone ~4.2k; `src/loot/` ~26%, `src/ragfair/` ~16%,
 `src/quest/` ~13%.
 
 ## Layout
@@ -26,8 +42,9 @@ Roughly 46k lines across 49 files, tests included. `src/bot/` is ~37% of that an
 | `src/ffi.rs` | The C-ABI surface. The **only** module containing `unsafe` |
 | `src/runtime.rs` | Process-wide multi-thread tokio runtime, `OnceLock`-built. Used only by `verify` |
 | `src/verify.rs` | Hashes `SPT_Data` with XXH3-128 and diffs it against `checks.dat` |
-| `src/logger.rs` | The log pipeline: `sptLogger.json`, filters, level gates, per-target formatting |
-| `src/log_sink.rs` | Where a formatted line lands: the console writer, and the file writer with its rotation and archiving |
+| `src/bin/gen_checks.rs` | The bin that writes `checks.dat`, over `verify::generate`. Release builds only |
+| `src/logger.rs` | The log pipeline: `sptLogger.json`, filters, level gates, per-target formatting — and the console sink |
+| `src/log_sink.rs` | The file sink alone: where a formatted line lands on disk, with its rotation and archiving |
 | `src/diag.rs` | The generator families' way into that pipeline: the locale table, the render, and `DiagSink` |
 | `src/loot/` | Location loot (static containers, loose loot) and reward loot (airdrops, cases, containers) |
 | `src/bot/` | One bot's entire inventory: equipment, mods, weapons, magazines, loot |
@@ -104,9 +121,13 @@ Hashing fans out over the runtime through a `JoinSet` capped at `MAX_CONCURRENT_
 ## The log pipeline (`src/logger.rs`, `src/log_sink.rs`)
 
 The one ported family with **no legacy path**: C# no longer has log handlers at all. `spt_logger_init` parses
-the raw `sptLogger.json` bytes once per process (idempotent, so a prepatcher's second managed copy is a
-no-op); `SPTLoggerDispatcher.Log` then hands each line's fields across `spt_log_emit`, and the crate owns
-filter matching, the level gate, per-target format expansion and the sinks. `spt_logger_close` drains them.
+the raw `sptLogger.json` bytes once per process; `SPTLoggerDispatcher.Log` then hands each line's fields across
+`spt_log_emit`, and the crate owns filter matching, the level gate, per-target format expansion and the sinks.
+
+Init and close are **ref-counted**, not idempotent: a second init keeps the running pipeline and ignores the
+new config, but it bumps the count, and the pipeline is only drained and torn down by the last of as many
+`spt_logger_close` calls as there were successful inits. That is what lets the prepatcher's nested
+`Program.Main` dispose its own container while the outer host keeps logging.
 
 Two rules the C# side depends on: **logging never fails the server** — a bad config or a broken library is one
 stderr notice and every later emit is a silent no-op — and **an emit never blocks on I/O**, because each file
@@ -131,6 +152,7 @@ line to the logger through `ffi::emit_pipeline`. Those lines carry a process-loc
 | `random_util.rs` | `Utils/RandomUtil.cs` | Every draw primitive, bug-for-bug. Also `TestSeedGuard` |
 | `probability_object_array.rs` | `Utils/Collections/ProbabilityObjectArray.cs` | Weighted draws over a key pool |
 | `mongo_id.rs` | `Models/Common/MongoId.cs` | 12-byte ObjectId generation, byte-for-byte identical layout |
+| `math_util.rs` | `Utils/MathUtil.cs` | Linear interpolation and range mapping |
 | `models.rs` | `Models/…` | Wire types (see *Conventions*) |
 
 ## `src/bot/`
@@ -166,6 +188,7 @@ One native call generates a whole batch of offers, not one offer.
 | `assort_generator.rs` | `Generators/Ragfair/RagfairAssortGenerator.cs` | The assort walk: every flea-sold preset, then every sellable template, as (root + children) lists. Draws nothing |
 | `price_service.rs` | `Services/Ragfair/RagfairPriceService.cs` | The pricing math one offer needs — flea/handbook/trader arms, preset rollups, the one biased price draw |
 | `server_helper.rs` | `Helpers/Ragfair/RagfairServerHelper.cs` | Stack counts, offer counts, offer currency, item validity |
+| `slice_cache.rs` | — | The parsed invariant slice, keyed by the caller's `DatabaseMutationStamp` (see *FFI boundary*) |
 | `models.rs` | `Models/Spt/Config/RagfairConfig.cs`, `Models/…` | Config records and the request/response envelopes |
 
 Two crate-internal facts:
@@ -179,19 +202,49 @@ Two crate-internal facts:
   field is built once per generator instance and never invalidated; here it is rebuilt on every call,
   which makes the native path *fresher* than legacy for runtime-added items.
 
+## `src/quest/`
+
+`mod.rs` defines `QuestContext<'a>` (`:30`) — the items view, base-class cache, handbook/flea/preset price
+tables, the reward and seasonal blacklists, boss items and spawns, extracts and location ids, the quest
+templates and the levelled Completion white/blacklists, plus its `DiagSink`. Every view is borrowed off the
+cached invariant slice. One native call generates **one** quest of one type.
+
+`generate_repeatable_quest` (`:98`) stands in for the type switch of
+`RepeatableQuestController.PickAndGenerateRandomRepeatableQuest` (`:390-397`): it takes the slice, installs the
+seed guard, dispatches on the requested type, and returns
+`QuestNativeResponse { quest, pool }` — the quest **and** the type pool the generator mutated on the way, which
+rides back whether or not a quest came out. A `None` quest is a normal outcome (exhausted pool, or a generator
+that gave up and logged why), not a failure.
+
+| Module | Stands in for | What it does |
+|---|---|---|
+| `elimination.rs` | `Generators/RepeatableQuests/EliminationQuestGenerator.cs` | The kill-N-of-X quest |
+| `completion.rs` | `Generators/RepeatableQuests/CompletionQuestGenerator.cs` | The hand-over-N-of-X quest |
+| `exploration.rs` | `Generators/RepeatableQuests/ExplorationQuestGenerator.cs` | The survive-N-raids quest |
+| `pickup.rs` | `Generators/RepeatableQuests/PickupQuestGenerator.cs` | The fetch-N-items-of-a-type quest. Reachable, but no shipped `quest.json` lists `Pickup` in its `types` |
+| `reward_generator.rs` | `Generators/RepeatableQuests/RepeatableQuestRewardGenerator.cs` | The reward chain every type ends with: XP, money, GP coins, an optional weapon preset, items, trader standing, an optional skill point |
+| `helper.rs` | `Helpers/Quest/RepeatableQuestHelper.cs` | The template clone/placeholder pass each generator opens with, and the level-band config lookups |
+| `slice_cache.rs` | — | The quest invariant slice, in its own slot separate from ragfair's (see *FFI boundary*) |
+| `models.rs` | `Models/Spt/Repeatable/…`, `Models/…` | Wire types |
+
+This is the one family that ports a C#-sanctioned `throw` as a panic rather than an error value — see
+*Conventions*.
+
 ## Conventions
 
 These are what keep the port correct; break one and output silently diverges from C#.
 
 - **Every ported module names its C# source in its `//!` header**, with the line range where the port is a
-  slice of a larger file rather than the whole of it. (`lib.rs`, `ffi.rs`, `runtime.rs`, `verify.rs` and the two
+  slice of a larger file rather than the whole of it. (`lib.rs`, `ffi.rs`, `runtime.rs`, `verify.rs` and all four
   `mod.rs` files have no C# counterpart and no header.) Read that header before changing anything.
-- **Deviations are marked `**Deviation:**`, at the scope they apply to** — module header, item doc, or a comment
-  on the line itself. Only `bot_inventory_generator.rs` and `bot_weapon_generator.rs` also collect theirs under a
-  module-level `# Deviations` heading; everywhere else, grep for the marker rather than expecting a section.
-- **RNG draw order is a contract.** The bot family states it up front: every module that draws opens with an
+- **Deviations are marked `Deviation:`, at the scope they apply to** — module header, item doc, or a comment on
+  the line itself. Grep that bare form: the bot family bolds it (`**Deviation:**`) and the loot family does not,
+  and ragfair and quest currently record none. Only `bot_inventory_generator.rs` and `bot_weapon_generator.rs`
+  also collect theirs under a module-level `# Deviations` heading; everywhere else there is no section to read.
+- **RNG draw order is a contract.** The bot family states it up front: every generating module opens with an
   ordered list ("*RNG calls, in C# source order — the parity contract*"), including draws C# consumes and
-  discards. The loot family documents each draw inline at its call site instead, against the C# line. Adding,
+  discards. The loot family documents each draw inline at its call site instead, against the C# line, and so do
+  the draw primitives themselves (`random_util.rs`, `probability_object_array.rs`, `exhaustable_array.rs`). Adding,
   removing, or reordering a draw desynchronises the whole sequence, so a "harmless" early-out that skips a roll
   is a bug.
 - **The generator families log for themselves, and have one rule for throws.** C# `ISptLogger` calls become
@@ -201,7 +254,7 @@ These are what keep the port correct; break one and output silently diverges fro
   assert the diagnostics as data.) A C# *return-null-and-log* path is ported as a `Diagnostic` plus `None`, in every
   family. A C#-*sanctioned* `throw` is ported one of two ways, by family: loot, bot and ragfair return it as a
   `LootError` (so does an unguarded null deref they would have NRE'd on); the quest family panics at the throw
-  site — `panic!` or `.expect` — and catches it at the family entry point (`quest/mod.rs:120`), which carries
+  site — `panic!` or `.expect` — and catches it at the family entry point (`quest/mod.rs:128`), which carries
   the message across as `STATUS_ERROR`. Panicking is not unsafe here: every export runs inside `catch_unwind`
   (`ffi.rs:214`), so nothing unwinds past the FFI boundary either way.
 - **Wire models come in four families** (`loot/models.rs`, `bot/models.rs`, `ragfair/models.rs`,
@@ -209,25 +262,32 @@ These are what keep the port correct; break one and output silently diverges fro
   `JsonPropertyName`, each with a `#[serde(flatten)] extra` map so
   mod-added fields survive the round trip — the counterpart to the `[JsonExtensionData]` that `Tools/Ceciler`
   injects. Request/response envelopes are a fresh contract and use plain camelCase with no passthrough map.
-- **One C# RNG lifetime can span two native calls.** Each generator entry point (not `ffi.rs`) opens the run
-  with `test_seed.map(TestSeedGuard::install)`. `generate_dynamic_loot` is the exception: it uses
+- **One C# RNG lifetime can span two native calls.** Each generator entry point (not `ffi.rs`) opens the run by
+  mapping the request's optional seed through `TestSeedGuard::install`. `generate_dynamic_loot` is the exception: it uses
   `TestSeedGuard::resume`, which picks up the thread-local stream the preceding `generate_static_containers`
   parked under the same seed. C# installs one `SeededRandomSource` for the whole of `GenerateLocationLoot` and
   draws in both phases; the native side is entered once per phase, so a fresh `install` on the second would
   replay the first phase's values. The guard is RAII, so a panic can't leak a seeded stream onto a pooled thread.
 - **Caches become per-call derivation.** C# DI singletons keyed by bot id or built once over the whole database
   (`BotEquipmentModPoolService`, `BotInventoryContainerService`) are recomputed per call or handed across the
-  boundary by the caller, since one native call generates one bot.
+  boundary by the caller. The unit is one bot, not one raid: the batch export hoists only the views every bot
+  in the wave shares (`SharedBotViewsWire`) and still derives the rest per bot, each with its own seed guard.
 
 ## Tests
 
-All tests are inline `#[cfg(test)]` modules (~670 of them); there is no `tests/` integration suite. Three kinds:
+Almost every test is an inline `#[cfg(test)]` module (~660 of them). Three kinds:
 
 - **Parity fixtures** — replay a C# scenario and assert the exact item list.
-- **Seeded-RNG tests** — a `testSeed` field on every request envelope installs a `TestSeedGuard`, swapping
-  thread entropy for a xoshiro256\*\* stream that is bit-identical to `Utils/RandomSource.cs`. Known-answer
-  tests in `random_util.rs` pin it, and `RandomSourceParityTests.cs` pins the C# end.
-- **FFI transport tests** — `ffi.rs` round-trips each export through raw pointers, covering success, parse
-  failure, generation failure, and null arguments.
+- **Seeded-RNG tests** — an optional seed on every request envelope (`testSeed`, spelled `seed` on the quest
+  one) installs a `TestSeedGuard`, swapping thread entropy for a xoshiro256\*\* stream that is bit-identical to
+  `Utils/RandomSource.cs`. Known-answer tests in `random_util.rs` pin it, and `RandomSourceParityTests.cs` pins
+  the C# end.
+- **FFI transport tests** — `ffi.rs` round-trips the exports through raw pointers; between them they cover
+  success, parse failure, generation failure and null arguments. `spt_generate_bot_inventory_batch` is the one
+  export with no transport test of its own.
+
+The one exception is `tests/completion_whitelist_baseclass.rs`, a timing-and-equivalence guard for the
+Completion whitelist filter's base-class lookups. It runs against the real shipped `items.json`, so it needs
+`scripts/decompress-assets.sh` to have run.
 
 Run with `cd rust && cargo test && cargo fmt --check && cargo clippy --all-targets -- -D warnings`.

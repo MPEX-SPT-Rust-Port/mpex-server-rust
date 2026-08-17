@@ -85,8 +85,8 @@ pub enum QuestError {
     StaleSlice,
 }
 
-/// `RepeatableQuestController.GenerateRepeatableQuest` (`:390-404`) — one quest of the requested
-/// type, plus the pool the generator mutated on the way.
+/// `RepeatableQuestController.PickAndGenerateRandomRepeatableQuest` (`:390-397`) — one quest of the
+/// requested type, plus the pool the generator mutated on the way.
 ///
 /// A `null` quest is a normal outcome, not a failure: the pool can be exhausted, or a generator can
 /// give up and log why. The mutated pool and the diagnostics ride back either way.
