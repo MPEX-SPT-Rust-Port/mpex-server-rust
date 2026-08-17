@@ -1682,8 +1682,12 @@ mod tests {
     #[test]
     fn a_pool_tpl_missing_from_the_database_is_dropped_and_redrawn() {
         let mut request = base_request();
+        // The ghost outweighs the real tpl 1000:1, so the pinned seed draws it first; it is then
+        // `shift_remove`d from the pool, leaving the redraw with only `HEADWEAR_TPL` to find.
+        // Worn headwear therefore proves the drop-and-redraw ran, with the diagnostics it logs
+        // now going straight to the pipeline.
         request["template"]["inventory"]["equipment"]["Headwear"] =
-            json!({"headwear_ghost": 1, HEADWEAR_TPL: 1});
+            json!({"headwear_ghost": 1000, HEADWEAR_TPL: 1});
 
         let result = generate(request).unwrap();
 
