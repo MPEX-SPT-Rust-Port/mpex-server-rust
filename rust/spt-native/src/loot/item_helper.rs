@@ -215,6 +215,18 @@ impl ItemBaseClassCache {
                 .any(|ancestor| base_class_tpls.contains(&ancestor.as_str()))
         })
     }
+
+    /// [`Self::is_of_baseclasses`] with the candidates in a set — the scan of the candidate list
+    /// becomes one probe per chain link, which is what the Completion whitelist/blacklist sites
+    /// need: their candidate lists run to hundreds of ids where every other caller passes one to
+    /// seven. Same enumeration direction as the slice form, so the answers are identical.
+    pub fn is_of_baseclasses_set(&self, tpl: &str, base_class_tpls: &HashSet<&str>) -> bool {
+        self.ancestors.get(tpl).is_some_and(|chain| {
+            chain
+                .iter()
+                .any(|ancestor| base_class_tpls.contains(ancestor.as_str()))
+        })
+    }
 }
 
 /// `ItemHelper.ArmorItemCanHoldMods` (`ItemHelper.cs:319-322`) — `_armorSlotsThatCanHoldMods`
@@ -1467,6 +1479,8 @@ mod tests {
         candidates.push("999999999999999999999999");
         candidates.push("aaaaaaaaaaaaaaaaaaaaaaaa");
 
+        let candidate_set: HashSet<&str> = candidates.iter().copied().collect();
+
         for tpl in &candidates {
             for base in &candidates {
                 assert_eq!(
@@ -1480,6 +1494,12 @@ mod tests {
                 cache.is_of_baseclasses(tpl, &candidates),
                 is_of_baseclasses(&view, tpl, &candidates),
                 "cache and walk disagree for tpl {tpl} against the full candidate list"
+            );
+
+            assert_eq!(
+                cache.is_of_baseclasses_set(tpl, &candidate_set),
+                is_of_baseclasses(&view, tpl, &candidates),
+                "set-probing cache and walk disagree for tpl {tpl}"
             );
         }
     }

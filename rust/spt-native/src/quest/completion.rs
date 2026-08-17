@@ -164,16 +164,15 @@ fn get_whitelisted_item_selection<'a>(
     // Filter and concatenate items according to current player level
     let item_ids_whitelisted = levelled_item_ids(item_whitelist, pmc_level);
     // `:368` asks `IsOfBaseclass` once per whitelisted id, answered from `ItemBaseClassService`'s
-    // precomputed ancestor sets. The cache probe below is that same shape: one lookup of the item's
-    // ancestor set, same answers as the walk it replaced (see `ItemBaseClassCache`).
-    let whitelisted_base_classes: Vec<&str> = item_ids_whitelisted.iter().copied().collect();
-
+    // precomputed ancestor sets. Here the whitelist stays a set and each pool item's (short)
+    // ancestor chain probes it — same answers, and the per-item cost no longer scales with the
+    // whitelist's length.
     item_selection
         .into_iter()
         .filter(|tpl| {
             // Whitelist can contain item tpls and item base type ids
             ctx.base_classes
-                .is_of_baseclasses(tpl, &whitelisted_base_classes)
+                .is_of_baseclasses_set(tpl, &item_ids_whitelisted)
                 || item_ids_whitelisted.contains(tpl)
         })
         .collect()
@@ -194,9 +193,7 @@ fn get_blacklisted_item_selection<'a>(
 
     // Filter and concatenate the arrays according to current player level
     let item_ids_blacklisted = levelled_item_ids(item_blacklist, pmc_level);
-    // One cache probe per candidate item, as on the whitelist above.
-    let blacklisted_base_classes: Vec<&str> = item_ids_blacklisted.iter().copied().collect();
-
+    // One chain-probes-the-set pass per candidate item, as on the whitelist above.
     item_selection
         .into_iter()
         .filter(|tpl| {
@@ -206,7 +203,7 @@ fn get_blacklisted_item_selection<'a>(
             // the right one — the blacklist drops nothing unless a tpl is listed *and* descends
             // from something else in the same list.
             !ctx.base_classes
-                .is_of_baseclasses(tpl, &blacklisted_base_classes)
+                .is_of_baseclasses_set(tpl, &item_ids_blacklisted)
                 || !item_ids_blacklisted.contains(tpl)
         })
         .collect()
