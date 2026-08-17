@@ -1611,7 +1611,7 @@ mod tests {
         unsafe { spt_buf_free(out_ptr, out_len) };
 
         let locales =
-            br#"{ "item-invalid_tpl_item": "Unable to find an item with tpl of: %s in Db" }"#;
+            br#"{ "roundtrip-test-key": "Unable to find an item with tpl of: %s in Db" }"#;
         let status =
             unsafe { spt_locales_set(locales.as_ptr(), locales.len(), &mut out_ptr, &mut out_len) };
         assert_eq!(status, STATUS_OK);
@@ -1620,7 +1620,7 @@ mod tests {
         sink.push(crate::loot::models::Diagnostic {
             category: "SPTarkov.Server.Core.Helpers.Items.ItemHelper",
             level: crate::loot::models::ERROR.to_owned(),
-            locale_key: Some("item-invalid_tpl_item".to_owned()),
+            locale_key: Some("roundtrip-test-key".to_owned()),
             args: Some(serde_json::json!("54009119af1c881c07000029")),
             message: None,
         });
