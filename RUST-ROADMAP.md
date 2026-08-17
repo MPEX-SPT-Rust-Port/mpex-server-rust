@@ -12,7 +12,7 @@ ported and run natively by default. Every ported class keeps its full 4.1.2 C# i
 pipeline is ported too, and has no legacy path: `SPTLoggerDispatcher` hands every line to the crate.
 Seventeen C-ABI exports (`src/ffi.rs`) carry all of it, JSON in and JSON out — except the ragfair
 response, which is a framed MessagePack envelope, and `spt_log_emit`, which passes the fields of one
-line directly (current ABI 16).
+line directly (current ABI 17).
 
 ## Working
 
@@ -103,10 +103,11 @@ the native pipeline; seeded-RNG parity at the primitive level (xoshiro256\*\*, t
 - **Typed loose-loot path is slow** — ~1347 ms per raid start for `bigmap` vs ~345 ms raw, against
   929 ms for the C# it replaced. Any registered `LazyLoad` transformer (seasonal events, mods)
   forces it. Vanilla installs stay on the raw path.
-- **A failure still crosses as a bare message** — everything the run logged on the way down is
-  already in the log, emitted as it happened, but the error itself is the one thing the FFI hands
-  back as text for C# to throw with (one-buffer contract). Localising and categorising that last
-  line is what remains.
+- **A failure crosses as a message for C# to throw with** — everything the run logged on the way
+  down is already in the log, emitted as it happened; the error text itself stays the C# caller's
+  to log (one-buffer contract). Since ABI 17 a panic crosses with its message too, and the one
+  4.1.2 throw that was localised (`location-critical_error_see_log`) renders through the native
+  locale table. The error line carries no category — it arrives as an exception, not a log line.
 - **Hangs are mostly undiagnosable** — ported retry loops can spin exactly as 4.1.2 does, inside an
   FFI call with no managed stack trace. Generator diagnostics stream now, so a hang beside a
   diagnostic site shows its last line; a hang in a stretch with no diagnostic sites still shows
@@ -302,10 +303,7 @@ the native pipeline; seeded-RNG parity at the primitive level (xoshiro256\*\*, t
 
 1. Later candidates, in `todo/TODO.md` order: scav case rewards, weather, fence assorts, raid-time
    adjustment, ragfair linked-item table.
-2. Re-scope the logging port's phase 3. Live emission made "`STATUS_ERROR` carries the run's
-   accumulated diagnostics" moot; what is left is the error envelope itself — the message and its
-   localisation.
-3. Profile Completion's two whole-items-table passes through
+2. Profile Completion's two whole-items-table passes through
    `reward_generator::is_valid_reward_item`, and `loot/item_helper.rs`'s uncached
    `is_of_baseclasses` walk under them, against `ItemBaseClassService`'s prebuilt parent map — the
    named candidate for Completion's 3.1x, unmeasured so far.

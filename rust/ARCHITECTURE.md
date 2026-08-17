@@ -22,7 +22,7 @@ Roughly 46k lines across 49 files, tests included. `src/bot/` is ~37% of that an
 
 | Path | Role |
 |---|---|
-| `src/lib.rs` | Module roots and `ABI_VERSION` (currently 16; must equal `SptNative.ExpectedAbiVersion`) |
+| `src/lib.rs` | Module roots and `ABI_VERSION` (currently 17; must equal `SptNative.ExpectedAbiVersion`) |
 | `src/ffi.rs` | The C-ABI surface. The **only** module containing `unsafe` |
 | `src/runtime.rs` | Process-wide multi-thread tokio runtime, `OnceLock`-built. Used only by `verify` |
 | `src/verify.rs` | Hashes `SPT_Data` with XXH3-128 and diffs it against `checks.dat` |
@@ -48,7 +48,7 @@ than a JSON document, and `spt_logger_close` takes nothing — see *The log pipe
 C# SptNative → spt_generate_* (JSON in)
   → serde deserialize into a request envelope from loot/, bot/, ragfair/ or quest/models.rs
   → catch_unwind( generator )
-  → serde serialize the result, or the LootError message, into an out-buffer
+  → serde serialize the result, or the failure message (LootError or panic text), into an out-buffer
 ```
 
 - `run_generator_with` is the shared body of the ten generation exports; eight reach it through
@@ -56,13 +56,14 @@ C# SptNative → spt_generate_* (JSON in)
   ragfair to frame its response instead of emitting one JSON document, quest for its own error type.
   `spt_verify_database` is separate because it blocks on the tokio runtime.
 - Status codes: `STATUS_OK` 0, `STATUS_BAD_ARGS` 1 (null pointer, bad UTF-8, unparseable JSON),
-  `STATUS_PANIC` 2, `STATUS_ERROR` 3, `STATUS_STALE_SLICE` 4 (ragfair and quest only — see below).
+  `STATUS_PANIC` 2 (the panic message is in the out-buffer since ABI 17), `STATUS_ERROR` 3,
+  `STATUS_STALE_SLICE` 4 (ragfair and quest only — see below).
   **Quest is the exception to 2**: `quest/mod.rs` catches the generator's panic itself and reports it
   as `STATUS_ERROR` 3 carrying the panic message, because that family ports a C#-sanctioned throw as
-  an `.expect` and the C# message is what the caller has to log. The cost is that a real port bug in
+  an `.expect` — a generation failure, not a library bug. The cost is that a real port bug in
   that family (an index panic in the Rust) also arrives as 3, indistinguishable from a sanctioned
   generation failure, instead of reaching `SptNative.cs`'s "this indicates a native library bug"
-  wording. Deliberate: the message is worth more than the discrimination.
+  wording. Deliberate: a sanctioned throw is a generation failure and must read as one.
 - **Two requests have a cached half**, ragfair's and the repeatable quest's. Each arrives as
   `{invariantStamp, invariant?, varying}`; `src/ragfair/slice_cache.rs` and
   `src/quest/slice_cache.rs` each hold the last parsed invariant slice under the stamp it came with,
@@ -70,9 +71,10 @@ C# SptNative → spt_generate_* (JSON in)
   not hold returns `STATUS_STALE_SLICE` and the C# caller retries once with the slice included. Those
   two slices are the only request data the crate holds across calls; every other payload is still
   projected per call.
-- **A buffer is written on failure too** — the parse error or the `LootError` message. Ownership is decided by
-  the out-pointer being non-null, never by the status code. `spt_verify_database`'s free-on-success-only shape
-  must not be copied into the generators.
+- **A buffer is written on failure too** — the parse error, the `LootError` message, or (since
+  ABI 17) the panic text. Ownership is decided by the out-pointer being non-null, never by the
+  status code. `spt_verify_database`'s free-on-success-only shape must not be copied into the
+  generators.
 - `catch_unwind` on every fallible path: a Rust panic never unwinds into the CLR.
 - **Only the failure message crosses the buffer.** On the `LootError` path `run_generator` writes
   `error.message` and nothing else — but the run's diagnostics are already in the log, emitted as
