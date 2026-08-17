@@ -21,19 +21,21 @@ SPTarkov.Common ──────┐
 SPTarkov.DI ──────────┘
      │
      └───────────────> SPTarkov.Reflection      (referenced by the host, not by Core)
-SPTarkov.Server.Assets                          (content-only, no code references)
+SPTarkov.Server.Assets                          (content-only; the host project-references it
+                                                 solely to copy SPT_Data to output)
 ```
 
 | Project | .cs files | Depends on | NuGet of note |
 |---|---:|---|---|
-| `SPTarkov.Common` | 24 | — | SemanticVersioning, ZLinq |
+| `SPTarkov.Common` | 22 | — | SemanticVersioning, ZLinq |
 | `SPTarkov.DI` | 3 | — | MS.Extensions.DependencyInjection.Abstractions, Hosting.Abstractions |
 | `SPTarkov.Reflection` | 8 | `SPTarkov.DI` | HarmonyX |
-| `SPTarkov.Server.Core` | 840 | `SPTarkov.Common`, `SPTarkov.DI` | HarmonyX, FastCloner, System.IO.Hashing |
+| `SPTarkov.Server.Core` | 847 | `SPTarkov.Common`, `SPTarkov.DI` | HarmonyX, FastCloner, System.IO.Hashing, MessagePack |
 | `SPTarkov.Server.Web` | 50 | `SPTarkov.Server.Core` | MudBlazor, Argon2Sharp |
-| `SPTarkov.Server.Assets` | 1 | — | — |
+| `SPTarkov.Server.Assets` | 0 | — | — |
 
-(`.cs` only — `SPTarkov.Server.Web` additionally has 34 `.razor` components.)
+(`.cs` only, `obj/`+`bin/` excluded — `SPTarkov.Server.Web` additionally has 34 `.razor` components.
+Core's 847 includes the build-generated `Utils/ProgramStatics.Generated.cs`, so 846 are hand-written.)
 
 ---
 
@@ -44,9 +46,9 @@ a game type — no `MongoId`, no `Item`, no config record. Logging, semver and g
 
 | Folder | Contents |
 |---|---|
-| `Logger/` | `SptLogger`, `SptLoggerProvider`, `SPTLoggerDispatcher`, `SptEarlyLoggerFactory` (the pre-DI logger used during startup), `SPTLoggerWrapper` (adapts the dispatcher to `Microsoft.Extensions.Logging.ILogger`) |
+| `Logger/` | `SptLogger`, `SptLoggerProvider`, `SPTLoggerDispatcher`, `SptEarlyLoggerFactory` (the pre-DI logger used during startup), `SptLoggerWrapper` (adapts the dispatcher to `Microsoft.Extensions.Logging.ILogger`) |
 | `Logger/Handlers/` | `BaseLogHandler` only. Its two implementations moved to Rust; the abstract class stays because the 4.1.2 public surface is frozen |
-| `Native/` | `NativeMethods` — the `spt_logger_init` / `spt_log_emit` / `spt_logger_close` P/Invokes the dispatcher writes through |
+| `Native/` | `NativeMethods` — the `spt_logger_init` / `spt_log_emit` / `spt_logger_close` / `spt_buf_free` P/Invokes the dispatcher writes through |
 | `Models/Logging/` | `ISptLogger`, `ILogHandler`, `SptLogMessage`, `SptLoggerConfiguration` (bound from `sptLogger.json`), `FileLogger` (empty marker type used as a log category) |
 | `Semver/` | `ISemVer` + `SemanticVersioningSemVer` — used for mod `SptVersion` range checks |
 | `Extensions/` | `String`, `List`, `Object`, `MemberInfo`, `HttpContext`, and two logger extension sets |
@@ -79,7 +81,7 @@ Runtime method patching for mods, over HarmonyX.
 
 ## SPTarkov.Server.Core
 
-All game logic — 840 of the 926 `.cs` files under `Libraries/`. Referenced by `SPTarkov.Server.Web`
+All game logic — 847 of the 930 `.cs` files under `Libraries/`. Referenced by `SPTarkov.Server.Web`
 and by the host; references only `SPTarkov.Common` and `SPTarkov.DI`.
 
 → **[`SPTarkov.Server.Core/ARCHITECTURE.md`](SPTarkov.Server.Core/ARCHITECTURE.md)** for per-folder
@@ -94,28 +96,35 @@ Blazor Server admin panel (MudBlazor), served by the same Kestrel host.
 |---|---|
 | `Pages/` | Routed pages: `/` `LandingPage`, `/login`, `/profiles` `ProfileControlPage`, `/credentials` `UserCredentialsPage`, `/configs` `ConfigEditorPage`, `/database` `DatabasePage`, `/tools` `ToolsPage`, `/status`, `/thank-you`, `/example-page` |
 | `Pages/Database/` | `DatabasePage` split into ten `.razor.cs` partials — one per table (Items, Quests, Traders, Bots, Globals, Handbook, Achievements, Customization) plus `Filters` and `Formatting` |
-| `Layout/` | `BaseMainLayout`, `BaseMudBlazorLayout` — the shells mod pages inherit from |
-| `Components/` | Reusable pieces grouped `Auth/` (1), `Configs/` (2), `Database/` (9), `Profiles/` (6) |
+| `Layout/` | `BaseMainLayout` (the `DefaultLayout` on `Routes.razor`'s `AuthorizeRouteView`), `BaseMudBlazorLayout` (`@layout` on all ten built-in pages) — also the shells a mod page can opt into |
+| `Components/` | Reusable pieces grouped `Auth/` (1), `Configs/` (2), `Database/` (9), `Profiles/` (7) |
 | `Models/` | View models: `Database/` (13 — rows, columns, filters, trader assorts), `Profiles/` (12 — edit models for quests, skills, hideout, prestige, traders), `Configs/` (4) |
 | `Services/` | `AuthService` + `IPasswordHasher`/`Argon2idPasswordHasher`, `ConfigEditorService` + `IConfigEditorConfigProvider`, `WebLocalizationService` |
-| `Utils/` | `JsonPropertyFlattener` (drives the structured config editor) |
+| `Utils/` | `JsonPropertyFlattener` — `BuildProperties(json)` → `DatabaseProperty` rows; drives the record-detail views in `ProfileControlPage` and eight `DatabasePage` table partials (*not* the config editor) |
 | root | `SPTWeb.cs` (registration + three minimal-API routes: login, logout, profile download), `App.razor`, `Routes.razor`, `_Imports.razor`, `IModBlazorMetadata.cs` |
 
 `IModBlazorMetadata` is the marker a mod assembly implements to have its `wwwroot` linked and its
 Blazor pages and MVC controllers registered — the one place in the solution where MVC controllers
 are supported at all.
 
-Those three minimal APIs in `SPTWeb.cs` plus `/health` in the host are the only routes in the
-solution that bypass the router pipeline.
+Those three minimal APIs in `SPTWeb.cs` plus `/health` in the host are the only *minimal-API*
+routes in the solution. They are not the only traffic outside the router pipeline: the same method
+also calls `MapRazorComponents<App>()` and `MapControllers()`, so every admin-panel page and every
+mod MVC controller is routed by ASP.NET too.
 
 ## SPTarkov.Server.Assets
 
-Content project, no runtime code. Ships `SPT_Data/` — `configs/`, `database/`, `images/` and the
-generated `checks.dat` — plus `looseLoot.7z` (unpacked by `scripts/decompress-assets.sh`). The
-build also relocates `dotnet/` satellite assemblies and `wwwroot/` admin-panel assets into the
-output `SPT_Data`, which is why neither is covered by hash verification. Its one `.cs` file is
-`build/PostBuild.cs`, an MSBuild-time task that hashes `SPT_Data` into `checks.dat` with
-`System.IO.Hashing.XxHash128` on Release builds. That hash format is a contract shared with
-`rust/spt-native/src/verify.rs`; see the root ARCHITECTURE.md.
+Content project, no code at all — zero `.cs` files, just the `.csproj` and the payload. Ships
+`SPT_Data/` — `configs/`, `database/`, `images/` and the generated `checks.dat` — plus
+`looseLoot.7z` (unpacked by `scripts/decompress-assets.sh`). `SPTarkov.Server`'s build relocates
+`dotnet/` satellite assemblies and `wwwroot/` admin-panel assets into the *output* `SPT_Data`,
+which is why neither is covered by hash verification.
+
+`checks.dat` is regenerated by the `PreBuildHashFile` target in `SPTarkov.Server.Assets.csproj` on
+Release builds only: `cargo run --locked --release --bin gen_checks -- <SPT_Data>`. That bin
+deliberately runs without `$(CargoTargetFlag)` — it executes on the build host, so a cross-RID
+publish still hashes with a host-triple binary. The bin is a thin wrapper over `verify::generate` in
+`rust/spt-native/src/verify.rs`, so the writer and the startup verifier are literally the same
+XXH3-128 code path; see the root ARCHITECTURE.md.
 
 Excluded from the knowledge graph by `.graphifyignore`.

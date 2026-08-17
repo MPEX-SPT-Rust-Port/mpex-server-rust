@@ -11,6 +11,10 @@
 !SPTarkov.Server/
 !SPTarkov.Server/**
 
+*.razor
+*.dat
+*.css
+*.html
 
 graphify-out/
 .claude/

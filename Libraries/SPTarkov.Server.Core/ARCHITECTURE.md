@@ -1,6 +1,6 @@
 # SPTarkov.Server.Core — Architecture
 
-All game logic. 839 tracked `.cs` files, ~91% of the code under `Libraries/`. Every path below is
+All game logic. 846 tracked `.cs` files, ~91% of the code under `Libraries/`. Every path below is
 relative to `Libraries/SPTarkov.Server.Core/`.
 
 This file is a map of Core: what each folder is for and where to add things. For behaviour that
@@ -8,10 +8,13 @@ spans the repo (Rust FFI contract, build pipeline, mods) see the [root
 ARCHITECTURE.md](../../ARCHITECTURE.md); for which of the six library projects owns what, see
 [`Libraries/ARCHITECTURE.md`](../ARCHITECTURE.md).
 
-Core references only `SPTarkov.Common` and `SPTarkov.DI`, plus three NuGet packages: `HarmonyX`
-(the dual-path generators and `BotWaveBatcher` use it to detect live patches), `FastCloner` (behind `Utils/Cloners/`)
-and `System.IO.Hashing`. Core's csproj is also what invokes `cargo` to build `rust/spt-native`, so
-any `dotnet build` needs the Rust toolchain on `PATH`.
+Core references only `SPTarkov.Common` and `SPTarkov.DI`, plus four NuGet packages: `HarmonyX`
+(the dual-path generators and `BotWaveBatcher` use it to detect live patches), `FastCloner` (behind `Utils/Cloners/`),
+`MessagePack` (`Native/Ragfair/MsgpackOfferReader`) and `System.IO.Hashing`. There is one more assembly
+reference that is not a package: `Spectre.Console.Ansi`, the Rust-emitted facade `SPTarkov.Common` builds,
+held to keep the mod ABI — four Core files still name Spectre types (`Watermark`, `ProgramStatics`,
+`StringToSpectreColorConverter`, `ClientLogRequest`). Core's csproj is also what invokes `cargo` to build
+`rust/spt-native`, so any `dotnet build` needs the Rust toolchain on `PATH`.
 
 ## Folder map
 
@@ -23,14 +26,14 @@ any `dotnet build` needs the Rust toolchain on `PATH`.
 | `Routers/` | 50 | URL → callback dispatch (`Static/` 23, `ItemEvents/` 11, `Dynamic/` 7, `SaveLoad/` 4, `Serializers/` 2, root 3) |
 | `Utils/` | 43 | JSON layer (23), RNG, cloning, collections, IO, importers. Plus gitignored `ProgramStatics.Generated.cs` |
 | `Callbacks/` | 34 | HTTP entry point per domain |
-| `Generators/` | 33 | Build game data from scratch |
+| `Generators/` | 34 | Build game data from scratch |
 | `Controllers/` | 30 | Orchestration |
-| `Extensions/` | 23 | Domain extension methods, one file per extended type |
+| `Extensions/` | 23 | Domain extension methods, mostly one file per extended type (`MathExtensions` is the exception; and `ProfileExtensions` extends `PmcData` while `FullProfileExtensions` extends `SptProfile`) |
 | `Migration/` | 21 | Versioned profile migrations |
 | `Exceptions/` | 13 | Typed exceptions (`Database/`, `Helpers/`, `Items/`) |
 | `Servers/` | 11 | HTTP, WebSocket, save, ragfair |
 | `DI/` | 8 | Router base classes + lifecycle interfaces |
-| `Native/` | 10 | C# side of the Rust FFI |
+| `Native/` | 12 | C# side of the Rust FFI |
 | `Constants/` | 5 | Id and slot-name constants |
 | `Loaders/` | 2 | `ConfigLoader`, `BundleLoader` |
 
@@ -40,21 +43,21 @@ No MVC, no attribute routing. Host middleware → `Servers/HttpServer` → an `I
 `Routers/HttpRouter`, which tries every static router first and falls back to dynamic routers only
 if none matched.
 
-`HttpServer.HandleRequestAsync` picks one of three destinations, and only the last reaches the
+`HttpServer.HandleRequestAsync` picks one of three destinations, and only one of them reaches the
 router layer:
 
 1. WebSocket upgrades → `Servers/Ws/`.
 2. The first `IHttpListener` that claims the request. There are two, and it is worth knowing which:
    `Routers/ImageRouter` serves static image files directly and **never touches callbacks** (it
    lives in `Routers/` but is a listener, not a `Router`); `Servers/Http/SptHttpListener` is the
-   normal pipeline below.
+   normal pipeline below, and it is the only thing that consults `HttpRouter`.
 3. Nothing claims it → falls through to the host's minimal APIs and the admin panel.
 
-`SptHttpListener` owns the wire concerns so nothing downstream has to: session id from the
-`PHPSESSID` cookie, zlib compression both ways, and the `ISerializer` escape hatch for the few
-non-JSON responses (`Routers/Serializers/` — bundles and notifications). Two behaviours surprise
-people: it serves **only GET, PUT and POST**, and an unmatched route still returns HTTP 200, with
-the 404 signalled inside the response envelope.
+`SptHttpListener` owns the wire concerns so nothing downstream has to: zlib compression both ways,
+setting the `PHPSESSID` cookie on the way out (`HttpServer` is what reads it on the way in), and the
+`ISerializer` escape hatch for the few non-JSON responses (`Routers/Serializers/` — bundles and
+notifications). Two behaviours surprise people: it serves **only GET, PUT and POST**, and an
+unmatched route still returns HTTP 200, with the 404 signalled inside the response envelope.
 
 **An endpoint = a router entry + a callback method + (usually) a controller method.** Three files.
 
@@ -65,8 +68,10 @@ the 404 signalled inside the response envelope.
 - Duplicate URLs: `StaticRouter` throws, `DynamicRouter` silently takes the first, and across
   routers the last one enumerated wins — `HttpRouter` runs *every* matching router, not just the
   first, and each overwrites the output.
-- `Router` raises `OnBeforeAction`/`OnAfterAction` events around every static, dynamic, item event
-  and save-load invocation — the seam for observing a route without replacing its registration.
+- `Router` raises `OnBeforeAction`/`OnAfterAction` events around static, dynamic and save-load
+  invocations — the seam for observing a route without replacing its registration. Item events are
+  the exception: `ItemEventRouter.HandleItemEvent` never fires them, and the
+  `ItemRouterOnBefore/AfterEventRequestData` records in `DI/Router.cs` are unused.
 - `Callbacks/` deserialize, delegate, serialize. Responses go through `Utils/HttpResponseUtil`,
   which wraps them in the client envelope (`data` + `err` + `errmsg`) — pick the wrong helper
   (`GetBody`, `GetUnclearedBody`, `NullResponse`, `EmptyResponse`, `EmptyArrayResponse`) and the
@@ -112,18 +117,24 @@ in `DI/`. Registration happens in one place — the host's `ProgramHelpers.Regis
 `Loaders/ConfigLoader` is a **static class, not `[Injectable]`** — it runs before the container
 exists. It maps each file in `SPT_Data/configs/` to a `BaseConfig` subclass in
 `Models/Spt/Config/`; the host registers each as its own singleton, so services inject e.g.
-`BotConfig` directly. `LocationConfig.ForceLegacyLootGeneration` and
-`BotConfig.ForceLegacyBotGeneration` are the Rust-port escape hatches.
+`BotConfig` directly. Four `forceLegacy*` flags are the Rust-port escape hatches, one per dual-path
+family: `LocationConfig.ForceLegacyLootGeneration`, `BotConfig.ForceLegacyBotGeneration`,
+`RagfairConfig.ForceLegacyRagfairGeneration` and `QuestConfig.ForceLegacyRepeatableQuestGeneration`.
+Narrower knobs sit alongside them: `BotConfig.ForcePerBotGeneration` (unbatch waves without leaving
+native) and, on `RagfairConfig` and `QuestConfig`, `TrustNativeRequestCacheWithMods` /
+`DisableNativeRequestCache` for the request-slice cache.
 
 ## JSON layer (`Utils/Json/`, 23 files)
 
 System.Text.Json with a custom converter set for the client's loose typing: union types
 (`ListOrT<T>`, `StringOrInt`, `DictionaryOrList`, `FloatOrIrregularFloatArray`), 16
 `Converters/` (enums, `MongoId`, number coercion), and `LazyLoad<T>`, which defers parsing the huge
-database files and whose transformer hook is the supported way to modify loose loot.
+database files and whose transformer hook is the supported way to modify loose loot. Only 9 of the
+16 are registered globally; the rest are opt-in per property via `[JsonConverter(typeof(…))]`.
 
-Gotcha: the converter list exists twice — in `SptJsonConverterRegistrator` (runtime, discovered via
-DI) and hardcoded in `ConfigLoader` (pre-DI). A converter that configs need must be added to both.
+Gotcha: that global list exists twice — in `SptJsonConverterRegistrator` (runtime, discovered via
+DI) and hardcoded in `ConfigLoader` (pre-DI), as two identical 9-entry arrays. A converter that
+configs need must be added to both.
 
 ## Logic layers
 
@@ -133,15 +144,15 @@ Convention: **Services** hold state, **Helpers** don't, **Generators** create da
 
 | Subfolder | Files | Owns |
 |---|---:|---|
-| `InRaid/` | 9 | `LocationLifecycleService` (raid start/end), airdrops, BTR, custom waves, goon spawns, open zones, raid time, raid weather |
-| `Bot/` | 8 | Equipment filters, mod pools, loot cache, name pool, weapon mod limits, per-match cache, PMC chat responses |
+| `InRaid/` | 9 | `LocationLifecycleService` (raid start/end), airdrops, BTR, custom waves, goon spawns, match location, open zones, raid time, raid weather |
+| `Bot/` | 8 | Equipment filters, mod pools, inventory containers, loot cache, name pool, weapon mod limits, per-match cache, PMC chat responses |
 | `Commerce/` | 7 | Fence, gifts, insurance, `MailSendService`, payment, repair, trader purchase persistence |
 | `Ragfair/` | 6 | Offers, prices, categories, linked items, required items, tax |
 | `Profile/` | 5 | Backup, creation, activity, `ProfileFixerService`, `ProfileMigrationService` |
-| `Modding/` | 5 | Custom item/quest registration, mod item cache, profile data access |
+| `Modding/` | 5 | Custom item/quest registration (`Custom/`), in-memory cache, mod item cache, profile data access |
 | `Server/` | 5 | `PostDbLoadService` (post-import DB adjustments), `SeasonalEventService`, notifications, bundle hashes, `DatabaseMutationStamp` |
-| `Locales/` | 3 | `ServerLocalisationService` (server messages), `LocaleService` (client locales) |
-| `Items/`, `Hideout/`, `Hosted/`, `Image/` | 7 | Item blacklists/base classes, cultist circle + map markers, startup hosted service, image routing |
+| `Locales/` | 3 | `AbstractLocalisationService` base + `ServerLocalisationService` (server messages), `LocaleService` (client locales) |
+| `Items/`, `Hideout/`, `Hosted/`, `Image/` | 7 | Item blacklists/base classes, cultist circle + map markers, startup hosted service + system-info logger, image routing |
 
 `ServerLocalisationService.GetText(key, args)` produces every user-visible server string. Its resolved
 table is also flattened and pushed to the Rust port at database import (`spt_locales_set`), which renders
@@ -157,27 +168,37 @@ Grouped by domain: `Profile/` (8, incl. `HideoutHelper`, `InventoryHelper`, `Pro
 `AbstractDialogChatBot` → `SptDialogueChatBot` / `CommandoDialogChatBot`, with `Commando/SptCommands/`
 and 15 `IChatMessageHandler` implementations under `SPTFriend/Commands/`.
 
-### `Generators/` (33) — build game data
+### `Generators/` (34) — build game data
 
 | Subfolder | Contents |
 |---|---|
-| `Bot/` | `BotGenerator`, `BotInventoryGenerator`, `BotEquipmentModGenerator`, `BotWeaponGenerator`, `BotLevelGenerator`, `PlayerScavGenerator` |
+| `Bot/` | `BotGenerator`, `BotInventoryGenerator`, `BotEquipmentModGenerator`, `BotWeaponGenerator`, `BotLevelGenerator`, `PlayerScavGenerator`, `BotWaveBatcher` |
 | `Loot/` | `LocationLootGenerator`, `LootGenerator`, `BotLootGenerator`, `PMCLootGenerator` |
-| `RepeatableQuests/` | Completion / elimination / exploration / pickup generators + reward generator |
-| `Weapons/` | `IInventoryMagGen` and four implementations: barrel, external, internal magazine, UBGL |
-| `Weather/`, `Ragfair/`, root | Weather presets; ragfair offers/assorts; fence assorts, PMC waves, scav case rewards |
+| `RepeatableQuests/` | `IRepeatableQuestGenerator` + completion / elimination / exploration / pickup generators, plus `RepeatableQuestRewardGenerator` |
+| `Weapons/` | `IInventoryMagGen`, the `InventoryMagGen` dispatcher and four implementations: barrel, external, internal magazine, UBGL |
+| `Weather/`, `Ragfair/`, root | `WeatherGenerator` + four presets; ragfair offers/assorts; fence assorts, PMC waves, scav case rewards |
 
-**Four are dual-path** — `LocationLootGenerator`, `LootGenerator`, `BotInventoryGenerator` and
-`RagfairOfferGenerator` forward to Rust by default and keep their 4.1.2 implementation as a legacy
-fallback. They use HarmonyX to detect a live patch and fall back, as does `BotWaveBatcher` — five
-files in Core reference it.
+**Eight are dual-path** — `LocationLootGenerator`, `LootGenerator`, `BotInventoryGenerator`,
+`RagfairOfferGenerator` and the four `RepeatableQuests/` quest-type generators (`Completion`,
+`Elimination`, `Exploration`, `Pickup`) forward to Rust by default and keep their 4.1.2
+implementation as a legacy fallback. Each holds a frozen list of 4.1.2 members and uses HarmonyX to
+detect a live patch on one before dispatching, as does `BotWaveBatcher` — ten files in Core
+reference HarmonyX (the eight generators, `BotWaveBatcher` and `BotController`).
 
-`BotInventoryGenerator` is the single entry point for the whole bot inventory, so
-`BotWeaponGenerator`, `BotEquipmentModGenerator` and `BotLootGenerator` do **not** forward to Rust
-themselves — they run only on the legacy path. They still participate in the decision: patching or
-replacing any of them, or deviating from the exact set of four built-in `IInventoryMagGen`
-implementations, forces the whole of bot generation back onto legacy. Dispatch conditions and
-`forceLegacy*` flags are in the root ARCHITECTURE.md.
+Two of the families fold collaborators into the native call, so those collaborators do **not**
+forward to Rust themselves — they run only on the legacy path, while still participating in the
+dispatch decision:
+
+- `BotInventoryGenerator` is the single entry point for the whole bot inventory, so
+  `BotWeaponGenerator`, `BotEquipmentModGenerator` and `BotLootGenerator` run legacy-only. Patching
+  or replacing any of them, or deviating from the exact set of four built-in `IInventoryMagGen`
+  implementations, forces the whole of bot generation back onto legacy.
+- The repeatable-quest generators fold in `RepeatableQuestRewardGenerator` and `RepeatableQuestHelper`
+  the same way. Their frozen list spans all six types, so a patch or subclass anywhere in it forces
+  all four quest-type generators onto legacy together. The four `Generate` dispatchers are deliberately
+  excluded from that list — a patch there wraps whichever path runs.
+
+Dispatch conditions and the `forceLegacy*` flags are in the root ARCHITECTURE.md.
 
 ## Models (437 files, over half of Core)
 
@@ -211,7 +232,7 @@ the template it copies — **do not delete it**, despite nothing referencing it 
 | Folder | Contents |
 |---|---|
 | `Servers/` | `HttpServer`, `WebSocketServer`, `SaveServer` (owns `user/profiles/`), `RagfairServer`; `Http/` listener + `RequestLogger`; `Ws/` connection and message handlers |
-| `Native/` | `NativeMethods` (`[LibraryImport]`), `SptNative` (safe wrapper), `Loot/`, `Bot/` and `Ragfair/` payload + projection types. The ragfair request's call-invariant half is skipped when `DatabaseMutationStamp` has not moved and no mods are loaded. Contract details in the root ARCHITECTURE.md |
+| `Native/` | `NativeMethods` (`[LibraryImport]`), `SptNative` (safe wrapper), `Loot/`, `Bot/`, `Ragfair/` and `RepeatableQuests/` payload + projection types. The ragfair and repeatable-quest requests' call-invariant half is skipped when `DatabaseMutationStamp` has not moved and no mods are loaded. Contract details in the root ARCHITECTURE.md |
 | `Migration/` | `IProfileMigration` / `AbstractProfileMigration` / context, versioned sets under `Migrations/3.11`, `4.0`, `4.1`, plus unversioned `Migrations/Fixes/` (7 corruption repairs) |
 | `Constants/` | `BodyPartContants` (typo is in the source), `ContainerConstants`, `RoleConstants`, `SideConstants`, `SlotConstants` |
 | `Exceptions/` | `Helpers/` (7, one per helper that throws), `Items/` (3, modded item/trader/clothing validation), `Database/` (3, incl. `DatabaseTablesAlreadySetException`) |
@@ -230,7 +251,7 @@ notifies *every* matching handler — unlike `IHttpListener`, where only the fir
 - `ProgramStatics` is `static partial`; its other half `Utils/ProgramStatics.Generated.cs` is
   written at build time from MSBuild properties. **Never edit the generated file.**
 - Also `FileUtil`, `HashUtil`, `HttpFileUtil`, `HttpResponseUtil`, `JsonUtil`, `MathUtil`,
-  `TimeUtil`, `Watermark`, `RagfairOfferHolder`.
+  `QteRandomUtil`, `TimeUtil`, `Watermark`, `RagfairOfferHolder`.
 
 ## Conventions
 
