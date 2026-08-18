@@ -526,6 +526,21 @@ fn logger_guard() -> std::sync::MutexGuard<'static, (usize, Option<Logger>)> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// The C# callback receiving Rust-originated log lines, so mod-registered ILogHandlers see the
+/// full stream and not only what crossed spt_log_emit. Spans are category, message, thread
+/// name; scalars are level, tid, unix-millis. Buffers are valid only for the call.
+type LogTap =
+    unsafe extern "C" fn(*const u8, usize, *const u8, usize, *const u8, usize, i32, i32, i64);
+
+/// Poison-tolerant like `logger_guard` — a panicked taker must not kill logging.
+static LOG_TAP: Mutex<Option<LogTap>> = Mutex::new(None);
+
+fn log_tap() -> Option<LogTap> {
+    *LOG_TAP
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// Native emitters get a small process-local id per thread — the managed thread id never crosses
 /// the boundary for lines Rust originates, but worker threads still stay distinguishable.
 static NEXT_EMIT_TID: AtomicI32 = AtomicI32::new(1);
@@ -550,6 +565,24 @@ pub(crate) fn emit_pipeline(category: &str, level: LogLevel, message: &str) {
         tid: EMIT_TID.with(|tid| *tid),
         unix_millis,
     };
+    // Rust-originated lines only: C#-originated lines fan out to handlers on the C# side, with
+    // their original Exception object.
+    // The tap must fire before LOGGER is taken - a handler may call straight back into spt_log_emit.
+    if let Some(tap) = log_tap() {
+        unsafe {
+            tap(
+                record.category.as_ptr(),
+                record.category.len(),
+                record.message.as_ptr(),
+                record.message.len(),
+                record.thread_name.as_ptr(),
+                record.thread_name.len(),
+                record.level as i32,
+                record.tid,
+                record.unix_millis,
+            )
+        };
+    }
     if let Some(logger) = logger_guard().1.as_ref() {
         logger.emit(&record);
     }
@@ -599,6 +632,71 @@ pub unsafe extern "C" fn spt_logger_init(
         Logger::from_json(bytes).map(|logger| {
             *guard = (1, Some(logger));
         })
+    })) {
+        Ok(Ok(())) => STATUS_OK,
+        Ok(Err(error)) => {
+            unsafe { write_buffer(error.into_bytes(), out_ptr, out_len) };
+            STATUS_ERROR
+        }
+        Err(payload) => {
+            unsafe { write_buffer(panic_message(payload).into_bytes(), out_ptr, out_len) };
+
+            STATUS_PANIC
+        }
+    }
+}
+
+/// Replaces the running pipeline's configuration in place: the C# side's answer to a mod mutating
+/// `SptLoggerConfiguration.Loggers` at runtime. Parse failure (`STATUS_ERROR`, message in the
+/// out-buffer) leaves the running pipeline untouched, as does calling before `spt_logger_init` has
+/// run. The init ref-count is untouched — a reinit is not an init. New sinks open under the
+/// pipeline lock, so a same-path target reopens in append mode (`freshened_paths`) rather than
+/// cascading the archives a second time; the old sinks flush and join after the swap.
+///
+/// # Safety
+/// `config_ptr` must point to `config_len` readable bytes of UTF-8; `out_ptr` and `out_len` must
+/// be valid for writes. A returned buffer is released with `spt_buf_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn spt_logger_reinit(
+    config_ptr: *const u8,
+    config_len: usize,
+    out_ptr: *mut *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    if out_ptr.is_null() || out_len.is_null() {
+        return STATUS_BAD_ARGS;
+    }
+
+    // Zeroed before the `config_ptr` guard: a bad-args return still leaves the caller's out-params
+    // written, never stale.
+    unsafe {
+        *out_ptr = std::ptr::null_mut();
+        *out_len = 0;
+    }
+
+    if config_ptr.is_null() {
+        return STATUS_BAD_ARGS;
+    }
+
+    let bytes = unsafe { std::slice::from_raw_parts(config_ptr, config_len) };
+
+    match catch_unwind(AssertUnwindSafe(|| {
+        // Parsing and opening the new sinks under the lock keeps the swap atomic against emits -
+        // reinit is rare, so briefly blocking the pipeline is the cheap side of that trade.
+        let mut guard = logger_guard();
+        if guard.1.is_none() {
+            return Err(
+                "the log pipeline is not initialised; call spt_logger_init first".to_owned(),
+            );
+        }
+        let new_logger = Logger::from_json(bytes)?;
+        let old = guard.1.replace(new_logger);
+        drop(guard);
+        // Join the old writer threads outside the lock, same rule as `spt_logger_close`.
+        if let Some(old) = old {
+            old.close();
+        }
+        Ok(())
     })) {
         Ok(Ok(())) => STATUS_OK,
         Ok(Err(error)) => {
@@ -711,6 +809,25 @@ pub unsafe extern "C" fn spt_logger_close() -> i32 {
     }
 }
 
+/// Registers — or with a null pointer clears — the process-wide tap receiving Rust-originated
+/// log lines. Independent of pipeline init state: a tap set before `spt_logger_init` still
+/// receives generator lines.
+///
+/// # Safety
+/// A non-null `tap` must stay callable until cleared or process exit (C# roots the delegate),
+/// and must not unwind. The spans it receives are valid only for the duration of each call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn spt_log_set_tap(tap: Option<LogTap>) -> i32 {
+    match catch_unwind(AssertUnwindSafe(|| {
+        *LOG_TAP
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = tap;
+    })) {
+        Ok(()) => STATUS_OK,
+        Err(_) => STATUS_PANIC,
+    }
+}
+
 /// Stores the resolved server-locale table generator diagnostics render against. Overwrites any
 /// previous table — the prepatch host pushing twice is harmless. On `STATUS_ERROR` the parse-error
 /// text is in the out-buffer and the previously stored table (if any) is untouched; generator
@@ -798,7 +915,7 @@ mod tests {
         assert_eq!(spt_native_abi_version(), crate::ABI_VERSION);
         assert_eq!(
             crate::ABI_VERSION,
-            19,
+            20,
             "bump SptNative.ExpectedAbiVersion too"
         );
     }
@@ -1744,10 +1861,30 @@ mod tests {
         assert_eq!(out_len, 0, "nothing may be written when out_ptr is null");
     }
 
+    static TAP_LINES: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+    unsafe extern "C" fn roundtrip_tap(
+        _category_ptr: *const u8,
+        _category_len: usize,
+        message_ptr: *const u8,
+        message_len: usize,
+        _tname_ptr: *const u8,
+        _tname_len: usize,
+        level: i32,
+        _tid: i32,
+        _millis: i64,
+    ) {
+        let message =
+            std::str::from_utf8(unsafe { std::slice::from_raw_parts(message_ptr, message_len) })
+                .unwrap_or("<bad utf8>")
+                .to_owned();
+        TAP_LINES.lock().unwrap().push(format!("{level}:{message}"));
+    }
+
     #[test]
     fn logger_exports_roundtrip() {
         /// The messages this test emits; everything else in the file belongs to a generator.
-        const MINE: [&str; 7] = [
+        const MINE: [&str; 10] = [
             "hello",
             "nullspans",
             "still up",
@@ -1755,6 +1892,9 @@ mod tests {
             "before init",
             "Unable to find an item with tpl of: 54009119af1c881c07000029 in Db",
             "plain line",
+            "moved",
+            "survives reinit failure",
+            "not tapped",
         ];
 
         let dir = TempDir::new().unwrap();
@@ -1777,6 +1917,13 @@ mod tests {
         // Emit before init is an OK no-op.
         let status = emit("Cat", "dropped", "", "main");
         assert_eq!(status, STATUS_OK);
+
+        // Reinit before init: an error naming the missing init, pipeline stays down.
+        let status =
+            unsafe { spt_logger_reinit(config.as_ptr(), config.len(), &mut out_ptr, &mut out_len) };
+        assert_eq!(status, STATUS_ERROR);
+        assert!(!out_ptr.is_null());
+        unsafe { spt_buf_free(out_ptr, out_len) };
 
         // Same for a generator diagnostic: a run before the host initialised logging drops its
         // lines rather than panicking on the empty pipeline.
@@ -1856,6 +2003,48 @@ mod tests {
         };
         assert_eq!(status, STATUS_BAD_ARGS);
 
+        // Reinit with unparseable JSON: error reported, the running pipeline is untouched.
+        let mut out_ptr: *mut u8 = std::ptr::null_mut();
+        let mut out_len: usize = 0;
+        let status = unsafe { spt_logger_reinit(b"nope".as_ptr(), 4, &mut out_ptr, &mut out_len) };
+        assert_eq!(status, STATUS_ERROR);
+        assert!(!out_ptr.is_null());
+        unsafe { spt_buf_free(out_ptr, out_len) };
+        assert_eq!(
+            emit("Cat", "survives reinit failure", "", "main"),
+            STATUS_OK
+        );
+
+        // Reinit to a second directory: later lines land there, not in the first file.
+        let moved_dir = TempDir::new().unwrap();
+        let moved_config = format!(
+            r#"{{ "loggers": [ {{ "type": "File", "logLevel": "Information",
+                "format": "%message%", "filePath": {path:?}, "filePattern": "spt.log",
+                "maxFileSizeMB": 10, "maxRollingFiles": 10, "filters": [] }} ] }}"#,
+            path = moved_dir.path().display().to_string(),
+        );
+        let status = unsafe {
+            spt_logger_reinit(
+                moved_config.as_ptr(),
+                moved_config.len(),
+                &mut out_ptr,
+                &mut out_len,
+            )
+        };
+        assert_eq!(status, STATUS_OK);
+        assert_eq!(emit("Cat", "moved", "", "main"), STATUS_OK);
+
+        // Reinit back to the first directory: a path this process already freshened reopens in
+        // append mode - no second cascade, so no spt.1.log appears beside the live file.
+        let status =
+            unsafe { spt_logger_reinit(config.as_ptr(), config.len(), &mut out_ptr, &mut out_len) };
+        assert_eq!(status, STATUS_OK);
+
+        // The tap receives Rust-originated lines only - this line crosses spt_log_emit inside the
+        // armed window, so it proves the export does not tap rather than merely arriving too early.
+        assert_eq!(unsafe { spt_log_set_tap(Some(roundtrip_tap)) }, STATUS_OK);
+        assert_eq!(emit("Cat", "not tapped", "", "main"), STATUS_OK);
+
         // Locale table + live diagnostic emission share the same run: bad JSON first.
         let status = unsafe { spt_locales_set(b"nope".as_ptr(), 4, &mut out_ptr, &mut out_len) };
         assert_eq!(status, STATUS_ERROR);
@@ -1884,6 +2073,37 @@ mod tests {
             message: Some("plain line".to_owned()),
         });
 
+        // Parallel tests' generator diagnostics share the process-global tap; filter to ours.
+        {
+            let tapped = TAP_LINES.lock().unwrap();
+            assert!(tapped.contains(
+                &"4:Unable to find an item with tpl of: 54009119af1c881c07000029 in Db".to_owned()
+            ));
+            assert!(tapped.contains(&"3:plain line".to_owned()));
+            assert!(
+                !tapped.iter().any(|line| line.ends_with(":not tapped")),
+                "spt_log_emit lines fan out C#-side and must not reach the tap"
+            );
+        }
+
+        // A cleared tap receives nothing further.
+        assert_eq!(unsafe { spt_log_set_tap(None) }, STATUS_OK);
+        sink.push(crate::loot::models::Diagnostic {
+            category: "SPTarkov.Server.Core.Generators.Loot.LootGenerator",
+            level: crate::loot::models::WARNING.to_owned(),
+            locale_key: None,
+            args: None,
+            message: Some("untapped line".to_owned()),
+        });
+        assert!(
+            !TAP_LINES
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|line| line.ends_with(":untapped line")),
+            "a cleared tap must receive nothing"
+        );
+
         // The first close drops the second init's reference - the nested `Program.Main` disposing
         // its container must not take the outer host's logging down with it.
         assert_eq!(unsafe { spt_logger_close() }, STATUS_OK);
@@ -1896,6 +2116,18 @@ mod tests {
 
         // Generators in other tests emit their diagnostics through the same process-global
         // pipeline, so only this test's own lines can be asserted on.
+        // Same shared-pipeline caveat as the first file below: other tests' generator diagnostics
+        // land here too for as long as the reinit pointed the pipeline at this directory.
+        let moved_contents = fs::read_to_string(moved_dir.path().join("spt.log")).unwrap();
+        let moved_mine: Vec<&str> = moved_contents
+            .lines()
+            .filter(|line| MINE.contains(line))
+            .collect();
+        assert_eq!(moved_mine, ["moved"]);
+        assert!(
+            !dir.path().join("spt.1.log").exists(),
+            "reinit to an already-freshened path must append, not cascade"
+        );
         let contents = fs::read_to_string(dir.path().join("spt.log")).unwrap();
         let mine: Vec<&str> = contents
             .lines()
@@ -1907,6 +2139,8 @@ mod tests {
             [
                 "hello",
                 "nullspans",
+                "survives reinit failure",
+                "not tapped",
                 "Unable to find an item with tpl of: 54009119af1c881c07000029 in Db",
                 "plain line",
                 "still up",

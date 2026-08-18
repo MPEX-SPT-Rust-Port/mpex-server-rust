@@ -47,8 +47,8 @@ a game type — no `MongoId`, no `Item`, no config record. Logging, semver and g
 | Folder | Contents |
 |---|---|
 | `Logger/` | `SptLogger`, `SptLoggerProvider`, `SPTLoggerDispatcher`, `SptEarlyLoggerFactory` (the pre-DI logger used during startup), `SptLoggerWrapper` (adapts the dispatcher to `Microsoft.Extensions.Logging.ILogger`) |
-| `Logger/Handlers/` | `BaseLogHandler` only. Its two implementations moved to Rust; the abstract class stays because the 4.1.2 public surface is frozen |
-| `Native/` | `NativeMethods` — the `spt_logger_init` / `spt_log_emit` / `spt_logger_close` / `spt_buf_free` P/Invokes the dispatcher writes through |
+| `Logger/Handlers/` | `BaseLogHandler` only. Its two implementations moved to Rust, but the abstract class is live mod surface: a mod subclasses it and hands the instance to `SPTLoggerDispatcher.RegisterHandler`, which the dispatcher fan-out and the native tap both feed |
+| `Native/` | `NativeMethods` — the `spt_logger_init` / `spt_logger_reinit` / `spt_log_emit` / `spt_log_set_tap` / `spt_logger_close` / `spt_buf_free` P/Invokes the dispatcher writes through |
 | `Models/Logging/` | `ISptLogger`, `ILogHandler`, `SptLogMessage`, `SptLoggerConfiguration` (bound from `sptLogger.json`), `FileLogger` (empty marker type used as a log category) |
 | `Semver/` | `ISemVer` + `SemanticVersioningSemVer` — used for mod `SptVersion` range checks |
 | `Extensions/` | `String`, `List`, `Object`, `MemberInfo`, `HttpContext`, and two logger extension sets |

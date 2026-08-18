@@ -55,18 +55,8 @@ public class SptBasicLogger<T> : ISptLogger<T>
         throw new NotImplementedException();
     }
 
-    public void WriteToLogFile(string body, LogLevel level = LogLevel.Information)
-    {
-        Console.WriteLine($"{categoryName}: {body}");
-    }
-
     public bool IsLogEnabled(LogLevel level)
     {
         return true;
-    }
-
-    public void DumpAndStop()
-    {
-        throw new NotImplementedException();
     }
 }

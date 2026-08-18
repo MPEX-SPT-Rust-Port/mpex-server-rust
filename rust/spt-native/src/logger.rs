@@ -2,7 +2,7 @@
 //! matching, format expansion, and the console/file sinks. C# builds an `SptLogMessage` and hands
 //! it across `spt_log_emit`; everything downstream lives here.
 
-use std::io::Write as _;
+use std::io::Write;
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::thread::JoinHandle;
 
@@ -369,6 +369,9 @@ pub fn should_emit(
 /// Console lines queued before writes start being dropped; same policy as the file sink's queue.
 const CONSOLE_QUEUE_CAPACITY: usize = 8192;
 
+/// Boxed so a test can substitute the terminal; production always hands over `std::io::stdout()`.
+type ConsoleWriter = Box<dyn Write + Send>;
+
 /// Stdout twin of `FileSink`: a writer thread behind a bounded channel, so a blocked terminal
 /// stalls the writer thread, not the logging call.
 struct ConsoleSink {
@@ -378,10 +381,14 @@ struct ConsoleSink {
 
 impl ConsoleSink {
     fn open() -> std::io::Result<ConsoleSink> {
+        ConsoleSink::open_with(Box::new(std::io::stdout()))
+    }
+
+    fn open_with(out: ConsoleWriter) -> std::io::Result<ConsoleSink> {
         let (sender, receiver) = sync_channel::<Vec<u8>>(CONSOLE_QUEUE_CAPACITY);
         let worker = std::thread::Builder::new()
             .name("spt-log-console".to_owned())
-            .spawn(move || console_run(&receiver))?;
+            .spawn(move || console_run(&receiver, out))?;
 
         Ok(ConsoleSink {
             sender: Some(sender),
@@ -404,12 +411,10 @@ impl ConsoleSink {
 }
 
 /// Drains bursts the same way the file writer does: block for one line, drain the backlog, one
-/// flush per burst.
-fn console_run(receiver: &Receiver<Vec<u8>>) {
-    let stdout = std::io::stdout();
-
+/// flush per burst. `Stdout`'s internal locking replaces the old burst-scoped `lock()` — nothing
+/// else in this crate writes stdout, so burst contiguity is unchanged in practice.
+fn console_run(receiver: &Receiver<Vec<u8>>, mut out: ConsoleWriter) {
     while let Ok(first) = receiver.recv() {
-        let mut out = stdout.lock();
         let _ = out.write_all(&first);
         let _ = out.write_all(b"\n");
         while let Ok(next) = receiver.try_recv() {
@@ -913,5 +918,102 @@ mod tests {
         let mut r = record("L", "x");
         r.unix_millis = 0;
         assert_eq!(render(&tokens, &r), "1970-01-01 00:00:00.000");
+    }
+
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+
+    struct SharedWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for SharedWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn console_lines_arrive_in_order_and_close_flushes() {
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let sink = ConsoleSink::open_with(Box::new(SharedWriter(Arc::clone(&lines)))).unwrap();
+
+        for index in 0..100 {
+            sink.write(format!("line {index}").into_bytes());
+        }
+        sink.close();
+
+        let text = String::from_utf8(lines.lock().unwrap().clone()).unwrap();
+        let expected: String = (0..100).map(|index| format!("line {index}\n")).collect();
+        assert_eq!(text, expected);
+    }
+
+    /// Blocks its first write until the test opens the gate, signalling when the worker has
+    /// entered it — so the test knows the queue behind the worker is empty before flooding it.
+    struct GatedWriter {
+        gate: std::sync::mpsc::Receiver<()>,
+        entered: std::sync::mpsc::Sender<()>,
+        lines: Arc<Mutex<Vec<u8>>>,
+        opened: bool,
+    }
+
+    impl Write for GatedWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if !self.opened {
+                let _ = self.entered.send(());
+                let _ = self.gate.recv();
+                self.opened = true;
+            }
+            self.lines.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// The roadmap's "console output is asynchronous and drops on a full queue" divergence,
+    /// previously unpinned. If `try_send` ever became a blocking `send`, the flood below would
+    /// hang the test instead of dropping the overflow.
+    #[test]
+    fn a_console_burst_deeper_than_the_queue_drops_instead_of_blocking() {
+        let (gate_sender, gate_receiver) = std::sync::mpsc::channel();
+        let (entered_sender, entered_receiver) = std::sync::mpsc::channel();
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let sink = ConsoleSink::open_with(Box::new(GatedWriter {
+            gate: gate_receiver,
+            entered: entered_sender,
+            lines: Arc::clone(&lines),
+            opened: false,
+        }))
+        .unwrap();
+
+        // The worker takes this line off the queue and blocks writing it.
+        sink.write(b"first".to_vec());
+        entered_receiver.recv().unwrap();
+
+        // The queue is empty and the worker is stuck: exactly CONSOLE_QUEUE_CAPACITY of these
+        // fit, the last 101 drop.
+        for index in 0..(CONSOLE_QUEUE_CAPACITY + 101) {
+            sink.write(format!("line {index}").into_bytes());
+        }
+
+        gate_sender.send(()).unwrap();
+        sink.close();
+
+        let written = lines.lock().unwrap().clone();
+        let count = written
+            .split(|&byte| byte == b'\n')
+            .filter(|piece| !piece.is_empty())
+            .count();
+        assert_eq!(
+            count,
+            1 + CONSOLE_QUEUE_CAPACITY,
+            "the burst beyond the queue capacity must drop, not block"
+        );
     }
 }
