@@ -9,6 +9,7 @@ using SPTarkov.Server.Core.Models.Common;
 using SPTarkov.Server.Core.Models.Eft.Common.Tables;
 using SPTarkov.Server.Core.Models.Spt.Config;
 using SPTarkov.Server.Core.Models.Spt.Tables;
+using SPTarkov.Server.Core.Native.Db;
 using SPTarkov.Server.Core.Native.Ragfair;
 using SPTarkov.Server.Core.Services.Items;
 using SPTarkov.Server.Core.Services.Ragfair;
@@ -22,10 +23,11 @@ namespace UnitTests.Tests.Generators;
 /// Head-to-head wall clock of the two dynamic flea offer generation paths on the same live database
 /// in one process, on the two calls the server actually makes: the full pass at startup and the
 /// regeneration pass <c>RagfairServer.ProcessExpiredFleaOffers</c> fires once enough offers expire.
-/// A pass is tens of thousands of offers with full item trees, which is why the native path's
-/// payload matters twice over - <see cref="RagfairPayloadProjection.BuildRequest"/> is timed on its
-/// own as well: that number is the floor under the native path, and the share it takes of it bounds
-/// what any projection-side fix could buy. Run in Release; the cargo dev profile makes Debug
+/// A pass is tens of thousands of offers with full item trees.
+/// <see cref="RagfairPayloadProjection.BuildRequest"/> is timed on its own as well, views override
+/// included - since the resident-DB flip that build is the *ineligible* caller's per-call cost
+/// (mods without <c>TrustNativeRequestCacheWithMods</c>, or <c>DisableNativeRequestCache</c>), not
+/// part of the eligible pass. Run in Release; the cargo dev profile makes Debug
 /// numbers meaningless. The "already-populated flea" premise the numbers are read against depends on
 /// this fixture running before the fixtures that clear the shared holder - alphabetical order
 /// currently guarantees it.
@@ -55,6 +57,7 @@ public class RagfairBenchmarkTests
     private BotConfig _botConfig = default!;
     private TimeUtil _timeUtil = default!;
     private DatabaseMutationStamp _databaseMutationStamp = default!;
+    private DbPublisher _dbPublisher = default!;
 
     /// <summary>
     /// The regeneration workload: one cloned single-item list per expired offer, at the configured
@@ -91,6 +94,7 @@ public class RagfairBenchmarkTests
         _botConfig = di.GetService<BotConfig>();
         _timeUtil = di.GetService<TimeUtil>();
         _databaseMutationStamp = di.GetService<DatabaseMutationStamp>();
+        _dbPublisher = di.GetService<DbPublisher>();
 
         _preExistingOfferIds = _offerService.GetOffers().Select(offer => offer.Id).ToHashSet();
 
@@ -111,27 +115,57 @@ public class RagfairBenchmarkTests
 
         RunScenario("full pass", null);
         RunScenario("regeneration pass", _expiredOffers);
-        RunSliceCacheScenario();
+        MeasureForcedPublish();
+        RunResidentDbScenario();
     }
 
     /// <summary>
-    /// What the stamp-gated invariant-slice cache buys on the regeneration pass. Cold bumps
-    /// <see cref="DatabaseMutationStamp"/> before every run, so every send projects and serialises
-    /// the whole invariant slice; warm leaves the stamp alone, so the send carries the varying
-    /// fields only and the native side reuses its already-parsed copy.
+    /// The republish cost in isolation - the three resident roots (templates, traders, globals)
+    /// projected, copied across the FFI, parsed and view-derived by <see cref="DbPublisher.ForcePublish"/>,
+    /// with no generation pass attached. This is the whole per-mutation cost the epoch protocol
+    /// pays; the warm resident arm below is what every pass pays once it is paid.
     /// </summary>
-    private void RunSliceCacheScenario()
+    private void MeasureForcedPublish()
+    {
+        for (var run = 0; run < WarmupRuns; run++)
+        {
+            _ = _dbPublisher.ForcePublish();
+        }
+
+        var timings = new List<double>(TimedRuns);
+        for (var run = 0; run < TimedRuns; run++)
+        {
+            var stopwatch = Stopwatch.StartNew();
+            _ = _dbPublisher.ForcePublish();
+            stopwatch.Stop();
+
+            timings.Add(stopwatch.Elapsed.TotalMilliseconds);
+        }
+
+        TestContext.Out.WriteLine(
+            $"{"publish (3 roots, forced)", -36} n={timings.Count}  mean={timings.Average():F2} ms  median={Median(timings):F2} ms  "
+                + $"min={timings.Min():F2} ms  max={timings.Max():F2} ms"
+        );
+    }
+
+    /// <summary>
+    /// What the stamp-gated resident DB buys on the regeneration pass. Cold bumps
+    /// <see cref="DatabaseMutationStamp"/> before every run, so every pass republishes the whole
+    /// database first; warm leaves the stamp alone, so the send carries the varying fields only
+    /// and the native side generates off the views it already derived.
+    /// </summary>
+    private void RunResidentDbScenario()
     {
         var cold = Measure(forceLegacy: false, LootGenerationPath.Native, _expiredOffers, () => _databaseMutationStamp.Bump());
-        Assert.That(_offerGenerator.LastSendIncludedSlice, Is.True, "the cold arm must send the slice on every pass");
+        Assert.That(_offerGenerator.LastSendIncludedViewsOverride, Is.False, "the cold arm still rides the resident path");
 
         var warm = Measure(forceLegacy: false, LootGenerationPath.Native, _expiredOffers);
-        Assert.That(_offerGenerator.LastSendIncludedSlice, Is.False, "the warm arm must hit the native slice cache");
+        Assert.That(_offerGenerator.LastSendIncludedViewsOverride, Is.False, "the warm arm must generate off the resident views");
 
-        Report("regeneration pass cache cold", cold);
-        Report("regeneration pass cache warm", warm);
+        Report("regeneration pass publish cold", cold);
+        Report("regeneration pass publish warm", warm);
         TestContext.Out.WriteLine(
-            $"{"slice cache", -20} speedup (median cold / median warm): {Median(cold.Timings) / Median(warm.Timings):F2}x  "
+            $"{"resident db", -20} speedup (median cold / median warm): {Median(cold.Timings) / Median(warm.Timings):F2}x  "
                 + $"warm share of cold median: {Median(warm.Timings) / Median(cold.Timings) * 100:F1}%"
         );
     }
@@ -253,23 +287,17 @@ public class RagfairBenchmarkTests
     private GenerateDynamicOffersRequest BuildRequest(List<List<Item>>? expiredOffers)
     {
         return RagfairPayloadProjection.BuildRequest(
-            RagfairPayloadProjection.BuildInvariantSlice(
-                _templateTable,
-                _handbookHelper,
-                _traderHelper,
-                _presetHelper,
-                _itemFilterService,
-                _seasonalEventService,
-                _botTable,
-                _itemHelper,
-                _botConfig,
-                _ragfairConfig
-            ),
+            RagfairPayloadProjection.BuildViewsOverride(_templateTable, _handbookHelper, _traderHelper, _presetHelper, _itemHelper),
             0,
             expiredOffers,
             _timeUtil.GetTimeStamp(),
             0,
-            null
+            null,
+            _ragfairConfig,
+            _itemFilterService,
+            _seasonalEventService,
+            _botTable,
+            _botConfig
         );
     }
 

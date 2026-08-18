@@ -25,26 +25,25 @@ namespace SPTarkov.Server.Core.Native.Ragfair;
 internal record GenerateDynamicOffersRequest
 {
     /// <summary>
-    ///     The <c>DatabaseMutationStamp</c> value the invariant slice was (or would be) built at.
-    ///     The native side stores the slice under this value and, on a slice-less request, serves
-    ///     its cached slice only when the stamps match.
+    ///     Resident-DB epoch this request was built against; 0 with <see cref="ViewsOverride"/>
+    ///     present (spec amendment 4).
     /// </summary>
-    [JsonPropertyName("invariantStamp")]
-    public required long InvariantStamp { get; set; }
+    [JsonPropertyName("epoch")]
+    public required ulong Epoch { get; set; }
 
     /// <summary>
-    ///     Null on a cache-hit send: the native side reuses the slice it stored under
-    ///     <see cref="InvariantStamp"/>. Always present until the cache gate lands.
+    ///     The distrust fallback (spec amendment 3): the C#-built view bundle, used for this call
+    ///     only and never made resident. Present iff the caller is ineligible for residency.
     /// </summary>
-    [JsonPropertyName("invariant")]
-    public RagfairInvariantSlice? Invariant { get; set; }
+    [JsonPropertyName("viewsOverride")]
+    public RagfairViewsOverride? ViewsOverride { get; set; }
 
     [JsonPropertyName("varying")]
     public required RagfairVaryingFields Varying { get; set; }
 }
 
 /// <summary>
-/// The members that change every call - everything the projection does not read off the database.
+/// The members that change every call - everything not derived off the resident database.
 /// </summary>
 internal record RagfairVaryingFields
 {
@@ -75,21 +74,44 @@ internal record RagfairVaryingFields
     /// </summary>
     [JsonPropertyName("expiredOffers")]
     public IEnumerable<List<Item>>? ExpiredOffers { get; set; }
-}
 
-/// <summary>
-/// The call-invariant half of the request: the database, config and service projections, which only
-/// change when the database does.
-/// </summary>
-internal record RagfairInvariantSlice
-{
     /// <summary>
     /// <c>RagfairConfig.Dynamic</c>, the live object - mods mutate it at runtime and the native side
-    /// has to see that.
+    /// has to see that. Moved off the old invariant slice (spec amendment 2): service/config state
+    /// with no resident home until Phases 2/4.
     /// </summary>
     [JsonPropertyName("dynamic")]
     public required Dynamic Dynamic { get; set; }
 
+    /// <summary>
+    /// <c>ItemFilterService.GetBlacklistedItems()</c>.
+    /// </summary>
+    [JsonPropertyName("configBlacklist")]
+    public required HashSet<MongoId> ConfigBlacklist { get; set; }
+
+    [JsonPropertyName("seasonalEventActive")]
+    public required bool SeasonalEventActive { get; set; }
+
+    [JsonPropertyName("seasonalItemTplBlacklist")]
+    public required HashSet<MongoId> SeasonalItemTplBlacklist { get; set; }
+
+    /// <summary>
+    /// <c>BotHelper.GatherPmcNamesOfLength</c> for each faction at
+    /// <c>BotConfig.BotNameLengthLimit</c>, pre-filtered. The faction itself is still drawn natively.
+    /// </summary>
+    [JsonPropertyName("pmcNamesUsec")]
+    public required List<string> PmcNamesUsec { get; set; }
+
+    [JsonPropertyName("pmcNamesBear")]
+    public required List<string> PmcNamesBear { get; set; }
+}
+
+/// <summary>
+/// The C#-built override of the eight database views the native side would otherwise read from its
+/// resident DB, sent by callers ineligible for residency.
+/// </summary>
+internal record RagfairViewsOverride
+{
     /// <summary>
     /// <c>GlobalTable.ItemPresets</c>, keyed by preset id. Scanned in order by the assort walk, so
     /// the insertion order of the source dictionary is the contract.
@@ -134,28 +156,6 @@ internal record RagfairInvariantSlice
     /// </summary>
     [JsonPropertyName("highestTraderPrices")]
     public required Dictionary<MongoId, double> HighestTraderPrices { get; set; }
-
-    /// <summary>
-    /// <c>ItemFilterService.GetBlacklistedItems()</c>.
-    /// </summary>
-    [JsonPropertyName("configBlacklist")]
-    public required HashSet<MongoId> ConfigBlacklist { get; set; }
-
-    [JsonPropertyName("seasonalEventActive")]
-    public required bool SeasonalEventActive { get; set; }
-
-    [JsonPropertyName("seasonalItemTplBlacklist")]
-    public required HashSet<MongoId> SeasonalItemTplBlacklist { get; set; }
-
-    /// <summary>
-    /// <c>BotHelper.GatherPmcNamesOfLength</c> for each faction at
-    /// <c>BotConfig.BotNameLengthLimit</c>, pre-filtered. The faction itself is still drawn natively.
-    /// </summary>
-    [JsonPropertyName("pmcNamesUsec")]
-    public required List<string> PmcNamesUsec { get; set; }
-
-    [JsonPropertyName("pmcNamesBear")]
-    public required List<string> PmcNamesBear { get; set; }
 
     /// <inheritdoc cref="LootCommon.ItemsView"/>
     [JsonPropertyName("items")]

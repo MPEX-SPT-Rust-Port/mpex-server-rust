@@ -3,7 +3,7 @@ pub mod models;
 pub mod offer_generator;
 pub mod price_service;
 pub mod server_helper;
-pub mod slice_cache;
+pub mod views;
 
 use std::collections::HashSet;
 

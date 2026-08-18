@@ -9,12 +9,13 @@ runs them. There are no `cargo bench` targets.
 | `LootBenchmarkTests.cs` | location loot — elapsed time per call, allocation, peak RSS |
 | `RewardLootBenchmarkTests.cs` | airdrop loot — elapsed time per call |
 | `BotBenchmarkTests.cs` | one bot's inventory — elapsed time per bot, payload projection timed separately |
-| `RagfairBenchmarkTests.cs` | a dynamic flea offer pass — elapsed time per pass, projection timed separately |
+| `RagfairBenchmarkTests.cs` | a dynamic flea offer pass — elapsed time per pass, views-override projection and forced publish timed separately |
 | `RepeatableQuestBenchmarkTests.cs` | one repeatable quest of each type — cold and warm invariant slice |
 | `ScavCaseBenchmarkTests.cs` | one scav case of each shipped recipe — elapsed time per call |
 | `ItemBaseClassBenchmarkTests.cs` | one bulk item base class cache build — elapsed time per hydrate |
 | `RagfairLinkedItemBenchmarkTests.cs` | one ragfair linked item table build — elapsed time per build |
 | `DbPublishSpikeTests.cs` | phase 0 state-ownership spike — full-DB publish envelope: per-root size and projection time; paired with `rust/spt-native/tests/phase0_publish_spike.rs` for parse time and RSS |
+| `RagfairViewsEquivalenceTests.cs` | phase 1 flip #1 — writes the 3-root publish envelope and C#-built expected ragfair views; paired with `rust/spt-native/tests/phase1_ragfair_views.rs` for the derivation-equivalence check |
 
 ## Running them
 
@@ -249,6 +250,39 @@ Wire volume, framed MessagePack (ABI 10, the shipped path), 57,842 offers: **35.
 
 Spread: native full pass 533-773 ms across both invocations, ±20 ms run-to-run on the median —
 changes under ~5% cannot be resolved here.
+
+`0287c7e` — 2026-08-18, post resident-DB flip (phase 1 flip #1, ABI 22). Same fixture shape and
+workload. The native arms now ride the resident DB: `DbPublisher.EnsureCurrent` publishes the
+templates, traders and globals roots once (absorbed in warmup) and every timed pass sends the
+varying block only. `BuildRequest` now times the C#-built `viewsOverride` — the ineligible
+caller's per-call cost, no longer any part of the eligible pass. The publish cold/warm rows
+replace the deleted slice cache's cold/warm rows: cold bumps `DatabaseMutationStamp` before every
+run, so each pass republishes all three roots first.
+
+| Scenario | Path | median | median (2nd run) | mean | min | max | offers | alloc/run |
+|---|---|---|---|---|---|---|---|---|
+| full pass | native (rust, resident db) | **520.25 ms** | 531.57 ms | 543.22 ms | 468.97 ms | 622.33 ms | 23,817 | 207.2 MB |
+| full pass | legacy (C# 4.1.2) | 455.06 ms | 419.75 ms | 456.44 ms | 424.67 ms | 498.72 ms | 24,018 | 282.6 MB |
+| full pass | `BuildRequest` (views override) | 15.87 ms | 14.18 ms | 21.73 ms | 12.88 ms | 41.29 ms | — | 7.1 MB |
+| regeneration | native (rust, resident db) | **12.06 ms** | 11.75 ms | 13.52 ms | 10.56 ms | 18.02 ms | 879 | 5.3 MB |
+| regeneration | legacy (C# 4.1.2) | 9.90 ms | 9.64 ms | 9.51 ms | 5.62 ms | 13.34 ms | 847 | 5.9 MB |
+| regeneration | `BuildRequest` (views override) | 13.84 ms | 13.14 ms | 14.16 ms | 8.80 ms | 20.55 ms | — | 7.1 MB |
+| publish (3 roots, forced) | `DbPublisher.ForcePublish` | 456.73 ms | 468.19 ms | 452.48 ms | 416.59 ms | 482.14 ms | — | — |
+| regeneration | native, publish **cold** (stamp bumped per run) | 440.02 ms | 446.55 ms | 437.99 ms | 431.88 ms | 443.97 ms | 882 | 156.9 MB |
+| regeneration | native, publish **warm** | **11.58 ms** | 11.44 ms | 13.59 ms | 10.35 ms | 19.59 ms | 857 | 5.3 MB |
+
+Speedup: **0.87x** full pass (0.79x), **0.82x** regeneration (0.82x). Publish warm vs cold:
+**37.99x** on the median (39.02x). Against the pre-flip `06825b3` numbers: pass 1 (full, native)
+699.55 → 520.25 ms and pass 2 (regeneration, native) 14.19 → 12.06 ms — the per-call half no
+longer builds or sends any view. The forced publish, 456.73 ms, is the whole per-*mutation* cost
+(3-root projection + FFI copy + parse + view derivation; Phase 0's warm three-root figure was
+432.4 ms); the cold arm's 440.02 ms median reading *below* it is run-to-run noise — the two arms'
+ranges overlap — not generation being free. The resident warm arm reads 11.58 ms against the deleted slice cache's warm 10.59 ms —
+the varying block now carries per call what the slice held resident (the 2026-08-18 amendment 2
+fields, O(KB)); at ~1 ms on an 11 ms pass the fixture cannot fully resolve it, and it is the
+accepted price of retiring the slice cache. Working set over the timed
+phase: native +370 MB on the full pass (2nd run +390 MB), legacy +0 MB — same shape as pre-flip's
++387 MB.
 
 ## Repeatable quest generation
 

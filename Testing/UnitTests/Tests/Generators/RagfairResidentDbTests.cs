@@ -1,19 +1,14 @@
 using System.Reflection;
+using System.Text;
 using NUnit.Framework;
 using SPTarkov.Server.Core.Generators.Ragfair;
-using SPTarkov.Server.Core.Helpers;
-using SPTarkov.Server.Core.Helpers.Items;
-using SPTarkov.Server.Core.Helpers.Profile;
-using SPTarkov.Server.Core.Helpers.Traders;
 using SPTarkov.Server.Core.Models.Common;
 using SPTarkov.Server.Core.Models.Eft.Common.Tables;
 using SPTarkov.Server.Core.Models.Spt.Config;
 using SPTarkov.Server.Core.Models.Spt.Mod;
 using SPTarkov.Server.Core.Models.Spt.Tables;
 using SPTarkov.Server.Core.Native;
-using SPTarkov.Server.Core.Native.Ragfair;
-using SPTarkov.Server.Core.Services;
-using SPTarkov.Server.Core.Services.Items;
+using SPTarkov.Server.Core.Native.Db;
 using SPTarkov.Server.Core.Services.Ragfair;
 using SPTarkov.Server.Core.Services.Server;
 using SPTarkov.Server.Core.Utils;
@@ -22,19 +17,23 @@ using SPTarkov.Server.Core.Utils.Cloners;
 namespace UnitTests.Tests.Generators;
 
 /// <summary>
-/// Pins the stamp-gated native slice cache: a hit skips the slice, a bump resends it, the kill
-/// switch disables it, a construction without the overload never caches, and a native-side
-/// desync self-heals through one retry. Mutates the shared config singleton and the live offer
-/// holder, so it restores both and never runs in parallel with other fixtures.
+/// Pins the resident-DB epoch protocol on the ragfair native path: an eligible generator names an
+/// epoch and never sends the views override, an unmoved stamp skips the republish, a bump forces
+/// one, the kill switch and untrusted mods fall back to the override, a construction without the
+/// overload always overrides, and a native-side epoch desync self-heals through one republish plus
+/// retry. Epochs are process-global (other fixtures publish too), so every assertion is relative.
+/// Mutates the shared config singleton and the live offer holder, so it restores both and never
+/// runs in parallel with other fixtures.
 /// </summary>
 [TestFixture]
 [NonParallelizable]
-public class RagfairNativeSliceCacheTests
+public class RagfairResidentDbTests
 {
     private RagfairOfferGenerator _generator = default!;
     private RagfairOfferService _offerService = default!;
     private RagfairConfig _ragfairConfig = default!;
     private DatabaseMutationStamp _stamp = default!;
+    private DbPublisher _publisher = default!;
     private RandomUtil _randomUtil = default!;
     private JsonUtil _jsonUtil = default!;
     private TemplateTable _templateTable = default!;
@@ -48,6 +47,7 @@ public class RagfairNativeSliceCacheTests
         _offerService = di.GetService<RagfairOfferService>();
         _ragfairConfig = di.GetService<RagfairConfig>();
         _stamp = di.GetService<DatabaseMutationStamp>();
+        _publisher = di.GetService<DbPublisher>();
         _randomUtil = di.GetService<RandomUtil>();
         _jsonUtil = di.GetService<JsonUtil>();
         _templateTable = di.GetService<TemplateTable>();
@@ -83,6 +83,20 @@ public class RagfairNativeSliceCacheTests
     }
 
     /// <summary>
+    /// The first pass after a stamp movement can bump the stamp again through the
+    /// <c>RejectedCanSellTemplates</c> replay (a real flip is a database write). Two passes settle
+    /// it: by the second, every rejected template is already false and no further bump is owed, so
+    /// the publisher's remembered stamp matches the live one.
+    /// </summary>
+    private void SettleStampAndPublish()
+    {
+        _generator.GenerateDynamicOffers();
+        ClearOffers();
+        _generator.GenerateDynamicOffers();
+        ClearOffers();
+    }
+
+    /// <summary>
     /// Everything seeded draws decide about an offer, ignoring the sanctioned per-run gaps
     /// (minted MongoIds, the intId counter, wall-clock start/end times).
     /// </summary>
@@ -105,25 +119,29 @@ public class RagfairNativeSliceCacheTests
     }
 
     [Test]
-    public void ASecondUnchangedPassSkipsTheSliceAndGeneratesTheSameOffers()
+    public void ASecondUnchangedPassSkipsTheRepublishAndGeneratesTheSameOffers()
     {
-        _stamp.Bump(); // force a full send first
+        _stamp.Bump(); // force a republish first
+        SettleStampAndPublish();
+
         GenerateWithASeededHolder();
-        Assert.That(_generator.LastSendIncludedSlice, Is.True);
-        var fullSend = OfferSignatures();
+        Assert.That(_generator.LastSendIncludedViewsOverride, Is.False, "an eligible generator must not send the override");
+        var firstPass = OfferSignatures();
+        var epochAfterFirst = _publisher.EnsureCurrent();
 
         ClearOffers();
         GenerateWithASeededHolder();
-        Assert.That(_generator.LastSendIncludedSlice, Is.False, "the unchanged stamp should have hit the cache");
-        var cacheHit = OfferSignatures();
+        Assert.That(_generator.LastSendIncludedViewsOverride, Is.False);
+        var secondPass = OfferSignatures();
 
-        Assert.That(cacheHit, Is.EqualTo(fullSend));
+        Assert.That(_publisher.EnsureCurrent(), Is.EqualTo(epochAfterFirst), "an unmoved stamp must not republish");
+        Assert.That(secondPass, Is.EqualTo(firstPass));
     }
 
     /// <summary>
     /// The native pass itself is seeded, but the holder is not: <c>AddOffer</c> spends an unseeded
     /// per-template cap draw (<c>RagfairOfferHolder.cs:153-163</c>) that decides which offers
-    /// survive, so the two passes only compare if that draw runs off a fresh fixed stream too.
+    /// survive, so two passes only compare if that draw runs off a fresh fixed stream too.
     /// </summary>
     private void GenerateWithASeededHolder()
     {
@@ -140,51 +158,61 @@ public class RagfairNativeSliceCacheTests
     }
 
     /// <summary>
-    /// The signature above is coarse by construction - a stale slice that moved a durability roll or
-    /// an <c>Upd</c> field would project identically through it. This is the fine-grained pin: one
-    /// item through the expired-offer vehicle (the same one <see cref="RagfairParityTests"/> uses, and
-    /// what <c>RagfairServer.cs:79</c> calls), full slice send versus cache hit, compared as
-    /// normalized JSON down to every field. A whole pass cannot be compared this way - tens of
-    /// thousands of offers is gigabytes of <c>JsonNode</c>.
+    /// The signature above is coarse by construction - a diverged view that moved a durability roll
+    /// or an <c>Upd</c> field would project identically through it. This is the fine-grained pin,
+    /// and the flip's whole promise in one process: the same item through the expired-offer vehicle
+    /// (the one <see cref="RagfairParityTests"/> uses, and what <c>RagfairServer.cs:79</c> calls),
+    /// generated once off the natively-derived resident views and once off the C#-built override,
+    /// compared as normalized JSON down to every field.
     /// </summary>
     [Test]
-    public void ACacheHitProducesAnIdenticalOfferFieldForField()
+    public void AResidentSendAndAnOverrideSendProduceAnIdenticalOfferFieldForField()
     {
         var item = BuildSingleItem();
 
-        _stamp.Bump(); // force a full send first
-        var fullSend = GenerateOneOffer(item);
-        Assert.That(_generator.LastSendIncludedSlice, Is.True);
+        var resident = GenerateOneOffer(item);
+        Assert.That(_generator.LastSendIncludedViewsOverride, Is.False);
 
-        var cacheHit = GenerateOneOffer(item);
-        Assert.That(_generator.LastSendIncludedSlice, Is.False, "the unchanged stamp should have hit the cache");
+        _ragfairConfig.DisableNativeRequestCache = true;
+        string overrideSend;
+        try
+        {
+            overrideSend = GenerateOneOffer(item);
+        }
+        finally
+        {
+            _ragfairConfig.DisableNativeRequestCache = false;
+        }
+        Assert.That(_generator.LastSendIncludedViewsOverride, Is.True);
 
-        LootJsonAssert.AssertEqual(fullSend, cacheHit, "slice-cache full send vs hit", 424242);
+        LootJsonAssert.AssertEqual(resident, overrideSend, "resident send vs views-override send", 424242);
     }
 
     [Test]
-    public void ABumpForcesTheSliceToBeResent()
+    public void ABumpForcesARepublish()
     {
-        _generator.GenerateDynamicOffers();
+        SettleStampAndPublish();
+        var epochBefore = _publisher.EnsureCurrent();
+
         _stamp.Bump();
-
-        ClearOffers();
         _generator.GenerateDynamicOffers();
 
-        Assert.That(_generator.LastSendIncludedSlice, Is.True);
+        Assert.That(_generator.LastSendIncludedViewsOverride, Is.False);
+        Assert.That(_publisher.EnsureCurrent(), Is.GreaterThan(epochBefore), "a bumped stamp must republish");
     }
 
     [Test]
-    public void TheKillSwitchAlwaysSendsTheSlice()
+    public void TheKillSwitchAlwaysSendsTheOverride()
     {
         _ragfairConfig.DisableNativeRequestCache = true;
         try
         {
             _generator.GenerateDynamicOffers();
+            Assert.That(_generator.LastSendIncludedViewsOverride, Is.True);
             ClearOffers();
             _generator.GenerateDynamicOffers();
 
-            Assert.That(_generator.LastSendIncludedSlice, Is.True);
+            Assert.That(_generator.LastSendIncludedViewsOverride, Is.True);
         }
         finally
         {
@@ -193,22 +221,22 @@ public class RagfairNativeSliceCacheTests
     }
 
     [Test]
-    public void ANativeSideDesyncSelfHealsThroughOneRetry()
+    public void ANativeSideEpochDesyncSelfHealsThroughOneRetry()
     {
-        // Desync: park a slice under a stamp the generator will never claim, then lie to the
-        // generator that its current stamp was already sent
-        var di = DI.GetInstance();
-        ParkForeignSlice(di);
-        _generator.LastSentSliceStamp = _stamp.Current;
+        SettleStampAndPublish();
+
+        // Desync: a direct native publish the publisher never sees moves the resident epoch out
+        // from under the epoch it remembers
+        SptNative.DbPublish(Encoding.UTF8.GetBytes("{\"schema\":1,\"roots\":{}}"));
 
         _generator.GenerateDynamicOffers();
 
-        Assert.That(_generator.LastSendIncludedSlice, Is.True, "the stale-slice miss should have retried with the slice");
+        Assert.That(_generator.LastSendIncludedViewsOverride, Is.False, "the stale-epoch miss should have republished and retried");
         Assert.That(_offerService.GetOffers(), Is.Not.Empty);
     }
 
     [Test]
-    public void AGeneratorBuiltOnTheFrozenConstructorNeverCaches()
+    public void AGeneratorBuiltOnTheFrozenConstructorAlwaysSendsTheOverride()
     {
         var di = DI.GetInstance();
         var frozen = BuildWithFrozenConstructor(di);
@@ -218,11 +246,11 @@ public class RagfairNativeSliceCacheTests
         ClearOffers();
         frozen.GenerateDynamicOffers();
 
-        Assert.That(frozen.LastSendIncludedSlice, Is.True, "no stamp service means no cache eligibility");
+        Assert.That(frozen.LastSendIncludedViewsOverride, Is.True, "no publisher means no residency eligibility");
     }
 
     [Test]
-    public void AGeneratorWithModsLoadedAlwaysSendsTheSlice()
+    public void AGeneratorWithModsLoadedAlwaysSendsTheOverride()
     {
         var di = DI.GetInstance();
         // The gate only reads Count, so a placeholder element stands in for a real mod
@@ -233,26 +261,28 @@ public class RagfairNativeSliceCacheTests
         ClearOffers();
         modded.GenerateDynamicOffers();
 
-        Assert.That(modded.LastSendIncludedSlice, Is.True, "a loaded mod without the trust flag disables the cache");
+        Assert.That(modded.LastSendIncludedViewsOverride, Is.True, "a loaded mod without the trust flag disables residency");
     }
 
     [Test]
-    public void TheTrustFlagKeepsTheCacheLiveWithModsLoaded()
+    public void TheTrustFlagKeepsTheResidentPathLiveWithModsLoaded()
     {
         var di = DI.GetInstance();
         var modded = BuildWithOverloadConstructor(di, new SptMod[] { null! });
         modded.NativeTestSeed = 424242;
 
-        // Not a slice input, so no bump is owed on the way back out
         _ragfairConfig.TrustNativeRequestCacheWithMods = true;
         try
         {
-            _stamp.Bump(); // force a full send first
             modded.GenerateDynamicOffers();
             ClearOffers();
             modded.GenerateDynamicOffers();
 
-            Assert.That(modded.LastSendIncludedSlice, Is.False, "the trust flag should keep the cache live despite the mod");
+            Assert.That(
+                modded.LastSendIncludedViewsOverride,
+                Is.False,
+                "the trust flag should keep the resident path live despite the mod"
+            );
         }
         finally
         {
@@ -320,37 +350,6 @@ public class RagfairNativeSliceCacheTests
                 Upd = new Upd { StackObjectsCount = 99999999, UnlimitedCount = true },
             },
         ];
-    }
-
-    /// <summary>
-    /// Leaves the native slice cache holding a stamp no generator will ever name, so the next
-    /// slice-less request for any other stamp misses and reports stale.
-    /// </summary>
-    private static void ParkForeignSlice(DI di)
-    {
-        var slice = RagfairPayloadProjection.BuildInvariantSlice(
-            di.GetService<TemplateTable>(),
-            di.GetService<HandbookHelper>(),
-            di.GetService<TraderHelper>(),
-            di.GetService<PresetHelper>(),
-            di.GetService<ItemFilterService>(),
-            di.GetService<SeasonalEventService>(),
-            di.GetService<BotTable>(),
-            di.GetService<ItemHelper>(),
-            di.GetService<BotConfig>(),
-            di.GetService<RagfairConfig>()
-        );
-
-        var request = RagfairPayloadProjection.BuildRequest(
-            slice,
-            long.MaxValue - 1,
-            null,
-            di.GetService<TimeUtil>().GetTimeStamp(),
-            0,
-            424242
-        );
-
-        SptNative.GenerateDynamicOffers(request);
     }
 
     private static RagfairOfferGenerator BuildWithFrozenConstructor(DI di)

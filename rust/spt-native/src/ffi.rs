@@ -31,9 +31,9 @@ pub const STATUS_BAD_ARGS: i32 = 1;
 pub const STATUS_PANIC: i32 = 2;
 /// Generation failed: the error message, not a result, is in the out-buffer.
 pub const STATUS_ERROR: i32 = 3;
-/// A slice-less ragfair or repeatable-quest request named a stamp this process has not cached; the
-/// caller resends.
-pub const STATUS_STALE_SLICE: i32 = 4;
+/// A request named a resident-DB epoch (ragfair) or a cached slice stamp (quests, until flip #2)
+/// this process does not hold; the caller republishes / resends.
+pub const STATUS_STALE_EPOCH: i32 = 4;
 
 /// How a generator failure crosses the boundary: which status code, and what message buffer.
 pub trait FfiFailure {
@@ -55,14 +55,16 @@ impl FfiFailure for RagfairError {
     fn status(&self) -> i32 {
         match self {
             RagfairError::Loot(_) => STATUS_ERROR,
-            RagfairError::StaleSlice => STATUS_STALE_SLICE,
+            RagfairError::StaleEpoch => STATUS_STALE_EPOCH,
         }
     }
 
     fn into_message(self) -> String {
         match self {
             RagfairError::Loot(error) => error.message,
-            RagfairError::StaleSlice => "no cached invariant slice for this stamp".to_string(),
+            RagfairError::StaleEpoch => {
+                "resident DB epoch mismatch; republish and retry".to_string()
+            }
         }
     }
 }
@@ -71,7 +73,7 @@ impl FfiFailure for QuestError {
     fn status(&self) -> i32 {
         match self {
             QuestError::Failed(_) => STATUS_ERROR,
-            QuestError::StaleSlice => STATUS_STALE_SLICE,
+            QuestError::StaleSlice => STATUS_STALE_EPOCH,
         }
     }
 
@@ -90,6 +92,20 @@ impl FfiFailure for ScavCaseError {
 
     fn into_message(self) -> String {
         self.message
+    }
+}
+
+impl FfiFailure for crate::db::PublishError {
+    fn status(&self) -> i32 {
+        STATUS_ERROR
+    }
+
+    fn into_message(self) -> String {
+        match self {
+            crate::db::PublishError::Schema(message) | crate::db::PublishError::Views(message) => {
+                message
+            }
+        }
     }
 }
 
@@ -547,6 +563,31 @@ pub unsafe extern "C" fn spt_build_ragfair_linked_item_table(
                     result: linked_items::build(&request),
                 })
             },
+        )
+    }
+}
+
+/// Installs a publish envelope's roots into the process-global resident DB and answers the new
+/// epoch as `{"epoch":N}`. A parse failure (including an unknown root name) is `STATUS_BAD_ARGS`;
+/// a schema or view-derivation failure is `STATUS_ERROR` and leaves the previous DB intact.
+///
+/// # Safety
+/// See `spt_generate_static_containers`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn spt_db_publish(
+    req_ptr: *const u8,
+    req_len: usize,
+    out_ptr: *mut *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    unsafe {
+        run_generator_with(
+            req_ptr,
+            req_len,
+            out_ptr,
+            out_len,
+            crate::db::publish,
+            |epoch| format!("{{\"epoch\":{epoch}}}").into_bytes(),
         )
     }
 }
@@ -1401,49 +1442,44 @@ mod tests {
         )
     }
 
-    /// Every required `InvariantSlice` member, braces included. The two price tables always know
+    /// Every member of the views override, braces included. The two price tables always know
     /// `SELLABLE_TPL`, which only matters when the items view carries it.
-    fn ragfair_invariant(items: &str, offer_item_count: &str) -> String {
-        let dynamic = ragfair_dynamic(offer_item_count);
+    fn ragfair_views_override(items: &str) -> String {
         format!(
-            r#"{{"dynamic":{dynamic},
-            "itemPresets":{{}},"defaultPresets":[],"defaultPresetsByTpl":{{}},"presetsByTpl":{{}},
+            r#"{{"itemPresets":{{}},"defaultPresets":[],"defaultPresetsByTpl":{{}},
+            "presetsByTpl":{{}},
             "fleaPrices":{{"{SELLABLE_TPL}":25000}},"handbookPrices":{{"{SELLABLE_TPL}":20000}},
-            "highestTraderPrices":{{"{SELLABLE_TPL}":12000}},"configBlacklist":[],
-            "seasonalEventActive":false,"seasonalItemTplBlacklist":[],
-            "pmcNamesUsec":["Deagle"],"pmcNamesBear":["Kirill"],"items":{items}}}"#
+            "highestTraderPrices":{{"{SELLABLE_TPL}":12000}},"items":{items}}}"#
         )
     }
 
-    /// The varying half, the same for every fixture here.
-    const RAGFAIR_VARYING: &str = r#""varying":{"timestamp":1700000000,"offerCounterStart":0}"#;
-
-    /// Every required `GenerateDynamicOffersRequest` member, slice included.
-    fn ragfair_request_with(items: &str, offer_item_count: &str) -> String {
-        let invariant = ragfair_invariant(items, offer_item_count);
-        format!(r#"{{"invariantStamp":0,{RAGFAIR_VARYING},"invariant":{invariant}}}"#)
+    /// The varying half, config and service state included (spec amendment 2). Starts with
+    /// `timestamp` so the expired-pass test can splice `expiredOffers` in front of it.
+    fn ragfair_varying(offer_item_count: &str) -> String {
+        let dynamic = ragfair_dynamic(offer_item_count);
+        format!(
+            r#""varying":{{"timestamp":1700000000,"offerCounterStart":0,
+            "dynamic":{dynamic},"configBlacklist":[],
+            "seasonalEventActive":false,"seasonalItemTplBlacklist":[],
+            "pmcNamesUsec":["Deagle"],"pmcNamesBear":["Kirill"]}}"#
+        )
     }
 
-    /// The minimal request at an arbitrary stamp, with the slice sent or omitted — the two halves
-    /// of the cache gate.
-    fn ragfair_request_with_stamp(stamp: i64, include_slice: bool) -> String {
-        if !include_slice {
-            return format!(r#"{{"invariantStamp":{stamp},{RAGFAIR_VARYING}}}"#);
-        }
-        let invariant = ragfair_invariant("{}", r#"{"default":{"min":2,"max":5}}"#);
+    /// Every required `GenerateDynamicOffersRequest` member, views override included.
+    fn ragfair_request_with(items: &str, offer_item_count: &str) -> String {
+        let varying = ragfair_varying(offer_item_count);
+        let views_override = ragfair_views_override(items);
+        format!(r#"{{"epoch":0,{varying},"viewsOverride":{views_override}}}"#)
+    }
 
-        format!(r#"{{"invariantStamp":{stamp},{RAGFAIR_VARYING},"invariant":{invariant}}}"#)
+    /// The minimal override-less request naming `epoch` — the resident-DB half of the protocol.
+    fn ragfair_request_at_epoch(epoch: u64) -> String {
+        let varying = ragfair_varying(r#"{"default":{"min":2,"max":5}}"#);
+        format!(r#"{{"epoch":{epoch},{varying}}}"#)
     }
 
     /// The one tpl the offer path would accept, were it in the items view.
     const SELLABLE_TPL: &str = "bbbbbbbbbbbbbbbbbbbbbbbb";
-
-    /// Every dynamic-offers export call writes the one static slice slot, so they run one at a time.
-    fn cache_lock() -> std::sync::MutexGuard<'static, ()> {
-        crate::ragfair::slice_cache::tests::CACHE_TEST_LOCK
-            .lock()
-            .unwrap()
-    }
 
     fn ragfair_request() -> String {
         ragfair_request_with("{}", r#"{"default":{"min":2,"max":5}}"#)
@@ -1496,8 +1532,6 @@ mod tests {
 
     #[test]
     fn a_minimal_dynamic_offers_request_returns_an_empty_offer_list() {
-        // Every full send stores its slice, so this shares the one static slot with the cache test.
-        let _guard = cache_lock();
         // Empty items view and empty presets: the assort walk yields nothing, so no draws happen.
         let (status, out) =
             call_generate(spt_generate_dynamic_offers, ragfair_request().as_bytes());
@@ -1523,7 +1557,6 @@ mod tests {
 
     #[test]
     fn a_dynamic_offers_failure_returns_status_error_and_the_message() {
-        let _guard = cache_lock();
         // `offerItemCount` without a "default" entry is the unguarded C# dictionary miss: it
         // dereferences the null `MinMax` `GetValueOrDefault` hands back, so the message is the
         // null-reference one, not one naming the key.
@@ -1544,7 +1577,6 @@ mod tests {
     /// contract stage A must preserve.
     #[test]
     fn an_unseeded_expired_pass_keeps_assort_order_and_sequential_int_ids() {
-        let _guard = cache_lock();
         let expired: Vec<String> = (0..30)
             .map(|i| format!(r#"[{{"_id":"{i:024x}","_tpl":"{SELLABLE_TPL}"}}]"#))
             .collect();
@@ -1586,22 +1618,48 @@ mod tests {
     }
 
     #[test]
-    fn ragfair_slice_less_request_hits_the_cache_or_reports_stale() {
-        let _guard = cache_lock();
-        // full send stores the slice under stamp 41
-        let full = ragfair_request_with_stamp(41, true);
-        let (status, _) = call_generate(spt_generate_dynamic_offers, full.as_bytes());
+    fn ragfair_epoch_protocol_gates_override_less_requests() {
+        let _guard = db_lock();
+        crate::db::clear();
+
+        // No publish yet: an override-less request has no resident DB to generate from
+        let (status, _) = call_generate(
+            spt_generate_dynamic_offers,
+            ragfair_request_at_epoch(1).as_bytes(),
+        );
+        assert_eq!(status, STATUS_STALE_EPOCH);
+
+        // Publish the mini roots (junk roots parse as empty typed containers, so the empty
+        // ragfair views derive) and name the returned epoch: the request generates
+        let (status, out) = call_generate(
+            spt_db_publish,
+            br#"{"schema":1,"roots":{"templates":{"a":1},"traders":{"b":2},"globals":{"c":3}}}"#,
+        );
+        assert_eq!(status, STATUS_OK);
+        let epoch = serde_json::from_slice::<serde_json::Value>(&out).unwrap()["epoch"]
+            .as_u64()
+            .unwrap();
+
+        let (status, _) = call_generate(
+            spt_generate_dynamic_offers,
+            ragfair_request_at_epoch(epoch).as_bytes(),
+        );
         assert_eq!(status, STATUS_OK);
 
-        // slice-less send with the same stamp generates from the cache
-        let hit = ragfair_request_with_stamp(41, false);
-        let (status, _) = call_generate(spt_generate_dynamic_offers, hit.as_bytes());
-        assert_eq!(status, STATUS_OK);
+        // A mismatched epoch is a stale miss carrying the republish-and-retry message
+        let (status, out) = call_generate(
+            spt_generate_dynamic_offers,
+            ragfair_request_at_epoch(epoch + 1).as_bytes(),
+        );
+        assert_eq!(status, STATUS_STALE_EPOCH);
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "resident DB epoch mismatch; republish and retry"
+        );
 
-        // slice-less send with a different stamp is a stale-slice miss
-        let miss = ragfair_request_with_stamp(42, false);
-        let (status, _) = call_generate(spt_generate_dynamic_offers, miss.as_bytes());
-        assert_eq!(status, STATUS_STALE_SLICE);
+        // The distrust fallback: a views override at epoch 0 never reads the resident DB
+        let (status, _) = call_generate(spt_generate_dynamic_offers, ragfair_request().as_bytes());
+        assert_eq!(status, STATUS_OK);
     }
 
     /// Every repeatable-quest call writes the quest family's own static slice slot — a different
@@ -1695,7 +1753,7 @@ mod tests {
             spt_generate_repeatable_quest,
             &quest_request(42, false, None),
         );
-        assert_eq!(status, STATUS_STALE_SLICE);
+        assert_eq!(status, STATUS_STALE_EPOCH);
         assert_eq!(
             String::from_utf8(out).unwrap(),
             "no cached invariant slice for this stamp"
@@ -1886,6 +1944,60 @@ mod tests {
         assert!(
             message.contains("expected ident"),
             "expected the serde error, got: {message}"
+        );
+    }
+
+    /// Every publish writes the one process-global resident DB, so these run under its test lock.
+    fn db_lock() -> std::sync::MutexGuard<'static, ()> {
+        crate::db::tests::DB_TEST_LOCK.lock().unwrap()
+    }
+
+    #[test]
+    fn db_publish_bumps_the_epoch_per_publish() {
+        let _guard = db_lock();
+        crate::db::clear();
+
+        // All three mini roots resident: the publish also derives the ragfair views.
+        let (status, out) = call_generate(
+            spt_db_publish,
+            br#"{"schema":1,"roots":{"templates":{"a":1},"traders":{"b":2},"globals":{"c":3}}}"#,
+        );
+        assert_eq!(status, STATUS_OK);
+        let body: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(body, serde_json::json!({"epoch": 1}));
+
+        let (status, out) = call_generate(
+            spt_db_publish,
+            br#"{"schema":1,"roots":{"templates":{"a":9}}}"#,
+        );
+        assert_eq!(status, STATUS_OK);
+        let body: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(body, serde_json::json!({"epoch": 2}));
+    }
+
+    #[test]
+    fn db_publish_rejects_an_unknown_root_as_bad_args() {
+        let _guard = db_lock();
+        let (status, out) =
+            call_generate(spt_db_publish, br#"{"schema":1,"roots":{"tempaltes":{}}}"#);
+
+        assert_eq!(status, STATUS_BAD_ARGS);
+        let message = String::from_utf8(out).unwrap();
+        assert!(
+            message.contains("unknown field"),
+            "expected the serde error, got: {message}"
+        );
+    }
+
+    #[test]
+    fn db_publish_reports_a_schema_error_as_status_error() {
+        let _guard = db_lock();
+        let (status, out) = call_generate(spt_db_publish, br#"{"schema":2,"roots":{}}"#);
+
+        assert_eq!(status, STATUS_ERROR);
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "unsupported publish schema 2"
         );
     }
 

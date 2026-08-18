@@ -41,23 +41,23 @@ public class SptNativeRagfairWireTests
         _ragfairConfig = di.GetService<RagfairConfig>();
 
         _request = RagfairPayloadProjection.BuildRequest(
-            RagfairPayloadProjection.BuildInvariantSlice(
+            RagfairPayloadProjection.BuildViewsOverride(
                 di.GetService<TemplateTable>(),
                 di.GetService<HandbookHelper>(),
                 di.GetService<TraderHelper>(),
                 di.GetService<PresetHelper>(),
-                di.GetService<ItemFilterService>(),
-                di.GetService<SeasonalEventService>(),
-                di.GetService<BotTable>(),
-                di.GetService<ItemHelper>(),
-                di.GetService<BotConfig>(),
-                _ragfairConfig
+                di.GetService<ItemHelper>()
             ),
             0,
             null,
             di.GetService<TimeUtil>().GetTimeStamp(),
             0,
-            TestSeed
+            TestSeed,
+            _ragfairConfig,
+            di.GetService<ItemFilterService>(),
+            di.GetService<SeasonalEventService>(),
+            di.GetService<BotTable>(),
+            di.GetService<BotConfig>()
         );
     }
 
@@ -66,18 +66,18 @@ public class SptNativeRagfairWireTests
     {
         Assert.Multiple(() =>
         {
-            Assert.That(_request.Invariant!.Items, Is.Not.Empty);
-            Assert.That(_request.Invariant!.FleaPrices, Is.Not.Empty);
-            Assert.That(_request.Invariant!.HandbookPrices, Is.Not.Empty);
-            Assert.That(_request.Invariant!.HighestTraderPrices, Is.Not.Empty);
-            Assert.That(_request.Invariant!.ItemPresets, Is.Not.Empty);
-            Assert.That(_request.Invariant!.DefaultPresets, Is.Not.Empty);
-            Assert.That(_request.Invariant!.DefaultPresetsByTpl, Is.Not.Empty);
-            Assert.That(_request.Invariant!.PresetsByTpl, Is.Not.Empty);
-            Assert.That(_request.Invariant!.PmcNamesUsec, Is.Not.Empty);
-            Assert.That(_request.Invariant!.PmcNamesBear, Is.Not.Empty);
-            Assert.That(_request.Invariant!.ConfigBlacklist, Is.Not.Empty);
-            Assert.That(_request.Invariant!.SeasonalItemTplBlacklist, Is.Not.Empty);
+            Assert.That(_request.ViewsOverride!.Items, Is.Not.Empty);
+            Assert.That(_request.ViewsOverride!.FleaPrices, Is.Not.Empty);
+            Assert.That(_request.ViewsOverride!.HandbookPrices, Is.Not.Empty);
+            Assert.That(_request.ViewsOverride!.HighestTraderPrices, Is.Not.Empty);
+            Assert.That(_request.ViewsOverride!.ItemPresets, Is.Not.Empty);
+            Assert.That(_request.ViewsOverride!.DefaultPresets, Is.Not.Empty);
+            Assert.That(_request.ViewsOverride!.DefaultPresetsByTpl, Is.Not.Empty);
+            Assert.That(_request.ViewsOverride!.PresetsByTpl, Is.Not.Empty);
+            Assert.That(_request.Varying.PmcNamesUsec, Is.Not.Empty);
+            Assert.That(_request.Varying.PmcNamesBear, Is.Not.Empty);
+            Assert.That(_request.Varying.ConfigBlacklist, Is.Not.Empty);
+            Assert.That(_request.Varying.SeasonalItemTplBlacklist, Is.Not.Empty);
             Assert.That(_request.Varying.ExpiredOffers, Is.Null);
         });
     }
@@ -90,13 +90,12 @@ public class SptNativeRagfairWireTests
     [Test]
     public void EveryProjectedDictionaryKeyIsAStringOnTheWire()
     {
-        var json = JsonNode.Parse(JsonSerializer.Serialize(_request, JsonUtil.JsonSerializerOptionsNoIndent))!.AsObject()[
-            "invariant"
-        ]!.AsObject();
+        var json = JsonNode.Parse(JsonSerializer.Serialize(_request, JsonUtil.JsonSerializerOptionsNoIndent))!.AsObject();
+        var viewsOverride = json["viewsOverride"]!.AsObject();
 
         foreach (var block in new[] { "fleaPrices", "handbookPrices", "highestTraderPrices", "itemPresets", "defaultPresetsByTpl" })
         {
-            foreach (var entry in json[block]!.AsObject())
+            foreach (var entry in viewsOverride[block]!.AsObject())
             {
                 Assert.That(long.TryParse(entry.Key, out _), Is.False, $"{block} key '{entry.Key}' serialised as a number");
             }
@@ -104,7 +103,7 @@ public class SptNativeRagfairWireTests
 
         // dynamic.condition and dynamic.offerItemCount are the two config maps the native side
         // iterates by key; a numeric key here would break the baseclass match and the offer count
-        foreach (var entry in json["dynamic"]!["condition"]!.AsObject())
+        foreach (var entry in json["varying"]!["dynamic"]!["condition"]!.AsObject())
         {
             Assert.That(new MongoId(entry.Key).IsEmpty, Is.False, $"condition key '{entry.Key}' is not a tpl");
         }
@@ -147,23 +146,29 @@ public class SptNativeRagfairWireTests
     }
 
     /// <summary>
-    /// The miss half of the cache gate: the native side keeps one slice slot, so a slice-less
-    /// request naming a stamp it has never stored must report itself distinctly rather than fail
-    /// as a generation error - that is what lets the caller self-heal by resending the slice.
+    /// The miss half of the epoch protocol: an override-less request naming an epoch the resident
+    /// DB does not hold must report itself distinctly rather than fail as a generation error -
+    /// that is what lets the caller self-heal by republishing and retrying once.
     /// </summary>
     [Test]
-    public void ASliceLessRequestWithAnUnknownStampThrowsStaleSlice()
+    public void AnOverrideLessRequestWithAnUnknownEpochThrowsStaleEpoch()
     {
+        var di = DI.GetInstance();
         var request = RagfairPayloadProjection.BuildRequest(
-            invariant: null,
-            invariantStamp: long.MaxValue,
+            viewsOverride: null,
+            epoch: ulong.MaxValue,
             expiredOffers: null,
             timestamp: 1_700_000_000,
             offerCounterStart: 0,
-            testSeed: 1234
+            testSeed: 1234,
+            _ragfairConfig,
+            di.GetService<ItemFilterService>(),
+            di.GetService<SeasonalEventService>(),
+            di.GetService<BotTable>(),
+            di.GetService<BotConfig>()
         );
 
-        Assert.Throws<NativeStaleSliceException>(() => SptNative.GenerateDynamicOffers(request));
+        Assert.Throws<NativeStaleEpochException>(() => SptNative.GenerateDynamicOffers(request));
     }
 
     /// <summary>
@@ -174,7 +179,7 @@ public class SptNativeRagfairWireTests
     public void AModAddedConfigFieldSurvivesTheRoundTrip()
     {
         var json = JsonNode.Parse(JsonSerializer.Serialize(_request, JsonUtil.JsonSerializerOptionsNoIndent))!.AsObject();
-        json["invariant"]!["dynamic"]!["modAddedField"] = "kept";
+        json["varying"]!["dynamic"]!["modAddedField"] = "kept";
 
         // No assertion on the value coming back - the native result carries offers, not the config;
         // this asserts only that an unknown key does not fail the parse.
@@ -197,7 +202,7 @@ public class SptNativeRagfairWireTests
         }
 
         var json = JsonNode.Parse(JsonSerializer.Serialize(_request, JsonUtil.JsonSerializerOptionsNoIndent))!.AsObject();
-        var itemTpl = json["invariant"]!["items"]!.AsObject().First().Key;
+        var itemTpl = json["viewsOverride"]!["items"]!.AsObject().First().Key;
         json["varying"]!["expiredOffers"] = new JsonArray(
             new JsonArray(
                 new JsonObject

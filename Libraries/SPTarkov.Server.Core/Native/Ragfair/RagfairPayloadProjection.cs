@@ -22,17 +22,12 @@ namespace SPTarkov.Server.Core.Native.Ragfair;
 /// </summary>
 internal static class RagfairPayloadProjection
 {
-    internal static RagfairInvariantSlice BuildInvariantSlice(
+    internal static RagfairViewsOverride BuildViewsOverride(
         TemplateTable templateTable,
         HandbookHelper handbookHelper,
         TraderHelper traderHelper,
         PresetHelper presetHelper,
-        ItemFilterService itemFilterService,
-        SeasonalEventService seasonalEventService,
-        BotTable botTable,
-        ItemHelper itemHelper,
-        BotConfig botConfig,
-        RagfairConfig ragfairConfig
+        ItemHelper itemHelper
     )
     {
         var templateItems = templateTable.Items;
@@ -53,9 +48,8 @@ internal static class RagfairPayloadProjection
             }
         }
 
-        return new RagfairInvariantSlice
+        return new RagfairViewsOverride
         {
-            Dynamic = ragfairConfig.Dynamic,
             // The globals' map itself, keys included: the native side mirrors PresetHelper.IsPreset
             // and GetPreset, whose key domain is that map's keys, not each preset's own `_id`
             ItemPresets = presetHelper
@@ -70,34 +64,42 @@ internal static class RagfairPayloadProjection
             FleaPrices = templateTable.Prices,
             HandbookPrices = handbookPrices,
             HighestTraderPrices = highestTraderPrices,
-            ConfigBlacklist = itemFilterService.GetBlacklistedItems(),
-            SeasonalEventActive = seasonalEventService.SeasonalEventEnabled(),
-            SeasonalItemTplBlacklist = seasonalEventService.GetInactiveSeasonalEventItems(),
-            PmcNamesUsec = GatherPmcNamesOfLength(botTable, Sides.Usec.ToLowerInvariant(), botConfig.BotNameLengthLimit),
-            PmcNamesBear = GatherPmcNamesOfLength(botTable, Sides.Bear.ToLowerInvariant(), botConfig.BotNameLengthLimit),
             Items = PayloadProjection.BuildItemsView(itemHelper.TemplateTable.Items),
         };
     }
 
     internal static GenerateDynamicOffersRequest BuildRequest(
-        RagfairInvariantSlice? invariant,
-        long invariantStamp,
+        RagfairViewsOverride? viewsOverride,
+        ulong epoch,
         IEnumerable<List<Item>>? expiredOffers,
         long timestamp,
         int offerCounterStart,
-        ulong? testSeed
+        ulong? testSeed,
+        RagfairConfig ragfairConfig,
+        ItemFilterService itemFilterService,
+        SeasonalEventService seasonalEventService,
+        BotTable botTable,
+        BotConfig botConfig
     )
     {
         return new GenerateDynamicOffersRequest
         {
-            InvariantStamp = invariantStamp,
-            Invariant = invariant,
+            Epoch = epoch,
+            ViewsOverride = viewsOverride,
             Varying = new RagfairVaryingFields
             {
                 TestSeed = testSeed,
                 Timestamp = timestamp,
                 OfferCounterStart = offerCounterStart,
                 ExpiredOffers = expiredOffers,
+                Dynamic = ragfairConfig.Dynamic,
+                ConfigBlacklist = itemFilterService.GetBlacklistedItems(),
+                SeasonalEventActive = seasonalEventService.SeasonalEventEnabled(),
+                SeasonalItemTplBlacklist = seasonalEventService.GetInactiveSeasonalEventItems(),
+                // Per call instead of per slice-build - cheap, and fresher than the old slice by
+                // construction
+                PmcNamesUsec = GatherPmcNamesOfLength(botTable, Sides.Usec.ToLowerInvariant(), botConfig.BotNameLengthLimit),
+                PmcNamesBear = GatherPmcNamesOfLength(botTable, Sides.Bear.ToLowerInvariant(), botConfig.BotNameLengthLimit),
             },
         };
     }
