@@ -10,12 +10,13 @@ runs them. There are no `cargo bench` targets.
 | `RewardLootBenchmarkTests.cs` | airdrop loot — elapsed time per call |
 | `BotBenchmarkTests.cs` | one bot's inventory — elapsed time per bot, payload projection timed separately |
 | `RagfairBenchmarkTests.cs` | a dynamic flea offer pass — elapsed time per pass, views-override projection and forced publish timed separately |
-| `RepeatableQuestBenchmarkTests.cs` | one repeatable quest of each type — cold and warm invariant slice |
+| `RepeatableQuestBenchmarkTests.cs` | one repeatable quest of each type — elapsed time per quest, publish cold/warm and views-override projection timed separately |
 | `ScavCaseBenchmarkTests.cs` | one scav case of each shipped recipe — elapsed time per call |
 | `ItemBaseClassBenchmarkTests.cs` | one bulk item base class cache build — elapsed time per hydrate |
 | `RagfairLinkedItemBenchmarkTests.cs` | one ragfair linked item table build — elapsed time per build |
 | `DbPublishSpikeTests.cs` | phase 0 state-ownership spike — full-DB publish envelope: per-root size and projection time; paired with `rust/spt-native/tests/phase0_publish_spike.rs` for parse time and RSS |
 | `RagfairViewsEquivalenceTests.cs` | phase 1 flip #1 — writes the 3-root publish envelope and C#-built expected ragfair views; paired with `rust/spt-native/tests/phase1_ragfair_views.rs` for the derivation-equivalence check |
+| `QuestViewsEquivalenceTests.cs` | phase 1 flip #2 — writes the 4-root publish envelope and C#-built expected quest views; paired with `rust/spt-native/tests/phase1_quest_views.rs` for the derivation-equivalence check |
 
 ## Running them
 
@@ -323,6 +324,51 @@ read its cold cost as ~47 ms like the rest). ~10.6 MB managed allocation per ful
 
 Cold (modded server) against legacy: Elimination ~3.9x slower, Completion about level on the median
 and ~2.5x slower against the legacy min, Exploration and Pickup ~15x slower.
+
+`e7c2852` — 2026-08-18, post resident-DB flip (phase 1 flip #2, ABI 23). Same fixture shape and
+workload. The native arms now ride the resident DB: `DbPublisher.EnsureCurrent` publishes the
+templates, traders, globals and locations roots once (absorbed in warmup — the locations root,
+`Base` + `AllExtracts` only, joined the envelope for this flip) and every timed pass sends the
+varying block only. `BuildViewsOverride` times the C#-built `viewsOverride` — the ineligible
+caller's per-call cost. The publish cold/warm rows replace the deleted slice cache's cold/warm
+rows: cold bumps `DatabaseMutationStamp` before every run, so each pass republishes all four
+roots first. The forced-publish row is the ragfair fixture's `DbPublisher.ForcePublish` arm
+(n=5 after 1 warmup, measured in the same sitting; the publisher is family-agnostic, and its
+envelope now carries four roots — the arm's console label still prints "3 roots").
+
+| Type | Arm | median | median (2nd run) | mean | min | max | alloc/run |
+|---|---|---|---|---|---|---|---|
+| Elimination | legacy (C# 4.1.2) | 20.59 ms | 21.09 ms | 21.61 ms | 19.55 ms | 30.16 ms | 1.3 MB |
+| Elimination | native, publish **cold** (stamp bumped per run) | 455.19 ms | 456.53 ms | 470.33 ms | 447.24 ms | 651.82 ms | 156.5 MB |
+| Elimination | **native, publish warm** | **2.69 ms** | 2.94 ms | 2.96 ms | 2.50 ms | 4.97 ms | 0.1 MB |
+| Completion | legacy (C# 4.1.2) | 21.48 ms | 21.91 ms | 30.12 ms | 19.32 ms | 126.53 ms | 3.4 MB |
+| Completion | native, publish **cold** (stamp bumped per run) | 460.74 ms | 460.41 ms | 463.05 ms | 450.40 ms | 502.89 ms | 156.4 MB |
+| Completion | **native, publish warm** | **4.81 ms** | 4.86 ms | 5.17 ms | 4.68 ms | 8.33 ms | 0.1 MB |
+| Exploration | legacy (C# 4.1.2) | 3.57 ms | 3.62 ms | 4.00 ms | 3.02 ms | 6.46 ms | 1.3 MB |
+| Exploration | native, publish **cold** (stamp bumped per run) | 457.53 ms | 459.56 ms | 460.28 ms | 448.42 ms | 499.02 ms | 156.4 MB |
+| Exploration | **native, publish warm** | **2.53 ms** | 2.54 ms | 2.80 ms | 2.38 ms | 4.33 ms | 0.1 MB |
+| Pickup | legacy (C# 4.1.2) | 3.06 ms | 3.82 ms | 4.16 ms | 2.72 ms | 13.86 ms | 1.3 MB |
+| Pickup | native, publish **cold** (stamp bumped per run) | 458.06 ms | 458.67 ms | 459.90 ms | 446.93 ms | 496.98 ms | 156.4 MB |
+| Pickup | **native, publish warm** | **2.36 ms** | 2.67 ms | 2.59 ms | 2.30 ms | 4.15 ms | 0.1 MB |
+| — | `BuildViewsOverride` only | 11.79 ms | 11.81 ms | 13.82 ms | 7.31 ms | 32.19 ms | 6.6 MB |
+| — | publish (4 roots, forced) — `DbPublisher.ForcePublish` | 471.64 ms | 471.03 ms | 480.43 ms | 442.43 ms | 527.53 ms | — |
+
+Speedup, legacy against warm native (run 1 / run 2): Elimination **7.67x / 7.18x**, Completion
+4.46x / 4.51x, Exploration **1.41x / 1.43x**, Pickup **1.30x / 1.43x**. The Completion legacy arm's
+low mode carried its median this sitting (21.48 ms against the pre-flip bimodal 56.15/min 21.15),
+so its speedup already reads off the low mode — no correction needed. Warm against the deleted
+slice cache's warm (`06825b3`: 2.60 / 4.95 / 2.35 / 2.29 ms): 2.69 / 4.81 / 2.53 / 2.36 ms — every
+delta is inside the ~10% noise bar, and the six service/config-backed fields the flip moved from
+the invariant slice into the per-call varying block (`itemBlacklist`, `rewardItemBlacklist`,
+`bossItems`, `seasonalItemTplBlacklist`, `repeatableQuestTemplateIds`, `locationIdMap` — O(KB))
+do not resolve above it: the same accepted price flip #1 paid. What is gone outright is the slice
+send: pre-flip a pass whose send carried the invariant slice paid ~47-90 ms and ~10.6 MB; post-flip
+no DB-derived data crosses per call at all, and warm alloc/run holds at 0.1 MB. The cold arm's
+~453-457 ms cold−warm delta is the whole per-*mutation* cost (4-root projection + FFI copy +
+parse + both families' view derivation), not a per-send cost; the forced publish reads 471.64 ms against
+0287c7e's 3-root 456.73 ms, the locations root's share sitting inside the two arms' overlap.
+Measured in the same sitting, ragfair's own arms did not move for gaining the fourth root (full
+pass native 493.28 ms against flip #1's 520.25 ms).
 
 ## Scav case rewards
 
