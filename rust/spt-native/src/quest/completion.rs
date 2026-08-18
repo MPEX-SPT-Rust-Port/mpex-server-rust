@@ -484,11 +484,12 @@ mod tests {
     use crate::diag::DiagSink;
     use crate::loot::item_helper;
     use crate::loot::random_util::TestSeedGuard;
-    use crate::quest::QuestContext;
     use crate::quest::helper::PRAPOR;
     use crate::quest::models::{
-        ListOrT, QuestInvariantSlice, RepeatableQuestConfig, tests::slice_value,
+        ListOrT, QuestVaryingRequest, RepeatableQuestConfig,
+        tests::{varying_value, views_override_value},
     };
+    use crate::quest::{QuestContext, QuestViews};
 
     const QUEST_CONFIG_PATH: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -533,16 +534,14 @@ mod tests {
         serde_json::from_value(daily).expect("parses")
     }
 
-    /// The fixture slice with the real Completion template spliced in and a three item pool: two
+    /// The fixture views with the real Completion template spliced in and a three item pool: two
     /// affordable tpls and the blacklisted one.
-    fn slice() -> QuestInvariantSlice {
-        let mut value = slice_value();
+    fn views() -> QuestViews {
+        let mut value = views_override_value();
         let templates = json(TEMPLATES_PATH);
 
         value["repeatableQuestTemplates"]["Completion"] =
             templates["templates"]["Completion"].clone();
-        value["repeatableQuestTemplateIds"]["pmc"]["Completion"] =
-            serde_json::json!("61604635c725987e815b1a46");
 
         let item = serde_json::json!({ "parent": PARENT, "type": "Item", "stackMaxSize": 1 });
         value["items"] = serde_json::json!({
@@ -559,14 +558,27 @@ mod tests {
         value["completionItemsWhitelist"] =
             serde_json::json!([{ "minPlayerLevel": 1, "itemIds": [PARENT] }]);
 
-        serde_json::from_value(value).expect("fixture slice parses")
+        QuestViews::Override(Box::new(
+            serde_json::from_value(value).expect("fixture views parse"),
+        ))
+    }
+
+    /// The fixture varying half with the Completion pmc template id spliced in.
+    fn varying() -> QuestVaryingRequest {
+        let mut value = varying_value();
+
+        value["repeatableQuestTemplateIds"]["pmc"]["Completion"] =
+            serde_json::json!("61604635c725987e815b1a46");
+
+        serde_json::from_value(value).expect("fixture varying parses")
     }
 
     /// `:264` draws 1-2 unique tpls for a level 20 PMC and `:312` draws 2-4 of each, and the
     /// blacklisted tpl never survives `:147` to be asked for.
     #[test]
     fn a_seeded_completion_quest_hands_over_unblacklisted_items_within_the_config_band() {
-        let slice = slice();
+        let views = views();
+        let varying = varying();
         let config = daily_config();
         let mut generated = 0;
         // Ranges pass under a wrong-bounds draw; the *set* of values seen over the 25 seeds does
@@ -575,7 +587,7 @@ mod tests {
         let mut hand_in_counts = BTreeSet::new();
 
         for seed in 1..=25u64 {
-            let mut ctx = QuestContext::from_slice(&slice);
+            let mut ctx = QuestContext::new(&views, &varying);
             ctx.diagnostics = DiagSink::capture();
             let _guard = TestSeedGuard::install(seed);
             let Some(quest) = super::generate(
@@ -646,7 +658,7 @@ mod tests {
         ];
 
         let blacklisted = |item_ids: serde_json::Value| {
-            let mut value = slice_value();
+            let mut value = views_override_value();
             value["items"] = serde_json::json!({
                 "aaaaaaaaaaaaaaaaaaaaaaaa": { "parent": PARENT, "type": "Item" },
                 "bbbbbbbbbbbbbbbbbbbbbbbb": { "parent": PARENT, "type": "Item" },
@@ -655,19 +667,22 @@ mod tests {
             value["completionItemsBlacklist"] =
                 serde_json::json!([{ "minPlayerLevel": 1, "itemIds": item_ids }]);
 
-            serde_json::from_value(value).expect("fixture slice parses")
+            QuestViews::Override(Box::new(
+                serde_json::from_value(value).expect("fixture views parse"),
+            ))
         };
 
-        let by_name: QuestInvariantSlice = blacklisted(serde_json::json!([BLACKLISTED]));
-        let by_base: QuestInvariantSlice = blacklisted(serde_json::json!([PARENT]));
-        let by_both: QuestInvariantSlice = blacklisted(serde_json::json!([BLACKLISTED, PARENT]));
+        let by_name = blacklisted(serde_json::json!([BLACKLISTED]));
+        let by_base = blacklisted(serde_json::json!([PARENT]));
+        let by_both = blacklisted(serde_json::json!([BLACKLISTED, PARENT]));
 
-        for (slice, expected) in [
+        let varying = varying();
+        for (views, expected) in [
             (&by_name, &POOL[..]),
             (&by_base, &POOL[..]),
             (&by_both, &POOL[..2]),
         ] {
-            let ctx = QuestContext::from_slice(slice);
+            let ctx = QuestContext::new(views, &varying);
             assert_eq!(
                 super::get_blacklisted_item_selection(&ctx, POOL.to_vec(), 20),
                 expected
@@ -675,13 +690,13 @@ mod tests {
         }
     }
 
-    /// The fixture slice carrying the real shipped item table and the real Completion whitelist.
+    /// The fixture views carrying the real shipped item table and the real Completion whitelist.
     /// Only `parent` is projected: it is the one member the base class walk reads, and the filter's
     /// other test is a plain `contains` on the tpl.
     ///
     /// Requires `scripts/decompress-assets.sh` to have unpacked `items.json`.
-    fn real_items_slice() -> QuestInvariantSlice {
-        let mut value = slice_value();
+    fn real_items_views() -> QuestViews {
+        let mut value = views_override_value();
         let raw = json(ITEMS_PATH);
         let mut items = serde_json::Map::new();
 
@@ -696,7 +711,9 @@ mod tests {
         value["completionItemsWhitelist"] =
             json(TEMPLATES_PATH)["data"]["Completion"]["itemsWhitelist"].clone();
 
-        serde_json::from_value(value).expect("real item slice parses")
+        QuestViews::Override(Box::new(
+            serde_json::from_value(value).expect("real item views parse"),
+        ))
     }
 
     /// `GetWhitelistedItemSelection` (`:365-371`) tests every whitelisted candidate against every
@@ -711,9 +728,10 @@ mod tests {
     /// Release and debug and would be flaky either way.
     #[test]
     fn the_whitelist_filter_walks_each_item_chain_once() {
-        let slice = real_items_slice();
-        let ctx = QuestContext::from_slice(&slice);
-        let selection: Vec<&str> = slice.items.keys().map(String::as_str).collect();
+        let views = real_items_views();
+        let varying = varying();
+        let ctx = QuestContext::new(&views, &varying);
+        let selection: Vec<&str> = ctx.items.keys().map(String::as_str).collect();
 
         let whitelisted = super::levelled_item_ids(ctx.completion_items_whitelist, PMC_LEVEL);
         let candidates: Vec<&str> = whitelisted.iter().copied().collect();

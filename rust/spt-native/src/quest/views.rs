@@ -1,10 +1,11 @@
 //! Quest database views derived natively at publish time (Phase 1 quest flip).
 //!
-//! Bug-for-bug ports of the C# that built the quest half of `QuestInvariantSlice`
-//! (`Native/RepeatableQuests/RepeatableQuestNativeRequestBuilder.cs:137-246`) — the C# bodies are
-//! the authority and every quirk is preserved at its port site. The three views the slice shared
+//! Bug-for-bug ports of the C# that built the database half of the pre-flip
+//! `QuestInvariantSlice` (now `QuestViewsOverride`,
+//! `Native/RepeatableQuests/RepeatableQuestNativeRequestBuilder.cs`) — the C# bodies are the
+//! authority and every quirk is preserved at its port site. The three views the override shares
 //! with ragfair (`Items`, `HandbookPrices`, `FleaPrices`) are the same maps
-//! [`crate::ragfair::views::derive`] already builds — `BuildInvariantSlice` calls the identical
+//! [`crate::ragfair::views::derive`] already builds — `BuildViewsOverride` calls the identical
 //! helpers (`PayloadProjection.BuildItemsView`, `HandbookHelper.GetTemplatePrice` over every
 //! items key, `templateTable.Prices` raw) — so they ride in via the shared
 //! [`RagfairDbViews`] `Arc` instead of a second derivation.
@@ -60,7 +61,7 @@ const REQUIREMENT_STATES: [&str; 14] = [
 ];
 
 /// The quest-family database views derived at publish
-/// (`RepeatableQuestNativeRequestBuilder.BuildInvariantSlice`'s database half). The service and
+/// (`RepeatableQuestNativeRequestBuilder.BuildViewsOverride`'s database half). The service and
 /// config members of the slice keep crossing per request; only what the resident roots determine
 /// lives here.
 #[derive(Debug)]

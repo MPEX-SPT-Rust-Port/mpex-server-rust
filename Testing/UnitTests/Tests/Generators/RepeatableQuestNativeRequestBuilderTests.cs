@@ -14,9 +14,10 @@ namespace UnitTests.Tests.Generators;
 
 /// <summary>
 /// Pins the halves of the <c>spt_generate_repeatable_quest</c> request the Rust side parses by name:
-/// the invariant slice's property set and key casing, the varying half's wire names, and the cache
-/// eligibility truth table. Mutates the shared <see cref="QuestConfig"/> singleton, so it restores
-/// the flags it flips and never runs in parallel with other fixtures.
+/// the views override's property set and key casing, the varying half's wire names - the six
+/// members moved off the old invariant slice included - and the residency eligibility truth table.
+/// Mutates the shared <see cref="QuestConfig"/> singleton, so it restores the flags it flips and
+/// never runs in parallel with other fixtures.
 /// </summary>
 [TestFixture]
 [NonParallelizable]
@@ -33,14 +34,6 @@ public class RepeatableQuestNativeRequestBuilderTests
         _questConfig = di.GetService<QuestConfig>();
     }
 
-    [SetUp]
-    public void SetUp()
-    {
-        // The builder is the shared DI singleton, so another fixture's Send would otherwise leave the
-        // cache primed and the first send here slice-less
-        _builder.LastSentSliceStamp = RepeatableQuestNativeRequestBuilder.NeverSent;
-    }
-
     [TearDown]
     public void TearDown()
     {
@@ -49,28 +42,22 @@ public class RepeatableQuestNativeRequestBuilderTests
     }
 
     /// <summary>
-    /// <c>QuestInvariantSlice</c> in <c>rust/spt-native/src/quest/models.rs:864-922</c>, whose members
-    /// are all non-<c>Option</c> bar the two collapsed completion filters: a renamed or dropped member
-    /// is a parse failure on the far side, not a silent default.
+    /// <c>QuestViewsWire</c> in <c>rust/spt-native/src/quest/models.rs</c>, whose members are all
+    /// non-<c>Option</c> bar the two collapsed completion filters: a renamed or dropped member is a
+    /// parse failure on the far side, not a silent default.
     /// </summary>
-    private static readonly string[] _sliceProperties =
+    private static readonly string[] _viewsOverrideProperties =
     [
         "items",
         "handbookPrices",
         "fleaPrices",
         "defaultWeaponPresets",
         "defaultPresetOrItemPrices",
-        "itemBlacklist",
-        "rewardItemBlacklist",
-        "bossItems",
-        "seasonalItemTplBlacklist",
         "repeatableQuestTemplates",
         "completionItemsWhitelist",
         "completionItemsBlacklist",
         "bossSpawnsByLocation",
         "extractsByLocation",
-        "repeatableQuestTemplateIds",
-        "locationIdMap",
     ];
 
     /// <summary>
@@ -83,22 +70,21 @@ public class RepeatableQuestNativeRequestBuilderTests
     }
 
     [Test]
-    public void TheInvariantSliceCarriesExactlyTheLockedWireProperties()
+    public void TheViewsOverrideCarriesExactlyTheLockedWireProperties()
     {
-        var slice = Serialize(_builder.BuildInvariantSlice());
+        var views = Serialize(_builder.BuildViewsOverride());
 
-        var written = slice.EnumerateObject().Select(property => property.Name).ToList();
+        var written = views.EnumerateObject().Select(property => property.Name).ToList();
 
-        Assert.That(written, Is.EquivalentTo(_sliceProperties));
+        Assert.That(written, Is.EquivalentTo(_viewsOverrideProperties));
     }
 
     [Test]
-    public void TheSliceKeepsTheQuestTemplateAndTemplateIdKeysPascalCase()
+    public void TheViewsOverrideKeepsTheQuestTemplateKeysPascalCase()
     {
-        var slice = Serialize(_builder.BuildInvariantSlice());
+        var views = Serialize(_builder.BuildViewsOverride());
 
-        Assert.That(slice.GetProperty("repeatableQuestTemplates").TryGetProperty("Elimination", out _), Is.True);
-        Assert.That(slice.GetProperty("repeatableQuestTemplateIds").GetProperty("pmc").TryGetProperty("Elimination", out _), Is.True);
+        Assert.That(views.GetProperty("repeatableQuestTemplates").TryGetProperty("Elimination", out _), Is.True);
     }
 
     /// <summary>
@@ -109,13 +95,13 @@ public class RepeatableQuestNativeRequestBuilderTests
     [Test]
     public void TheTwoLocationMapsUseTheirOwnKeyCasing()
     {
-        var slice = Serialize(_builder.BuildInvariantSlice());
+        var views = Serialize(_builder.BuildViewsOverride());
 
-        var bossSpawnKeys = slice.GetProperty("bossSpawnsByLocation").EnumerateObject().Select(property => property.Name).ToList();
+        var bossSpawnKeys = views.GetProperty("bossSpawnsByLocation").EnumerateObject().Select(property => property.Name).ToList();
         Assert.That(bossSpawnKeys, Does.Contain("Interchange"));
         Assert.That(bossSpawnKeys, Does.Contain("Sandbox_high"));
 
-        var extractKeys = slice.GetProperty("extractsByLocation").EnumerateObject().Select(property => property.Name).ToList();
+        var extractKeys = views.GetProperty("extractsByLocation").EnumerateObject().Select(property => property.Name).ToList();
         Assert.That(extractKeys, Is.EqualTo(extractKeys.Select(key => key.ToLowerInvariant()).ToList()));
         // The pool draws these keys from ELocationName, so every map it can name has to be reachable
         Assert.That(extractKeys, Does.Contain("rezervbase"));
@@ -129,9 +115,9 @@ public class RepeatableQuestNativeRequestBuilderTests
     [Test]
     public void AnExtractIsProjectedToTheFourMemberExitView()
     {
-        var slice = Serialize(_builder.BuildInvariantSlice());
+        var views = Serialize(_builder.BuildViewsOverride());
 
-        var exit = slice
+        var exit = views
             .GetProperty("extractsByLocation")
             .EnumerateObject()
             .Select(property => property.Value)
@@ -151,7 +137,7 @@ public class RepeatableQuestNativeRequestBuilderTests
     [Test]
     public void TheHandbookPricesCoverTheCurrencyTpls()
     {
-        var handbookPrices = Serialize(_builder.BuildInvariantSlice()).GetProperty("handbookPrices");
+        var handbookPrices = Serialize(_builder.BuildViewsOverride()).GetProperty("handbookPrices");
 
         foreach (var currency in Money.GetMoneyTpls())
         {
@@ -170,12 +156,45 @@ public class RepeatableQuestNativeRequestBuilderTests
 
         Assert.That(
             varying.EnumerateObject().Select(property => property.Name),
-            Is.EquivalentTo(new[] { "questType", "sessionId", "pmcLevel", "traderId", "questTypePool", "repeatableConfig" })
+            Is.EquivalentTo(
+                new[]
+                {
+                    "questType",
+                    "sessionId",
+                    "pmcLevel",
+                    "traderId",
+                    "questTypePool",
+                    "repeatableConfig",
+                    "itemBlacklist",
+                    "rewardItemBlacklist",
+                    "bossItems",
+                    "seasonalItemTplBlacklist",
+                    "repeatableQuestTemplateIds",
+                    "locationIdMap",
+                }
+            )
         );
         // A closed enum on the far side: a pool-drawn string would come back as an internal-status error
         Assert.That(varying.GetProperty("questType").GetString(), Is.EqualTo("Exploration"));
         // Test-only, and named `seed` - not `testSeed` like the older families
         Assert.That(Serialize(BuildVarying(seed: 424242)).GetProperty("seed").GetUInt64(), Is.EqualTo(424242UL));
+    }
+
+    /// <summary>
+    /// The six members moved off the old invariant slice ride the varying half under their
+    /// unchanged wire names, template-id keys still PascalCase.
+    /// </summary>
+    [Test]
+    public void TheVaryingHalfCarriesTheSixMovedMembers()
+    {
+        var varying = Serialize(BuildVarying(seed: null));
+
+        Assert.That(varying.GetProperty("itemBlacklist").ValueKind, Is.EqualTo(JsonValueKind.Array));
+        Assert.That(varying.GetProperty("rewardItemBlacklist").ValueKind, Is.EqualTo(JsonValueKind.Array));
+        Assert.That(varying.GetProperty("bossItems").ValueKind, Is.EqualTo(JsonValueKind.Array));
+        Assert.That(varying.GetProperty("seasonalItemTplBlacklist").ValueKind, Is.EqualTo(JsonValueKind.Array));
+        Assert.That(varying.GetProperty("repeatableQuestTemplateIds").GetProperty("pmc").TryGetProperty("Elimination", out _), Is.True);
+        Assert.That(varying.GetProperty("locationIdMap").TryGetProperty("bigmap", out _), Is.True);
     }
 
     /// <summary>
@@ -203,10 +222,11 @@ public class RepeatableQuestNativeRequestBuilderTests
     /// <summary>
     /// The only end-to-end proof that both halves parse: property names pin the shape, but a member
     /// whose converter writes the wrong JSON type - an enum as its ordinal, say - only shows up when
-    /// the native side actually reads it. The second pass also pins the cache gate.
+    /// the native side actually reads it. An eligible send names an epoch and never carries the
+    /// override.
     /// </summary>
     [Test]
-    public void AFullSendGeneratesNativelyAndTheNextSendSkipsTheSlice()
+    public void AnEligibleSendGeneratesNativelyOffTheResidentDb()
     {
         var (quest, pool) = _builder.Send(
             RepeatableQuestType.Exploration,
@@ -218,23 +238,11 @@ public class RepeatableQuestNativeRequestBuilderTests
             424242
         );
 
-        Assert.That(_builder.LastSendIncludedSlice, Is.True);
+        Assert.That(_builder.LastSendIncludedViewsOverride, Is.False, "an eligible builder must not send the override");
         Assert.That(quest, Is.Not.Null);
         Assert.That(quest!.Location, Is.Not.Null);
         // The generator consumes the location it drew
         Assert.That(pool.Pool.Exploration.Locations, Has.Count.LessThan(BuildPool().Pool.Exploration.Locations!.Count));
-
-        _builder.Send(
-            RepeatableQuestType.Exploration,
-            "6193a720f8ee7e52e4290000",
-            20,
-            Traders.PRAPOR,
-            BuildPool(),
-            _questConfig.RepeatableQuests[0],
-            424242
-        );
-
-        Assert.That(_builder.LastSendIncludedSlice, Is.False, "the unchanged stamp should have hit the native cache");
     }
 
     /// <summary>
@@ -251,14 +259,14 @@ public class RepeatableQuestNativeRequestBuilderTests
     {
         var request = new GenerateRepeatableQuestRequest
         {
-            // No real stamp: the slice this parks in the native cache is not one any send should hit
-            InvariantStamp = long.MaxValue,
-            Invariant = _builder.BuildInvariantSlice(),
+            // The override path: epoch 0, views carried whole, resident DB never read
+            Epoch = 0,
+            ViewsOverride = _builder.BuildViewsOverride(),
             Varying = BuildVarying(seed: 424242),
         };
 
         var json = JsonNode.Parse(JsonSerializer.Serialize(request, SptNative.QuestJsonOptions))!.AsObject();
-        json["invariant"]!["repeatableQuestTemplates"]!["Exploration"]!["modAddedField"] = "kept";
+        json["viewsOverride"]!["repeatableQuestTemplates"]!["Exploration"]!["modAddedField"] = "kept";
 
         var result = SptNative.GenerateRepeatableQuest(Encoding.UTF8.GetBytes(json.ToJsonString()));
 
@@ -303,7 +311,7 @@ public class RepeatableQuestNativeRequestBuilderTests
     [TestCase(1, true, false, true)]
     [TestCase(1, false, true, false)]
     [TestCase(1, true, true, false)]
-    public void CacheEligibilityFollowsTheModStateAndTheTwoFlags(int modCount, bool trust, bool disable, bool expected)
+    public void ResidentDbEligibilityFollowsTheModStateAndTheTwoFlags(int modCount, bool trust, bool disable, bool expected)
     {
         _questConfig.TrustNativeRequestCacheWithMods = trust;
         _questConfig.DisableNativeRequestCache = disable;
@@ -311,7 +319,25 @@ public class RepeatableQuestNativeRequestBuilderTests
         // The gate only reads Count, so placeholder elements stand in for real mods
         var builder = BuildWithMods(Enumerable.Repeat<SptMod>(null!, modCount).ToList());
 
-        Assert.That(builder.CacheEligible(), Is.EqualTo(expected));
+        Assert.That(builder.ResidentDbEligible(), Is.EqualTo(expected));
+    }
+
+    /// <summary>
+    /// A builder built on the frozen constructor has no <c>DbPublisher</c> and can never be
+    /// eligible, whatever the flags say.
+    /// </summary>
+    [Test]
+    public void ABuilderBuiltOnTheFrozenConstructorIsNeverEligible()
+    {
+        var di = DI.GetInstance();
+        var constructor = typeof(RepeatableQuestNativeRequestBuilder)
+            .GetConstructors()
+            .MinBy(candidate => candidate.GetParameters().Length)!;
+        var arguments = constructor.GetParameters().Select(parameter => di.GetService(parameter.ParameterType)).ToArray();
+
+        var frozen = (RepeatableQuestNativeRequestBuilder)constructor.Invoke(arguments);
+
+        Assert.That(frozen.ResidentDbEligible(), Is.False, "no publisher means no residency eligibility");
     }
 
     private RepeatableQuestVaryingFields BuildVarying(ulong? seed)
@@ -342,7 +368,11 @@ public class RepeatableQuestNativeRequestBuilderTests
     private static RepeatableQuestNativeRequestBuilder BuildWithMods(IReadOnlyList<SptMod> mods)
     {
         var di = DI.GetInstance();
-        var constructor = typeof(RepeatableQuestNativeRequestBuilder).GetConstructors().Single();
+        // The frozen constructor plus the additive overload the container uses; take the widest,
+        // which is what DI would pick
+        var constructor = typeof(RepeatableQuestNativeRequestBuilder)
+            .GetConstructors()
+            .MaxBy(candidate => candidate.GetParameters().Length)!;
         var arguments = constructor
             .GetParameters()
             .Select(parameter => parameter.ParameterType == typeof(IReadOnlyList<SptMod>) ? mods : di.GetService(parameter.ParameterType))

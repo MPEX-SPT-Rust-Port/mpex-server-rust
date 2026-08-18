@@ -9,6 +9,7 @@ using SPTarkov.Server.Core.Models.Spt.Config;
 using SPTarkov.Server.Core.Models.Spt.Mod;
 using SPTarkov.Server.Core.Models.Spt.Repeatable;
 using SPTarkov.Server.Core.Models.Spt.Tables;
+using SPTarkov.Server.Core.Native.Db;
 using SPTarkov.Server.Core.Native.Loot;
 using SPTarkov.Server.Core.Services.Items;
 using SPTarkov.Server.Core.Services.Server;
@@ -19,14 +20,14 @@ namespace SPTarkov.Server.Core.Native.RepeatableQuests;
 /// <summary>
 /// Assembles the <see cref="GenerateRepeatableQuestRequest"/> for one repeatable-quest generation
 /// out of the live database, services and config - everything the five generators and
-/// <c>RepeatableQuestHelper</c> would have read for themselves - and owns the stamp-gated native
-/// slice cache for the whole family.
+/// <c>RepeatableQuestHelper</c> would have read for themselves - and drives the resident-DB epoch
+/// protocol for the whole family: an eligible send names the epoch <see cref="DbPublisher"/>
+/// guarantees current, an ineligible one carries the C#-built views override instead.
 ///
-/// A singleton, unlike ragfair's projection: five generators share one native slice cache, so the
-/// last-sent stamp has to be shared too. Concurrent sends race that field, and nothing here has to
-/// win the race: the native side validates the stamp every request names against the slice it
-/// actually holds, so a lost update costs one redundant slice on the wire and a stale read costs one
-/// self-healing stale-slice retry. Neither can generate from the wrong slice.
+/// A singleton, unlike ragfair's projection: five generators share one dispatch seam. Concurrent
+/// sends can race a republish, and nothing here has to win the race: the native side validates the
+/// epoch every request names against the resident DB it actually holds, so a stale read costs one
+/// self-healing republish-and-retry. Neither side can generate from the wrong views.
 /// </summary>
 [Injectable(InjectionType.Singleton)]
 public class RepeatableQuestNativeRequestBuilder(
@@ -41,32 +42,54 @@ public class RepeatableQuestNativeRequestBuilder(
     IReadOnlyList<SptMod> loadedMods
 )
 {
-    /// <summary>
-    ///     <see cref="LastSentSliceStamp"/> before any slice has been sent under an eligible cache.
-    ///     <c>DatabaseMutationStamp</c> counts up from zero, so a negative value is never a real stamp.
-    /// </summary>
-    internal const long NeverSent = -1;
+    private readonly DbPublisher? _dbPublisher;
 
     /// <summary>
-    ///     The native side caches the parsed invariant slice under the stamp value it was sent
-    ///     with; this is the stamp of the last slice it accepted, so an unchanged stamp can skip
-    ///     the slice entirely. <see cref="NeverSent"/> until a slice is sent under an eligible cache.
-    ///     Internal set: the desync test seam.
+    ///     Whether the most recent native send carried the C#-built views override rather than
+    ///     naming a resident-DB epoch. Test seam.
     /// </summary>
-    internal long LastSentSliceStamp { get; set; } = NeverSent;
+    internal bool LastSendIncludedViewsOverride { get; private set; }
 
     /// <summary>
-    ///     Whether the most recent native send carried the invariant slice. Test seam.
+    ///     The constructor the container uses: the frozen one plus the resident-DB publisher.
+    ///     Additive and apicompat-verified.
     /// </summary>
-    internal bool LastSendIncludedSlice { get; private set; }
-
-    /// <summary>
-    ///     Whether a slice-less send is ever allowed: the kill switch is off, and either no mods are
-    ///     loaded or the user vouched their mods don't write tables directly.
-    /// </summary>
-    internal bool CacheEligible()
+    public RepeatableQuestNativeRequestBuilder(
+        TemplateTable templateTable,
+        LocationTable locationTable,
+        HandbookHelper handbookHelper,
+        PresetHelper presetHelper,
+        ItemFilterService itemFilterService,
+        SeasonalEventService seasonalEventService,
+        QuestConfig questConfig,
+        DatabaseMutationStamp databaseMutationStamp,
+        IReadOnlyList<SptMod> loadedMods,
+        DbPublisher dbPublisher
+    )
+        : this(
+            templateTable,
+            locationTable,
+            handbookHelper,
+            presetHelper,
+            itemFilterService,
+            seasonalEventService,
+            questConfig,
+            databaseMutationStamp,
+            loadedMods
+        )
     {
-        if (questConfig.DisableNativeRequestCache)
+        _dbPublisher = dbPublisher;
+    }
+
+    /// <summary>
+    ///     Whether an override-less send off the resident DB is ever allowed: the publisher exists,
+    ///     the kill switch is off, and either no mods are loaded or the user vouched their mods
+    ///     don't write tables directly. A builder built on the frozen constructor has no publisher
+    ///     and always sends the override.
+    /// </summary>
+    internal bool ResidentDbEligible()
+    {
+        if (_dbPublisher is null || questConfig.DisableNativeRequestCache)
         {
             return false;
         }
@@ -75,8 +98,8 @@ public class RepeatableQuestNativeRequestBuilder(
     }
 
     /// <summary>
-    ///     One native generation pass, with the invariant slice included only when the native cache
-    ///     cannot already be holding it. The one entry point the dispatch calls.
+    ///     One native generation pass, with the views override included only when the caller is
+    ///     ineligible to generate off the resident DB. The one entry point the dispatch calls.
     /// </summary>
     /// <returns> The generated quest - null is a valid no-quest outcome - and the mutated pool </returns>
     internal (RepeatableQuest? Quest, QuestTypePool Pool) Send(
@@ -89,25 +112,30 @@ public class RepeatableQuestNativeRequestBuilder(
         ulong? seed = null
     )
     {
-        var stamp = databaseMutationStamp.Current;
-        var eligible = CacheEligible();
-        var sendSlice = !eligible || LastSentSliceStamp != stamp;
         var varying = BuildVarying(questType, sessionId, pmcLevel, traderId, questTypePool, repeatableConfig, seed);
 
         RepeatableQuestResult result;
-        try
+        if (!ResidentDbEligible())
         {
-            result = SptNative.GenerateRepeatableQuest(BuildRequest(sendSlice, stamp, varying));
-            LastSendIncludedSlice = sendSlice;
+            result = SptNative.GenerateRepeatableQuest(BuildRequest(BuildViewsOverride(), epoch: 0, varying));
+            LastSendIncludedViewsOverride = true;
         }
-        catch (NativeStaleEpochException)
+        else
         {
-            // The native cache does not hold the slice this stamp names - resend it whole
-            result = SptNative.GenerateRepeatableQuest(BuildRequest(true, stamp, varying));
-            LastSendIncludedSlice = true;
-        }
+            var epoch = _dbPublisher!.EnsureCurrent();
+            try
+            {
+                result = SptNative.GenerateRepeatableQuest(BuildRequest(viewsOverride: null, epoch, varying));
+            }
+            catch (NativeStaleEpochException)
+            {
+                // The resident DB does not hold this epoch - republish everything and retry once
+                epoch = _dbPublisher.ForcePublish();
+                result = SptNative.GenerateRepeatableQuest(BuildRequest(viewsOverride: null, epoch, varying));
+            }
 
-        LastSentSliceStamp = eligible ? stamp : NeverSent;
+            LastSendIncludedViewsOverride = false;
+        }
 
         return (result.Quest, result.Pool);
     }
@@ -131,10 +159,16 @@ public class RepeatableQuestNativeRequestBuilder(
             QuestTypePool = questTypePool,
             RepeatableConfig = repeatableConfig,
             Seed = seed,
+            ItemBlacklist = itemFilterService.GetItemBlacklistCache(),
+            RewardItemBlacklist = itemFilterService.GetItemRewardBlacklist(),
+            BossItems = itemFilterService.GetBossItems(),
+            SeasonalItemTplBlacklist = seasonalEventService.GetInactiveSeasonalEventItems(),
+            RepeatableQuestTemplateIds = questConfig.RepeatableQuestTemplates,
+            LocationIdMap = questConfig.LocationIdMap,
         };
     }
 
-    internal QuestInvariantSlice BuildInvariantSlice()
+    internal QuestViewsOverride BuildViewsOverride()
     {
         var templateItems = templateTable.Items;
         var handbookPrices = new Dictionary<MongoId, double>(templateItems.Count);
@@ -151,33 +185,31 @@ public class RepeatableQuestNativeRequestBuilder(
 
         var completionFilters = templateTable.RepeatableQuests.Data?.Completion;
 
-        return new QuestInvariantSlice
+        return new QuestViewsOverride
         {
             Items = PayloadProjection.BuildItemsView(templateItems),
             HandbookPrices = handbookPrices,
             FleaPrices = templateTable.Prices,
             DefaultWeaponPresets = presetHelper.GetDefaultWeaponPresets().Values.Select(PayloadProjection.ToPresetView).ToList(),
             DefaultPresetOrItemPrices = defaultPresetOrItemPrices,
-            ItemBlacklist = itemFilterService.GetItemBlacklistCache(),
-            RewardItemBlacklist = itemFilterService.GetItemRewardBlacklist(),
-            BossItems = itemFilterService.GetBossItems(),
-            SeasonalItemTplBlacklist = seasonalEventService.GetInactiveSeasonalEventItems(),
             RepeatableQuestTemplates = templateTable.RepeatableQuests.Templates!,
             CompletionItemsWhitelist = completionFilters?.ItemsWhitelist ?? [],
             CompletionItemsBlacklist = completionFilters?.ItemsBlacklist ?? [],
             BossSpawnsByLocation = BuildBossSpawnsByLocation(),
             ExtractsByLocation = BuildExtractsByLocation(),
-            RepeatableQuestTemplateIds = questConfig.RepeatableQuestTemplates,
-            LocationIdMap = questConfig.LocationIdMap,
         };
     }
 
-    private GenerateRepeatableQuestRequest BuildRequest(bool sendSlice, long stamp, RepeatableQuestVaryingFields varying)
+    private static GenerateRepeatableQuestRequest BuildRequest(
+        QuestViewsOverride? viewsOverride,
+        ulong epoch,
+        RepeatableQuestVaryingFields varying
+    )
     {
         return new GenerateRepeatableQuestRequest
         {
-            InvariantStamp = stamp,
-            Invariant = sendSlice ? BuildInvariantSlice() : null,
+            Epoch = epoch,
+            ViewsOverride = viewsOverride,
             Varying = varying,
         };
     }

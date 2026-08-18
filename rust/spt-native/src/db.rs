@@ -31,8 +31,8 @@ pub struct ResidentDb {
 #[derive(Debug)]
 pub enum PublishError {
     Schema(String),
-    /// A ragfair view derivation failure. Aborts the publish before the swap — the previous
-    /// resident DB stays fully intact.
+    /// A view derivation failure, ragfair or quest. Aborts the publish before the swap — the
+    /// previous resident DB stays fully intact.
     Views(String),
 }
 
@@ -135,8 +135,7 @@ pub fn clear() {
 
 #[cfg(test)]
 pub mod tests {
-    /// Serializes every test that touches the process-global store — the same discipline the
-    /// slice caches use (`quest/slice_cache.rs`).
+    /// Serializes every test that touches the process-global store.
     pub static DB_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// Makes the next derive panic inside `publish` — proves the catch keeps the lock unpoisoned.

@@ -1,3 +1,4 @@
+using System.Text;
 using NUnit.Framework;
 using SPTarkov.Common.Models.Logging;
 using SPTarkov.Server.Core.Generators.Loot;
@@ -12,6 +13,8 @@ using SPTarkov.Server.Core.Models.Spt.Config;
 using SPTarkov.Server.Core.Models.Spt.Mod;
 using SPTarkov.Server.Core.Models.Spt.Repeatable;
 using SPTarkov.Server.Core.Models.Spt.Tables;
+using SPTarkov.Server.Core.Native;
+using SPTarkov.Server.Core.Native.Db;
 using SPTarkov.Server.Core.Native.RepeatableQuests;
 using SPTarkov.Server.Core.Services.Items;
 using SPTarkov.Server.Core.Services.Locales;
@@ -24,16 +27,19 @@ namespace UnitTests.Tests.Generators;
 /// <summary>
 /// Pins the reasons repeatable-quest generation falls back to the retained 4.1.2 C# implementation
 /// that are not Harmony patches (those are <see cref="RepeatableQuestHookLivenessTests"/>) - the
-/// config flag and a mod-substituted collaborator - plus what the native slice cache does at the
-/// <c>Send</c> level: the kill switch, the mod/trust truth table, and the stale-slice retry.
+/// config flag and a mod-substituted collaborator - plus what the resident-DB epoch protocol does
+/// at the <c>Send</c> level: an unmoved stamp skips the republish, the kill switch and untrusted
+/// mods fall back to the views override, and a native-side epoch desync self-heals through one
+/// republish plus retry. Epochs are process-global (other fixtures publish too), so every epoch
+/// assertion is relative.
 ///
 /// One generator is the vehicle for all of it. The four generators carry per-class copies of the
 /// same seam, and <see cref="RepeatableQuestParityTests"/> already asserts the flag drives each of
-/// them onto the path it names, for both paths - so running the substitution and cache cases four
-/// times over would gate nothing the parity fixture does not.
+/// them onto the path it names, for both paths - so running the substitution and dispatch cases
+/// four times over would gate nothing the parity fixture does not.
 ///
-/// Mutates the shared <see cref="QuestConfig"/> singleton and the shared builder's last-sent stamp,
-/// so it restores the flags and resets the stamp per case, and never runs in parallel.
+/// Mutates the shared <see cref="QuestConfig"/> singleton, so it restores the flags it flips and
+/// never runs in parallel.
 /// </summary>
 [TestFixture]
 [NonParallelizable]
@@ -46,7 +52,7 @@ public class RepeatableQuestPathDispatchTests
     private ExplorationQuestGenerator _explorationQuestGenerator = default!;
     private RepeatableQuestNativeRequestBuilder _builder = default!;
     private QuestConfig _questConfig = default!;
-    private DatabaseMutationStamp _databaseMutationStamp = default!;
+    private DbPublisher _publisher = default!;
 
     private RepeatableQuestConfig _repeatableConfig = default!;
     private MongoId _traderId;
@@ -60,7 +66,7 @@ public class RepeatableQuestPathDispatchTests
         _explorationQuestGenerator = di.GetService<ExplorationQuestGenerator>();
         _builder = di.GetService<RepeatableQuestNativeRequestBuilder>();
         _questConfig = di.GetService<QuestConfig>();
-        _databaseMutationStamp = di.GetService<DatabaseMutationStamp>();
+        _publisher = di.GetService<DbPublisher>();
 
         _repeatableConfig = _questConfig.RepeatableQuests.First(config => config.Side == PlayerGroup.Pmc);
         _traderId = _repeatableConfig.TraderWhitelist.First(whitelist => whitelist.QuestTypes.Contains("Exploration")).TraderId;
@@ -69,14 +75,6 @@ public class RepeatableQuestPathDispatchTests
         // than an edge this fixture invents
         var band = _repeatableConfig.QuestConfig.ExplorationConfig[1].LevelRange;
         _pmcLevel = (band.Min + band.Max) / 2;
-    }
-
-    [SetUp]
-    public void SetUp()
-    {
-        // The builder is the shared DI singleton, so another fixture's send would otherwise leave the
-        // native cache primed and the first send here slice-less
-        _builder.LastSentSliceStamp = RepeatableQuestNativeRequestBuilder.NeverSent;
     }
 
     [TearDown]
@@ -154,26 +152,43 @@ public class RepeatableQuestPathDispatchTests
         AssertSubstitutionForcesLegacyPath(typeof(TestRepeatableQuestRewardGeneratorSubclass));
     }
 
+    /// <summary>
+    /// The stamp gate at the <see cref="DbPublisher"/> level: two passes over an unmoved database
+    /// generate off the same resident epoch, with no republish in between and no override sent.
+    /// </summary>
     [Test]
-    public void TheKillSwitchAlwaysSendsTheSlice()
+    public void ASecondUnchangedPassSkipsTheRepublish()
+    {
+        Generate(_explorationQuestGenerator);
+        Assert.That(_builder.LastSendIncludedViewsOverride, Is.False, "an eligible builder must not send the override");
+        var epochAfterFirst = _publisher.EnsureCurrent();
+
+        Generate(_explorationQuestGenerator);
+
+        Assert.That(_builder.LastSendIncludedViewsOverride, Is.False);
+        Assert.That(_publisher.EnsureCurrent(), Is.EqualTo(epochAfterFirst), "an unmoved stamp must not republish");
+    }
+
+    [Test]
+    public void TheKillSwitchAlwaysSendsTheOverride()
     {
         _questConfig.DisableNativeRequestCache = true;
 
         Generate(_explorationQuestGenerator);
-        Assert.That(_builder.LastSendIncludedSlice, Is.True);
+        Assert.That(_builder.LastSendIncludedViewsOverride, Is.True);
 
         Generate(_explorationQuestGenerator);
 
-        Assert.That(_builder.LastSendIncludedSlice, Is.True, "the kill switch let a send skip the slice");
+        Assert.That(_builder.LastSendIncludedViewsOverride, Is.True, "the kill switch let a send skip the override");
     }
 
     /// <summary>
-    /// The cache gate at the <c>Send</c> level, where <c>RepeatableQuestNativeRequestBuilderTests</c>
-    /// covers <c>CacheEligible</c> alone: a loaded mod can write the tables the slice projects, so
-    /// without the trust flag every send carries the slice.
+    /// The residency gate at the <c>Send</c> level, where <c>RepeatableQuestNativeRequestBuilderTests</c>
+    /// covers <c>ResidentDbEligible</c> alone: a loaded mod can write the tables the views derive
+    /// from, so without the trust flag every send carries the override.
     /// </summary>
     [Test]
-    public void AModdedBuilderAlwaysSendsTheSlice()
+    public void AModdedBuilderAlwaysSendsTheOverride()
     {
         var modded = BuildBuilderWithMods();
         var generator = BuildGenerator(modded);
@@ -181,48 +196,43 @@ public class RepeatableQuestPathDispatchTests
         Generate(generator);
         Generate(generator);
 
-        Assert.That(modded.LastSendIncludedSlice, Is.True, "a loaded mod without the trust flag disables the cache");
+        Assert.That(modded.LastSendIncludedViewsOverride, Is.True, "a loaded mod without the trust flag disables residency");
     }
 
-    /// <inheritdoc cref="AModdedBuilderAlwaysSendsTheSlice"/>
+    /// <inheritdoc cref="AModdedBuilderAlwaysSendsTheOverride"/>
     [Test]
-    public void TheTrustFlagKeepsTheCacheLiveWithModsLoaded()
+    public void TheTrustFlagKeepsTheResidentPathLiveWithModsLoaded()
     {
         var modded = BuildBuilderWithMods();
         var generator = BuildGenerator(modded);
         _questConfig.TrustNativeRequestCacheWithMods = true;
 
         Generate(generator);
-        Assert.That(modded.LastSendIncludedSlice, Is.True, "the first send has nothing cached to hit");
-
         Generate(generator);
 
-        Assert.That(modded.LastSendIncludedSlice, Is.False, "the trust flag should keep the cache live despite the loaded mod");
+        Assert.That(
+            modded.LastSendIncludedViewsOverride,
+            Is.False,
+            "the trust flag should keep the resident path live despite the loaded mod"
+        );
     }
 
     /// <summary>
-    /// The native cache holds one slice under one stamp. Bump the stamp without sending a slice for
-    /// it and then claim it was already sent, and the next slice-less request names a stamp the
-    /// native side does not hold - which has to self-heal through exactly one retry, not throw.
+    /// Move the resident epoch out from under the publisher with a direct native publish it never
+    /// sees, and the next override-less request names an epoch the native side does not hold -
+    /// which has to self-heal through exactly one republish plus retry, not throw.
     /// </summary>
     [Test]
     public void ANativeSideDesyncSelfHealsThroughOneRetry()
     {
-        // Park a slice under the current stamp, then move the stamp on and lie about having sent it
+        // Prime the publisher, then desync it
         Generate(_explorationQuestGenerator);
-        _databaseMutationStamp.Bump();
-        _builder.LastSentSliceStamp = _databaseMutationStamp.Current;
+        SptNative.DbPublish(Encoding.UTF8.GetBytes("{\"schema\":1,\"roots\":{}}"));
 
         var quest = Generate(_explorationQuestGenerator);
 
-        Assert.That(_builder.LastSendIncludedSlice, Is.True, "the stale-slice miss should have retried with the slice");
+        Assert.That(_builder.LastSendIncludedViewsOverride, Is.False, "the stale-epoch miss should have republished and retried");
         Assert.That(quest, Is.Not.Null, "the retry produced no quest");
-
-        // The retry parked the slice under the stamp it named, so the next send is a clean hit - one
-        // retry healed it rather than leaving every later send stale
-        Generate(_explorationQuestGenerator);
-
-        Assert.That(_builder.LastSendIncludedSlice, Is.False, "the retry did not leave the native cache holding the current stamp");
     }
 
     /// <summary>

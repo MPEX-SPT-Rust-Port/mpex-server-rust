@@ -836,35 +836,32 @@ pub struct BossInfo {
 // Request / response envelopes
 // ---------------------------------------------------------------------------
 
-/// The whole request, the ragfair ABI-13 envelope reused: the stamp the caller's slice was (or
-/// would be) projected at, the slice itself on a full send, and the varying half every call
-/// carries. [`crate::quest::slice_cache`] answers a slice-less send from what it stored.
+/// The whole request, the ragfair epoch envelope reused: the resident-DB epoch the caller built
+/// against, the C#-built views override when the caller is ineligible for residency, and the
+/// varying half every call carries.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QuestNativeRequest {
-    /// The caller's `DatabaseMutationStamp.Current`, a C# `long`.
-    pub invariant_stamp: i64,
-    /// Absent on a slice-less send, where the native side reuses the slice it stored under
-    /// [`Self::invariant_stamp`].
-    pub invariant: Option<QuestInvariantSlice>,
+    /// Resident-DB epoch this request was built against; 0 with `views_override` present.
+    pub epoch: u64,
+    /// The distrust fallback: the C#-built view bundle, used for this call only and never made
+    /// resident. Present iff the caller is ineligible for residency.
+    pub views_override: Option<QuestViewsWire>,
     pub varying: QuestVaryingRequest,
 }
 
-/// The call-invariant half: the database, config and service projections, which only change when
-/// the database does.
+/// The C#-built override of the database views [`crate::quest::views::derive`] would have derived
+/// — the wire form of [`crate::quest::views::QuestDbViews`], sent by callers ineligible for
+/// residency.
 ///
-/// The three projections the ragfair slice already carries — the items view, the handbook price
-/// table and `templateTable.Prices` — keep ragfair's member names and shapes
-/// ([`crate::ragfair::models::InvariantSlice`]) so the C# builder projects them the same way for
-/// both families. The rest are this family's own, each projected down to exactly what the C# call
-/// sites read.
-///
-/// Membership-only projections deserialize straight into a [`HashSet`]; ragfair's `PreparedSlice`
-/// conversion step exists to do that once per store, which is what deserializing into the set
-/// already does.
+/// The three views shared with ragfair — the items view, the handbook price table and
+/// `templateTable.Prices` — keep ragfair's member names and shapes
+/// ([`crate::ragfair::models::RagfairViewsWire`]) so the C# builder projects them the same way
+/// for both families. The rest are this family's own, each projected down to exactly what the C#
+/// call sites read.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct QuestInvariantSlice {
+pub struct QuestViewsWire {
     /// The `TemplateItem` table flattened by the C# caller — walked whole by
     /// `RepeatableQuestRewardGenerator.GetRewardableItems` (`:660`) and
     /// `CompletionQuestGenerator.GetItemsToRetrievePool` (`:132`), and read per tpl by every
@@ -885,16 +882,6 @@ pub struct QuestInvariantSlice {
     /// walks the preset caches `GetDefaultPreset` fills, so it stays a C#-side loop and crosses as
     /// a map.
     pub default_preset_or_item_prices: IndexMap<String, f64>,
-    /// `ItemFilterService.GetItemBlacklistCache()` — what `IsItemBlacklisted` (`:710/:713`)
-    /// answers from: the `config/item.json` blacklist plus anything added at runtime.
-    pub item_blacklist: HashSet<String>,
-    /// `ItemFilterService.GetItemRewardBlacklist()` — `IsItemRewardBlacklisted` (`:711`).
-    pub reward_item_blacklist: HashSet<String>,
-    /// `ItemFilterService.GetBossItems()` — `IsBossItem` (`:726`).
-    pub boss_items: HashSet<String>,
-    /// `SeasonalEventService.GetInactiveSeasonalEventItems()` (`:655`,
-    /// `CompletionQuestGenerator.cs:128`). Ragfair's slice carries it under the same name.
-    pub seasonal_item_tpl_blacklist: HashSet<String>,
     /// `TemplateTable.RepeatableQuests.Templates` — the four templates
     /// `GetClonedQuestTemplateForType` clones (`RepeatableQuestHelper.cs:68-76`).
     pub repeatable_quest_templates: RepeatableTemplates,
@@ -917,19 +904,15 @@ pub struct QuestInvariantSlice {
     /// up with (`ExplorationQuestGenerator.cs:183`). List order is load-bearing: the exit is drawn
     /// from the filtered list by index (`:279`).
     pub extracts_by_location: IndexMap<String, Vec<ExitView>>,
-    /// `QuestConfig.RepeatableQuestTemplates` — the template **ids** by player group
-    /// (`RepeatableQuestHelper.cs:187-197`), not the quest templates above.
-    pub repeatable_quest_template_ids: RepeatableQuestTemplates,
-    /// `QuestConfig.LocationIdMap` — `GetQuestLocationByMapId` (`RepeatableQuestHelper.cs:204`).
-    pub location_id_map: IndexMap<String, String>,
-    /// [`ItemBaseClassCache`] over [`Self::items`], built on first use and reused by every warm
-    /// call on the cached slice. Never crosses the wire.
+    /// [`ItemBaseClassCache`] over [`Self::items`], built on first use — an override pays for it
+    /// per request, where the resident views carry ragfair's prebuilt cache. Never crosses the
+    /// wire.
     #[serde(skip)]
     base_classes: OnceLock<ItemBaseClassCache>,
 }
 
-impl QuestInvariantSlice {
-    /// The flattened ancestor cache for [`Self::items`] — built once per slice, on first use.
+impl QuestViewsWire {
+    /// The flattened ancestor cache for [`Self::items`] — built once per override, on first use.
     pub fn base_classes(&self) -> &ItemBaseClassCache {
         self.base_classes
             .get_or_init(|| ItemBaseClassCache::build(&self.items))
@@ -987,8 +970,8 @@ pub struct RepeatableQuestTemplates {
     pub scav: IndexMap<String, String>,
 }
 
-/// The members that change every call — everything not projected off the database. The full
-/// request ([`QuestNativeRequest`]) wraps this next to the invariant slice.
+/// The members that change every call — everything not derived off the resident database. The
+/// full request ([`QuestNativeRequest`]) wraps this next to the views override.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QuestVaryingRequest {
@@ -1000,6 +983,23 @@ pub struct QuestVaryingRequest {
     pub repeatable_config: RepeatableQuestConfig,
     /// Test-only: draws come from a seeded generator when set. Absent in production.
     pub seed: Option<u64>,
+    // Moved from the old invariant slice: service/config state with no resident home until
+    // Phases 2/4. Wire names and value shapes are byte-identical to the old slice members.
+    /// `ItemFilterService.GetItemBlacklistCache()` — what `IsItemBlacklisted` (`:710/:713`)
+    /// answers from: the `config/item.json` blacklist plus anything added at runtime.
+    pub item_blacklist: HashSet<String>,
+    /// `ItemFilterService.GetItemRewardBlacklist()` — `IsItemRewardBlacklisted` (`:711`).
+    pub reward_item_blacklist: HashSet<String>,
+    /// `ItemFilterService.GetBossItems()` — `IsBossItem` (`:726`).
+    pub boss_items: HashSet<String>,
+    /// `SeasonalEventService.GetInactiveSeasonalEventItems()` (`:655`,
+    /// `CompletionQuestGenerator.cs:128`). Ragfair's varying half carries it under the same name.
+    pub seasonal_item_tpl_blacklist: HashSet<String>,
+    /// `QuestConfig.RepeatableQuestTemplates` — the template **ids** by player group
+    /// (`RepeatableQuestHelper.cs:187-197`), not the quest templates in the views.
+    pub repeatable_quest_template_ids: RepeatableQuestTemplates,
+    /// `QuestConfig.LocationIdMap` — `GetQuestLocationByMapId` (`RepeatableQuestHelper.cs:204`).
+    pub location_id_map: IndexMap<String, String>,
 }
 
 /// One generated quest and the pool it was drawn from, which the generators mutate.
@@ -1020,8 +1020,8 @@ where
     Ok(deserialize_string_or_number(deserializer)?.map(|value| value as i32))
 }
 
-/// `pub` so `slice_cache`'s tests — and the generator ports after them — build a slice off the
-/// same fixture.
+/// `pub` so the generator and FFI tests build their views override and varying half off the same
+/// fixtures.
 #[cfg(test)]
 pub mod tests {
     use super::*;
@@ -1167,7 +1167,7 @@ pub mod tests {
 
     /// One entry per map/table, with the real Elimination template spliced in so the
     /// `repeatableQuestTemplates` keys are pinned against the shipped database.
-    pub fn slice_value() -> serde_json::Value {
+    pub fn views_override_value() -> serde_json::Value {
         let templates = database(TEMPLATES_PATH);
 
         serde_json::json!({
@@ -1183,10 +1183,6 @@ pub mod tests {
                 "id": "preset1", "encyclopedia": "bbbbbbbbbbbbbbbbbbbbbbbb"
             }],
             "defaultPresetOrItemPrices": { "bbbbbbbbbbbbbbbbbbbbbbbb": 21000.0 },
-            "itemBlacklist": ["999999999999999999999999"],
-            "rewardItemBlacklist": ["888888888888888888888888"],
-            "bossItems": ["777777777777777777777777"],
-            "seasonalItemTplBlacklist": ["666666666666666666666666"],
             "repeatableQuestTemplates": { "Elimination": templates["templates"]["Elimination"] },
             "completionItemsWhitelist": [
                 { "minPlayerLevel": 1, "itemIds": ["bbbbbbbbbbbbbbbbbbbbbbbb"] }
@@ -1198,92 +1194,74 @@ pub mod tests {
                     "name": "Dorms V-Ex", "side": "Pmc", "chance": 100.0,
                     "passageRequirement": "TransferItem"
                 }]
-            },
-            "repeatableQuestTemplateIds": {
-                "pmc": { "Elimination": "616052ea3054fc0e2c24ce6e" },
-                "scav": { "Elimination": "62825ef60e88d037dc1eb428" }
-            },
-            "locationIdMap": { "bigmap": "55f2d3fd4bdc2d5f408b4567" }
+            }
         })
     }
 
-    pub fn slice() -> QuestInvariantSlice {
-        serde_json::from_value(slice_value()).expect("fixture slice parses")
+    pub fn views_override() -> QuestViewsWire {
+        serde_json::from_value(views_override_value()).expect("fixture views override parses")
+    }
+
+    /// The parsed varying half — what [`crate::quest::QuestContext::new`] borrows its six
+    /// service/config members from.
+    pub fn varying() -> QuestVaryingRequest {
+        serde_json::from_value(varying_value()).expect("fixture varying parses")
     }
 
     #[test]
-    fn the_invariant_slice_reads_the_locked_wire_contract() {
-        let slice = slice();
+    fn the_views_override_reads_the_locked_wire_contract() {
+        let views = views_override();
 
         assert_eq!(
-            slice.items["bbbbbbbbbbbbbbbbbbbbbbbb"].parent.as_deref(),
+            views.items["bbbbbbbbbbbbbbbbbbbbbbbb"].parent.as_deref(),
             Some("cccccccccccccccccccccccc")
         );
-        assert_eq!(slice.handbook_prices["bbbbbbbbbbbbbbbbbbbbbbbb"], 20000.0);
-        assert_eq!(slice.flea_prices["bbbbbbbbbbbbbbbbbbbbbbbb"], 25000.0);
+        assert_eq!(views.handbook_prices["bbbbbbbbbbbbbbbbbbbbbbbb"], 20000.0);
+        assert_eq!(views.flea_prices["bbbbbbbbbbbbbbbbbbbbbbbb"], 25000.0);
         assert_eq!(
-            slice.default_weapon_presets[0].encyclopedia.as_deref(),
+            views.default_weapon_presets[0].encyclopedia.as_deref(),
             Some("bbbbbbbbbbbbbbbbbbbbbbbb")
         );
         assert_eq!(
-            slice.default_preset_or_item_prices["bbbbbbbbbbbbbbbbbbbbbbbb"],
+            views.default_preset_or_item_prices["bbbbbbbbbbbbbbbbbbbbbbbb"],
             21000.0
-        );
-        assert!(slice.item_blacklist.contains("999999999999999999999999"));
-        assert!(
-            slice
-                .reward_item_blacklist
-                .contains("888888888888888888888888")
-        );
-        assert!(slice.boss_items.contains("777777777777777777777777"));
-        assert!(
-            slice
-                .seasonal_item_tpl_blacklist
-                .contains("666666666666666666666666")
         );
 
         // The template rides in whole, and the three types the fixture omits are the `null` arm
-        let elimination = slice
+        let elimination = views
             .repeatable_quest_templates
             .elimination
             .as_ref()
             .expect("elimination template");
         assert_eq!(elimination.quest.id, "68690637c1394a820efc27ca");
-        assert!(slice.repeatable_quest_templates.completion.is_none());
-        assert!(slice.repeatable_quest_templates.exploration.is_none());
-        assert!(slice.repeatable_quest_templates.pickup.is_none());
+        assert!(views.repeatable_quest_templates.completion.is_none());
+        assert!(views.repeatable_quest_templates.exploration.is_none());
+        assert!(views.repeatable_quest_templates.pickup.is_none());
 
         assert_eq!(
-            slice.completion_items_whitelist[0].min_player_level,
+            views.completion_items_whitelist[0].min_player_level,
             Some(1)
         );
         assert!(
-            slice.completion_items_whitelist[0]
+            views.completion_items_whitelist[0]
                 .item_ids
                 .contains("bbbbbbbbbbbbbbbbbbbbbbbb")
         );
         // A filter entry with no `itemIds` is the C# `?? []`, not a parse failure
-        assert!(slice.completion_items_blacklist[0].item_ids.is_empty());
+        assert!(views.completion_items_blacklist[0].item_ids.is_empty());
 
-        assert_eq!(slice.boss_spawns_by_location["bigmap"], ["bossKilla"]);
-        let extract = &slice.extracts_by_location["bigmap"][0];
+        assert_eq!(views.boss_spawns_by_location["bigmap"], ["bossKilla"]);
+        let extract = &views.extracts_by_location["bigmap"][0];
         assert_eq!(extract.name.as_deref(), Some("Dorms V-Ex"));
         assert_eq!(extract.side.as_deref(), Some("Pmc"));
         assert_eq!(extract.chance, Some(100.0));
         assert_eq!(extract.passage_requirement, "TransferItem");
 
-        assert_eq!(
-            slice.repeatable_quest_template_ids.pmc["Elimination"],
-            "616052ea3054fc0e2c24ce6e"
-        );
-        assert_eq!(
-            slice.repeatable_quest_template_ids.scav["Elimination"],
-            "62825ef60e88d037dc1eb428"
-        );
-        assert_eq!(slice.location_id_map["bigmap"], "55f2d3fd4bdc2d5f408b4567");
-
-        // Every view the generators consult is reachable through the context
-        let context = crate::quest::QuestContext::from_slice(&slice);
+        // Every view the generators consult is reachable through the context, the varying half's
+        // moved members included
+        let views = crate::quest::QuestViews::Override(Box::new(views));
+        let varying = varying();
+        let context = crate::quest::QuestContext::new(&views, &varying);
         assert_eq!(context.items.len(), 1);
         assert_eq!(
             context.location_id_map["bigmap"],
@@ -1292,27 +1270,28 @@ pub mod tests {
     }
 
     #[test]
-    fn the_native_request_carries_the_slice_or_leaves_it_out() {
+    fn the_native_request_carries_the_views_override_or_leaves_it_out() {
         let mut request = serde_json::json!({
-            "invariantStamp": 12,
-            "invariant": slice_value(),
+            "epoch": 12,
+            "viewsOverride": views_override_value(),
             "varying": varying_value(),
         });
 
         let parsed: QuestNativeRequest =
             serde_json::from_value(request.clone()).expect("full request parses");
-        assert_eq!(parsed.invariant_stamp, 12);
-        assert!(parsed.invariant.is_some());
+        assert_eq!(parsed.epoch, 12);
+        assert!(parsed.views_override.is_some());
         assert_eq!(parsed.varying.quest_type, RepeatableQuestType::Elimination);
 
-        // A slice-less send drops the member entirely
-        request.as_object_mut().unwrap().remove("invariant");
+        // An override-less send drops the member entirely
+        request.as_object_mut().unwrap().remove("viewsOverride");
         let parsed: QuestNativeRequest =
-            serde_json::from_value(request).expect("slice-less request parses");
-        assert!(parsed.invariant.is_none());
+            serde_json::from_value(request).expect("override-less request parses");
+        assert!(parsed.views_override.is_none());
     }
 
-    /// The varying half of a request, as the locked contract spells it.
+    /// The varying half of a request, as the locked contract spells it — the six members moved
+    /// off the old invariant slice included.
     pub fn varying_value() -> serde_json::Value {
         let config = database(QUEST_CONFIG_PATH);
 
@@ -1330,6 +1309,15 @@ pub mod tests {
                 }
             },
             "repeatableConfig": config["repeatableQuests"][0],
+            "itemBlacklist": ["999999999999999999999999"],
+            "rewardItemBlacklist": ["888888888888888888888888"],
+            "bossItems": ["777777777777777777777777"],
+            "seasonalItemTplBlacklist": ["666666666666666666666666"],
+            "repeatableQuestTemplateIds": {
+                "pmc": { "Elimination": "616052ea3054fc0e2c24ce6e" },
+                "scav": { "Elimination": "62825ef60e88d037dc1eb428" }
+            },
+            "locationIdMap": { "bigmap": "55f2d3fd4bdc2d5f408b4567" }
         })
     }
 
@@ -1351,6 +1339,29 @@ pub mod tests {
             targets["Savage"].locations.as_deref(),
             Some(&["any".to_owned()][..])
         );
+
+        // The six members moved off the old invariant slice, under their unchanged wire names
+        assert!(parsed.item_blacklist.contains("999999999999999999999999"));
+        assert!(
+            parsed
+                .reward_item_blacklist
+                .contains("888888888888888888888888")
+        );
+        assert!(parsed.boss_items.contains("777777777777777777777777"));
+        assert!(
+            parsed
+                .seasonal_item_tpl_blacklist
+                .contains("666666666666666666666666")
+        );
+        assert_eq!(
+            parsed.repeatable_quest_template_ids.pmc["Elimination"],
+            "616052ea3054fc0e2c24ce6e"
+        );
+        assert_eq!(
+            parsed.repeatable_quest_template_ids.scav["Elimination"],
+            "62825ef60e88d037dc1eb428"
+        );
+        assert_eq!(parsed.location_id_map["bigmap"], "55f2d3fd4bdc2d5f408b4567");
 
         let response = QuestNativeResponse {
             quest: Some(
