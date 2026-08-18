@@ -212,6 +212,18 @@ public static class SptNative
     /// <exception cref="InvalidOperationException">The build failed, or the native side misbehaved.</exception>
     public static RagfairLinkedItemResult BuildRagfairLinkedItemTable(RagfairLinkedItemRequest request)
     {
+        // Frozen pre-flip signature: an override send at epoch 0, never touching resident state.
+        return BuildRagfairLinkedItemTable(new RagfairLinkedItemNativeRequest { Epoch = 0, ViewsOverride = request });
+    }
+
+    /// <summary>
+    /// Builds the whole ragfair linked-item table in one call, off the resident templates root
+    /// or the override the request carries.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">The build failed, or the native side misbehaved.</exception>
+    /// <exception cref="NativeStaleEpochException">An override-less request named an epoch the resident DB does not hold.</exception>
+    internal static RagfairLinkedItemResult BuildRagfairLinkedItemTable(RagfairLinkedItemNativeRequest request)
+    {
         return Generate<RagfairLinkedItemResponse>(
             LootExport.RagfairLinkedItems,
             JsonSerializer.SerializeToUtf8Bytes(request, LootJsonOptions)

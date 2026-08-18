@@ -10,7 +10,6 @@ using SPTarkov.Server.Core.Models.Eft.Common.Tables;
 using SPTarkov.Server.Core.Models.Enums;
 using SPTarkov.Server.Core.Models.Spt.Config;
 using SPTarkov.Server.Core.Models.Spt.Tables;
-using SPTarkov.Server.Core.Native;
 using SPTarkov.Server.Core.Native.Ragfair;
 
 namespace SPTarkov.Server.Core.Services.Ragfair;
@@ -178,7 +177,7 @@ public class RagfairLinkedItemService(TemplateTable templateTable, ItemHelper it
 
         LastPathTaken = LootGenerationPath.Native;
 
-        var result = SptNative.BuildRagfairLinkedItemTable(_requestBuilder!.Build());
+        var result = _requestBuilder!.Send();
 
         // The same final copy loop legacy runs. Quirk 1, ported verbatim: `.Add`, never TryAdd or
         // assignment - a rebuild over a warm cache throws on both paths, and the miss path's
