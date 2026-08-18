@@ -540,7 +540,10 @@ pub struct LootCommon {
 }
 
 /// The slice of `TemplateItem` the generator actually reads, flattened by the C# caller.
-#[derive(Debug, Deserialize)]
+/// `Serialize` exists for the phase-1 equivalence harness (`tests/phase1_ragfair_views.rs`),
+/// which serializes a natively-derived view to compare against the C#-built one — the
+/// `serde(rename)`s make that serialization mirror the wire names.
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ItemView {
     pub parent: Option<String>,
@@ -664,7 +667,7 @@ pub struct ItemView {
 }
 
 /// `Models/Eft/Common/Tables/TemplateItem.cs:1641-1681` — `Grid` plus its `_props`, flattened.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GridView {
     /// `Grid._name` — becomes the placed item's `slotId`.
@@ -675,14 +678,14 @@ pub struct GridView {
 }
 
 /// `Models/Eft/Common/Tables/TemplateItem.cs:1683-1693`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GridFilterView {
     pub filter: Option<Vec<String>>,
     pub excluded_filter: Option<Vec<String>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SlotView {
     pub name: Option<String>,
@@ -694,7 +697,7 @@ pub struct SlotView {
     pub plate: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PresetView {
     pub items: Vec<Item>,
