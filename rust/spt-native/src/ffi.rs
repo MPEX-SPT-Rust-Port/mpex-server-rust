@@ -31,8 +31,8 @@ pub const STATUS_BAD_ARGS: i32 = 1;
 pub const STATUS_PANIC: i32 = 2;
 /// Generation failed: the error message, not a result, is in the out-buffer.
 pub const STATUS_ERROR: i32 = 3;
-/// A request named a resident-DB epoch (ragfair) or a cached slice stamp (quests, until flip #2)
-/// this process does not hold; the caller republishes / resends.
+/// A request named a resident-DB epoch this process does not hold; the caller republishes and
+/// retries.
 pub const STATUS_STALE_EPOCH: i32 = 4;
 
 /// How a generator failure crosses the boundary: which status code, and what message buffer.
@@ -73,14 +73,14 @@ impl FfiFailure for QuestError {
     fn status(&self) -> i32 {
         match self {
             QuestError::Failed(_) => STATUS_ERROR,
-            QuestError::StaleSlice => STATUS_STALE_EPOCH,
+            QuestError::StaleEpoch => STATUS_STALE_EPOCH,
         }
     }
 
     fn into_message(self) -> String {
         match self {
             QuestError::Failed(message) => message,
-            QuestError::StaleSlice => "no cached invariant slice for this stamp".to_string(),
+            QuestError::StaleEpoch => "resident DB epoch mismatch; republish and retry".to_string(),
         }
     }
 }
@@ -447,7 +447,8 @@ pub unsafe extern "C" fn spt_generate_dynamic_offers(
     }
 }
 
-/// One repeatable quest, from the cached invariant slice or the one this request carries.
+/// One repeatable quest, off the resident DB's derived views or the override this request
+/// carries.
 ///
 /// # Safety
 /// See `spt_generate_static_containers`.
@@ -992,7 +993,7 @@ mod tests {
         assert_eq!(spt_native_abi_version(), crate::ABI_VERSION);
         assert_eq!(
             crate::ABI_VERSION,
-            22,
+            23,
             "bump SptNative.ExpectedAbiVersion too"
         );
     }
@@ -1662,24 +1663,16 @@ mod tests {
         assert_eq!(status, STATUS_OK);
     }
 
-    /// Every repeatable-quest call writes the quest family's own static slice slot — a different
-    /// slot from ragfair's, with its own lock.
-    fn quest_cache_lock() -> std::sync::MutexGuard<'static, ()> {
-        crate::quest::slice_cache::tests::CACHE_TEST_LOCK
-            .lock()
-            .unwrap()
-    }
-
-    /// A repeatable-quest request at `stamp`, with the slice sent or omitted, off the fixtures the
-    /// model tests already pin against the shipped database.
-    fn quest_request(stamp: i64, include_slice: bool, seed: Option<u64>) -> Vec<u8> {
+    /// A repeatable-quest request at `epoch`, with the views override sent or omitted, off the
+    /// fixtures the model tests already pin against the shipped database.
+    fn quest_request(epoch: u64, include_override: bool, seed: Option<u64>) -> Vec<u8> {
         let mut varying = crate::quest::models::tests::varying_value();
         if let Some(seed) = seed {
             varying["seed"] = serde_json::json!(seed);
         }
-        let mut request = serde_json::json!({"invariantStamp": stamp, "varying": varying});
-        if include_slice {
-            request["invariant"] = crate::quest::models::tests::slice_value();
+        let mut request = serde_json::json!({"epoch": epoch, "varying": varying});
+        if include_override {
+            request["viewsOverride"] = crate::quest::models::tests::views_override_value();
         }
 
         serde_json::to_vec(&request).expect("request serializes")
@@ -1732,41 +1725,58 @@ mod tests {
     }
 
     #[test]
-    fn a_slice_less_quest_request_hits_the_cache_or_reports_stale() {
-        let _guard = quest_cache_lock();
-        // full send stores the slice under stamp 41
+    fn quest_epoch_protocol_gates_override_less_requests() {
+        let _guard = db_lock();
+        crate::db::clear();
+
+        // No publish yet: an override-less request has no resident DB to generate from
         let (status, _) = call_generate(
             spt_generate_repeatable_quest,
-            &quest_request(41, true, None),
+            &quest_request(1, false, None),
+        );
+        assert_eq!(status, STATUS_STALE_EPOCH);
+
+        // Publish the mini roots (junk roots parse as empty typed containers, so the empty quest
+        // views derive) and name the returned epoch: the request generates
+        let (status, out) = call_generate(
+            spt_db_publish,
+            br#"{"schema":1,"roots":{"templates":{"a":1},"traders":{"b":2},"globals":{"c":3},"locations":{"factory4_day":{}}}}"#,
+        );
+        assert_eq!(status, STATUS_OK);
+        let epoch = serde_json::from_slice::<serde_json::Value>(&out).unwrap()["epoch"]
+            .as_u64()
+            .unwrap();
+
+        let (status, _) = call_generate(
+            spt_generate_repeatable_quest,
+            &quest_request(epoch, false, None),
         );
         assert_eq!(status, STATUS_OK);
 
-        // slice-less send with the same stamp generates from the cache
-        let (status, _) = call_generate(
-            spt_generate_repeatable_quest,
-            &quest_request(41, false, None),
-        );
-        assert_eq!(status, STATUS_OK);
-
-        // slice-less send with a different stamp is a stale-slice miss
+        // A mismatched epoch is a stale miss carrying the republish-and-retry message
         let (status, out) = call_generate(
             spt_generate_repeatable_quest,
-            &quest_request(42, false, None),
+            &quest_request(epoch + 1, false, None),
         );
         assert_eq!(status, STATUS_STALE_EPOCH);
         assert_eq!(
             String::from_utf8(out).unwrap(),
-            "no cached invariant slice for this stamp"
+            "resident DB epoch mismatch; republish and retry"
         );
+
+        // The distrust fallback: a views override at epoch 0 never reads the resident DB
+        let (status, _) =
+            call_generate(spt_generate_repeatable_quest, &quest_request(0, true, None));
+        assert_eq!(status, STATUS_OK);
     }
 
     #[test]
     fn a_quest_generator_throw_returns_status_error_and_the_message() {
-        let _guard = quest_cache_lock();
         // The Daily config ships no `Pickup` block, and `PickupQuestGenerator:39` dereferences it
-        // unconditionally — the C#-sanctioned throw, ported as a panic.
+        // unconditionally — the C#-sanctioned throw, ported as a panic. Rides the override path,
+        // so the resident DB is never read.
         let mut request: serde_json::Value =
-            serde_json::from_slice(&quest_request(9, true, None)).unwrap();
+            serde_json::from_slice(&quest_request(0, true, None)).unwrap();
         request["varying"]["questType"] = serde_json::json!("Pickup");
 
         let (status, out) = call_generate(
@@ -1781,10 +1791,47 @@ mod tests {
         );
     }
 
+    /// Publish a resident DB rich enough to draw a real elimination quest from: the shipped
+    /// repeatable-quest templates plus the one priced weapon item the wire fixtures pin, as
+    /// roots. Returns the epoch override-less requests must name.
+    fn publish_quest_roots() -> u64 {
+        let templates_block = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../Libraries/SPTarkov.Server.Assets/SPT_Data/database/templates/repeatableQuests.json"
+        ))
+        .expect("SPT_Data file readable");
+        let request = format!(
+            r#"{{"schema":1,"roots":{{
+                "templates":{{
+                    "items":{{
+                        "5422acb9af1c889c16000029":{{"_name":"weapon","_type":"Node","_parent":"","_props":{{}}}},
+                        "bbbbbbbbbbbbbbbbbbbbbbbb":{{"_name":"item","_type":"Item",
+                            "_parent":"5422acb9af1c889c16000029","_props":{{"StackMaxSize":1}}}}
+                    }},
+                    "handbook":{{"Items":[{{"Id":"bbbbbbbbbbbbbbbbbbbbbbbb","ParentId":"cat","Price":20000.0}}]}},
+                    "prices":{{"bbbbbbbbbbbbbbbbbbbbbbbb":25000.0}},
+                    "repeatableQuests":{templates_block}
+                }},
+                "traders":{{}},
+                "globals":{{"ItemPresets":{{"preset1":{{"_id":"preset1","_name":"default",
+                    "_items":[{{"_id":"aaaaaaaaaaaaaaaaaaaaaaaa","_tpl":"bbbbbbbbbbbbbbbbbbbbbbbb"}}],
+                    "_encyclopedia":"bbbbbbbbbbbbbbbbbbbbbbbb"}}}}}},
+                "locations":{{}}
+            }}}}"#
+        );
+
+        let (status, out) = call_generate(spt_db_publish, request.as_bytes());
+        assert_eq!(status, STATUS_OK);
+        serde_json::from_slice::<serde_json::Value>(&out).unwrap()["epoch"]
+            .as_u64()
+            .expect("publish answers an epoch")
+    }
+
     #[test]
     fn a_seeded_quest_request_answers_the_same_bytes_twice() {
-        let _guard = quest_cache_lock();
-        let request = quest_request(7, true, Some(42));
+        let _guard = db_lock();
+        let epoch = publish_quest_roots();
+        let request = quest_request(epoch, false, Some(42));
 
         let (first_status, first) = call_generate(spt_generate_repeatable_quest, &request);
         let (second_status, second) = call_generate(spt_generate_repeatable_quest, &request);
@@ -1809,7 +1856,7 @@ mod tests {
         );
 
         // …and the masking has teeth: another seed draws a different quest.
-        let other_request = quest_request(7, true, Some(7));
+        let other_request = quest_request(epoch, false, Some(7));
         let (status, other) = call_generate(spt_generate_repeatable_quest, &other_request);
         assert_eq!(status, STATUS_OK);
         assert_ne!(

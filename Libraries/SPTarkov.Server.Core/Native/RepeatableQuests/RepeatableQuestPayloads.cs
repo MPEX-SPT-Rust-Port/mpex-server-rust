@@ -10,13 +10,13 @@ namespace SPTarkov.Server.Core.Native.RepeatableQuests;
 
 /// <summary>
 /// The request/response envelope of <c>spt_generate_repeatable_quest</c>, mirroring
-/// <c>rust/spt-native/src/quest/models.rs:836-1001</c> member for member. The envelope itself is
-/// ragfair's ABI-13 shape reused: stamp, optional slice, varying half.
+/// <c>rust/spt-native/src/quest/models.rs</c> member for member. The envelope itself is ragfair's
+/// resident-DB epoch shape reused: epoch, optional views override, varying half.
 ///
 /// Config and database models are the existing records from <c>Models</c>, whose
 /// <c>JsonPropertyName</c>s are what the Rust wire names were pinned to, so their shape stays
 /// authoritative by construction. The game-data views (<see cref="ItemView"/>,
-/// <see cref="PresetView"/>) are the loot port's, and the quest slice
+/// <see cref="PresetView"/>) are the loot port's, and the quest views override
 /// deliberately reuses them so one C# projection serves both families.
 ///
 /// Members Rust declares as <c>Option&lt;T&gt;</c> are nullable, everything else is
@@ -27,19 +27,18 @@ namespace SPTarkov.Server.Core.Native.RepeatableQuests;
 internal record GenerateRepeatableQuestRequest
 {
     /// <summary>
-    ///     The <c>DatabaseMutationStamp</c> value the invariant slice was (or would be) built at.
-    ///     The native side stores the slice under this value and, on a slice-less request, serves
-    ///     its cached slice only when the stamps match.
+    ///     Resident-DB epoch this request was built against; 0 with <see cref="ViewsOverride"/>
+    ///     present.
     /// </summary>
-    [JsonPropertyName("invariantStamp")]
-    public required long InvariantStamp { get; set; }
+    [JsonPropertyName("epoch")]
+    public required ulong Epoch { get; set; }
 
     /// <summary>
-    ///     Null on a cache-hit send: the native side reuses the slice it stored under
-    ///     <see cref="InvariantStamp"/>.
+    ///     The distrust fallback: the C#-built view bundle, used for this call only and never made
+    ///     resident. Present iff the caller is ineligible for residency.
     /// </summary>
-    [JsonPropertyName("invariant")]
-    public QuestInvariantSlice? Invariant { get; set; }
+    [JsonPropertyName("viewsOverride")]
+    public QuestViewsOverride? ViewsOverride { get; set; }
 
     [JsonPropertyName("varying")]
     public required RepeatableQuestVaryingFields Varying { get; set; }
@@ -83,13 +82,47 @@ internal record RepeatableQuestVaryingFields
     /// </summary>
     [JsonPropertyName("seed")]
     public ulong? Seed { get; set; }
+
+    // Moved off the old invariant slice: service/config state with no resident home until
+    // Phases 2/4. Wire names and value shapes are byte-identical to the old slice members.
+
+    /// <summary>
+    ///     What <c>ItemFilterService.IsItemBlacklisted</c> answers from: the config/item.json
+    ///     blacklist plus anything added at runtime.
+    /// </summary>
+    [JsonPropertyName("itemBlacklist")]
+    public required HashSet<MongoId> ItemBlacklist { get; set; }
+
+    [JsonPropertyName("rewardItemBlacklist")]
+    public required HashSet<MongoId> RewardItemBlacklist { get; set; }
+
+    [JsonPropertyName("bossItems")]
+    public required HashSet<MongoId> BossItems { get; set; }
+
+    [JsonPropertyName("seasonalItemTplBlacklist")]
+    public required HashSet<MongoId> SeasonalItemTplBlacklist { get; set; }
+
+    /// <summary>
+    ///     <c>QuestConfig.RepeatableQuestTemplates</c> - the template <b>ids</b> by player group,
+    ///     not the quest templates in the views override. Its per-group keys are PascalCase quest
+    ///     type names.
+    /// </summary>
+    [JsonPropertyName("repeatableQuestTemplateIds")]
+    public required RepeatableQuestTemplates RepeatableQuestTemplateIds { get; set; }
+
+    /// <summary>
+    ///     <c>QuestConfig.LocationIdMap</c>, keyed the way <c>GetQuestLocationByMapId</c> looks it
+    ///     up: by the raw <c>ELocationName</c> name, mixed case included.
+    /// </summary>
+    [JsonPropertyName("locationIdMap")]
+    public required Dictionary<string, string> LocationIdMap { get; set; }
 }
 
 /// <summary>
-/// The call-invariant half of the request: the database, config and service projections, which only
-/// change when the database does.
+/// The C#-built override of the database views the native side would otherwise read from its
+/// resident DB, sent by callers ineligible for residency.
 /// </summary>
-internal record QuestInvariantSlice
+internal record QuestViewsOverride
 {
     /// <inheritdoc cref="LootCommon.ItemsView"/>
     [JsonPropertyName("items")]
@@ -122,22 +155,6 @@ internal record QuestInvariantSlice
     /// </summary>
     [JsonPropertyName("defaultPresetOrItemPrices")]
     public required Dictionary<MongoId, double> DefaultPresetOrItemPrices { get; set; }
-
-    /// <summary>
-    ///     What <c>ItemFilterService.IsItemBlacklisted</c> answers from: the config/item.json
-    ///     blacklist plus anything added at runtime.
-    /// </summary>
-    [JsonPropertyName("itemBlacklist")]
-    public required HashSet<MongoId> ItemBlacklist { get; set; }
-
-    [JsonPropertyName("rewardItemBlacklist")]
-    public required HashSet<MongoId> RewardItemBlacklist { get; set; }
-
-    [JsonPropertyName("bossItems")]
-    public required HashSet<MongoId> BossItems { get; set; }
-
-    [JsonPropertyName("seasonalItemTplBlacklist")]
-    public required HashSet<MongoId> SeasonalItemTplBlacklist { get; set; }
 
     /// <summary>
     ///     <c>TemplateTable.RepeatableQuests.Templates</c> - the four templates
@@ -177,20 +194,6 @@ internal record QuestInvariantSlice
     /// </summary>
     [JsonPropertyName("extractsByLocation")]
     public required Dictionary<string, List<ExitView>> ExtractsByLocation { get; set; }
-
-    /// <summary>
-    ///     <c>QuestConfig.RepeatableQuestTemplates</c> - the template <b>ids</b> by player group, not
-    ///     the quest templates above. Its per-group keys are PascalCase quest type names.
-    /// </summary>
-    [JsonPropertyName("repeatableQuestTemplateIds")]
-    public required RepeatableQuestTemplates RepeatableQuestTemplateIds { get; set; }
-
-    /// <summary>
-    ///     <c>QuestConfig.LocationIdMap</c>, keyed the way <c>GetQuestLocationByMapId</c> looks it up:
-    ///     by the raw <c>ELocationName</c> name, mixed case included.
-    /// </summary>
-    [JsonPropertyName("locationIdMap")]
-    public required Dictionary<string, string> LocationIdMap { get; set; }
 }
 
 /// <summary>

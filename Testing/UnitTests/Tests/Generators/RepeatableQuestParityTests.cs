@@ -31,7 +31,7 @@ namespace UnitTests.Tests.Generators;
 /// the path selector - and, for the one forced case, that band's
 /// <c>EliminationConfig.SpecificLocationChance</c>. Both live in the varying half of the request, so
 /// (unlike ragfair) no <c>DatabaseMutationStamp</c> bump is needed: this fixture never writes
-/// anything the invariant slice projects.
+/// anything the resident DB projects.
 /// </item>
 /// <item>
 /// <see cref="RandomUtil.RandomSource"/> and <c>ProbabilityRandomSource.Current</c> - one shared
@@ -43,11 +43,11 @@ namespace UnitTests.Tests.Generators;
 /// </item>
 /// </list>
 /// The <see cref="QuestTypePool"/> is built fresh per call and never shared, so it needs no restore.
-/// One thing is mutated and <i>not</i> restored: every native send advances
-/// <c>RepeatableQuestNativeRequestBuilder.LastSentSliceStamp</c> on the shared singleton. It is
-/// test-session state like ragfair's pre-generated flea - the native side revalidates every stamp and
-/// self-heals a stale one, and <c>RepeatableQuestNativeRequestBuilderTests</c> resets it in its own
-/// <c>[SetUp]</c>.
+/// One thing is mutated and <i>not</i> restored: an eligible native send keeps the process-global
+/// resident DB current, so the native side may hold a new epoch afterwards (and the shared builder's
+/// <c>LastSendIncludedViewsOverride</c> seam records the send shape). It is test-session state like
+/// ragfair's pre-generated flea - the native side validates the epoch every request names and a
+/// stale one self-heals with a republish and one retry.
 ///
 /// The one sanctioned parity gap: <c>MongoId</c> minting sits outside the seeded stream on both
 /// sides, so ~12-25 ids per quest can never match. <see cref="LootIdNormalizer"/> maps every one that

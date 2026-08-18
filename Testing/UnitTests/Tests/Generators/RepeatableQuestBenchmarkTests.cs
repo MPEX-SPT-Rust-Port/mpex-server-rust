@@ -7,7 +7,9 @@ using SPTarkov.Server.Core.Models.Common;
 using SPTarkov.Server.Core.Models.Enums;
 using SPTarkov.Server.Core.Models.Spt.Config;
 using SPTarkov.Server.Core.Models.Spt.Repeatable;
+using SPTarkov.Server.Core.Native.Db;
 using SPTarkov.Server.Core.Native.RepeatableQuests;
+using SPTarkov.Server.Core.Services.Server;
 using SPTarkov.Server.Core.Utils.Cloners;
 using SPTarkov.Server.Core.Utils.Collections;
 
@@ -16,12 +18,12 @@ namespace UnitTests.Tests.Generators;
 /// <summary>
 /// Head-to-head wall clock of the two repeatable-quest generation paths on the same live database in
 /// one process, for every quest type the four generators produce. One quest is a millisecond of C#
-/// work, so the native path's cost is dominated by the request it has to hand across the boundary -
-/// which is why the native side is measured twice: with the stamp-gated invariant slice sent on every
-/// call (<c>QuestConfig.DisableNativeRequestCache</c>, the shape a modded server runs) and with it
-/// cached native-side (the shape a stock server runs). <c>BuildInvariantSlice</c> is timed on its own
-/// as a fourth phase: the cold-warm gap is what the slice costs per send end to end, and that phase
-/// is the C# half of it - the part a stamp-keyed C#-side memo could ever reach.
+/// work, so the native path's cost is dominated by keeping the resident DB current - which is why
+/// the native side is measured twice: with <c>DatabaseMutationStamp</c> bumped before every run so
+/// each pass republishes the whole database first (publish cold), and with the stamp left alone so
+/// the send carries the varying fields only and generates off the already-derived resident views
+/// (publish warm, the shape a stock server runs). <c>BuildViewsOverride</c> is timed on its own as
+/// a fourth phase: the C# projection an ineligible (modded, untrusted) send pays per call.
 ///
 /// Run in Release; the cargo dev profile makes Debug numbers meaningless.
 /// </summary>
@@ -46,6 +48,8 @@ public class RepeatableQuestBenchmarkTests
     private RepeatableQuestHelper _repeatableQuestHelper = default!;
     private RepeatableQuestNativeRequestBuilder _builder = default!;
     private QuestConfig _questConfig = default!;
+    private DatabaseMutationStamp _databaseMutationStamp = default!;
+    private DbPublisher _dbPublisher = default!;
     private ICloner _cloner = default!;
 
     /// <summary> The pmc daily config - the one every type but Pickup is generated from </summary>
@@ -66,6 +70,8 @@ public class RepeatableQuestBenchmarkTests
         _repeatableQuestHelper = di.GetService<RepeatableQuestHelper>();
         _builder = di.GetService<RepeatableQuestNativeRequestBuilder>();
         _questConfig = di.GetService<QuestConfig>();
+        _databaseMutationStamp = di.GetService<DatabaseMutationStamp>();
+        _dbPublisher = di.GetService<DbPublisher>();
         _cloner = di.GetService<ICloner>();
 
         _pmcDaily = _questConfig.RepeatableQuests.First(config => config.Side == PlayerGroup.Pmc);
@@ -76,7 +82,6 @@ public class RepeatableQuestBenchmarkTests
     public void TearDown()
     {
         _questConfig.ForceLegacyRepeatableQuestGeneration = false;
-        _questConfig.DisableNativeRequestCache = false;
     }
 
     [Test]
@@ -87,7 +92,7 @@ public class RepeatableQuestBenchmarkTests
             RunScenario(questType);
         }
 
-        Report("BuildInvariantSlice only", MeasureSliceProjection());
+        Report("BuildViewsOverride only", MeasureViewsOverrideProjection());
     }
 
     private void RunScenario(string questType)
@@ -97,22 +102,31 @@ public class RepeatableQuestBenchmarkTests
         var pmcLevel = LevelForBand(repeatableConfig, questType);
         var traderId = TraderForType(repeatableConfig, questType);
 
-        var legacy = Measure(generator, repeatableConfig, pmcLevel, traderId, forceLegacy: true, disableCache: false);
-        var cold = Measure(generator, repeatableConfig, pmcLevel, traderId, forceLegacy: false, disableCache: true);
-        var warm = Measure(generator, repeatableConfig, pmcLevel, traderId, forceLegacy: false, disableCache: false);
+        var legacy = Measure(generator, repeatableConfig, pmcLevel, traderId, forceLegacy: true);
+
+        var epochBeforeCold = _dbPublisher.EnsureCurrent();
+        var cold = Measure(generator, repeatableConfig, pmcLevel, traderId, forceLegacy: false, () => _databaseMutationStamp.Bump());
+        Assert.That(
+            _dbPublisher.EnsureCurrent(),
+            Is.GreaterThan(epochBeforeCold),
+            "the cold arm never advanced the resident-DB epoch - it measured the warm path"
+        );
+
+        var warm = Measure(generator, repeatableConfig, pmcLevel, traderId, forceLegacy: false);
 
         Report($"{questType} legacy (C# 4.1.2)", legacy);
-        Report($"{questType} native, slice cold", cold);
-        Report($"{questType} native, slice warm", warm);
+        Report($"{questType} native, publish cold", cold);
+        Report($"{questType} native, publish warm", warm);
         TestContext.Out.WriteLine(
             $"{questType, -12} speedup (median legacy / median native warm): {Median(legacy.Timings) / Median(warm.Timings):F2}x  "
-                + $"slice cost per send (median cold - median warm): {Median(cold.Timings) - Median(warm.Timings):F2} ms"
+                + $"publish cost per send (median cold - median warm): {Median(cold.Timings) - Median(warm.Timings):F2} ms"
         );
     }
 
-    /// <param name="disableCache">
-    ///     Forces every native send to carry the whole invariant slice - what a server with mods
-    ///     loaded pays, since <c>CacheEligible</c> is false there unless the user vouched for them.
+    /// <param name="beforeEachRun">
+    ///     Runs outside the timed region, before every warmup and timed run. The cold arm bumps
+    ///     <c>DatabaseMutationStamp</c> here, so every pass republishes the whole database first;
+    ///     the warm arm leaves the stamp alone and generates off the already-derived resident views.
     /// </param>
     private RunStats Measure(
         IRepeatableQuestGenerator generator,
@@ -120,20 +134,19 @@ public class RepeatableQuestBenchmarkTests
         int pmcLevel,
         MongoId traderId,
         bool forceLegacy,
-        bool disableCache
+        Action? beforeEachRun = null
     )
     {
         _questConfig.ForceLegacyRepeatableQuestGeneration = forceLegacy;
-        _questConfig.DisableNativeRequestCache = disableCache;
 
         var timings = new List<double>(TimedRuns);
 
         try
         {
-            // JIT, the native library load and the first lazy-load deserialise are not measured; the
-            // second warmup is also what leaves the native slice cache primed for the warm phase
+            // JIT, the native library load and the first lazy-load deserialise are not measured
             for (var run = 0; run < WarmupRuns; run++)
             {
+                beforeEachRun?.Invoke();
                 _ = generator.Generate(_sessionId, pmcLevel, traderId, BuildPool(repeatableConfig, pmcLevel), repeatableConfig);
             }
 
@@ -143,13 +156,7 @@ public class RepeatableQuestBenchmarkTests
 
             if (!forceLegacy)
             {
-                // The cold and warm arms differ only in whether the send carries the slice, so that
-                // is asserted rather than assumed - two arms measuring the same send would read 0 ms
-                Assert.That(
-                    _builder.LastSendIncludedSlice,
-                    Is.EqualTo(disableCache),
-                    disableCache ? "the cold arm skipped the slice" : "the warm arm missed the native slice cache"
-                );
+                Assert.That(_builder.LastSendIncludedViewsOverride, Is.False, "both native arms must ride the resident path");
             }
 
             GC.Collect();
@@ -163,6 +170,7 @@ public class RepeatableQuestBenchmarkTests
                 // The generators consume the pool they are handed, so it is rebuilt per run -
                 // outside the timed region, the way the bot fixture hoists its template clone
                 var pool = BuildPool(repeatableConfig, pmcLevel);
+                beforeEachRun?.Invoke();
 
                 var stopwatch = Stopwatch.StartNew();
                 _ = generator.Generate(_sessionId, pmcLevel, traderId, pool, repeatableConfig);
@@ -176,23 +184,21 @@ public class RepeatableQuestBenchmarkTests
         finally
         {
             _questConfig.ForceLegacyRepeatableQuestGeneration = false;
-            _questConfig.DisableNativeRequestCache = false;
         }
     }
 
     /// <summary>
-    /// The C# half of what a slice-carrying send pays: both price maps over the whole items table,
-    /// the items view, every default preset, the boss spawns and extracts of every location. The
-    /// serialise and the native-side parse are not in here - the cold-minus-warm gap in the scenario
-    /// above is the whole cost, this is the share of it a C#-side memo could ever remove.
+    /// The C# projection an ineligible (modded, untrusted) send pays per call: both price maps over
+    /// the whole items table, the items view, every default weapon preset, the boss spawns and
+    /// extracts of every location. The serialise and the native-side parse are not in here.
     /// </summary>
-    private RunStats MeasureSliceProjection()
+    private RunStats MeasureViewsOverrideProjection()
     {
         var timings = new List<double>(TimedRuns);
 
         for (var run = 0; run < WarmupRuns; run++)
         {
-            _ = _builder.BuildInvariantSlice();
+            _ = _builder.BuildViewsOverride();
         }
 
         GC.Collect();
@@ -204,7 +210,7 @@ public class RepeatableQuestBenchmarkTests
         for (var run = 0; run < TimedRuns; run++)
         {
             var stopwatch = Stopwatch.StartNew();
-            _ = _builder.BuildInvariantSlice();
+            _ = _builder.BuildViewsOverride();
             stopwatch.Stop();
 
             timings.Add(stopwatch.Elapsed.TotalMilliseconds);

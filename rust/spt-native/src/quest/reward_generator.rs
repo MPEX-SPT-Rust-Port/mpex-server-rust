@@ -974,9 +974,12 @@ mod tests {
     use super::*;
     use crate::diag::DiagSink;
     use crate::loot::random_util::TestSeedGuard;
-    use crate::quest::QuestContext;
     use crate::quest::helper::PRAPOR;
-    use crate::quest::models::{QuestInvariantSlice, RepeatableQuestConfig, tests::slice_value};
+    use crate::quest::models::{
+        RepeatableQuestConfig,
+        tests::{varying, views_override, views_override_value},
+    };
+    use crate::quest::{QuestContext, QuestViews};
 
     const SEED: u64 = 42;
 
@@ -993,12 +996,14 @@ mod tests {
         serde_json::from_value(config["repeatableQuests"][0].clone()).expect("parses")
     }
 
-    /// The fixture slice, repriced.
-    fn priced_slice_of(prices: serde_json::Value) -> QuestInvariantSlice {
-        let mut value = slice_value();
+    /// The fixture views, repriced.
+    fn priced_views_of(prices: serde_json::Value) -> QuestViews {
+        let mut value = views_override_value();
         value["defaultPresetOrItemPrices"] = prices;
 
-        serde_json::from_value(value).expect("fixture slice parses")
+        QuestViews::Override(Box::new(
+            serde_json::from_value(value).expect("fixture views parse"),
+        ))
     }
 
     fn stack_sizes_drawn(ctx: &QuestContext<'_>, tpl: &str) -> BTreeSet<i32> {
@@ -1012,9 +1017,10 @@ mod tests {
     #[test]
     fn the_stack_size_tier_table_skips_four_in_the_middle_band() {
         // One price per tier band of `:443-448`
-        let slice =
-            priced_slice_of(serde_json::json!({ "cheap": 1000.0, "mid": 5000.0, "dear": 20000.0 }));
-        let ctx = QuestContext::from_slice(&slice);
+        let views =
+            priced_views_of(serde_json::json!({ "cheap": 1000.0, "mid": 5000.0, "dear": 20000.0 }));
+        let varying = varying();
+        let ctx = QuestContext::new(&views, &varying);
         let _guard = TestSeedGuard::install(SEED);
 
         assert_eq!(
@@ -1041,10 +1047,11 @@ mod tests {
     fn the_budget_loop_rewards_one_item_however_many_are_asked_for() {
         const POOL: [&str; 5] = ["aa", "bb", "cc", "dd", "ee"];
 
-        let slice = priced_slice_of(serde_json::json!({
+        let views = priced_views_of(serde_json::json!({
             "aa": 100.0, "bb": 100.0, "cc": 100.0, "dd": 100.0, "ee": 100.0
         }));
-        let mut ctx = QuestContext::from_slice(&slice);
+        let varying = varying();
+        let mut ctx = QuestContext::new(&views, &varying);
         ctx.diagnostics = DiagSink::capture();
         let config = daily_config();
 
@@ -1064,8 +1071,9 @@ mod tests {
     /// (`:106`), in that order, under the three keys the client expects (`:76-81`).
     #[test]
     fn a_seeded_reward_leads_with_experience_then_money() {
-        let slice = crate::quest::models::tests::slice();
-        let mut ctx = QuestContext::from_slice(&slice);
+        let views = QuestViews::Override(Box::new(views_override()));
+        let varying = varying();
+        let mut ctx = QuestContext::new(&views, &varying);
         ctx.diagnostics = DiagSink::capture();
         let config = daily_config();
         let skill_rewards = &config.quest_config.elimination[0].possible_skill_rewards;

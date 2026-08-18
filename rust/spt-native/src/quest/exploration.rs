@@ -403,11 +403,12 @@ mod tests {
 
     use crate::diag::DiagSink;
     use crate::loot::random_util::TestSeedGuard;
-    use crate::quest::QuestContext;
     use crate::quest::helper::PRAPOR;
     use crate::quest::models::{
-        ListOrT, QuestInvariantSlice, QuestTypePool, RepeatableQuestConfig, tests::slice_value,
+        ListOrT, QuestTypePool, QuestVaryingRequest, RepeatableQuestConfig,
+        tests::{varying_value, views_override_value},
     };
+    use crate::quest::{QuestContext, QuestViews};
 
     const QUEST_CONFIG_PATH: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -435,18 +436,15 @@ mod tests {
     const LOCATION: &str = "Interchange";
     const LOCATION_ID: &str = "5714dbc024597771384a510d";
 
-    /// The fixture slice with the real Exploration template spliced in and five extracts on
+    /// The fixture views with the real Exploration template spliced in and five extracts on
     /// `interchange`: two drawable ones, plus one rejected per filter — wrong side (`:185`), zero
     /// spawn chance (`:263`) and a passage requirement outside the whitelist (`:266`).
-    fn slice() -> QuestInvariantSlice {
-        let mut value = slice_value();
+    fn views() -> QuestViews {
+        let mut value = views_override_value();
         let templates = json(TEMPLATES_PATH);
 
         value["repeatableQuestTemplates"]["Exploration"] =
             templates["templates"]["Exploration"].clone();
-        value["repeatableQuestTemplateIds"]["pmc"]["Exploration"] =
-            serde_json::json!("616041eb031af660100c9967");
-        value["locationIdMap"][LOCATION] = serde_json::json!(LOCATION_ID);
         value["extractsByLocation"] = serde_json::json!({
             LOCATION.to_lowercase(): [
                 { "name": DRAWABLE_EXITS[0], "side": "Pmc", "chance": 100.0,
@@ -462,7 +460,21 @@ mod tests {
             ]
         });
 
-        serde_json::from_value(value).expect("fixture slice parses")
+        QuestViews::Override(Box::new(
+            serde_json::from_value(value).expect("fixture views parse"),
+        ))
+    }
+
+    /// The fixture varying half with the Exploration pmc template id and the mixed-case location
+    /// mapping spliced in.
+    fn varying() -> QuestVaryingRequest {
+        let mut value = varying_value();
+
+        value["repeatableQuestTemplateIds"]["pmc"]["Exploration"] =
+            serde_json::json!("616041eb031af660100c9967");
+        value["locationIdMap"][LOCATION] = serde_json::json!(LOCATION_ID);
+
+        serde_json::from_value(value).expect("fixture varying parses")
     }
 
     /// One location, as `quest.json`'s `locations` map spells it — key and target both raw.
@@ -482,13 +494,14 @@ mod tests {
     /// show up over enough seeds, and the two carry different extract-count bounds (`:165-170`).
     #[test]
     fn a_seeded_exploration_quest_asks_for_extracts_on_the_drawn_map() {
-        let slice = slice();
+        let views = views();
+        let varying = varying();
         let config = daily_config();
         let mut plain_counts = BTreeSet::new();
         let mut specific_counts = BTreeSet::new();
 
         for seed in 1..=120u64 {
-            let mut ctx = QuestContext::from_slice(&slice);
+            let mut ctx = QuestContext::new(&views, &varying);
             ctx.diagnostics = DiagSink::capture();
             let mut pool = pool();
             let _guard = TestSeedGuard::install(seed);
@@ -568,8 +581,9 @@ mod tests {
     /// before any draw is spent.
     #[test]
     fn an_empty_location_pool_drops_the_quest_type() {
-        let slice = slice();
-        let mut ctx = QuestContext::from_slice(&slice);
+        let views = views();
+        let varying = varying();
+        let mut ctx = QuestContext::new(&views, &varying);
         ctx.diagnostics = DiagSink::capture();
         let mut pool = pool();
         pool.pool

@@ -893,9 +893,12 @@ pub fn generate(
 mod tests {
     use crate::diag::DiagSink;
     use crate::loot::random_util::TestSeedGuard;
-    use crate::quest::QuestContext;
     use crate::quest::helper::PRAPOR;
-    use crate::quest::models::{ListOrT, QuestTypePool, RepeatableQuestConfig, tests::slice};
+    use crate::quest::models::{
+        ListOrT, QuestTypePool, RepeatableQuestConfig,
+        tests::{varying, views_override},
+    };
+    use crate::quest::{QuestContext, QuestViews};
 
     const QUEST_CONFIG_PATH: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -923,7 +926,7 @@ mod tests {
         serde_json::from_value(daily).expect("parses")
     }
 
-    /// One savage target over `any` plus `bigmap`, which is the fixture slice's only mapped
+    /// One savage target over `any` plus `bigmap`, which is the fixture varying's only mapped
     /// location key.
     fn pool() -> QuestTypePool {
         serde_json::from_value(serde_json::json!({
@@ -947,8 +950,9 @@ mod tests {
 
     #[test]
     fn a_seeded_elimination_quest_draws_one_or_two_body_parts_and_empties_the_target_pool() {
-        let slice = slice();
-        let mut ctx = QuestContext::from_slice(&slice);
+        let views = QuestViews::Override(Box::new(views_override()));
+        let varying = varying();
+        let mut ctx = QuestContext::new(&views, &varying);
         ctx.diagnostics = DiagSink::capture();
         let config = daily_config();
         let mut pool = pool();
@@ -1070,8 +1074,9 @@ mod tests {
         }
         let config: RepeatableQuestConfig = serde_json::from_value(daily).expect("parses");
 
-        let slice = slice();
-        let mut ctx = QuestContext::from_slice(&slice);
+        let views = QuestViews::Override(Box::new(views_override()));
+        let varying = varying();
+        let mut ctx = QuestContext::new(&views, &varying);
         ctx.diagnostics = DiagSink::capture();
         let mut pool = pool();
 

@@ -257,15 +257,19 @@ pub fn get_quest_location_by_map_id<'a>(
 mod tests {
     use super::*;
     use crate::diag::DiagSink;
-    use crate::quest::QuestContext;
-    use crate::quest::models::{RepeatableQuestType, tests::slice};
+    use crate::quest::models::{
+        RepeatableQuestType,
+        tests::{varying, views_override},
+    };
+    use crate::quest::{QuestContext, QuestViews};
 
     /// The shipped Elimination template carries `{templateId} name {traderId}` in every text
-    /// member, so the fixture slice needs no patching to exercise the substitution.
+    /// member, so the fixture views need no patching to exercise the substitution.
     #[test]
     fn generate_repeatable_template_substitutes_prapor_everywhere_but_the_name() {
-        let slice = slice();
-        let mut ctx = QuestContext::from_slice(&slice);
+        let views = QuestViews::Override(Box::new(views_override()));
+        let varying = varying();
+        let mut ctx = QuestContext::new(&views, &varying);
         ctx.diagnostics = DiagSink::capture();
 
         let quest = generate_repeatable_template(
@@ -296,8 +300,9 @@ mod tests {
     /// location key (`:206-210`).
     #[test]
     fn the_error_paths_report_their_locale_key_and_give_up() {
-        let slice = slice();
-        let mut ctx = QuestContext::from_slice(&slice);
+        let views = QuestViews::Override(Box::new(views_override()));
+        let varying = varying();
+        let mut ctx = QuestContext::new(&views, &varying);
         ctx.diagnostics = DiagSink::capture();
 
         // The fixture only carries the Elimination template

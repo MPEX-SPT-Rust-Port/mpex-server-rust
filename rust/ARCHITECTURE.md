@@ -28,14 +28,14 @@ order), `rmp-serde` (the ragfair MessagePack envelope), `indexmap`, `rand`/`rand
 pins `-C target-cpu=x86-64-v3` on both x64 targets, so the built library will not run on pre-AVX2 hardware, and
 the mold linker on Linux. Both profiles use one codegen unit; release adds fat LTO.
 
-~51k lines across the 55 files of `src/`, inline tests included: `bot/` ~34%, `loot/` ~24%, `ragfair/` ~15%,
+~52k lines across the 55 files of `src/`, inline tests included: `bot/` ~33%, `loot/` ~23%, `ragfair/` ~15%,
 `quest/` ~12%, `scav_case/` ~4%. `bot_equipment_mod_generator.rs` alone is 4.2k.
 
 ## Layout
 
 | Path | Role |
 |---|---|
-| `src/lib.rs` | Module roots and `ABI_VERSION` (currently 22; must equal `SptNative.ExpectedAbiVersion`) |
+| `src/lib.rs` | Module roots and `ABI_VERSION` (currently 23; must equal `SptNative.ExpectedAbiVersion`) |
 | `src/ffi.rs` | The C-ABI surface. The **only** module containing `unsafe` |
 | `src/runtime.rs` | Process-wide multi-thread tokio runtime, `OnceLock`-built. Used only by `verify` |
 | `src/verify.rs` | Hashes `SPT_Data` with XXH3-128 and diffs it against `checks.dat` |
@@ -43,7 +43,7 @@ the mold linker on Linux. Both profiles use one codegen unit; release adds fat L
 | `src/logger.rs` | The log pipeline: `sptLogger.json`, filters, level gates, per-target formatting — and the console sink |
 | `src/log_sink.rs` | The file sink alone: where a formatted line lands on disk, with its rotation and archiving |
 | `src/diag.rs` | The generator families' way into that pipeline: the locale table, the render, and `DiagSink` |
-| `src/db.rs` | The resident DB: the epoch-versioned store of published roots (templates, traders, globals); a publish re-derives ragfair's views |
+| `src/db.rs` | The resident DB: the epoch-versioned store of published roots (templates, traders, globals, locations); a publish re-derives the ragfair and quest views |
 | `src/db/models.rs` | The publish envelope's wire types |
 | `src/loot/` | Location loot (static containers, loose loot) and reward loot (airdrops, cases, containers) |
 | `src/bot/` | One bot's entire inventory: equipment, mods, weapons, magazines, loot |
@@ -56,11 +56,11 @@ the mold linker on Linux. Both profiles use one codegen unit; release adds fat L
 ## FFI boundary (`ffi.rs`)
 
 Twenty-three `extern "C"` exports: two trivial (`spt_native_abi_version`, `spt_buf_free`), thirteen taking a
-UTF-8 JSON generation request, `spt_db_publish` taking the publish envelope, `spt_verify_database` taking a
-directory path, `spt_locales_set` taking the resolved server-locale table as JSON, and five for the log
-pipeline (`spt_logger_init`, `spt_logger_reinit`, `spt_log_emit`, `spt_logger_close`, `spt_log_set_tap` — see
-*The log pipeline*). The fifteen generation/publish/verify exports hand back a heap buffer the caller
-releases with `spt_buf_free`.
+UTF-8 JSON generation request, `spt_verify_database` taking a directory path, `spt_db_publish` taking the
+resident-DB publish envelope, `spt_locales_set` taking the resolved server-locale table as JSON, and five
+for the log pipeline (`spt_logger_init`, `spt_logger_reinit`, `spt_log_emit`, `spt_logger_close`,
+`spt_log_set_tap` — see *The log pipeline*). The fifteen generation/verify/publish exports hand back a
+heap buffer the caller releases with `spt_buf_free`.
 
 ```
 C# SptNative → spt_generate_* (JSON in)
@@ -79,16 +79,17 @@ C# SptNative → spt_generate_* (JSON in)
   3 carrying the message, because those families port a C#-sanctioned throw as a panic — a generation failure,
   not a library bug. The cost is that a real port bug in those two also arrives as 3, indistinguishable from a
   sanctioned failure. Deliberate.
-- **Ragfair rides the resident DB; the repeatable quest still carries a cached half.** `spt_db_publish`
-  (called by C#'s `DbPublisher` whenever `DatabaseMutationStamp` has moved) makes the templates, traders and
-  globals roots resident in `db.rs`, which derives ragfair's views at publish time. A ragfair request arrives
-  as `{epoch, viewsOverride?, varying}` and borrows those views; an epoch the store does not hold returns
-  `STATUS_STALE_EPOCH` and the C# caller force-publishes and retries once. An ineligible caller (mods loaded
-  without trust, or the kill switch) sends `viewsOverride` with `epoch: 0` instead — used for that call only,
-  never made resident. The quest request is still `{invariantStamp, invariant?, varying}`, with
-  `quest/slice_cache.rs` holding the last parsed invariant slice until flip #2 moves quests onto the resident
-  DB; it shares status 4's value. The resident roots and that quest slice are the only request data held
-  across calls.
+- **Ragfair and the repeatable quest ride the resident DB.** `spt_db_publish` (called by C#'s
+  `DbPublisher` whenever `DatabaseMutationStamp` has moved) makes the templates, traders, globals and
+  locations roots resident in `db.rs`, which derives both families' views at publish time — the quest views
+  share `items`/`handbookPrices`/`fleaPrices` with ragfair's through one `Arc`; the quest-own views
+  (`quest/views.rs`) derive off the same publish. The locations root is `Base` + `AllExtracts` only, keyed
+  by the locations' `JsonPropertyName` strings (a null `AllExtracts` ships as `[]`). Both families' requests
+  arrive as `{epoch, viewsOverride?, varying}` and borrow those views; an epoch the store does not hold
+  returns `STATUS_STALE_EPOCH` and the C# caller force-publishes and retries once. An ineligible caller
+  (mods loaded without trust, or the kill switch) sends `viewsOverride` with `epoch: 0` instead — a
+  documented wire contract, not runtime-enforced — used for that call only, never made resident. The
+  resident roots are the only request data held across calls (ABI 23).
 - **A buffer is written on failure too** — the parse error, the `LootError` message, or the panic text.
   Ownership is decided by the out-pointer being non-null, never by the status code. `spt_verify_database`'s
   free-on-success-only shape must not be copied into the generators.
@@ -203,12 +204,13 @@ Two crate-internal facts:
 
 `mod.rs` defines `QuestContext<'a>` — the items view, base-class cache, price tables, the reward and seasonal
 blacklists, boss items and spawns, extracts and location ids, the quest templates and the levelled Completion
-white/blacklists, plus its `DiagSink`. Every view is borrowed off the cached invariant slice. One native call
-generates **one** quest of one type.
+white/blacklists, plus its `DiagSink`. Every DB-derived view is borrowed off the resident DB's publish-derived
+views (or the request's `viewsOverride` — see *FFI boundary*); the service/config-backed fields ride the
+request's varying block. One native call generates **one** quest of one type.
 
 `generate_repeatable_quest` stands in for the type switch of
-`RepeatableQuestController.PickAndGenerateRandomRepeatableQuest` (`:390-397`): it takes the slice, installs the
-seed guard, dispatches on the requested type, and returns `QuestNativeResponse { quest, pool }` — the quest
+`RepeatableQuestController.PickAndGenerateRandomRepeatableQuest` (`:390-397`): it resolves the epoch's views,
+installs the seed guard, dispatches on the requested type, and returns `QuestNativeResponse { quest, pool }` — the quest
 **and** the type pool the generator mutated on the way, which rides back either way. A `None` quest is a normal
 outcome (exhausted pool, or a generator that gave up and logged why), not a failure.
 
@@ -220,7 +222,7 @@ outcome (exhausted pool, or a generator that gave up and logged why), not a fail
 | `pickup.rs` | `Generators/RepeatableQuests/PickupQuestGenerator.cs` | The fetch-N-items-of-a-type quest. Reachable, but no shipped `quest.json` lists `Pickup` in its `types` |
 | `reward_generator.rs` | `Generators/RepeatableQuests/RepeatableQuestRewardGenerator.cs` | The reward chain every type ends with: XP, money, GP coins, an optional weapon preset, items, trader standing, an optional skill point |
 | `helper.rs` | `Helpers/Quest/RepeatableQuestHelper.cs` | The template clone/placeholder pass each generator opens with, and the level-band config lookups |
-| `slice_cache.rs` | — | The quest invariant slice, keyed by the caller's `DatabaseMutationStamp`; stays until flip #2 moves quests onto the resident DB (see *FFI boundary*) |
+| `views.rs` | — | Publish-time derivation of the quest views from the resident roots in `src/db.rs`, sharing the items/price views with `ragfair/views.rs` through one `Arc` (see *FFI boundary*) |
 | `models.rs` | `Models/Spt/Repeatable/…`, `Models/…` | Wire types |
 
 ## Conventions
@@ -287,10 +289,12 @@ Almost all tests are inline `#[cfg(test)]` modules (~750 of them). Three kinds:
   failure, generation failure and null arguments. `spt_generate_bot_inventory_batch` is the one export with no
   transport test of its own.
 
-Three `tests/` targets. `completion_whitelist_baseclass.rs` is a timing-and-equivalence guard for the
-Completion whitelist filter's base-class lookups; it runs against the real shipped `items.json`, so it needs
-`scripts/decompress-assets.sh` to have run. `phase0_publish_spike.rs` and `phase1_ragfair_views.rs` are the
-resident-DB flip's run-by-hand (`--ignored`) harnesses: the publish parse-cost/RSS spike and the
-native-vs-C# ragfair views equivalence check, each fed fixture files a C# test writes first.
+Four `tests/` targets: `completion_whitelist_baseclass.rs`, a timing-and-equivalence guard for the
+Completion whitelist filter's base-class lookups (runs against the real shipped `items.json`, so it needs
+`scripts/decompress-assets.sh` to have run); `phase0_publish_spike.rs` (`#[ignore]`d, the Phase 0 publish
+measurements); and `phase1_ragfair_views.rs` / `phase1_quest_views.rs` (`#[ignore]`d), the Rust halves of the
+two views-equivalence harness pairs — each parses an envelope its C# twin (`RagfairViewsEquivalenceTests` /
+`QuestViewsEquivalenceTests`) wrote to `$TMPDIR` and asserts the Rust-derived views equivalent to the
+C#-built ones.
 
 Run with `cd rust && cargo test && cargo fmt --check && cargo clippy --all-targets -- -D warnings`.

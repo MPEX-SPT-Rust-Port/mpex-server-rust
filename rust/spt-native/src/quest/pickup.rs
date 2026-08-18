@@ -133,10 +133,11 @@ mod tests {
 
     use crate::diag::DiagSink;
     use crate::loot::random_util::TestSeedGuard;
-    use crate::quest::QuestContext;
     use crate::quest::models::{
-        ListOrT, QuestInvariantSlice, QuestTypePool, RepeatableQuestConfig, tests::slice_value,
+        ListOrT, QuestTypePool, QuestVaryingRequest, RepeatableQuestConfig,
+        tests::{varying_value, views_override_value},
     };
+    use crate::quest::{QuestContext, QuestViews};
 
     const QUEST_CONFIG_PATH: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -161,16 +162,26 @@ mod tests {
             .expect("parses")
     }
 
-    /// The fixture slice with the real Pickup template and its scav template id spliced in.
-    fn slice() -> QuestInvariantSlice {
-        let mut value = slice_value();
+    /// The fixture views with the real Pickup template spliced in.
+    fn views() -> QuestViews {
+        let mut value = views_override_value();
         let templates = json(TEMPLATES_PATH);
 
         value["repeatableQuestTemplates"]["Pickup"] = templates["templates"]["Pickup"].clone();
+
+        QuestViews::Override(Box::new(
+            serde_json::from_value(value).expect("fixture views parse"),
+        ))
+    }
+
+    /// The fixture varying half with the Pickup scav template id spliced in.
+    fn varying() -> QuestVaryingRequest {
+        let mut value = varying_value();
+
         value["repeatableQuestTemplateIds"]["scav"]["Pickup"] =
             serde_json::json!("628f588ebb558574b2260fe5");
 
-        serde_json::from_value(value).expect("fixture slice parses")
+        serde_json::from_value(value).expect("fixture varying parses")
     }
 
     /// Pickup draws nothing from the pool, so any pool does.
@@ -190,7 +201,8 @@ mod tests {
     /// the `CounterCreator`'s `Equipment` condition.
     #[test]
     fn a_seeded_pickup_quest_asks_for_the_drawn_item_type() {
-        let slice = slice();
+        let views = views();
+        let varying = varying();
         let config = savage_config();
         let pickup_config = config.quest_config.pickup.as_ref().expect("Pickup config");
         let entries = pickup_config
@@ -201,7 +213,7 @@ mod tests {
         let mut counts = BTreeSet::new();
 
         for seed in 1..=60u64 {
-            let mut ctx = QuestContext::from_slice(&slice);
+            let mut ctx = QuestContext::new(&views, &varying);
             ctx.diagnostics = DiagSink::capture();
             let mut pool = pool();
             let _guard = TestSeedGuard::install(seed);
@@ -292,8 +304,9 @@ mod tests {
     #[test]
     #[should_panic(expected = "PickupQuestGenerator:39")]
     fn a_config_without_a_pickup_block_throws_at_the_first_dereference() {
-        let slice = slice();
-        let mut ctx = QuestContext::from_slice(&slice);
+        let views = views();
+        let varying = varying();
+        let mut ctx = QuestContext::new(&views, &varying);
         ctx.diagnostics = DiagSink::capture();
         let daily: RepeatableQuestConfig =
             serde_json::from_value(json(QUEST_CONFIG_PATH)["repeatableQuests"][0].clone())

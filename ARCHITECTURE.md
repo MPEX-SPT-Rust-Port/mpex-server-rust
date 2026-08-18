@@ -160,8 +160,8 @@ Two non-obvious steps run during build, both in `SPTarkov.Server.Core.csproj`:
 `Libraries/SPTarkov.Common/Native/NativeMethods.cs`, because `SPTarkov.Common` cannot reference
 Server.Core. It owns database hash verification, the ported generation paths (location loot, reward
 loot, whole-bot inventory, dynamic ragfair offers, repeatable quests, scav case rewards), the item
-base-class cache build, the ragfair linked-item table, the resident DB the ragfair path reads from,
-and the whole log pipeline. Twenty-three
+base-class cache build, the ragfair linked-item table, the resident DB the ragfair and
+repeatable-quest paths read from, and the whole log pipeline. Twenty-three
 exports, JSON in / JSON out — except the ragfair response, a framed MessagePack envelope, and the
 log exports — with `spt_native_abi_version` handshaking against `SptNative.ExpectedAbiVersion`.
 
@@ -175,14 +175,13 @@ with mod `ILogHandler`s fanned out from the dispatcher (resolve it from DI and c
 by contract: a broken library or config produces one stderr notice and logging stays off rather than
 stopping the server.
 
-Payloads are projected from the live database on every call, with two exceptions. The
-repeatable-quest request resends its call-invariant half only when `DatabaseMutationStamp` has
-moved. The ragfair request sends no invariant half at all: `DbPublisher` re-publishes the
-templates/traders/globals roots into the native resident DB when the stamp moves, and each call
-carries just an epoch (a stale epoch self-heals by force-publish and one retry). Because a mod
-writing an injected table directly never reaches the stamp's bump sites, both mechanisms are gated
-on no mods being loaded, with opt-in and kill-switch flags per family; an ineligible ragfair caller
-ships the full views with every call instead.
+Payloads are projected from the live database on every call, except the ragfair and repeatable-quest
+requests, which carry no call-invariant half at all: `DbPublisher` re-publishes the
+templates/traders/globals/locations roots into the native resident DB when `DatabaseMutationStamp`
+has moved, and each call carries just an epoch (a stale epoch self-heals by force-publish and one
+retry). Because a mod writing an injected table directly never reaches the stamp's bump sites, the
+resident path is gated on no mods being loaded, with opt-in and kill-switch flags per family; an
+ineligible caller ships the full views with every call instead.
 
 Native is not uniformly faster — several families are slower than the C# they replace and stay the
 default anyway, each with a force-legacy flag. The argument per family is in

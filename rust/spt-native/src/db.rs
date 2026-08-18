@@ -9,7 +9,8 @@ pub mod models;
 
 use std::sync::{Arc, RwLock};
 
-use crate::db::models::{GlobalsRoot, PublishRequest, TemplatesRoot, TradersRoot};
+use crate::db::models::{GlobalsRoot, LocationsRoot, PublishRequest, TemplatesRoot, TradersRoot};
+use crate::quest::views::QuestDbViews;
 use crate::ragfair::views::RagfairDbViews;
 
 pub struct ResidentDb {
@@ -17,16 +18,21 @@ pub struct ResidentDb {
     pub templates: Option<Arc<TemplatesRoot>>,
     pub traders: Option<Arc<TradersRoot>>,
     pub globals: Option<Arc<GlobalsRoot>>,
+    pub locations: Option<Arc<LocationsRoot>>,
     /// `Some` whenever all three source roots are resident — re-derived on every such publish,
     /// `None` otherwise.
     pub ragfair_views: Option<Arc<RagfairDbViews>>,
+    /// `Some` whenever templates+globals+locations are resident **and** [`Self::ragfair_views`]
+    /// derived (which additionally needs traders). C# always publishes all four roots together,
+    /// so in practice both view sets derive on the same publish.
+    pub quest_views: Option<Arc<QuestDbViews>>,
 }
 
 #[derive(Debug)]
 pub enum PublishError {
     Schema(String),
-    /// A ragfair view derivation failure. Aborts the publish before the swap — the previous
-    /// resident DB stays fully intact.
+    /// A view derivation failure, ragfair or quest. Aborts the publish before the swap — the
+    /// previous resident DB stays fully intact.
     Views(String),
 }
 
@@ -67,6 +73,11 @@ pub fn publish(request: PublishRequest) -> Result<u64, PublishError> {
         .globals
         .map(Arc::new)
         .or_else(|| previous.and_then(|db| db.globals.clone()));
+    let locations = request
+        .roots
+        .locations
+        .map(Arc::new)
+        .or_else(|| previous.and_then(|db| db.locations.clone()));
 
     // Derived before the swap: a derivation error aborts the publish and leaves the previous
     // resident DB fully intact. The derive runs under the write guard, so a panic in it must
@@ -88,12 +99,30 @@ pub fn publish(request: PublishRequest) -> Result<u64, PublishError> {
         _ => None,
     };
 
+    // Same containment as the ragfair derive above: caught panic, abort before the swap.
+    let quest_views = match (&templates, &globals, &locations, &ragfair_views) {
+        (Some(templates), Some(globals), Some(locations), Some(ragfair_views)) => {
+            let derived = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                #[cfg(test)]
+                if tests::PANIC_ON_QUEST_DERIVE.load(std::sync::atomic::Ordering::Relaxed) {
+                    panic!("injected quest derive panic");
+                }
+                crate::quest::views::derive(templates, globals, locations, ragfair_views)
+            }))
+            .unwrap_or_else(|_| Err("quest view derivation panicked".to_string()));
+            Some(Arc::new(derived.map_err(PublishError::Views)?))
+        }
+        _ => None,
+    };
+
     *slot = Some(Arc::new(ResidentDb {
         epoch,
         templates,
         traders,
         globals,
+        locations,
         ragfair_views,
+        quest_views,
     }));
 
     Ok(epoch)
@@ -106,12 +135,16 @@ pub fn clear() {
 
 #[cfg(test)]
 pub mod tests {
-    /// Serializes every test that touches the process-global store — the same discipline the
-    /// slice caches use (`quest/slice_cache.rs`).
+    /// Serializes every test that touches the process-global store.
     pub static DB_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// Makes the next derive panic inside `publish` — proves the catch keeps the lock unpoisoned.
     pub static PANIC_ON_DERIVE: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+
+    /// [`PANIC_ON_DERIVE`]'s twin for the quest derive block — the ragfair injection errors the
+    /// publish before the quest derive ever runs, so proving its catch needs its own seam.
+    pub static PANIC_ON_QUEST_DERIVE: std::sync::atomic::AtomicBool =
         std::sync::atomic::AtomicBool::new(false);
 }
 
@@ -145,14 +178,14 @@ mod store_tests {
         let _guard = tests::DB_TEST_LOCK.lock().unwrap();
         clear();
         publish(request(
-            r#"{"schema":1,"roots":{"templates":{"a":1},"traders":{"b":2},"globals":{"c":3}}}"#,
+            r#"{"schema":1,"roots":{"templates":{"a":1},"traders":{"b":2},"globals":{"c":3},"locations":{"factory4_day":{}}}}"#,
         ))
         .unwrap();
         let before = current().unwrap();
         publish(request(r#"{"schema":1,"roots":{"templates":{"a":9}}}"#)).unwrap();
         let after = current().unwrap();
 
-        // traders/globals survive by Arc identity; templates was replaced
+        // traders/globals/locations survive by Arc identity; templates was replaced
         assert!(Arc::ptr_eq(
             before.traders.as_ref().unwrap(),
             after.traders.as_ref().unwrap()
@@ -160,6 +193,10 @@ mod store_tests {
         assert!(Arc::ptr_eq(
             before.globals.as_ref().unwrap(),
             after.globals.as_ref().unwrap()
+        ));
+        assert!(Arc::ptr_eq(
+            before.locations.as_ref().unwrap(),
+            after.locations.as_ref().unwrap()
         ));
         assert!(!Arc::ptr_eq(
             before.templates.as_ref().unwrap(),
@@ -224,11 +261,40 @@ mod store_tests {
     }
 
     #[test]
+    fn full_publish_derives_quest_views_and_a_republish_rederives() {
+        let _guard = tests::DB_TEST_LOCK.lock().unwrap();
+        clear();
+
+        // Ragfair's three roots resident but no locations: ragfair views derive, quest views don't
+        publish(request(
+            r#"{"schema":1,"roots":{"templates":{"a":1},"traders":{"b":2},"globals":{"c":3}}}"#,
+        ))
+        .unwrap();
+        let partial = current().unwrap();
+        assert!(partial.ragfair_views.is_some());
+        assert!(partial.quest_views.is_none());
+
+        // Locations arrives: all four roots resident, quest views derive
+        publish(request(
+            r#"{"schema":1,"roots":{"locations":{"factory4_day":{}}}}"#,
+        ))
+        .unwrap();
+        let first = current().unwrap();
+        let first_views = first.quest_views.as_ref().expect("quest views derived");
+
+        // A templates-only republish re-derives even though the other roots are unchanged
+        publish(request(r#"{"schema":1,"roots":{"templates":{"a":9}}}"#)).unwrap();
+        let second = current().unwrap();
+        let second_views = second.quest_views.as_ref().expect("quest views re-derived");
+        assert!(!Arc::ptr_eq(first_views, second_views));
+    }
+
+    #[test]
     fn derivation_error_aborts_the_publish_before_the_swap() {
         let _guard = tests::DB_TEST_LOCK.lock().unwrap();
         clear();
         publish(request(
-            r#"{"schema":1,"roots":{"templates":{"a":1},"traders":{"b":2},"globals":{"c":3}}}"#,
+            r#"{"schema":1,"roots":{"templates":{"a":1},"traders":{"b":2},"globals":{"c":3},"locations":{"factory4_day":{}}}}"#,
         ))
         .unwrap();
         let before = current().unwrap();
@@ -251,6 +317,33 @@ mod store_tests {
             before.ragfair_views.as_ref().unwrap(),
             after.ragfair_views.as_ref().unwrap()
         ));
+        assert!(Arc::ptr_eq(
+            before.quest_views.as_ref().unwrap(),
+            after.quest_views.as_ref().unwrap()
+        ));
+    }
+
+    #[test]
+    fn quest_derivation_panic_is_a_views_error_and_does_not_poison_the_lock() {
+        let _guard = tests::DB_TEST_LOCK.lock().unwrap();
+        use std::sync::atomic::Ordering;
+        clear();
+        publish(request(
+            r#"{"schema":1,"roots":{"templates":{"a":1},"traders":{"b":2},"globals":{"c":3},"locations":{"factory4_day":{}}}}"#,
+        ))
+        .unwrap();
+        let before = current().unwrap();
+
+        tests::PANIC_ON_QUEST_DERIVE.store(true, Ordering::Relaxed);
+        let error = publish(request(r#"{"schema":1,"roots":{"templates":{"a":9}}}"#)).unwrap_err();
+        tests::PANIC_ON_QUEST_DERIVE.store(false, Ordering::Relaxed);
+        assert!(matches!(error, PublishError::Views(_)));
+
+        // The lock is not poisoned: reads and a follow-up publish still succeed
+        let after = current().unwrap();
+        assert_eq!(after.epoch, before.epoch);
+        let healed = publish(request(r#"{"schema":1,"roots":{"templates":{"a":9}}}"#)).unwrap();
+        assert_eq!(healed, before.epoch + 1);
     }
 
     #[test]

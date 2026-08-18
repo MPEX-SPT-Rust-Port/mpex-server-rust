@@ -120,8 +120,8 @@ public class RagfairBenchmarkTests
     }
 
     /// <summary>
-    /// The republish cost in isolation - the three resident roots (templates, traders, globals)
-    /// projected, copied across the FFI, parsed and view-derived by <see cref="DbPublisher.ForcePublish"/>,
+    /// The republish cost in isolation - the four resident roots (templates, traders, globals,
+    /// locations) projected, copied across the FFI, parsed and view-derived by <see cref="DbPublisher.ForcePublish"/>,
     /// with no generation pass attached. This is the whole per-mutation cost the epoch protocol
     /// pays; the warm resident arm below is what every pass pays once it is paid.
     /// </summary>
@@ -143,7 +143,7 @@ public class RagfairBenchmarkTests
         }
 
         TestContext.Out.WriteLine(
-            $"{"publish (3 roots, forced)", -36} n={timings.Count}  mean={timings.Average():F2} ms  median={Median(timings):F2} ms  "
+            $"{"publish (4 roots, forced)", -36} n={timings.Count}  mean={timings.Average():F2} ms  median={Median(timings):F2} ms  "
                 + $"min={timings.Min():F2} ms  max={timings.Max():F2} ms"
         );
     }

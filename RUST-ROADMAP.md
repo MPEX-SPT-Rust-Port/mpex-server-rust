@@ -13,9 +13,9 @@ natively by default. Every ported class keeps its full 4.1.2 C# implementation a
 selected automatically when a mod hooks it or manually via a config flag. The log pipeline is ported
 too, and has no legacy path: `SPTLoggerDispatcher` hands every line to the crate.
 
-Twenty-two C-ABI exports (`src/ffi.rs`) carry all of it, JSON in and JSON out — except the ragfair
+Twenty-three C-ABI exports (`src/ffi.rs`) carry all of it, JSON in and JSON out — except the ragfair
 response, which is a framed MessagePack envelope, and `spt_log_emit`, which passes the fields of one
-line directly (current ABI 22).
+line directly (current ABI 23).
 
 Native is not uniformly faster. Loot and repeatable quests win; bots, reward loot, ragfair, scav
 case, the base-class hydrate and the linked-item table are slower than the C# they replace, and
@@ -142,8 +142,9 @@ silently drops camora ammo on the fifth); and the native `_type` test being
    without `TrustNativeRequestCacheWithMods`, or `DisableNativeRequestCache`) send the C#-built
    view bundle as `viewsOverride` on every call at today's projection cost, never touching resident
    state. Full protocol: the epoch-protocol section and its 2026-08-18 amendments in
-   docs/superpowers/specs/2026-08-17-rust-state-ownership-design.md. Quests still run the older
-   stamp-keyed invariant-slice cache until flip #2; see *Exceptions in force*.
+   docs/superpowers/specs/2026-08-17-rust-state-ownership-design.md. Ragfair (flip #1) and the
+   repeatable quests (flip #2) ride it today; every other family still projects per call — see
+   *Exceptions in force*.
 4. **RNG parity.** Both sides draw through the shared xoshiro256\*\* source behind test-only seams
    (`Utils/RandomSource.cs` / `random_util.rs`), pinned by twin known-answer tests. Production C#
    randomness stays bit-for-bit unchanged.
@@ -260,21 +261,24 @@ frame per offer behind a header frame (since ABI 10, encoding tag 1), deserialis
 `Parallel.For` straight out of the native buffer. Ragfair is the only export that uses it. Its batch
 also takes **one timestamp** where legacy calls `TimeUtil.GetTimeStamp()` per offer.
 
-**Ragfair reads the resident DB; quests still cache an invariant slice — the two departures from
-per-call projection (guideline 3).** Both key freshness on the same `DatabaseMutationStamp`, a
+**Ragfair and the repeatable quests read the resident DB — the two departures from per-call
+projection (guideline 3).** Both key freshness on the same `DatabaseMutationStamp`, a
 monotonic counter bumped from `SeasonalEventService.UpdateGlobalEvents`, `ItemFilterService`'s
 blacklist `Add*` methods, `CustomItemService`'s `Create*` methods and a guarded replay bump when
-`CanSellOnRagfair` flips true→false. **Ragfair (flip #1, ABI 22):** `DbPublisher` publishes the
-templates, traders and globals roots into the resident store (`rust/spt-native/src/db.rs`), which
-derives the ragfair views at publish time; each request carries the epoch, and an epoch the store
+`CanSellOnRagfair` flips true→false. **Ragfair (flip #1, ABI 22) and quests (flip #2, ABI 23)
+share one protocol:** `DbPublisher` publishes the templates, traders, globals and locations roots
+into the resident store (`rust/spt-native/src/db.rs`), which derives both families' views at
+publish time; each request arrives as `{epoch, viewsOverride?, varying}`, and an epoch the store
 does not hold returns `STATUS_STALE_EPOCH` (4), surfacing as `NativeStaleEpochException` and
 self-healing with one `ForcePublish` + retry — a lost epoch costs one republish, never a wrong
-result. **Quests:** the older stamp-keyed slice cache (`{invariantStamp, invariant?, varying}`,
-quests ABI 14) runs unchanged until flip #2 and shares status 4's value. **A mod writing an
-injected table's dictionaries directly is invisible to the stamp by design** — the eligibility gate
-carries that weight instead: resident state (and the quest cache) is trusted only when no mods are
+result. Six quest service/config-backed fields (`itemBlacklist`, `rewardItemBlacklist`,
+`bossItems`, `seasonalItemTplBlacklist`, `repeatableQuestTemplateIds`, `locationIdMap`) ride the
+varying block per call until Phases 2/4 — the same carve-out ragfair's config-derived fields took.
+**A mod writing an injected table's dictionaries directly is invisible to the stamp by design** —
+the eligibility gate carries that weight instead: resident state is trusted only when no mods are
 loaded, with `TrustNativeRequestCacheWithMods` as the opt-in and `DisableNativeRequestCache` as the
-kill switch; ineligible ragfair callers send a per-call `viewsOverride` instead (guideline 3).
+kill switch; ineligible callers send a per-call `viewsOverride` with `epoch: 0` instead — a
+documented wire contract, not runtime-enforced (guideline 3).
 Every other payload in the crate is still projected per call.
 
 **Flip #1 ledger.** (a) Helper-cache freshness: legacy's hydrate-once caches — `TraderHelper`'s
@@ -296,6 +300,21 @@ delta for the flip (`git diff --stat da556e7..0287c7e -- Libraries/SPTarkov.Serv
 +214/−70 lines across 7 files — the invariant half of the ragfair builder is gone, and `Db/`
 (`DbPublisher` + `DbPayloadProjection`, 105 lines) is new shared infrastructure every later flip
 reuses.
+
+**Flip #2 ledger.** (a) Freshness delta: pre-flip, the quest slice was rebuilt from the live
+tables whenever a send included it, so every send that carried the slice saw all mutations up to
+that moment; post-flip an *un-stamped* table mutation is invisible to the quest path until the
+next stamped publish. Stamped mutations are unchanged — the next publish picks them up, exactly
+as before. (b) The quest views share `items`/`handbookPrices`/`fleaPrices` with the ragfair views
+through one `Arc` (identical C# helper semantics, independently verified);
+`defaultWeaponPresets`, `defaultPresetOrItemPrices`, the repeatableQuests lifts and the two
+location maps are quest-own derivations at publish. (c) The `locations` root added for this flip
+is `Base` + `AllExtracts` only (`AllExtracts` is a sibling of `Base` on the C# `Location`), keyed
+by the locations' `JsonPropertyName` strings (e.g. `factory4_day`) and domain-bounded by
+`LocationTable.GetDictionary()`; a null `AllExtracts` ships as `[]`. Net `Native/` delta for the
+flip (`git diff --stat 1360a28..e7c2852 -- Libraries/SPTarkov.Server.Core/Native/`): +175/−103
+lines across 5 files — the quest builder's stamp machinery and invariant-slice half are gone,
+replaced by the four-root publish through the `Db/` infrastructure flip #1 built.
 
 **The ported 4.1.2 quirks are documented at their call sites**, as numbered `Quirk N` comments in
 `rust/spt-native/src/quest/*.rs`, `src/scav_case/generator.rs`, `src/base_class.rs` and

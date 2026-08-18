@@ -56,15 +56,14 @@ internal enum LootExport
 
 public static class SptNative
 {
-    private const uint ExpectedAbiVersion = 22;
+    private const uint ExpectedAbiVersion = 23;
 
     // ffi.rs
     private const int StatusOk = 0;
     private const int StatusPanic = 2;
     private const int StatusError = 3;
 
-    // ffi.rs: a request named a resident-DB epoch (ragfair) or a cached slice stamp (quests,
-    // until flip #2) the native process does not hold
+    // ffi.rs: a request named a resident-DB epoch the native process does not hold
     private const int StatusStaleEpoch = 4;
 
     // No CancellationToken: the native hash pass is a single bounded blocking call that cannot be
@@ -244,7 +243,7 @@ public static class SptNative
     /// Generates one repeatable quest of the type the request names, plus the pool the generator
     /// mutated on the way.
     /// </summary>
-    /// <exception cref="NativeStaleEpochException">A slice-less request named a stamp the native cache does not hold.</exception>
+    /// <exception cref="NativeStaleEpochException">An override-less request named an epoch the resident DB does not hold.</exception>
     /// <exception cref="InvalidOperationException">Generation failed, or the native side misbehaved.</exception>
     internal static RepeatableQuestResult GenerateRepeatableQuest(GenerateRepeatableQuestRequest request)
     {
@@ -638,8 +637,8 @@ public static class SptNative
 }
 
 /// <summary>
-///     A request named a resident-DB epoch (ragfair) or a cached slice stamp (quests, until flip
-///     #2) the native process does not hold. The caller self-heals by republishing the resident
-///     DB, or by resending the request with the invariant slice included.
+///     A request named a resident-DB epoch the native process does not hold. The caller
+///     self-heals by republishing the resident DB (<c>DbPublisher.ForcePublish()</c>) and
+///     retrying once.
 /// </summary>
 internal sealed class NativeStaleEpochException(string message) : InvalidOperationException(message);
