@@ -733,7 +733,7 @@ pub struct SharedBotViewsWire {
 /// details. The template and the two views hydrated from the bot's level live on the shared block
 /// as [`SharedBotViewsWire::template_variants`] — the batch path draws the level natively and picks
 /// the variant whose band covers it, so a wave ships one template per level segment (typically one
-/// to three) rather than one per bot.
+/// to three, up to ~8 for a full 1..79 range on shipped config) rather than one per bot.
 ///
 /// `details.bot_level` still rides the wire because the single-bot request reuses this view; the
 /// batch projection sends 0 and the drawn level overwrites it before any consumer reads it.

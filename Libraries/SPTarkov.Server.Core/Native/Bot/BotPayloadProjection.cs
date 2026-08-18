@@ -118,7 +118,7 @@ internal static class BotPayloadProjection
     }
 
     /// <summary>
-    /// The 22 request members that do not vary between the bots of one wave, built once for the
+    /// The request members that do not vary between the bots of one wave, built once for the
     /// whole wave. The role and player level are the wave's, which is what lets the equipment
     /// blacklist ride here rather than per bot. The level inputs and the band variants are the
     /// caller's - only it knows the wave's level range and the bands it splits into.

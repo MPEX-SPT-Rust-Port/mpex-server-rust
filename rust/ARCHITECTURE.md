@@ -28,7 +28,7 @@ order), `rmp-serde` (the ragfair MessagePack envelope), `indexmap`, `rand`/`rand
 pins `-C target-cpu=x86-64-v3` on both x64 targets, so the built library will not run on pre-AVX2 hardware, and
 the mold linker on Linux. Both profiles use one codegen unit; release adds fat LTO.
 
-~49k lines across the 52 files of `src/`, inline tests included: `bot/` ~34%, `loot/` ~24%, `ragfair/` ~15%,
+~49k lines across the 53 files of `src/`, inline tests included: `bot/` ~34%, `loot/` ~24%, `ragfair/` ~15%,
 `quest/` ~12%, `scav_case/` ~4%. `bot_equipment_mod_generator.rs` alone is 4.2k.
 
 ## Layout

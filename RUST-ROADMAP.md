@@ -204,14 +204,22 @@ for the caller to write into `details.BotLevel`/`Info.Level`/`Info.Experience` b
 reads them. `GetRelativePmcBotLevelRange` stays C#-side: its inputs are wave-constant, so the
 batcher calls it once and ships the range plus the exp table as `levelGeneration` (PMC waves only —
 non-PMC takes the constant level 1 and draws nothing, which is what keeps non-PMC seeded pins
-byte-identical). Because every level-dependent pre-call step is a *pure band lookup*
-(`FilterBotEquipment`, the appearance/voice pools, `LootItemLimitsRub`) and none of them draws, the
-batcher splits the range at those bands' edges and runs the **unchanged C#** filter, seasonal strip,
-blacklist strip and pool hydration once per band — shipping one `templateVariants` entry per band
-instead of one filtered template per bot. Segments are typically 1-3 (up to ~8 for a full 1..79
-range on shipped config), and always exactly one `[1..1]` for a non-PMC or playerscav wave. The
-per-bot slice collapses to `botId` + `testSeed` + `details`. Voice and appearance move *after* the
-call, drawn from the band the drawn level lands in. Divergences: **none intended.** The one
+byte-identical). Because every level-dependent *pre-call* step is a *pure band lookup* that draws
+nothing — `FilterBotEquipment` (whose `Clothing` weighting adjustment is also what reshapes the
+appearance and voice pools, so they are not a separate lookup) and the `LootItemLimitsRub` price
+bands — the batcher splits the range at those bands' edges and runs the **unchanged C#** filter,
+seasonal strip, blacklist strip and pool hydration once per band — shipping one `templateVariants`
+entry per band instead of one filtered template per bot. Segments are typically 1-3 (up to ~8 for a
+full 1..79 range on shipped config), and always exactly one `[1..1]` for a non-PMC or playerscav
+wave. The per-bot slice collapses to `botId` + `testSeed` + `details`. The voice and appearance
+*draws* move **after** the call, onto the band the drawn level lands in. The decline set grows two
+member-scoped entries for the seasonal strip (`SeasonalEventService.ChristmasEventEnabled` and
+`RemoveChristmasItemsFromBotInventory`, which now run per band) — member-scoped rather than
+whole-type so a seasonal mod patching unrelated event surface does not de-batch the server. One
+deliberate carve-out from "decline whenever a mod could observe the difference": pool and price
+hydration — `BotLootCacheService.GetLootFromCache` (12 calls) and `HandbookHelper.GetTemplatePrice`
+also run once per band and are **not** in the decline set, because economy mods patch them constantly
+and declining there would de-batch most modded servers. Divergences: **none intended.** The one
 fidelity note is `AddAdditionalPocketLootWeightsForUnheardBot`, which the native side applies to the
 cloned variant template with an `if let` where C# dereferences `PocketLoot` unguarded — a
 template with no `pocketLoot` block NREs on the per-bot path and is a no-op here (documented at the

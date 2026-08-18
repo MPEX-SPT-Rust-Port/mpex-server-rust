@@ -39,7 +39,7 @@ mod tests {
     use super::generate_bot_level;
     use crate::loot::random_util::TestSeedGuard;
 
-    // min == max short-circuits the level draw in get_biased_random_number (RandomUtil.cs:377-380),
+    // min == max short-circuits the level draw in get_biased_random_number (RandomUtil.cs:388-391),
     // so the only draw left is the fractional exp: level 2 < max_level_index 3 draws
     // get_int(0, exp_table[2] - 1) = [0, 29].
     #[test]
@@ -63,14 +63,17 @@ mod tests {
     }
 
     // At exactly max_level_index the fractional is also skipped (`level < maxLevelIndex` is false).
+    // Seeded because the assertion is about a draw *not* happening: under seed 7 the draw a `<=`
+    // here would make — get_int(0, exp_table[2] - 1) — is non-zero, so the mutation reads 30 + 26.
     #[test]
     fn at_max_level_index_no_fractional_draws() {
+        let _guard = TestSeedGuard::install(7);
         let exp_table = [10, 20, 30];
         let (level, exp) = generate_bot_level(2, 2, &exp_table);
         assert_eq!((level, exp), (2, 30));
     }
 
-    // max < min: GetBiasedRandomNumber returns -1 (RandomUtil.cs:364-368), (int) cast keeps -1,
+    // max < min: GetBiasedRandomNumber returns -1 (RandomUtil.cs:376-380), (int) cast keeps -1,
     // Math.Clamp lands on 0, base is 0, and the fractional draws from expTable[0].
     #[test]
     fn an_inverted_range_lands_on_level_zero() {

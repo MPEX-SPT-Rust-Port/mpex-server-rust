@@ -19,6 +19,7 @@ using SPTarkov.Server.Core.Native.Bot;
 using SPTarkov.Server.Core.Services.Bot;
 using SPTarkov.Server.Core.Services.Items;
 using SPTarkov.Server.Core.Services.Profile;
+using SPTarkov.Server.Core.Services.Server;
 using SPTarkov.Server.Core.Utils.Cloners;
 
 namespace SPTarkov.Server.Core.Generators.Bot;
@@ -30,6 +31,12 @@ namespace SPTarkov.Server.Core.Generators.Bot;
 ///     honour - or when the wave could write nighttime equipment clamps, whose cross-bot feedback
 ///     loop only the per-bot path replays. Bots that fail are skipped with one Critical log each,
 ///     matching BotController.TryGenerateSingleBot.
+///
+///     One carve-out from "whenever a mod could observe the difference": pool and price hydration.
+///     BotLootCacheService.GetLootFromCache (12 calls) and HandbookHelper.GetTemplatePrice run once
+///     per level band here, not once per bot, and neither is in the decline set. Both are patched
+///     constantly by economy mods, so declining on them would de-batch most modded servers - and
+///     their per-bot results are identical anyway for bots sharing a band.
 /// </summary>
 [Injectable]
 public class BotWaveBatcher(
@@ -66,6 +73,11 @@ public class BotWaveBatcher(
     ///     dispatcher wraps whichever path runs. Internal additions (the prelude/finish split,
     ///     PrepareBot, the two batch seams) are IsAssembly and fall out of the visibility filter on
     ///     their own.
+    ///
+    ///     SeasonalEventService is member-scoped where the four above are whole-type: only its two
+    ///     christmas members are re-timed by the batch (ApplyBatchTemplateMutations runs them once
+    ///     per level band), and the type carries a lot of unrelated event surface that seasonal mods
+    ///     patch - sweeping it whole would de-batch those servers for no fidelity gain.
     /// </summary>
     private static readonly List<MethodBase> _hookableWaveMembers =
     [
@@ -78,6 +90,13 @@ public class BotWaveBatcher(
             .Where(method => !method.IsSpecialName && (method.IsPublic || method.IsFamily || method.IsFamilyOrAssembly))
             // Protected on another class, so nameof() cannot reach it
             .Where(method => method.Name != "GenerateBotWave"),
+        // OfType drops a lookup that stopped resolving rather than putting a null in the set; the
+        // decline test patches both, so a rename that slips past nameof() fails there
+        .. new[]
+        {
+            typeof(SeasonalEventService).GetMethod(nameof(SeasonalEventService.ChristmasEventEnabled)),
+            typeof(SeasonalEventService).GetMethod(nameof(SeasonalEventService.RemoveChristmasItemsFromBotInventory)),
+        }.OfType<MethodBase>(),
     ];
 
     private sealed record PreparedWaveBot(BotBase Bot, BotType Template, BotGenerationDetails Details);
@@ -224,7 +243,7 @@ public class BotWaveBatcher(
                     continue;
                 }
 
-                // Before everything else: dogtags and CacheBot both read Info.Level
+                // Before everything else: CacheBot reads Info.Level
                 // (MatchBotDetailsCacheService.cs:54)
                 entry.Details.BotLevel = envelope.Result.Level!.Value;
                 entry.Bot.Info.Experience = envelope.Result.Exp;

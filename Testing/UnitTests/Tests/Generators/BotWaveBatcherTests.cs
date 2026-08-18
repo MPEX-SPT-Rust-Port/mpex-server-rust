@@ -68,6 +68,9 @@ public class BotWaveBatcherTests
     [Test]
     public void ABatchedWaveProducesCompleteBots()
     {
+        // Every bot starts as a clone of this, and the post-call draws are what overwrite it
+        var untouched = DI.GetInstance().GetService<BotTable>().Base.Customization!;
+
         var wave = _batcher.TryGenerateWave(_sessionId, BuildWaveDetails());
 
         Assert.That(wave, Is.Not.Null, "default configuration should take the batch path");
@@ -76,7 +79,28 @@ public class BotWaveBatcherTests
         {
             Assert.That(bot!.Inventory?.Items, Is.Not.Empty, "bot came back without an inventory");
             Assert.That(bot.Id, Is.Not.EqualTo(default(MongoId)));
+
+            // Voice and appearance are drawn after the native call, from the band the drawn level
+            // landed in. assault.json's voice pool does not contain base.json's default, so a
+            // missing voice draw is caught per bot.
+            Assert.That(bot.Customization!.Voice, Is.Not.Null.And.Not.EqualTo(default(MongoId)), "a bot came back without a voice");
+            Assert.That(bot.Customization.Voice, Is.Not.EqualTo(untouched.Voice), "the post-call voice draw never ran");
+            Assert.That(bot.Customization.Head, Is.Not.Null.And.Not.EqualTo(default(MongoId)), "a bot came back without a head");
         }
+
+        // The appearance pools do contain base.json's defaults, so per bot a default is a legal
+        // draw and only the wave is decidable: with the appearance draw gone every bot keeps every
+        // default, which is what this rejects.
+        Assert.That(
+            wave!.Any(bot =>
+                bot!.Customization!.Head != untouched.Head
+                || bot.Customization.Body != untouched.Body
+                || bot.Customization.Feet != untouched.Feet
+                || bot.Customization.Hands != untouched.Hands
+            ),
+            Is.True,
+            "the post-call appearance draw never ran - the whole wave still wears the bots/base.json default"
+        );
 
         // GenerateInventoryId reroots every bot onto a fresh equipment id - all distinct
         Assert.That(wave!.Select(bot => bot!.Inventory!.Equipment).Distinct().Count(), Is.EqualTo(3));
@@ -88,9 +112,11 @@ public class BotWaveBatcherTests
     /// dogtag branch, which only fires for the roles in <c>BotConfig.BotRolesWithDogTags</c>.
     ///
     /// Also the only place the level the native side drew is observable end to end: a PMC draws a
-    /// real level, and <c>CacheBot</c> reads <c>Info.Level</c>
-    /// (<c>MatchBotDetailsCacheService.cs:54</c>), so the cached copy pins both the assignment and
-    /// its ordering ahead of the caching step.
+    /// real level, and the one member that constrains where the batcher assigns it is
+    /// <c>CacheBot</c>, which reads <c>Info.Level</c> (<c>MatchBotDetailsCacheService.cs:54</c>) -
+    /// the dogtag branch beside it is level-independent, reading only <c>Info.Side</c> and
+    /// <c>Info.GameVersion</c>. So the cached copy pins both the assignment and its ordering ahead
+    /// of the caching step.
     /// </summary>
     [Test]
     public void APmcWaveIsRewrittenToSavageAndKeepsItsDogtag()
@@ -239,6 +265,44 @@ public class BotWaveBatcherTests
         finally
         {
             harmony.UnpatchSelf();
+        }
+    }
+
+    /// <summary>
+    /// The batch runs the seasonal strip once per level band instead of once per bot, so a live
+    /// patch on either christmas member declines. SeasonalEventService is in the decline set
+    /// member-scoped rather than whole-type, so this also pins that both lookups still resolve - a
+    /// lookup that stopped resolving would drop out of the set silently.
+    /// </summary>
+    [Test]
+    public void AHarmonyPatchOnTheSeasonalStripDeclinesTheBatch()
+    {
+        string[] members =
+        [
+            nameof(SeasonalEventService.ChristmasEventEnabled),
+            nameof(SeasonalEventService.RemoveChristmasItemsFromBotInventory),
+        ];
+
+        foreach (var name in members)
+        {
+            var harmony = new Harmony($"unit-tests.botwave-batcher.{name}");
+            var member = typeof(SeasonalEventService).GetMethod(name);
+            Assert.That(member, Is.Not.Null, $"frozen member SeasonalEventService.{name} not found");
+
+            try
+            {
+                harmony.Patch(member, prefix: new HarmonyMethod(typeof(BotWaveBatcherTests), nameof(Prefix)));
+
+                Assert.That(
+                    _batcher.TryGenerateWave(_sessionId, BuildWaveDetails()),
+                    Is.Null,
+                    $"a wave with {name} patched must run per bot"
+                );
+            }
+            finally
+            {
+                harmony.UnpatchSelf();
+            }
         }
     }
 

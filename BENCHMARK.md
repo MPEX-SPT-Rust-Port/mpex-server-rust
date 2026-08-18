@@ -156,15 +156,17 @@ Against the previous measurement (`aa733a7`, 2026-08-14): batched cost per bot f
 ms at wave 45 and from 7.63 to 5.14 at wave 10, and per-bot request bytes fell from 0.30 to 0.08 MiB
 (45), 0.40 → 0.19 (20), 0.58 → 0.38 (10), 0.94 → 0.76 (5). Read the batched column against the
 *same-run* serial and parallel arms, not against the old table: both of those arms are unchanged code
-and still drifted ~10% between the two dates.
+and still drifted 9.5-31% between the two dates (serial 9.5-18%, parallel 13-31%).
 
 The whole saving is wire volume. The batch's per-bot cost is `shared/N + slice`, and folding the
 template, loot pools and handbook prices out of the slice and onto the shared block as per-level-band
 variants left the slice at `botId` + `testSeed` + `details` — a few hundred bytes, small enough to
 vanish into the MiB rounding above (wave 45's 0.08 MiB/bot is `3.81/45` to two decimals). So the
 shared block is now effectively **100%** of the request, where before the fold it was the 95.7% that
-`SharedBotViewsWire`'s doc comment used to quote. Wave 1 is unchanged by construction: one bot, one
-segment, one copy of everything.
+`SharedBotViewsWire`'s doc comment used to quote. Wave 1 is unchanged *in what it builds*: one bot,
+one segment, one copy of everything, the same bytes as before the fold. Its timing still moves run to
+run like every other row here (42.72 → 46.76 ms across the two dates, against unchanged-code arms
+that drifted as much) - the construction claim is not a claim that the number holds.
 
 ## Ragfair offer generation
 
