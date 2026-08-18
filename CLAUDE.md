@@ -33,6 +33,9 @@ supported target, and `Containerfile.release`/`Containerfile.dev` are x86_64-onl
 Release builds also regenerate `SPT_Data/checks.dat` by running the `gen_checks` bin in `rust/spt-native`
 (`cargo run --bin gen_checks`), which shares the XXH3-128 implementation with the startup verifier.
 
+## Pull Requests
+Pull requests will target the `dev` branch unless explicitly told otherwise.
+
 ## Architecture
 
 Full reference: [ARCHITECTURE.md](ARCHITECTURE.md) — solution layout, request pipeline, DI, startup order,
