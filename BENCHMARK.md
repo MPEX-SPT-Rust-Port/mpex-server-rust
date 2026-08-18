@@ -122,6 +122,12 @@ Recorded 2026-08-12 on `e7cb120` plus the working-tree bump of `rand` 0.9 → 0.
 
 Speedup on median elapsed time per call: **2.61x**. Managed allocation: **3.14x** less.
 
+The native arm above is the raw path, which splices `looseLoot.json`'s bytes in unparsed. A
+registered `LazyLoad` transformer (seasonal events, mods) forces the typed path instead, and that
+one is the slowest of the three: **~1347 ms** per raid start for `bigmap`, against ~345 ms raw and
+the 929 ms C# it replaced. Older figures, carried over from RUST-ROADMAP.md rather than re-measured
+alongside the table above.
+
 ### Peak working set
 
 Separate `dotnet test` invocations, as above.
