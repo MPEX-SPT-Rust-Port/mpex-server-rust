@@ -354,7 +354,7 @@ the native pipeline; seeded-RNG parity at the primitive level (xoshiro256\*\*, t
   effect on `PARKED_RNG`, whose only consumer is the loot dynamic entry point, which never runs on
   a rayon worker.
 - **The ragfair response is a framed MessagePack envelope, not a JSON buffer.** One length-prefixed
-  frame per offer behind a header frame (since ABI **10**, encoding tag 1; current ABI is 20), which
+  frame per offer behind a header frame (since ABI **10**, encoding tag 1; current ABI is 21), which
   C# deserialises with `Parallel.For` over the frames straight out of the native buffer — no
   whole-response JSON document is ever materialised. Only the ragfair response uses it; every other
   export is still JSON in / JSON out.
