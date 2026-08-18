@@ -19,6 +19,7 @@ public class WatermarkLocale(ServerLocalisationService serverLocalisationService
         serverLocalisationService.GetText("watermark-paid_scammed"),
         serverLocalisationService.GetText("watermark-commercial_use_prohibited"),
     ];
+
     /// <summary>
     /// Retained for 4.1.2 mod compatibility. Mods can no longer be disabled, so the watermark never renders these.
     /// </summary>

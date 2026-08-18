@@ -56,7 +56,7 @@ internal enum LootExport
 
 public static class SptNative
 {
-    private const uint ExpectedAbiVersion = 23;
+    private const uint ExpectedAbiVersion = 24;
 
     // ffi.rs
     private const int StatusOk = 0;
@@ -186,6 +186,18 @@ public static class SptNative
     /// </summary>
     /// <exception cref="InvalidOperationException">The build failed, or the native side misbehaved.</exception>
     public static ItemBaseClassResult BuildItemBaseClassCache(ItemBaseClassRequest request)
+    {
+        // Frozen pre-flip signature: an override send at epoch 0, never touching resident state.
+        return BuildItemBaseClassCache(new ItemBaseClassNativeRequest { Epoch = 0, ViewsOverride = request });
+    }
+
+    /// <summary>
+    /// Walks every template's parent chain in one call, off the resident templates root or the
+    /// override the request carries.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">The build failed, or the native side misbehaved.</exception>
+    /// <exception cref="NativeStaleEpochException">An override-less request named an epoch the resident DB does not hold.</exception>
+    internal static ItemBaseClassResult BuildItemBaseClassCache(ItemBaseClassNativeRequest request)
     {
         return Generate<ItemBaseClassResponse>(
             LootExport.ItemBaseClass,

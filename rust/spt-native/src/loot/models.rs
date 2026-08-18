@@ -543,7 +543,7 @@ pub struct LootCommon {
 /// `Serialize` exists for the phase-1 equivalence harness (`tests/phase1_ragfair_views.rs`),
 /// which serializes a natively-derived view to compare against the C#-built one — the
 /// `serde(rename)`s make that serialization mirror the wire names.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ItemView {
     pub parent: Option<String>,
