@@ -413,6 +413,21 @@ Arm order was not re-tested here; the reversed read on `526704c` was 27.65 / 8.5
 Hydrate runs once per startup, so the cost is ~25 ms added to startup.
 `ItemConfig.ForceLegacyItemBaseClassHydration` is the opt-out.
 
+Post-flip (#3, resident DB) — `4f66860`, 2026-08-18. Same fixture, same shape (4,673 templates
+in; 4,553 tpls / 20,218 ancestor ids, plus 120 root node ids out):
+
+| Arm | median | mean | min | max |
+|---|---|---|---|---|
+| **native (rust, resident)** | **21.69 ms** | 22.53 ms | 17.49 ms | 29.64 ms |
+| **legacy (C# 4.1.2)** | **6.97 ms** | 8.29 ms | 5.12 ms | 20.58 ms |
+| `Build` (request only) | 0.28 ms | 0.47 ms | 0.24 ms | 3.56 ms |
+
+Speedup **0.32x** (pre-flip 0.23x): eligible sends now ride the resident templates root — an
+`{epoch}`-only wire, no per-send projection or whole-table request serialisation — while ineligible sends
+carry the old projection as `viewsOverride` at the pre-flip cost. The fixture's two warmups
+absorb the first send, so the publish-carrying first-send cost did not surface as a number of its
+own here; the per-mutation four-root publish is the repeatable-quests section's ~471 ms figure.
+
 ## Ragfair linked item table
 
 `06825b3` — 2026-08-17. One linked item table build over the shipped items table (4,673 templates in;
@@ -439,6 +454,21 @@ Position for position: **~3.1x** slower (both first) or **~5.1-5.4x** (both seco
 
 The build is lazy and single-shot, so the loss is ~78 ms on whichever request arrives first.
 `RagfairConfig.ForceLegacyRagfairLinkedItemBuild` is the opt-out.
+
+Post-flip (#3, resident DB) — `4f66860`, 2026-08-18. Same fixture, same shape (4,673 templates
+in; 4,673 tpls / 63,530 linked ids out), native measured first as in the pre-flip main table:
+
+| Arm | median | mean | min | max |
+|---|---|---|---|---|
+| **native (rust, resident)** | **60.39 ms** | 56.66 ms | 37.33 ms | 70.53 ms |
+| **legacy (C# 4.1.2)** | **21.49 ms** | 21.98 ms | 17.41 ms | 26.80 ms |
+| `Build` (request only) | 5.18 ms | 7.55 ms | 2.93 ms | 18.48 ms |
+
+Speedup **0.36x** as the fixture measures it (pre-flip 0.16x): eligible sends now ride the
+resident templates root (`{epoch}`-only wire), ineligible sends carry the old projection as
+`viewsOverride` at the pre-flip cost. The legacy arm is code-identical to pre-flip, so its move
+(21.49 against 15.38 ms) is the sitting — read the native delta against that bar. The warmups
+absorb the first send, so no distinct publish-carrying first-send number surfaced.
 
 ## Caveats
 
