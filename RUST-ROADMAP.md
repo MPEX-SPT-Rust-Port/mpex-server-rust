@@ -21,7 +21,8 @@ Native is not uniformly faster. Loot and repeatable quests win; bots, reward loo
 case, the base-class hydrate and the linked-item table are slower than the C# they replace, and
 native stays their default anyway — each case is argued where it is measured, in
 [BENCHMARK.md](BENCHMARK.md), and each has a force-legacy flag for anyone who disagrees. Ragfair is
-the one family that set itself a parity gate and **missed** it, with every in-scope lever spent.
+the one family that set itself a parity gate and **missed** it; the resident-DB flip narrowed the
+gap without closing it, and every lever short of the remaining state-ownership phases is spent.
 
 ## Working
 
@@ -40,6 +41,7 @@ the one family that set itself a parity gate and **missed** it, with every in-sc
 | Scav case rewards | `ScavCaseRewardGenerator.Generate` | `spt_generate_scav_case_rewards` |
 | Item base-class cache hydrate | `ItemBaseClassService.HydrateItemBaseClassCache` | `spt_build_item_base_class_cache` |
 | Ragfair linked-item table | `RagfairLinkedItemService.BuildLinkedItemTable` | `spt_build_ragfair_linked_item_table` |
+| Resident DB publish — the templates, traders, globals and locations roots, plus the ragfair and quest views derived from them | `DbPublisher.EnsureCurrent` / `ForcePublish` | `spt_db_publish` |
 | The whole log pipeline — filters, level gates, per-target formatting, console + file sinks | `SPTLoggerDispatcher.Log` | `spt_logger_init`, `spt_logger_reinit`, `spt_log_emit`, `spt_logger_close`, `spt_log_set_tap` |
 | Generator diagnostics, localised and logged natively as they happen | `DatabaseImporter` → `SptNative.SetServerLocales` | `spt_locales_set` |
 
@@ -47,6 +49,20 @@ Also working: mod-added fields on game data survive the round trip (`#[serde(fla
 mirroring Ceciler's `[JsonExtensionData]`); native generator diagnostics render and log themselves
 through the native pipeline; seeded-RNG parity at the primitive level (xoshiro256\*\*, twin
 known-answer tests both sides).
+
+**`rust/` is a two-crate workspace, and the second crate is not a port.** `rust/spectre-facade` is
+a build-time generator: it emits a facade `Spectre.Console.Ansi.dll` (via `dotnetdll`) carrying
+just `Spectre.Console.Color`, because SPT dropped the real dependency while the frozen 4.1.2 mod
+surface still bakes that type into `ISptLogger<T>`, `SptLogMessage`, `ClientLogRequest` and
+`Watermark.Draw` — a compiled mod's typeref names the *defining* assembly, so only an assembly of
+that name satisfies it (in Spectre.Console 0.57.2 `Color` lives in `Spectre.Console.Ansi`, not
+`Spectre.Console`). It is guideline 1 paid in a second language rather than anything ported. Two
+consequences: **`SPTarkov.Common` needs the Rust toolchain too**, not just `Core` — its
+`BuildSpectreFacade` target shells out to `cargo` — and the `<Reference>` is not transitive, so
+each of the five projects naming `Color` carries its own. The colours are inert (the logger prints
+plain text); known cosmetic gaps are `FromInt32` returning Default instead of the xterm palette
+entry and the inherited `ValueType.ToString()`. Scope is `Color` only — mods that called
+`AnsiConsole`, `Markup` or `Style` still break, that surface never being SPT's contract.
 
 ## Broken / known divergences
 
@@ -59,6 +75,11 @@ known-answer tests both sides).
   `WeightedRandomHelper`, `ItemFilterService`/`PresetHelper` predicates, `ICloner`, plus ragfair's
   `HandbookHelper`, `PaymentHelper`, `BotHelper`, `TraderHelper`, `SeasonalEventService`, quests'
   `MathUtil` and scav case's `RagfairPriceService.GetStaticPriceForItem` and `HideoutTable` reads.
+  One partial exception: `SeasonalEventService.ChristmasEventEnabled` and
+  `RemoveChristmasItemsFromBotInventory` *are* detected — member-scoped, by the bot wave batcher
+  only, because the batch re-times them per level band. A patch there de-batches the wave to the
+  per-bot path, where the strip runs in C# and the patch takes effect; every other use of the type,
+  ragfair's included, stays undetected.
 - **Templates without `_props` read as "not in the db"** on the native *generator* paths — they are
   dropped from `itemsView`. Only bites mod-added props-less templates. The base-class hydrate
   projects the whole table and is unaffected.
@@ -67,6 +88,14 @@ known-answer tests both sides).
 - **The native ragfair and scav case paths are fresher than legacy for runtime-added items** — C#
   caches `AllowedFleaPriceItemsForBarter` (ragfair) and `DbItemsCache`/`DbAmmoItemsCache` (scav
   case) per generator instance and effectively never invalidates; Rust re-derives per call.
+- **An un-stamped table mutation is invisible to ragfair and the repeatable quests** — the two
+  resident-DB families read roots republished only when `DatabaseMutationStamp` moves, and the
+  stamp is bumped from five sites only (`SeasonalEventService.UpdateGlobalEvents`,
+  `ItemFilterService`'s two blacklist `Add*` methods, `CustomItemService`'s two `Create*`
+  methods, plus the `CanSellOnRagfair` replay bump). A mod writing an injected table's
+  dictionaries directly bumps nothing, so its edits do not reach either family until some other
+  stamped mutation forces a publish. By design — the mods-off eligibility gate carries the weight
+  until Phase 2 (guideline 3, and the *Flip #1/#2 ledgers*).
 - **The item base-class and linked-item cache *keys* differ** — legacy stores under `item.Id`
   (`ItemBaseClassService.cs:194,199`; `RagfairLinkedItemService.cs:200`), native under the
   `templateTable.Items` dictionary key. Separable only by a mod filing a template under a key ≠ its
@@ -74,6 +103,13 @@ known-answer tests both sides).
 - **Golden-test parity is normalised, not raw-byte.** Every family has a full-output golden gate
   (`*ParityTests` in `Testing/UnitTests`). Sanctioned gaps: minted `MongoId`s, and for ragfair
   `intId` and `startTime`/`endTime` (one batch timestamp natively vs a per-offer clock in legacy).
+- **The resident-DB views-equivalence gate is manual, not part of `dotnet test`.** Proving a
+  natively-derived view matches the C#-built override over the real database is a two-step
+  harness: an `[Explicit]` NUnit fixture writes the roots envelope and the expected views
+  (`RagfairViewsEquivalenceTests`, `QuestViewsEquivalenceTests`), then an `#[ignore]`d Rust
+  integration test compares them (`rust/spt-native/tests/phase1_{ragfair,quest}_views.rs`).
+  Neither half runs in the gate loop; a flip that silently changes a derivation is caught by the
+  parity goldens, not by this.
 - **A failure crosses as a message for C# to throw with** — never as a log line, so it carries no
   category. Since ABI 18 a panic crosses with its message too.
 - **Hangs are mostly undiagnosable** — ported retry loops can spin exactly as 4.1.2 does, inside an
@@ -177,7 +213,8 @@ is no per-generator flag. Elsewhere: `BotConfig.ForceLegacyBotGeneration` and `F
 `RagfairConfig.ForceLegacyRagfairGeneration` and `ForceLegacyRagfairLinkedItemBuild`,
 `QuestConfig.ForceLegacyRepeatableQuestGeneration`,
 `ScavCaseConfig.ForceLegacyScavCaseGeneration`, `ItemConfig.ForceLegacyItemBaseClassHydration`, plus
-each cache's `TrustNativeRequestCacheWithMods` / `DisableNativeRequestCache`. Only
+`TrustNativeRequestCacheWithMods` / `DisableNativeRequestCache`, which carry the resident-DB
+eligibility gate and exist on `RagfairConfig` and `QuestConfig` only, the two flipped families. Only
 `forceLegacyLootGeneration` is serialised into a shipped `.json` (`location.json`); the rest exist
 as C# defaults and a user who wants one adds it to the file.
 
@@ -187,9 +224,12 @@ dispatcher entry point itself — a patch there wraps whichever path runs, by de
 bots, the four generator classes; ragfair, `RagfairOfferGenerator`, `RagfairPriceService`,
 `RagfairServerHelper`, `RagfairAssortGenerator`; quests, the four `*QuestGenerator`s plus
 `RepeatableQuestRewardGenerator` and `RepeatableQuestHelper`; scav case, base class and the
-linked-item table, their own class only. A container-substituted subclass also flips — except scav
-case, which checks no substitution at all. Bots additionally flip on an `InventoryMagGenComponents`
-set that isn't exactly the four built-ins. `PickupQuestGenerator` contributes **zero** frozen
+linked-item table, their own class only. A container-substituted subclass also flips — **except
+loot**, whose `UseLegacyPath` ends at the patch scan and checks no substitution at all, so a
+`LootGenerator`/`LocationLootGenerator` subclass registered at a higher `TypePriority` still runs
+native. The families with a one-class frozen set (scav case, base class, linked-item table) check
+substitution of that class; the multi-class ones check their collaborators too. Bots additionally
+flip on an `InventoryMagGenComponents` set that isn't exactly the four built-ins. `PickupQuestGenerator` contributes **zero** frozen
 hookable members — its whole legacy body is inline in `Generate`.
 
 **The bot wave batches before it iterates.** `BotController.GenerateBotWave` offers the wave to
@@ -317,9 +357,11 @@ lines across 5 files — the quest builder's stamp machinery and invariant-slice
 replaced by the four-root publish through the `Db/` infrastructure flip #1 built.
 
 **The ported 4.1.2 quirks are documented at their call sites**, as numbered `Quirk N` comments in
-`rust/spt-native/src/quest/*.rs`, `src/scav_case/generator.rs`, `src/base_class.rs` and
-`src/linked_items.rs`; grep case-insensitively for `quirk`. Some numbers have no Rust site because
-the quirk lives on the C# side (the base-class hydrate never resetting `_rootNodeIds`, the
+`rust/spt-native/src/quest/*.rs`, `src/scav_case/generator.rs`, `src/base_class.rs`,
+`src/linked_items.rs` and `src/loot/container_extensions.rs`; grep case-insensitively for `quirk`,
+which also turns up unnumbered ones in the bot, loot and ragfair modules. Some numbers have no
+Rust site because the quirk lives on the C# side (the base-class hydrate never resetting
+`_rootNodeIds`, the
 linked-item dispatcher's copy loop and no-lock rule, the request builder's null-`Filter`-group
 projection) or on no code at all. The behaviour these preserve is deliberate; reverting one silently
 diverges from C#. The bare `:N` line numbers in those comments are the 4.1.2 body the port was
@@ -327,8 +369,23 @@ written against, not the current file.
 
 ## Roadmap
 
-1. Next candidates and their costing live in [todo/TODO.md](todo/TODO.md); with #1, #2 and #3
-   landed, the unstarted front is the tier-1 completeness trio (#4-#6) and tier 2.
-2. Convert `is_valid_reward_item`'s trader whitelist (`quest/reward_generator.rs:869`, a `Vec<&str>`
+1. **The resident-DB flips are the active front.** Phase 1 of
+   `docs/superpowers/specs/2026-08-17-rust-state-ownership-design.md` moves every generation
+   export onto the epoch protocol, one family per flip — each its own plan, own ABI bump,
+   goldens passing *unchanged*, BENCHMARK.md re-measured before the next starts. Landed: #1
+   ragfair, #2 repeatable quests. Remaining: **#3 base-class hydrate + linked-item table** (two
+   startup one-shots shipping whole-table payloads today, so their measured regressions should
+   collapse to near-zero marginal cost — the next one worth doing), #4 loot (the
+   loose-loot raw-bytes splice becomes a per-map resident root so the fast arm stays fast), #5
+   scav case, #6 bots (biggest expected win; `SharedBotViewsWire` dissolves into resident views).
+   Then Phase 2 (Ceciler write barriers, which retires the mods-off eligibility gate and flips
+   `TrustNativeRequestCacheWithMods` default-on), Phase 3 (Rust loads `SPT_Data`), Phase 4
+   (configs join the resident set, closing the runtime-config ceiling flip #1's ledger records)
+   and Phase 5 (profile persistence).
+2. Port candidates and their costing live in [todo/TODO.md](todo/TODO.md); with #1, #2 and #3
+   landed, the unstarted front is the tier-1 completeness trio (#4-#6) and tier 2. The two axes
+   are independent — a flip re-homes data for something already ported, a TODO item ports
+   something new.
+3. Convert `is_valid_reward_item`'s trader whitelist (`quest/reward_generator.rs:869`, a `Vec<&str>`
    of up to 14 candidates) to `ItemBaseClassCache::is_of_baseclasses_set` and measure whether 14 is
    long enough for the set form to pay. Narrow and unmeasured.

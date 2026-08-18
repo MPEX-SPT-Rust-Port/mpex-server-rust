@@ -41,7 +41,7 @@ type — no `MongoId`, no `Item`, no config record. Logging, semver, generic ext
 
 | Folder | Contents |
 |---|---|
-| `Logger/` | `SptLogger`, `SptLoggerProvider`, `SPTLoggerDispatcher`, `SptEarlyLoggerFactory` (pre-DI logger used during startup), `SptLoggerWrapper` (adapts to `Microsoft.Extensions.Logging.ILogger`) |
+| `Logger/` | `SptLogger`, `SptLoggerProvider`, `SPTLoggerDispatcher`, `SptEarlyLoggerFactory` (pre-DI logger used during startup), `SptLoggerWrapper` (adapts to `Microsoft.Extensions.Logging.ILogger`; the class inside is spelled `SPTLoggerWrapper`) |
 | `Logger/Handlers/` | `BaseLogHandler` only. Its two implementations moved to Rust, but the abstract class is live mod surface — a mod subclasses it and registers via `SPTLoggerDispatcher.RegisterHandler` |
 | `Native/` | `NativeMethods` — the logger P/Invokes into `rust/spt-native` |
 | `Models/Logging/` | `ISptLogger`, `ILogHandler`, `SptLogMessage`, `SptLoggerConfiguration` (bound from `sptLogger.json`), `FileLogger` (empty marker type used as a log category) |
@@ -53,6 +53,13 @@ The `sptLogger.json` / `sptLogger.Development.json` files the server refuses to 
 this project's config. It is the front end only: `AddSptLogger` hands the raw config bytes to
 `rust/spt-native`, which owns filters, level gate, formatting and the console/file sinks.
 
+Common also *emits* `Spectre.Console.Ansi` — the facade `rust/spectre-facade` builds so compiled
+4.1.2 mods can still bind `Spectre.Console.Color`, frozen into `ISptLogger<T>`, `SptLogMessage`,
+`ClientLogRequest` and `Watermark.Draw`. Its `BuildSpectreFacade` target shells out to `cargo`, so
+**Common needs the Rust toolchain too**, not just Core. `<Reference>` items are not transitive, so
+each of the five projects naming `Color` carries its own: Common, Core, `Testing/UnitTests` and the
+two `Tools/` generators.
+
 ## SPTarkov.DI
 
 Three files — the whole attribute-driven container.
@@ -60,7 +67,10 @@ Three files — the whole attribute-driven container.
 - `Annotations/Injectable.cs` — `[Injectable]`, `InjectionType` (Singleton / Transient / Scoped /
   HostedService), `TypePriority`.
 - `DependencyInjectionHandler.cs` — assembly scan; registers each type against itself, its
-  interfaces and its base types. `InjectAll` applies them in ascending `TypePriority`.
+  interfaces and its base types. `InjectAll` applies them in ascending `TypePriority`. Two traps:
+  interfaces in a `System.*` namespace are skipped, so nothing is resolvable as `IDisposable` or
+  `IComparable`; and `InjectAll` throws on a second call, which is why every caller (including the
+  DI validation test) builds a fresh handler rather than reusing one.
 - `Extensions/DependencyInjectionExtensions.cs` — the `IServiceCollection` hookup.
 
 The lifecycle interfaces (`IOnLoad`, `IOnUpdate`, `IOnDIConstruct`) live in **Core**'s `DI/` folder,
@@ -88,7 +98,7 @@ Blazor Server admin panel (MudBlazor), served by the same Kestrel host.
 | Folder | Contents |
 |---|---|
 | `Pages/` | Ten routed pages: `/`, `/login`, `/profiles`, `/configs`, `/database`, `/tools`, `/credentials`, `/status`, `/thank-you`, `/example-page` |
-| `Pages/Database/` | `DatabasePage` split into ten `.razor.cs` partials — one per table, plus `Filters` and `Formatting` |
+| `Pages/Database/` | `DatabasePage` split across `DatabasePage.razor.cs` plus ten partials — eight per-table (achievements, bots, customization, globals, handbook, items, quests, traders) and `Filters` + `Formatting` |
 | `Layout/` | `BaseMainLayout` (the `DefaultLayout` on `Routes.razor`), `BaseMudBlazorLayout` (`@layout` on all ten built-in pages) — also the shells a mod page can opt into |
 | `Components/` | `Auth/` (1), `Configs/` (2), `Database/` (9), `Profiles/` (7) |
 | `Models/` | View models: `Database/` (13), `Profiles/` (12), `Configs/` (4) |
@@ -96,9 +106,9 @@ Blazor Server admin panel (MudBlazor), served by the same Kestrel host.
 | `Utils/` | `JsonPropertyFlattener` — drives the record-detail views in `ProfileControlPage` and the `DatabasePage` table partials (*not* the config editor) |
 | root | `SPTWeb.cs` (registration + three minimal-API routes), `App.razor`, `Routes.razor`, `_Imports.razor`, `IModBlazorMetadata.cs` |
 
-`IModBlazorMetadata` is the marker a mod assembly implements to have its `wwwroot` linked and its
-Blazor pages and MVC controllers registered — the one place in the solution where MVC controllers
-are supported at all.
+`IModBlazorMetadata` is the marker a mod's **metadata class** implements — alongside `IModMetadata`,
+not on the assembly — to have its `wwwroot` linked and its Blazor pages and MVC controllers
+registered. The one place in the solution where MVC controllers are supported at all.
 
 `SPTWeb.cs`'s three minimal APIs (login, logout, profile download) plus `/health` in the host are the
 only *minimal-API* routes in the solution — but not the only traffic outside the router pipeline: the

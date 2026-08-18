@@ -25,13 +25,13 @@ csproj invokes `cargo`, so any `dotnet build` needs the Rust toolchain on `PATH`
 | `Callbacks/` | 34 | HTTP entry point per domain |
 | `Generators/` | 34 | Build game data from scratch |
 | `Controllers/` | 30 | Orchestration |
-| `Extensions/` | 23 | Domain extension methods, one file per extended type (`ProfileExtensions` extends `PmcData`, `FullProfileExtensions` extends `SptProfile`) |
+| `Extensions/` | 23 | Domain extension methods, each file named for its main extended type (`ProfileExtensions` extends `PmcData`, `FullProfileExtensions` extends `SptProfile`) |
 | `Migration/` | 21 | Versioned profile migrations (`3.11`, `4.0`, `4.1`) plus unversioned `Migrations/Fixes/` (7) |
 | `Native/` | 20 | C# side of the Rust FFI |
 | `Exceptions/` | 13 | Typed exceptions (`Helpers/` 7, `Items/` 3, `Database/` 3) |
 | `Servers/` | 11 | HTTP, WebSocket, save, ragfair |
 | `DI/` | 8 | Router base classes + lifecycle interfaces |
-| `Constants/` | 5 | Id and slot-name constants (`BodyPartContants` typo is in the source) |
+| `Constants/` | 5 | Game string constants — body parts, containers, roles, sides, slots. Every class is named for the plural (`BodyParts`, `Containers`, `Roles`, `Sides`, `Slots`), never for its `*Constants.cs` file; the `BodyPartContants` typo is in the source |
 | `Loaders/` | 2 | `ConfigLoader`, `BundleLoader` |
 
 ## Request pipeline
@@ -64,7 +64,8 @@ Routing rules worth knowing:
   deserializes the body via `JsonUtil`, using `EmptyRequestData` when there is no body.
 - `Router` raises `OnBeforeAction`/`OnAfterAction` around static, dynamic and save-load invocations —
   the seam for observing a route. Item events are the exception: `ItemEventRouter.HandleItemEvent`
-  never fires them and the `ItemRouterOnBefore/AfterEventRequestData` records are unused.
+  never fires them, so the `ItemRouterOnBefore/AfterEventRequestData` records — and the generic
+  `OnAfterEventRequestData<T, R>` beside them — are declared in `DI/Router.cs` and used nowhere.
 - Responses go through `Utils/HttpResponseUtil`, which wraps them in the client envelope
   (`data`/`err`/`errmsg`) — the wrong helper (`GetBody`, `GetUnclearedBody`, `NullResponse`,
   `EmptyResponse`, `EmptyArrayResponse`) is silently rejected by the game. `NoBody` serializes raw,
@@ -114,8 +115,8 @@ Seven `ForceLegacy*` flags are the Rust-port escape hatches, one per dual-path f
 `QuestConfig.ForceLegacyRepeatableQuestGeneration`, `ScavCaseConfig.ForceLegacyScavCaseGeneration`
 and `ItemConfig.ForceLegacyItemBaseClassHydration`. Narrower knobs:
 `BotConfig.ForcePerBotGeneration` (unbatch waves without leaving native) and, on `RagfairConfig` and
-`QuestConfig`, `TrustNativeRequestCacheWithMods` / `DisableNativeRequestCache` (on ragfair these now
-gate resident-DB eligibility rather than a request cache).
+`QuestConfig`, `TrustNativeRequestCacheWithMods` / `DisableNativeRequestCache` — the names are
+legacy, both families now gate resident-DB eligibility rather than a request cache.
 
 ## JSON layer (`Utils/Json/`, 23 files)
 
@@ -228,9 +229,10 @@ template it copies — **do not delete it**, despite nothing referencing it in s
 | `Migration/` | `IProfileMigration` / `AbstractProfileMigration` / context, versioned sets under `Migrations/3.11`, `4.0`, `4.1`, plus unversioned `Migrations/Fixes/` (7 corruption repairs) |
 | `Exceptions/` | `Helpers/` (7, one per helper that throws), `Items/` (3, modded item/trader/clothing validation), `Database/` (3) |
 
-The repeatable-quest request skips its call-invariant half when `DatabaseMutationStamp` has not
-moved and no mods are loaded; the ragfair request instead rides the native resident DB, republished
-by `Native/Db/DbPublisher` when the stamp moves.
+The ragfair and repeatable-quest requests both ride the native resident DB: they carry no
+call-invariant half, just an epoch from `Native/Db/DbPublisher`, which republishes the
+templates/traders/globals/locations roots when `DatabaseMutationStamp` moves. A stale epoch
+self-heals with a force-publish and one retry; an ineligible caller ships the full views instead.
 
 `WebSocketServer` matches `IWebSocketConnectionHandler.GetHookUrl()` as a substring of the path and
 notifies *every* matching handler — unlike `IHttpListener`, where only the first match runs.

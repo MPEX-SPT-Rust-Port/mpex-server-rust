@@ -25,7 +25,7 @@ Detail lives in the per-directory documents:
 | `Libraries/SPTarkov.DI` | Attribute-driven DI container: `[Injectable]`, `DependencyInjectionHandler` |
 | `Libraries/SPTarkov.Common` | Shared primitives and the logging front end (`SptLogger`, `SPTLoggerDispatcher`) |
 | `Libraries/SPTarkov.Reflection` | Runtime method patching for mods (`AbstractPatch`, `PatchManager`) |
-| `rust/` | Cargo workspace: the `spt-native` cdylib called over C ABI |
+| `rust/` | Two-member Cargo workspace: the `spt-native` cdylib called over C ABI, and `spectre-facade`, which emits the stub `Spectre.Console.Ansi` assembly `SPTarkov.Common` builds and four other projects reference |
 | `Tools/Ceciler` + `Patches/Ceciler.JsonExtensionData` | Mono.Cecil IL rewriter run on Release builds, and the patch assembly it applies |
 | `Tools/MongoIdTplGenerator`, `Tools/JsonExtensionDataGenerator`, `Tools/HideoutCraftQuestIdGenerator` | Dev-time one-shot generators |
 | `Testing/UnitTests` | NUnit suite |
@@ -61,8 +61,11 @@ Router families under `Routers/`: `Static/` and `Dynamic/` (the path above); `It
 `EventOutputHolder`); `SaveLoad/` (run on profile load to patch saved data); `Serializers/`
 (non-JSON responses); `ImageRouter.cs` (a second `IHttpListener` serving registered images).
 
-Four routes skip all of this as minimal APIs: `/health` (`Program.cs`) and the admin panel's login,
-logout and profile-download routes (`SPTarkov.Server.Web/SPTWeb.cs`).
+Four routes are minimal APIs instead: `/health` (`Program.cs`) and the admin panel's login, logout
+and profile-download routes (`SPTarkov.Server.Web/SPTWeb.cs`). They do not bypass the catch-all —
+`ConfigureWebApp` registers it ahead of `UseSptBlazor()`, so every request enters
+`HandleRequestAsync` first; no `IHttpListener` claims them, `next` runs, and routing dispatches them
+from there. Same path the Blazor panel takes.
 
 ## Core abstractions
 
@@ -96,7 +99,10 @@ registrations).
 → real `WebApplicationBuilder` with database tables as singletons → pre-SPT-load callbacks → Kestrel.
 
 The mod-loading split in `Program.StartServerAfterModLoading` is deliberate: merging it back breaks
-prepatching by forcing types into context too early.
+prepatching by forcing types into context too early. `PrepatchIsolationTests` guards the specific
+failure — a prepatcher re-hosts the server in its own `AssemblyLoadContext`, so anything reflecting
+over `SPT.Server` before that decision must not pull `SPTarkov.Server.Web` into the default context;
+a duplicate there kills every Blazor circuit and the admin panel goes dead.
 
 ## Persistence
 
@@ -146,7 +152,7 @@ Two non-obvious steps run during build, both in `SPTarkov.Server.Core.csproj`:
 - On Release/publish, `Tools/Ceciler` rewrites the compiled `SPTarkov.Server.Core.dll` with
   Mono.Cecil, injecting a `[JsonExtensionData]` property into every type under `Models` so unknown
   client JSON round-trips instead of being dropped. Release binaries therefore differ structurally
-  from Debug ones; `PrepatchIsolationTests` guards it.
+  from Debug ones. No unit test covers the rewrite.
 
 `SPTarkov.Server.Assets` hashes `SPT_Data` into `checks.dat` on Release builds, which
 `DatabaseImporter` verifies at startup outside DEBUG. The format is a contract shared with
@@ -188,8 +194,10 @@ default anyway, each with a force-legacy flag. The argument per family is in
 [`BENCHMARK.md`](BENCHMARK.md), next to the numbers.
 
 Build coupling: `BuildSptNative` shells out to `cargo build` before compiling, so **`cargo` on
-`PATH` is a hard build dependency**. Cross-RID builds need `-p:SptNativeRid=<rid>`; only `linux-x64`
-is mapped.
+`PATH` is a hard build dependency**. Cross-RID builds need `-p:SptNativeRid=<rid>`, and only same-OS
+targets are mapped: `Build.props` holds one entry (`linux-x64` → `x86_64-unknown-linux-gnu`) inside a
+Linux-only `PropertyGroup`, so from a Windows host nothing maps and the guard in
+`SPTarkov.Server.csproj` fails the build rather than shipping a host-triple library.
 
 → [`rust/ARCHITECTURE.md`](rust/ARCHITECTURE.md) for the crate internals and the FFI contract.
 → [`RUST-ROADMAP.md`](RUST-ROADMAP.md) § *Exceptions in force* for what flips each family to legacy,

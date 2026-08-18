@@ -6,8 +6,8 @@ A Cargo workspace with two members.
 server logic**, not a new subsystem: every module stands in for a named `SPTarkov.Server.Core` file and is
 expected to produce byte-identical output. The C# side of the boundary is
 `Libraries/SPTarkov.Server.Core/Native/` — `NativeMethods.cs`, `SptNative.cs` and the per-family payload
-projections under `BaseClass/`, `Bot/`, `Loot/`, `Ragfair/`, `RepeatableQuests/`, `ScavCase/` — **except the
-log pipeline**, whose P/Invoke lives in a different assembly:
+projections under `BaseClass/`, `Bot/`, `Db/`, `Loot/`, `Ragfair/`, `RepeatableQuests/`, `ScavCase/` —
+**except the log pipeline**, whose P/Invoke lives in a different assembly:
 `Libraries/SPTarkov.Common/Native/NativeMethods.cs` and `Common/Logger/SPTLoggerDispatcher.cs`.
 
 `spectre-facade` has nothing to do with the port. It is a ~520-line `dotnetdll` program that emits a facade
@@ -64,7 +64,8 @@ heap buffer the caller releases with `spt_buf_free`.
 
 ```
 C# SptNative → spt_generate_* (JSON in)
-  → serde into a request envelope from the family's models.rs (base_class.rs carries its own)
+  → serde into a request envelope from the family's models.rs
+    (base_class.rs and linked_items.rs declare theirs inline instead)
   → catch_unwind( generator )
   → serde out the result, or the failure message, into an out-buffer
 ```
@@ -81,7 +82,10 @@ C# SptNative → spt_generate_* (JSON in)
   sanctioned failure. Deliberate.
 - **Ragfair and the repeatable quest ride the resident DB.** `spt_db_publish` (called by C#'s
   `DbPublisher` whenever `DatabaseMutationStamp` has moved) makes the templates, traders, globals and
-  locations roots resident in `db.rs`, which derives both families' views at publish time — the quest views
+  locations roots resident in `db.rs` — every root optional, an absent one keeping the resident copy, and
+  the epoch bumping on full and partial publishes alike; a bad schema or a failed view derivation aborts
+  before the swap, leaving the previous resident DB intact. It derives both families' views at publish
+  time — the quest views
   share `items`/`handbookPrices`/`fleaPrices` with ragfair's through one `Arc`; the quest-own views
   (`quest/views.rs`) derive off the same publish. The locations root is `Base` + `AllExtracts` only, keyed
   by the locations' `JsonPropertyName` strings (a null `AllExtracts` ships as `[]`). Both families' requests
@@ -225,22 +229,41 @@ outcome (exhausted pool, or a generator that gave up and logged why), not a fail
 | `views.rs` | — | Publish-time derivation of the quest views from the resident roots in `src/db.rs`, sharing the items/price views with `ragfair/views.rs` through one `Arc` (see *FFI boundary*) |
 | `models.rs` | `Models/Spt/Repeatable/…`, `Models/…` | Wire types |
 
+## `src/scav_case/`
+
+The one family with **no context type**: `ScavCaseRequest` *is* the view, passed by reference alongside the
+`DiagSink` rather than projected into a borrowed struct, because a craft reads few enough members that the
+extra type would earn nothing. It is also the one family whose `mod.rs` carries a `//!` header — it holds the
+entry point, and it states the family's citation convention: a bare `` `:N` `` is a line of the 4.1.2 body
+the port was written against, which now lives on in the C# file as `GenerateLegacy` about 131 lines below
+where the citation points. Citations naming a file are current. One native call generates **one** craft's
+rewards.
+
+| Module | Stands in for | What it does |
+|---|---|---|
+| `mod.rs` | `Generators/ScavCaseRewardGenerator.cs` (entry) | `generate_scav_case_rewards` — installs the seed guard and `catch_unwind`s the generator, so the dictionary-index throws come back as `ScavCaseError` rather than `STATUS_PANIC` (see *Conventions*) |
+| `generator.rs` | `Generators/ScavCaseRewardGenerator.cs` | The craft: the reward pool (rebuilt per request, not cached on an instance), the per-rarity counts and price bands, the picks, and the money/ammo/preset arms |
+| `models.rs` | — | Request/response envelopes only; the DB/EFT types they carry are `loot::models`' |
+
 ## Conventions
 
 These are what keep the port correct; break one and output silently diverges from C#.
 
 - **Every ported module names its C# source in its `//!` header**, with a line range where the port is a slice
   of a larger file. (`lib.rs`, `ffi.rs`, `runtime.rs`, `verify.rs` and the `mod.rs` of every family except
-  `scav_case` have no C# counterpart and no header.) Read that header before changing anything.
+  `scav_case` have no C# counterpart and no header. `db.rs` is the one module that has a header naming no C#
+  source — there is no C# resident DB; it cites the epoch-protocol spec instead.) Read that header before
+  changing anything.
 - **Deviations are marked `Deviation:`, at the scope they apply to** — module header, item doc, or the line
   itself. Grep the bare form: the bot family bolds it, the loot family does not, and ragfair, quest and scav
   case currently record none. Only `bot_inventory_generator.rs` and `bot_weapon_generator.rs` also collect
   theirs under a module-level `# Deviations` heading.
-- **RNG draw order is a contract.** The bot family states it up front — every generating module opens with an
+- **RNG draw order is a contract.** The bot family states it up front — nine of its modules open with an
   ordered list ("*RNG calls, in C# source order — the parity contract*"), including draws C# consumes and
-  discards. The loot family documents each draw inline at its call site against the C# line, as do the draw
-  primitives themselves. Adding, removing or reordering a draw desynchronises the whole sequence, so a
-  "harmless" early-out that skips a roll is a bug.
+  discards. `level_generator.rs` is the exception: a two-function slice, so its draws are documented inline
+  the way the loot family does it. The loot family documents each draw at its call site against the C# line,
+  as do the draw primitives themselves. Adding, removing or reordering a draw desynchronises the whole
+  sequence, so a "harmless" early-out that skips a roll is a bug.
 - **The generator families log for themselves, and have one rule for throws.** C# `ISptLogger` calls become
   `Diagnostic` values pushed onto the run's `diag::DiagSink`, rendered and emitted as they happen under the
   module's `CATEGORY` — the `typeof(T).FullName` of the C# class it stands in for. (Tests swap in the sink's
@@ -250,7 +273,10 @@ These are what keep the port correct; break one and output silently diverges fro
   at the throw site and catches it at the family entry point. Scav case does both — a `ScavCaseError` where the
   C# throw is reachable through a guard, a caught panic where the C# throws out of a dictionary index.
   Panicking is safe here: every export runs inside `catch_unwind`, so nothing unwinds past the boundary.
-- **Wire models come in five families** (one `models.rs` per generator directory). DB/EFT models mirror C#
+- **Wire models come in six families** — one `models.rs` per generator directory, plus `db/models.rs`, whose
+  publish roots are `#[serde(flatten)]` supersets throughout so a root stays full-fidelity no matter how
+  little of it Rust reads. (`base_class.rs` and `linked_items.rs` have no `models.rs`; their one
+  request/response pair each is declared in the module.) DB/EFT models mirror C#
   records field-for-field, pinned to the exact `JsonPropertyName`, each with a `#[serde(flatten)] extra` map so
   mod-added fields survive the round trip — the counterpart to the `[JsonExtensionData]` that `Tools/Ceciler`
   injects. Request/response envelopes are a fresh contract: plain camelCase, no passthrough map.
@@ -275,6 +301,11 @@ These are what keep the port correct; break one and output silently diverges fro
   draws nothing and takes the constant `(1, 0)`, so non-PMC seeded streams are unchanged. The drawn `level`
   and `exp` ride back on `BotInventoryResult`; both are omitted from the single-bot response, whose request
   and reply shapes are untouched (it keeps C# level generation and C# filtering).
+  **The batch reply is `{bots: [{result?|error?}]}`**, one envelope per slice in request order with exactly
+  one member set. A bot that fails carries its message there instead of failing the export — the wave
+  survives it, the way `BotController.TryGenerateSingleBot` skips a failed bot with one Critical log. The
+  export itself never returns `STATUS_ERROR`: only a malformed request or a panic (rayon re-raises a
+  worker's) reaches the status codes above.
 
 ## Tests
 

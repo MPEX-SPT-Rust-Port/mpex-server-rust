@@ -20,7 +20,7 @@ the built `SPT.Server` executable from its output directory (`SPTarkov.Server/bi
 `dotnet run` from the repo root. IDE profiles for this are in `SPTarkov.Server/Properties/launchSettings.json`.
 
 Publish flags (`dotnet publish`) feed the generated `ProgramStatics` class: `-p:SptVersion=`, `-p:SptCommit=`,
-`-p:SptBuildTime=`, `-p:SptBuildType=` (`LOCAL`/`DEBUG`/`RELEASE`/`BLEEDINGEDGE`/`BLEEDINGEDGEMODS`). Defaults live in
+`-p:SptBuildTime=`, `-p:SptBuildType=` (`LOCAL`/`DEBUG`/`RELEASE`). Defaults live in
 `Build.props`.
 
 `cargo` must be on `PATH` for **any** `dotnet build` of the solution — `SPTarkov.Server.Core` builds `rust/spt-native`
