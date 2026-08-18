@@ -1,5 +1,6 @@
 pub mod base_class;
 pub mod bot;
+pub mod db;
 pub mod diag;
 pub mod ffi;
 pub mod linked_items;
