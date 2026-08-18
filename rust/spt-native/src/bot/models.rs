@@ -648,9 +648,43 @@ pub struct GenerateBotInventoryRequest {
     pub mod_pool_slot_order: IndexMap<String, Vec<usize>>,
 }
 
-/// The 20 request members that do not vary between the bots of one wave — every database view,
-/// every config slice, and the blacklist the caller resolved from the wave's role and the player's
-/// level. 95.7% of a single-bot request's bytes by measurement.
+/// `BotLevelGenerator.GetRelativePmcBotLevelRange` (`BotLevelGenerator.cs:67-101`), resolved once
+/// per wave because its inputs are all wave-constant, plus the exp table the draw sums out of
+/// (`:39`). Only the draw itself varies per bot, and that is what
+/// [`crate::bot::level_generator::generate_bot_level`] does natively.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LevelGenerationWire {
+    pub level_min: i32,
+    pub level_max: i32,
+    /// `GlobalTable.ExperienceTable` projected to plain ints, in order.
+    pub exp_table: Vec<i32>,
+}
+
+/// The bot template and the two views resolved from the bot's level, for one band of levels.
+///
+/// Every level-dependent step the C# prelude runs before the native call is a band lookup —
+/// `FirstOrDefault(x => level >= x.LevelRange.Min && level <= x.LevelRange.Max)` at
+/// `BotEquipmentFilterService.cs:137-189`, `BotHelper.cs:83-90` and
+/// `BotPayloadProjection.cs:290-298` — and none of them draws. So the caller runs the *unchanged*
+/// C# filter and pool hydration once per segment on which all of those lookups are constant and
+/// ships one variant per segment, instead of one filtered template per bot. A non-PMC or
+/// playerscav wave is always a single `[1..1]` variant, because non-PMC level is the constant 1
+/// (`BotLevelGenerator.cs:23-26`).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TemplateVariantWire {
+    pub level_min: i32,
+    pub level_max: i32,
+    pub template: BotTemplateWire,
+    pub loot_pools: BotLootCacheWire,
+    pub handbook_prices: IndexMap<String, f64>,
+}
+
+/// The request members that do not vary between the bots of one wave — every database view, every
+/// config slice, the blacklist the caller resolved from the wave's role and the player's level, and
+/// (as [`Self::template_variants`]) the templates and loot pools, which vary by level *band* rather
+/// than by bot.
 ///
 /// Deserialized as a nested object rather than `#[serde(flatten)]`: flatten routes the whole map
 /// through serde's buffering path, which would cost more than the duplication it removes.
@@ -685,11 +719,24 @@ pub struct SharedBotViewsWire {
     /// field means database order — today's behavior.
     #[serde(default)]
     pub mod_pool_slot_order: IndexMap<String, Vec<usize>>,
+    /// The wave's level-draw inputs. Present iff the wave is PMC: every other bot takes the
+    /// constant `(1, 0)` without drawing (`BotLevelGenerator.cs:23-26`), so there is nothing to
+    /// send. A PMC slice that arrives without it is an error envelope, never a panic.
+    #[serde(default)]
+    pub level_generation: Option<LevelGenerationWire>,
+    /// Ascending, contiguous, covering `[level_min..level_max]`; exactly one `[1..1]` entry for a
+    /// non-PMC or playerscav wave.
+    pub template_variants: Vec<TemplateVariantWire>,
 }
 
-/// The six request members that do vary per bot. `template` is per-bot because
-/// `BotEquipmentFilterService.FilterBotEquipment` mutates a fresh clone for each one, and
-/// `loot_pools`/`handbook_prices` because the loot price bands are resolved from the bot's level.
+/// The three request members that do vary per bot: identity, the test seed and the generation
+/// details. The template and the two views hydrated from the bot's level live on the shared block
+/// as [`SharedBotViewsWire::template_variants`] — the batch path draws the level natively and picks
+/// the variant whose band covers it, so a wave ships one template per level segment (typically one
+/// to three) rather than one per bot.
+///
+/// `details.bot_level` still rides the wire because the single-bot request reuses this view; the
+/// batch projection sends 0 and the drawn level overwrites it before any consumer reads it.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BotSliceWire {
@@ -697,9 +744,6 @@ pub struct BotSliceWire {
     #[serde(default)]
     pub test_seed: Option<u64>,
     pub details: BotGenerationDetailsWire,
-    pub template: BotTemplateWire,
-    pub loot_pools: BotLootCacheWire,
-    pub handbook_prices: IndexMap<String, f64>,
 }
 
 /// One wave: the shared views once, then a slice per bot.
@@ -782,6 +826,15 @@ pub struct BotInventoryResult {
     /// Equipment *mod* slot → the chance the nighttime clamp (`:204`) left behind, for the C#
     /// caller to write back into its shared `BotConfig` object.
     pub randomisation_clamps: IndexMap<String, f64>,
+    /// The level this bot drew, for the caller to write into `details.BotLevel` and `Info.Level`
+    /// (`BotGenerator.cs:222-225`, `:270`). `None` on the single-bot path, which keeps its C# level
+    /// generation — so that response's bytes are unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub level: Option<i32>,
+    /// The experience total that goes with [`Self::level`] (`BotLevelGenerator.cs:39-44`) →
+    /// `Info.Experience`. `None` alongside it, for the same reason.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exp: Option<i32>,
 }
 
 #[cfg(test)]
@@ -1010,6 +1063,73 @@ mod tests {
         assert_eq!(parsed.test_seed, None);
     }
 
+    /// The flat single-bot fixture reshaped into a batch request: the slice keeps identity, seed
+    /// and details, and the three level-dependent members move into one full-coverage variant.
+    fn batch_request_json(level_generation: Option<serde_json::Value>) -> serde_json::Value {
+        let mut shared: serde_json::Value = serde_json::from_str(REQUEST_JSON).unwrap();
+        let object = shared.as_object_mut().unwrap();
+
+        let mut slice = serde_json::Map::new();
+        for key in ["botId", "testSeed", "details"] {
+            if let Some(value) = object.remove(key) {
+                slice.insert(key.to_owned(), value);
+            }
+        }
+
+        let variant = serde_json::json!({
+            "levelMin": 1,
+            "levelMax": 99,
+            "template": object.remove("template").unwrap(),
+            "lootPools": object.remove("lootPools").unwrap(),
+            "handbookPrices": object.remove("handbookPrices").unwrap(),
+        });
+        object.insert("templateVariants".to_owned(), serde_json::json!([variant]));
+        if let Some(level_generation) = level_generation {
+            object.insert("levelGeneration".to_owned(), level_generation);
+        }
+
+        serde_json::json!({"shared": shared, "bots": [serde_json::Value::Object(slice)]})
+    }
+
+    #[test]
+    fn batch_request_deserializes_with_level_inputs() {
+        let json = batch_request_json(Some(serde_json::json!({
+            "levelMin": 5, "levelMax": 30, "expTable": [10, 20],
+        })));
+        let parsed: GenerateBotInventoryBatchRequest = serde_json::from_value(json).unwrap();
+
+        let level_generation = parsed.shared.level_generation.as_ref().unwrap();
+        assert_eq!(level_generation.level_min, 5);
+        assert_eq!(level_generation.level_max, 30);
+        assert_eq!(level_generation.exp_table, vec![10, 20]);
+
+        // The template and its two level-banded companions ride once per band, not once per bot.
+        let variant = &parsed.shared.template_variants[0];
+        assert_eq!((variant.level_min, variant.level_max), (1, 99));
+        assert_eq!(variant.template.chances.equipment["Headwear"], 75.0);
+        assert_eq!(
+            variant.loot_pools.backpack_loot["aaaaaaaaaaaaaaaaaaaaaab1"],
+            4.0
+        );
+        assert_eq!(variant.handbook_prices["aaaaaaaaaaaaaaaaaaaaaab4"], 12500.5);
+
+        // The slice is down to identity + seed + details.
+        let slice = &parsed.bots[0];
+        assert_eq!(slice.bot_id, "bbbbbbbbbbbbbbbbbbbbbbbb");
+        assert_eq!(slice.test_seed, None);
+        assert_eq!(slice.details.bot_level, 12);
+    }
+
+    #[test]
+    fn a_batch_request_without_level_inputs_parses_to_none() {
+        let parsed: GenerateBotInventoryBatchRequest =
+            serde_json::from_value(batch_request_json(None)).unwrap();
+
+        // A non-PMC wave sends no `levelGeneration` at all — the level is the constant 1.
+        assert!(parsed.shared.level_generation.is_none());
+        assert_eq!(parsed.shared.template_variants.len(), 1);
+    }
+
     #[test]
     fn mod_added_template_fields_survive_the_round_trip() {
         let parsed: GenerateBotInventoryRequest = serde_json::from_str(REQUEST_JSON).unwrap();
@@ -1049,9 +1169,13 @@ mod tests {
                 },
             )]),
             randomisation_clamps: IndexMap::from([("Headwear".to_owned(), 62.5)]),
+            level: None,
+            exp: None,
         })
         .unwrap();
 
+        // The single-bot path leaves level/exp unset, so its response bytes are what they were
+        // before the batch started drawing levels.
         assert_eq!(
             out.as_object().unwrap().keys().collect::<Vec<_>>(),
             vec!["inventory", "containerGrids", "randomisationClamps"]
@@ -1083,5 +1207,17 @@ mod tests {
         assert_eq!(grids["grids"][0]["gridMap"][0][1], 1);
         assert_eq!(grids["grids"][0]["gridFull"], false);
         assert_eq!(out["randomisationClamps"]["Headwear"], 62.5);
+
+        // The batch path sets both, and they ride out camelCase like the rest.
+        let out = serde_json::to_value(BotInventoryResult {
+            inventory: BotBaseInventoryWire::default(),
+            container_grids: IndexMap::new(),
+            randomisation_clamps: IndexMap::new(),
+            level: Some(23),
+            exp: Some(45_600),
+        })
+        .unwrap();
+        assert_eq!(out["level"], 23);
+        assert_eq!(out["exp"], 45_600);
     }
 }
