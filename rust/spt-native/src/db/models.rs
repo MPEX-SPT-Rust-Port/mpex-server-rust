@@ -1,7 +1,8 @@
 //! Wire models of the resident database (spec § The epoch protocol, as amended 2026-08-18).
 //!
 //! Task-1 shape rule: every root is a `#[serde(flatten)]` superset map. Typed fields are lifted
-//! out of `extra` only when Rust-side derivation reads them (`ragfair::views::derive` today) —
+//! out of `extra` only when Rust-side derivation reads them (`ragfair::views::derive` today, the
+//! repeatable-quest flip's inputs lifted ahead of it) —
 //! the flatten map is what keeps the root full-fidelity regardless. Wire names are pinned to the
 //! C# `JsonPropertyName` of the record each type mirrors (`Models/Spt/Tables/TemplateTable.cs`,
 //! `TradersTable.cs`, `GlobalTable.cs` and the member types they reach). Every lifted container
@@ -13,6 +14,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::loot::models::Item;
+use crate::quest::models::{LevelledItemFilter, RepeatableTemplates};
 
 /// `{"schema":1,"roots":{...}}` — the envelope `DbPayloadProjection` (C#) writes.
 #[derive(Debug, Deserialize)]
@@ -30,10 +32,11 @@ pub struct PublishRoots {
     pub templates: Option<TemplatesRoot>,
     pub traders: Option<TradersRoot>,
     pub globals: Option<GlobalsRoot>,
+    pub locations: Option<LocationsRoot>,
 }
 
-/// `Models/Spt/Tables/TemplateTable.cs` — only the members the ragfair view derivation reads
-/// are typed; everything else rides in `extra`.
+/// `Models/Spt/Tables/TemplateTable.cs` — only the members the ragfair view derivation and the
+/// repeatable-quest flip read are typed; everything else rides in `extra`.
 #[derive(Debug, Default, Deserialize)]
 pub struct TemplatesRoot {
     /// `TemplateTable.Items` (`TemplateTable.cs:16-17`).
@@ -46,6 +49,43 @@ pub struct TemplatesRoot {
     /// `GetFleaPricesAsArray` draws an index into.
     #[serde(default)]
     pub prices: IndexMap<String, f64>,
+    /// `TemplateTable.RepeatableQuests` (`TemplateTable.cs:25-26`) — what the repeatable-quest
+    /// flip reads.
+    #[serde(rename = "repeatableQuests")]
+    pub repeatable_quests: Option<RepeatableQuestsWire>,
+    #[serde(flatten)]
+    pub extra: IndexMap<String, Value>,
+}
+
+/// `Models/Eft/Common/Tables/RepeatableQuests.cs:21-34` `RepeatableQuestDatabase` — only the
+/// members the repeatable-quest generators read (`Templates`, `Data`) are typed; `rewards` and
+/// `samples` ride in `extra`.
+#[derive(Debug, Deserialize)]
+pub struct RepeatableQuestsWire {
+    pub templates: Option<RepeatableTemplates>,
+    pub data: Option<RepeatableQuestsData>,
+    #[serde(flatten)]
+    pub extra: IndexMap<String, Value>,
+}
+
+/// `RepeatableQuests.cs:138-141` `Options`, the `Data` member's type.
+#[derive(Debug, Deserialize)]
+pub struct RepeatableQuestsData {
+    #[serde(rename = "Completion")]
+    pub completion: Option<CompletionFilter>,
+    #[serde(flatten)]
+    pub extra: IndexMap<String, Value>,
+}
+
+/// `RepeatableQuests.cs:144-150` `CompletionFilter`. C# declares both lists nullable; absent and
+/// null collapse to empty here, the same branch the C# takes for both (`quest::models` documents
+/// the same collapse on its slice members).
+#[derive(Debug, Deserialize)]
+pub struct CompletionFilter {
+    #[serde(rename = "itemsWhitelist", default)]
+    pub items_whitelist: Vec<LevelledItemFilter>,
+    #[serde(rename = "itemsBlacklist", default)]
+    pub items_blacklist: Vec<LevelledItemFilter>,
     #[serde(flatten)]
     pub extra: IndexMap<String, Value>,
 }
@@ -128,6 +168,75 @@ pub struct Preset {
     /// Only default presets carry `_encyclopedia`.
     #[serde(rename = "_encyclopedia")]
     pub encyclopedia: Option<String>,
+    #[serde(flatten)]
+    pub extra: IndexMap<String, Value>,
+}
+
+/// `Models/Spt/Tables/LocationTable.cs` — the root is the serialized table: one key per map
+/// (`bigmap`, `factory4_day`, …) plus the UI-linkage `base` (`LocationTable.cs:117-118`), so the
+/// flatten map replaces a named `extra` wholesale, the same shape as [`TradersRoot`].
+/// `GetDictionary()` re-keys by C# property name at read time; the wire keys here are the
+/// `JsonPropertyName`s `GetLocation` falls back to.
+#[derive(Debug, Default, Deserialize)]
+pub struct LocationsRoot {
+    #[serde(flatten)]
+    pub locations: IndexMap<String, LocationEntry>,
+}
+
+/// One value of the locations dictionary root — `Models/Eft/Common/Location.cs`. Only the two
+/// members the repeatable-quest projection reads are typed; the loot members ride in `extra`.
+#[derive(Debug, Deserialize)]
+pub struct LocationEntry {
+    /// `Location.Base` (`Location.cs:12-13`). `Option` keeps the parse total — the table's
+    /// UI-linkage `base` key parses as an entry with no `base` member of its own.
+    pub base: Option<LocationBaseView>,
+    /// `Location.AllExtracts` (`Location.cs:45-46`) — a member of `Location`, not `LocationBase`;
+    /// what `BuildExtractsByLocation` projects (`RepeatableQuestNativeRequestBuilder.cs:231`).
+    #[serde(rename = "allExtracts", default)]
+    pub all_extracts: Vec<ExitSourceView>,
+    #[serde(flatten)]
+    pub extra: IndexMap<String, Value>,
+}
+
+/// `Models/Eft/Common/LocationBase.cs:8` `LocationBase` — only the two members
+/// `BuildBossSpawnsByLocation` reads (`RepeatableQuestNativeRequestBuilder.cs:195-206`).
+#[derive(Debug, Deserialize)]
+pub struct LocationBaseView {
+    /// `required string` in C# (`LocationBase.cs:181-182`); `Option` so the parse stays total —
+    /// the builder's `Base?.Id is not { }` skip is the branch a missing id takes.
+    #[serde(rename = "Id")]
+    pub id: Option<String>,
+    #[serde(rename = "BossLocationSpawn", default)]
+    pub boss_location_spawn: Vec<BossSpawnView>,
+    #[serde(flatten)]
+    pub extra: IndexMap<String, Value>,
+}
+
+/// `LocationBase.cs:501` `BossLocationSpawn` — `BossName` is the only member the elimination
+/// projection reads off a spawn.
+#[derive(Debug, Deserialize)]
+pub struct BossSpawnView {
+    #[serde(rename = "BossName")]
+    pub boss_name: Option<String>,
+    #[serde(flatten)]
+    pub extra: IndexMap<String, Value>,
+}
+
+/// `LocationBase.cs:806-883` `Exit`, restricted to the four members `ToExitView` reads
+/// (`RepeatableQuestNativeRequestBuilder.cs:238-247`). `AllExtracts` entries are the derived
+/// `AllExtractsExit : Exit`; its `SptName` addition rides in `extra`.
+#[derive(Debug, Deserialize)]
+pub struct ExitSourceView {
+    #[serde(rename = "Name")]
+    pub name: Option<String>,
+    #[serde(rename = "Side")]
+    pub side: Option<String>,
+    #[serde(rename = "Chance")]
+    pub chance: Option<f64>,
+    /// `RequirementState` through `JsonStringEnumConverter`, non-nullable in C# — always a string
+    /// on a published root; `Option` keeps the parse total.
+    #[serde(rename = "PassageRequirement")]
+    pub passage_requirement: Option<String>,
     #[serde(flatten)]
     pub extra: IndexMap<String, Value>,
 }
@@ -435,5 +544,97 @@ where
         Some(other) => Err(serde::de::Error::custom(format!(
             "expected a ReloadMode name or number, found {other}"
         ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The shipped `repeatableQuests` block — the exact wire a published `templates` root carries
+    /// under that key, the same fixture `quest::models`' round-trip tests parse.
+    const REPEATABLE_QUESTS_PATH: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../Libraries/SPTarkov.Server.Assets/SPT_Data/database/templates/repeatableQuests.json"
+    );
+
+    #[test]
+    fn locations_root_lifts_base_and_extracts_and_keeps_the_rest() {
+        // Wire names pinned to Location.cs ("base", "allExtracts") and LocationBase.cs
+        // ("Id", "BossLocationSpawn", "BossName", "Name"/"Side"/"Chance"/"PassageRequirement")
+        let root: LocationsRoot = serde_json::from_str(
+            r#"{
+                "factory4_day": {
+                    "base": {
+                        "Id": "55f2d3fd4bdc2d5f408b4567",
+                        "BossLocationSpawn": [
+                            {"BossName": "bossTagilla", "BossChance": 25.0}
+                        ],
+                        "OpenZones": "ZoneFactory"
+                    },
+                    "allExtracts": [
+                        {
+                            "Name": "Gate 3",
+                            "Side": "Pmc",
+                            "Chance": 100.0,
+                            "PassageRequirement": "TransferItem",
+                            "ExfiltrationTime": 8.0
+                        }
+                    ],
+                    "looseLoot": {"spawnpointCount": 1}
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let entry = &root.locations["factory4_day"];
+        let base = entry.base.as_ref().unwrap();
+        assert_eq!(base.id.as_deref(), Some("55f2d3fd4bdc2d5f408b4567"));
+        assert_eq!(
+            base.boss_location_spawn[0].boss_name.as_deref(),
+            Some("bossTagilla")
+        );
+        let exit = &entry.all_extracts[0];
+        assert_eq!(exit.name.as_deref(), Some("Gate 3"));
+        assert_eq!(exit.side.as_deref(), Some("Pmc"));
+        assert_eq!(exit.chance, Some(100.0));
+        assert_eq!(exit.passage_requirement.as_deref(), Some("TransferItem"));
+        // Unlifted members ride in extra at every level
+        assert!(entry.extra.contains_key("looseLoot"));
+        assert!(base.extra.contains_key("OpenZones"));
+        assert!(base.boss_location_spawn[0].extra.contains_key("BossChance"));
+        assert!(exit.extra.contains_key("ExfiltrationTime"));
+    }
+
+    #[test]
+    fn templates_root_lifts_the_shipped_repeatable_quests_block() {
+        let block =
+            std::fs::read_to_string(REPEATABLE_QUESTS_PATH).expect("SPT_Data file readable");
+        let root: TemplatesRoot =
+            serde_json::from_str(&format!(r#"{{"repeatableQuests":{block}}}"#)).unwrap();
+
+        let repeatable = root.repeatable_quests.as_ref().unwrap();
+        let templates = repeatable.templates.as_ref().unwrap();
+        assert!(templates.elimination.is_some());
+        let completion = repeatable
+            .data
+            .as_ref()
+            .unwrap()
+            .completion
+            .as_ref()
+            .unwrap();
+        assert_eq!(completion.items_whitelist[0].min_player_level, Some(1));
+        assert!(!completion.items_blacklist.is_empty());
+        // The unlifted RepeatableQuestDatabase members ride in extra
+        assert!(repeatable.extra.contains_key("rewards"));
+        assert!(repeatable.extra.contains_key("samples"));
+    }
+
+    #[test]
+    fn publish_roots_accepts_locations_as_a_root_name() {
+        let request: PublishRequest =
+            serde_json::from_str(r#"{"schema":1,"roots":{"locations":{"factory4_day":{}}}}"#)
+                .unwrap();
+        assert!(request.roots.locations.is_some());
     }
 }

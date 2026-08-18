@@ -9,7 +9,7 @@ pub mod models;
 
 use std::sync::{Arc, RwLock};
 
-use crate::db::models::{GlobalsRoot, PublishRequest, TemplatesRoot, TradersRoot};
+use crate::db::models::{GlobalsRoot, LocationsRoot, PublishRequest, TemplatesRoot, TradersRoot};
 use crate::ragfair::views::RagfairDbViews;
 
 pub struct ResidentDb {
@@ -17,6 +17,7 @@ pub struct ResidentDb {
     pub templates: Option<Arc<TemplatesRoot>>,
     pub traders: Option<Arc<TradersRoot>>,
     pub globals: Option<Arc<GlobalsRoot>>,
+    pub locations: Option<Arc<LocationsRoot>>,
     /// `Some` whenever all three source roots are resident — re-derived on every such publish,
     /// `None` otherwise.
     pub ragfair_views: Option<Arc<RagfairDbViews>>,
@@ -67,6 +68,11 @@ pub fn publish(request: PublishRequest) -> Result<u64, PublishError> {
         .globals
         .map(Arc::new)
         .or_else(|| previous.and_then(|db| db.globals.clone()));
+    let locations = request
+        .roots
+        .locations
+        .map(Arc::new)
+        .or_else(|| previous.and_then(|db| db.locations.clone()));
 
     // Derived before the swap: a derivation error aborts the publish and leaves the previous
     // resident DB fully intact. The derive runs under the write guard, so a panic in it must
@@ -93,6 +99,7 @@ pub fn publish(request: PublishRequest) -> Result<u64, PublishError> {
         templates,
         traders,
         globals,
+        locations,
         ragfair_views,
     }));
 
@@ -145,14 +152,14 @@ mod store_tests {
         let _guard = tests::DB_TEST_LOCK.lock().unwrap();
         clear();
         publish(request(
-            r#"{"schema":1,"roots":{"templates":{"a":1},"traders":{"b":2},"globals":{"c":3}}}"#,
+            r#"{"schema":1,"roots":{"templates":{"a":1},"traders":{"b":2},"globals":{"c":3},"locations":{"factory4_day":{}}}}"#,
         ))
         .unwrap();
         let before = current().unwrap();
         publish(request(r#"{"schema":1,"roots":{"templates":{"a":9}}}"#)).unwrap();
         let after = current().unwrap();
 
-        // traders/globals survive by Arc identity; templates was replaced
+        // traders/globals/locations survive by Arc identity; templates was replaced
         assert!(Arc::ptr_eq(
             before.traders.as_ref().unwrap(),
             after.traders.as_ref().unwrap()
@@ -160,6 +167,10 @@ mod store_tests {
         assert!(Arc::ptr_eq(
             before.globals.as_ref().unwrap(),
             after.globals.as_ref().unwrap()
+        ));
+        assert!(Arc::ptr_eq(
+            before.locations.as_ref().unwrap(),
+            after.locations.as_ref().unwrap()
         ));
         assert!(!Arc::ptr_eq(
             before.templates.as_ref().unwrap(),
