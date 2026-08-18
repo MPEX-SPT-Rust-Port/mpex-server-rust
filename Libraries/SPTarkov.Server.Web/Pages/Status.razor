@@ -31,7 +31,6 @@
                 <MudCardContent>
                     <MudList T="string" Class="mx-auto mt-4">
                         <MudListItem Icon="@Icons.Material.Filled.Circle" IconColor="Color.Warning">@L("status-spt-version"): @_sptVersion</MudListItem>
-                        <MudListItem Icon="@Icons.Material.Filled.Circle" IconColor="Color.Warning">@L("status-mods") @(_modsEnabled ? L("common-enabled") : L("common-disabled"))</MudListItem>
                         <MudListItem Icon="@Icons.Material.Filled.Circle" IconColor="Color.Warning">@L("status-debug") @(_debugEnabled ? L("common-enabled") : L("common-disabled"))</MudListItem>
                         <MudListItem Icon="@Icons.Material.Filled.Circle" IconColor="Color.Warning">@L("status-time-started"): @_startTime</MudListItem>
                         <MudListItem Icon="@Icons.Material.Filled.Circle" IconColor="Color.Warning">@L("status-uptime"): @_uptimeSeconds @L("common-seconds")</MudListItem>
@@ -58,7 +57,6 @@
 {
     private string _sptVersion = string.Empty;
     private bool _debugEnabled = false;
-    private bool _modsEnabled = false;
     private DateTime _startTime = DateTime.Now;
     private long _uptimeSeconds = 0;
     private readonly List<string> _activeProfiles = [];
@@ -70,7 +68,6 @@
 
         _sptVersion = ProgramStatics.SPT_VERSION().ToString();
         _debugEnabled = ProgramStatics.DEBUG();
-        _modsEnabled = ProgramStatics.MODS();
         _startTime = TimeUtil.GetDateTimeFromTimeStamp(coreConfig.ServerStartTime.Value).ToLocalTime();
         _uptimeSeconds = DateTimeOffset.Now.ToUnixTimeSeconds() - coreConfig.ServerStartTime.Value;
 

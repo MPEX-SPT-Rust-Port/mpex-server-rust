@@ -507,7 +507,6 @@ public class GameController(
             logger.Debug($"Profile made with: {fullProfile.SptData?.Version}");
             logger.Debug($"Server version: {ProgramStatics.SPT_VERSION()} {ProgramStatics.COMMIT()}");
             logger.Debug($"Debug enabled: {ProgramStatics.DEBUG()}");
-            logger.Debug($"Mods enabled: {ProgramStatics.MODS()}");
         }
     }
 

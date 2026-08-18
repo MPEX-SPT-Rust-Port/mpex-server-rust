@@ -34,14 +34,11 @@ public sealed class SPTStartupHostedService(
     {
         try
         {
-            if (ProgramStatics.MODS())
+            foreach (var mod in loadedMods)
             {
-                foreach (var mod in loadedMods)
+                if (File.Exists(Path.Join(Directory.GetCurrentDirectory(), mod.GetModPath(), "bundles.json")))
                 {
-                    if (File.Exists(Path.Join(Directory.GetCurrentDirectory(), mod.GetModPath(), "bundles.json")))
-                    {
-                        await bundleLoader.LoadBundlesAsync(mod, cancellationToken).ConfigureAwait(false);
-                    }
+                    await bundleLoader.LoadBundlesAsync(mod, cancellationToken).ConfigureAwait(false);
                 }
             }
 

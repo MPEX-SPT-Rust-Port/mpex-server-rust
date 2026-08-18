@@ -21,11 +21,6 @@ public sealed partial class ModValidator(
 
     public List<SptMod> ValidateMods(IEnumerable<SptMod> mods)
     {
-        if (!ProgramStatics.MODS())
-        {
-            return [];
-        }
-
         // Validate all assemblies for references. This will deprecate AbstractMetadata semver checks in 4.1
         foreach (var mod in mods)
         {
