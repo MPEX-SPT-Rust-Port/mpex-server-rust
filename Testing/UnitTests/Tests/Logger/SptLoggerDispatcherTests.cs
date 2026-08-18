@@ -208,6 +208,25 @@ public class SptLoggerDispatcherTests
         Assert.That(handler.Received[0].Reference, Is.SameAs(reference));
     }
 
+    [Test]
+    public async Task ARegisteredHandlerReceivesMessages()
+    {
+        // The production path: AddSptLogger builds the dispatcher from its own service collection,
+        // so a mod's handler is never constructor-injected and has to register itself.
+        var handler = new CapturingHandler();
+        var reference = HandlerReference();
+        var dispatcher = new SPTLoggerDispatcher(new SptLoggerConfiguration { Loggers = [reference] }, []);
+
+        dispatcher.Log(Message(LogLevel.Information, "before registering"));
+        dispatcher.RegisterHandler(handler);
+        dispatcher.Log(Message(LogLevel.Information, "after registering"));
+        await dispatcher.DisposeAsync();
+
+        Assert.That(handler.Received, Has.Count.EqualTo(1));
+        Assert.That(handler.Received[0].Message.Message, Is.EqualTo("after registering"));
+        Assert.That(handler.Received[0].Reference, Is.SameAs(reference));
+    }
+
     private sealed class ReentrantHandler : ILogHandler
     {
         public SPTLoggerDispatcher? Dispatcher { get; set; }

@@ -12,6 +12,18 @@ namespace SPTarkov.Common.Logger;
 /// spt_logger_init has already run from AddSptLogger. Mod-registered ILogHandlers are routed to
 /// again (restored 4.1.2 behaviour): C#-originated lines fan out here with their original
 /// Exception object, Rust-originated lines arrive through the spt_log_set_tap callback.
+/// <para>
+/// A mod resolves this singleton from DI and calls RegisterHandler — AddSptLogger builds the
+/// dispatcher from its own service collection, so an ILogHandler registered in the host container
+/// is never constructor-injected. Routing is per configuration reference (exclude filters, then
+/// the include gate, then the level), and a reference only reaches handlers whose LoggerType
+/// matches it.
+/// </para>
+/// <para>
+/// Dispose clears the tap, but a native callback already in flight can still deliver to a handler
+/// during or after disposal; the fan-out's per-handler catch contains whatever that handler then
+/// throws.
+/// </para>
 /// </summary>
 public sealed class SPTLoggerDispatcher : IAsyncDisposable
 {
@@ -48,8 +60,14 @@ public sealed class SPTLoggerDispatcher : IAsyncDisposable
     private static bool _inHandlerFanOut;
 
     private readonly SptLoggerConfiguration _config;
-    private readonly ILogHandler[] _logHandlers;
-    private readonly bool _tapRegistered;
+
+    /// <summary>
+    /// Copy-on-write under _handlerLock: RegisterHandler swaps a new array in, readers snapshot the
+    /// reference into a local and iterate that, so a registration during a fan-out cannot tear.
+    /// </summary>
+    private readonly Lock _handlerLock = new();
+    private ILogHandler[] _logHandlers;
+    private bool _tapRegistered;
 
     /// <summary>
     /// Set when the native side fails: a panic status, or an unloadable library. Reported once to
@@ -64,11 +82,37 @@ public sealed class SPTLoggerDispatcher : IAsyncDisposable
         _config = config;
         _logHandlers = logHandlers.ToArray();
 
-        if (_logHandlers.Length == 0)
+        if (_logHandlers.Length > 0)
         {
-            return;
+            EnsureTapRegistered();
+        }
+    }
+
+    /// <summary>
+    /// Adds a handler to the fan-out, and arms the native tap if this is the first one. The
+    /// mod-facing entry point: resolve this dispatcher from DI and call this from your mod's
+    /// startup, because AddSptLogger constructs the dispatcher before any mod service exists.
+    /// </summary>
+    public void RegisterHandler(ILogHandler handler)
+    {
+        ArgumentNullException.ThrowIfNull(handler);
+
+        lock (_handlerLock)
+        {
+            _logHandlers = [.. _logHandlers, handler];
         }
 
+        EnsureTapRegistered();
+    }
+
+    /// <summary>
+    /// Idempotent: the native tap slot is process-wide, so re-registering the same callback is
+    /// harmless, and an unloadable library leaves the C# fan-out working on its own.
+    /// </summary>
+    private void EnsureTapRegistered()
+    {
+        // Set first: the tap can fire from another thread the instant LogSetTap returns, and a
+        // null target would drop that line.
         _tapTarget = this;
 
         try
@@ -78,7 +122,8 @@ public sealed class SPTLoggerDispatcher : IAsyncDisposable
         }
         catch (Exception failure) when (failure is DllNotFoundException or EntryPointNotFoundException)
         {
-            // No native library means no native-origin lines; the C# fan-out still works.
+            // No native library means no native-origin lines; don't root this instance for nothing.
+            _tapTarget = null;
         }
     }
 
@@ -202,7 +247,9 @@ public sealed class SPTLoggerDispatcher : IAsyncDisposable
     /// </summary>
     private void FanOutToHandlers(SptLogMessage message)
     {
-        if (_logHandlers.Length == 0 || _inHandlerFanOut)
+        var handlers = _logHandlers;
+
+        if (handlers.Length == 0 || _inHandlerFanOut)
         {
             return;
         }
@@ -218,7 +265,7 @@ public sealed class SPTLoggerDispatcher : IAsyncDisposable
                     continue;
                 }
 
-                foreach (var handler in _logHandlers)
+                foreach (var handler in handlers)
                 {
                     if (handler.LoggerType != reference.Type)
                     {
@@ -321,12 +368,11 @@ public sealed class SPTLoggerDispatcher : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
-        if (_tapRegistered)
+        // Only the instance that currently owns the process-wide slot may clear it; a dispatcher
+        // registered after this one must keep receiving native lines.
+        if (_tapRegistered && ReferenceEquals(_tapTarget, this))
         {
-            if (ReferenceEquals(_tapTarget, this))
-            {
-                _tapTarget = null;
-            }
+            _tapTarget = null;
 
             NativeMethods.LogSetTap(0);
         }

@@ -531,6 +531,7 @@ pub(crate) fn emit_pipeline(category: &str, level: LogLevel, message: &str) {
     };
     // Rust-originated lines only: C#-originated lines fan out to handlers on the C# side, with
     // their original Exception object.
+    // The tap must fire before LOGGER is taken - a handler may call straight back into spt_log_emit.
     if let Some(tap) = log_tap() {
         unsafe {
             tap(
@@ -1809,7 +1810,7 @@ mod tests {
     #[test]
     fn logger_exports_roundtrip() {
         /// The messages this test emits; everything else in the file belongs to a generator.
-        const MINE: [&str; 9] = [
+        const MINE: [&str; 10] = [
             "hello",
             "nullspans",
             "still up",
@@ -1819,6 +1820,7 @@ mod tests {
             "plain line",
             "moved",
             "survives reinit failure",
+            "not tapped",
         ];
 
         let dir = TempDir::new().unwrap();
@@ -1964,8 +1966,10 @@ mod tests {
             unsafe { spt_logger_reinit(config.as_ptr(), config.len(), &mut out_ptr, &mut out_len) };
         assert_eq!(status, STATUS_OK);
 
-        // The tap receives Rust-originated lines only.
+        // The tap receives Rust-originated lines only - this line crosses spt_log_emit inside the
+        // armed window, so it proves the export does not tap rather than merely arriving too early.
         assert_eq!(unsafe { spt_log_set_tap(Some(roundtrip_tap)) }, STATUS_OK);
+        assert_eq!(emit("Cat", "not tapped", "", "main"), STATUS_OK);
 
         // Locale table + live diagnostic emission share the same run: bad JSON first.
         let status = unsafe { spt_locales_set(b"nope".as_ptr(), 4, &mut out_ptr, &mut out_len) };
@@ -2003,7 +2007,7 @@ mod tests {
             ));
             assert!(tapped.contains(&"3:plain line".to_owned()));
             assert!(
-                !tapped.iter().any(|line| line.ends_with(":hello")),
+                !tapped.iter().any(|line| line.ends_with(":not tapped")),
                 "spt_log_emit lines fan out C#-side and must not reach the tap"
             );
         }
@@ -2062,6 +2066,7 @@ mod tests {
                 "hello",
                 "nullspans",
                 "survives reinit failure",
+                "not tapped",
                 "Unable to find an item with tpl of: 54009119af1c881c07000029 in Db",
                 "plain line",
                 "still up",

@@ -182,7 +182,9 @@ the native pipeline; seeded-RNG parity at the primitive level (xoshiro256\*\*, t
   mutating `SptLoggerConfiguration.Loggers` alone changes what `IsLogEnabled` answers but not what
   is written. `SPTLoggerDispatcher.ReloadConfiguration()` (additive, post-port) re-hands the
   mutated object to `spt_logger_reinit` and the two agree again; a reload the native parser
-  rejects leaves the running pipeline untouched.
+  rejects leaves the running pipeline untouched. Mutate `Loggers` before the server is serving
+  traffic, or accept the enumeration race — the list is read per line, unguarded, exactly as it was
+  pre-port.
 - **Excluded categories still pay the per-line marshaling cost** — filtering moved native-side, so
   every line is encoded, crosses the FFI boundary and takes the pipeline mutex before it is dropped.
 - **Line terminators are always `\n` and dates always Gregorian, culture-independent** — the C#
@@ -202,7 +204,10 @@ the native pipeline; seeded-RNG parity at the primitive level (xoshiro256\*\*, t
   them again (original message and `Exception` object, per-reference filters and level), and
   `spt_log_set_tap`'s callback delivers Rust-originated generator lines. Native-origin lines
   arrive as rendered text with no `Exception` object and the native `%tid%` counter — accepted.
-  `BaseLogHandler`/`GetCompiledFormat`/`Match` are live mod-support surface again.
+  `BaseLogHandler`/`GetCompiledFormat`/`Match` are live mod-support surface again. Registration
+  changed shape: resolve `SPTLoggerDispatcher` from DI and call `RegisterHandler` (additive,
+  post-port), because `AddSptLogger` builds the dispatcher from its own service collection and a
+  constructor-injected handler set is therefore always empty in a real run.
 
 ## Guidelines
 
