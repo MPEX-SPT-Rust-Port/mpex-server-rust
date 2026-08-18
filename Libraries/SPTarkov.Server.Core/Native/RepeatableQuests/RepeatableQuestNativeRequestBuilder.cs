@@ -38,6 +38,7 @@ public class RepeatableQuestNativeRequestBuilder(
     ItemFilterService itemFilterService,
     SeasonalEventService seasonalEventService,
     QuestConfig questConfig,
+    // Unused since the resident-DB flip (DbPublisher reads the stamp itself); frozen 4.1.2 apicompat surface, do not remove
     DatabaseMutationStamp databaseMutationStamp,
     IReadOnlyList<SptMod> loadedMods
 )

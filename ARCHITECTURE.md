@@ -159,7 +159,7 @@ Two non-obvious steps run during build, both in `SPTarkov.Server.Core.csproj`:
 `Libraries/SPTarkov.Common/Native/NativeMethods.cs`, because `SPTarkov.Common` cannot reference
 Server.Core. It owns database hash verification, the ported generation paths (location loot, reward
 loot, whole-bot inventory, dynamic ragfair offers, repeatable quests, scav case rewards), the item
-base-class cache build, the ragfair linked-item table, and the whole log pipeline. Twenty-two
+base-class cache build, the ragfair linked-item table, and the whole log pipeline. Twenty-three
 exports, JSON in / JSON out — except the ragfair response, a framed MessagePack envelope, and the
 log exports — with `spt_native_abi_version` handshaking against `SptNative.ExpectedAbiVersion`.
 

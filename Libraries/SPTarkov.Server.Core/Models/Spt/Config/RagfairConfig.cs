@@ -61,16 +61,17 @@ public record RagfairConfig : BaseConfig
     public bool ForceLegacyRagfairLinkedItemBuild { get; set; }
 
     /// <summary>
-    ///     Keep the native request-slice cache live even with mods loaded. Off, any loaded mod
-    ///     disables the cache. On, the instrumented mutation paths (CustomItemService, the
-    ///     blacklist caches, seasonal events) still invalidate it, but a mod writing an injected
-    ///     table's dictionaries directly goes unseen - only enable when your mods don't do that.
+    ///     Keep the native resident-DB fast path live even with mods loaded. Off, any loaded mod
+    ///     forces the views override onto every send. On, the instrumented mutation paths
+    ///     (CustomItemService, the blacklist caches, seasonal events) still trigger a republish,
+    ///     but a mod writing an injected table's dictionaries directly goes unseen - only enable
+    ///     when your mods don't do that.
     /// </summary>
     [JsonPropertyName("trustNativeRequestCacheWithMods")]
     public bool TrustNativeRequestCacheWithMods { get; set; }
 
     /// <summary>
-    ///     Always resend the full native request slice: disables the stamp cache without
+    ///     Always send the C#-built views override: disables the resident-DB fast path without
     ///     touching the native path itself.
     /// </summary>
     [JsonPropertyName("disableNativeRequestCache")]

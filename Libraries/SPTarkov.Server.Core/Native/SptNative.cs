@@ -637,8 +637,8 @@ public static class SptNative
 }
 
 /// <summary>
-///     A request named a resident-DB epoch (ragfair) or a cached slice stamp (quests, until flip
-///     #2) the native process does not hold. The caller self-heals by republishing the resident
-///     DB, or by resending the request with the invariant slice included.
+///     A request named a resident-DB epoch the native process does not hold. The caller
+///     self-heals by republishing the resident DB (<c>DbPublisher.ForcePublish()</c>) and
+///     retrying once.
 /// </summary>
 internal sealed class NativeStaleEpochException(string message) : InvalidOperationException(message);

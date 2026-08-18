@@ -55,11 +55,12 @@ the mold linker on Linux. Both profiles use one codegen unit; release adds fat L
 
 ## FFI boundary (`ffi.rs`)
 
-Twenty-two `extern "C"` exports: two trivial (`spt_native_abi_version`, `spt_buf_free`), thirteen taking a
-UTF-8 JSON generation request, `spt_verify_database` taking a directory path, `spt_locales_set` taking the
-resolved server-locale table as JSON, and five for the log pipeline (`spt_logger_init`, `spt_logger_reinit`,
-`spt_log_emit`, `spt_logger_close`, `spt_log_set_tap` — see *The log pipeline*). The fourteen
-generation/verify exports hand back a heap buffer the caller releases with `spt_buf_free`.
+Twenty-three `extern "C"` exports: two trivial (`spt_native_abi_version`, `spt_buf_free`), thirteen taking a
+UTF-8 JSON generation request, `spt_verify_database` taking a directory path, `spt_db_publish` taking the
+resident-DB publish envelope, `spt_locales_set` taking the resolved server-locale table as JSON, and five
+for the log pipeline (`spt_logger_init`, `spt_logger_reinit`, `spt_log_emit`, `spt_logger_close`,
+`spt_log_set_tap` — see *The log pipeline*). The fifteen generation/verify/publish exports hand back a
+heap buffer the caller releases with `spt_buf_free`.
 
 ```
 C# SptNative → spt_generate_* (JSON in)

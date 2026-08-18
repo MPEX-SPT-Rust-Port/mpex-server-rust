@@ -7,6 +7,7 @@ using SPTarkov.Server.Core.Models.Common;
 using SPTarkov.Server.Core.Models.Enums;
 using SPTarkov.Server.Core.Models.Spt.Config;
 using SPTarkov.Server.Core.Models.Spt.Repeatable;
+using SPTarkov.Server.Core.Native.Db;
 using SPTarkov.Server.Core.Native.RepeatableQuests;
 using SPTarkov.Server.Core.Services.Server;
 using SPTarkov.Server.Core.Utils.Cloners;
@@ -48,6 +49,7 @@ public class RepeatableQuestBenchmarkTests
     private RepeatableQuestNativeRequestBuilder _builder = default!;
     private QuestConfig _questConfig = default!;
     private DatabaseMutationStamp _databaseMutationStamp = default!;
+    private DbPublisher _dbPublisher = default!;
     private ICloner _cloner = default!;
 
     /// <summary> The pmc daily config - the one every type but Pickup is generated from </summary>
@@ -69,6 +71,7 @@ public class RepeatableQuestBenchmarkTests
         _builder = di.GetService<RepeatableQuestNativeRequestBuilder>();
         _questConfig = di.GetService<QuestConfig>();
         _databaseMutationStamp = di.GetService<DatabaseMutationStamp>();
+        _dbPublisher = di.GetService<DbPublisher>();
         _cloner = di.GetService<ICloner>();
 
         _pmcDaily = _questConfig.RepeatableQuests.First(config => config.Side == PlayerGroup.Pmc);
@@ -100,7 +103,15 @@ public class RepeatableQuestBenchmarkTests
         var traderId = TraderForType(repeatableConfig, questType);
 
         var legacy = Measure(generator, repeatableConfig, pmcLevel, traderId, forceLegacy: true);
+
+        var epochBeforeCold = _dbPublisher.EnsureCurrent();
         var cold = Measure(generator, repeatableConfig, pmcLevel, traderId, forceLegacy: false, () => _databaseMutationStamp.Bump());
+        Assert.That(
+            _dbPublisher.EnsureCurrent(),
+            Is.GreaterThan(epochBeforeCold),
+            "the cold arm never advanced the resident-DB epoch - it measured the warm path"
+        );
+
         var warm = Measure(generator, repeatableConfig, pmcLevel, traderId, forceLegacy: false);
 
         Report($"{questType} legacy (C# 4.1.2)", legacy);
