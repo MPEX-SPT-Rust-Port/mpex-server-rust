@@ -141,65 +141,70 @@ public class BotWaveBatcher(
             return [];
         }
 
-        var waveDetails = cloner.Clone(botGenerationDetails)!;
-        waveDetails.RoleLowercase = waveDetails.Role.ToLowerInvariant();
-        // Batch preludes no longer mutate templates, so any survivor's clone is the pristine wave
-        // template
-        var waveTemplate = survivors[0].Template;
-
-        LevelGenerationView? levelGeneration = null;
-        var range = new MinMax<int>(1, 1);
-        if (waveDetails.IsPmc)
-        {
-            var expTable = globalTable.Configuration.Exp.Level.ExperienceTable;
-            range = botLevelGenerator.GetRelativePmcBotLevelRange(waveDetails, waveTemplate.BotExperience.Level, expTable.Length);
-            levelGeneration = new LevelGenerationView
-            {
-                LevelMin = range.Min,
-                LevelMax = range.Max,
-                ExpTable = [.. expTable.Select(entry => entry.Experience)],
-            };
-        }
-
-        var segments = EnumerateLevelSegments(
-            waveDetails,
-            range,
-            // BotEquipmentFilterService.cs:28 - a PMC wave filters against the literal "pmc" entry
-            waveDetails.IsPmc && botConfig.Equipment.TryGetValue("pmc", out var pmcFilters)
-                ? pmcFilters
-                : null,
-            pmcConfig.LootItemLimitsRub
-        );
-        var variants = new List<TemplateVariant>(segments.Count);
-        foreach (var segment in segments)
-        {
-            var variantDetails = cloner.Clone(waveDetails)!;
-            variantDetails.BotLevel = segment.Min;
-            var variantTemplate = cloner.Clone(waveTemplate)!;
-            botGenerator.ApplyBatchTemplateMutations(sessionId, variantTemplate, variantDetails);
-            var lootPools = BotPayloadProjection.BuildLootPools(botLootCacheService, variantTemplate, variantDetails, pmcConfig);
-            variants.Add(
-                new TemplateVariant(
-                    segment.Min,
-                    segment.Max,
-                    variantTemplate,
-                    lootPools,
-                    BotPayloadProjection.BuildHandbookPrices(lootPools, handbookHelper)
-                )
-            );
-        }
+        // Read by the post-call loop, so it outlives the try the wave prep runs in
+        var variants = new List<TemplateVariant>();
 
         BotInventoryBatchResult batchResult;
         try
         {
+            var waveDetails = cloner.Clone(botGenerationDetails)!;
+            waveDetails.RoleLowercase = waveDetails.Role.ToLowerInvariant();
+            // Batch preludes no longer mutate templates, so any survivor's clone is the pristine
+            // wave template
+            var waveTemplate = survivors[0].Template;
+
+            LevelGenerationView? levelGeneration = null;
+            var range = new MinMax<int>(1, 1);
+            if (waveDetails.IsPmc)
+            {
+                var expTable = globalTable.Configuration.Exp.Level.ExperienceTable;
+                range = botLevelGenerator.GetRelativePmcBotLevelRange(waveDetails, waveTemplate.BotExperience.Level, expTable.Length);
+                levelGeneration = new LevelGenerationView
+                {
+                    LevelMin = range.Min,
+                    LevelMax = range.Max,
+                    ExpTable = [.. expTable.Select(entry => entry.Experience)],
+                };
+            }
+
+            var segments = EnumerateLevelSegments(
+                waveDetails,
+                range,
+                // BotEquipmentFilterService.cs:28 - a PMC wave filters against the literal "pmc" entry
+                waveDetails.IsPmc && botConfig.Equipment.TryGetValue("pmc", out var pmcFilters)
+                    ? pmcFilters
+                    : null,
+                pmcConfig.LootItemLimitsRub
+            );
+            foreach (var segment in segments)
+            {
+                var variantDetails = cloner.Clone(waveDetails)!;
+                variantDetails.BotLevel = segment.Min;
+                var variantTemplate = cloner.Clone(waveTemplate)!;
+                botGenerator.ApplyBatchTemplateMutations(sessionId, variantTemplate, variantDetails);
+                var lootPools = BotPayloadProjection.BuildLootPools(botLootCacheService, variantTemplate, variantDetails, pmcConfig);
+                variants.Add(
+                    new TemplateVariant(
+                        segment.Min,
+                        segment.Max,
+                        variantTemplate,
+                        lootPools,
+                        BotPayloadProjection.BuildHandbookPrices(lootPools, handbookHelper)
+                    )
+                );
+            }
+
             batchResult = SptNative.GenerateBotInventoryBatch(
                 BuildBatchRequest(sessionId, waveDetails, survivors, levelGeneration, variants)
             );
         }
         catch (Exception e)
         {
-            // A wholesale failure is a native bug; on the per-bot path every bot's call would
-            // have thrown the same way and the wave would come back empty there too
+            // The wave prep runs in here too: the per-bot path contains the same level-range,
+            // filter and pool-hydration throws in its per-bot catch, and BotController's wave
+            // caller has no catch of its own. A wholesale native failure is a native bug; on the
+            // per-bot path every bot's call would have thrown the same way and the wave would come
+            // back empty there too
             logger.Critical($"Failed to generate bot wave ({botGenerationDetails.Role}): {e.Message}", e);
 
             return [];
