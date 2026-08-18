@@ -1,18 +1,126 @@
+using System.Reflection;
+using HarmonyLib;
 using SPTarkov.Common.Models.Logging;
 using SPTarkov.DI.Annotations;
 using SPTarkov.Server.Core.Extensions;
+using SPTarkov.Server.Core.Generators.Loot;
 using SPTarkov.Server.Core.Helpers.Items;
 using SPTarkov.Server.Core.Models.Common;
 using SPTarkov.Server.Core.Models.Eft.Common.Tables;
 using SPTarkov.Server.Core.Models.Enums;
+using SPTarkov.Server.Core.Models.Spt.Config;
 using SPTarkov.Server.Core.Models.Spt.Tables;
+using SPTarkov.Server.Core.Native;
+using SPTarkov.Server.Core.Native.Ragfair;
 
 namespace SPTarkov.Server.Core.Services.Ragfair;
 
+/// <summary>
+///     Cache the items linked to each item in the items db inside a dictionary
+///
+///     The table build runs in <c>rust/spt-native</c> by default; the request builder projects the
+///     live items table into the native payload. The full 4.1.2 C# implementation is retained below
+///     as the legacy path - it is the frozen mod contract (constructor and protected members are
+///     apicompat-gated against the 4.1.2 baseline) and runs instead of the native path when a Harmony
+///     patch on any frozen member is detected, when a mod substituted the service, when the frozen
+///     constructor built the instance or when RagfairConfig.ForceLegacyRagfairLinkedItemBuild is set,
+///     so mod hooks fire with genuine baseline semantics.
+/// </summary>
 [Injectable(InjectionType.Singleton)]
 public class RagfairLinkedItemService(TemplateTable templateTable, ItemHelper itemHelper, ISptLogger<RagfairLinkedItemService> logger)
 {
     protected readonly Dictionary<MongoId, HashSet<MongoId>> linkedItemsCache = new();
+
+    private readonly RagfairLinkedItemNativeRequestBuilder? _requestBuilder;
+
+    /// <summary>
+    ///     Only set beside <see cref="_requestBuilder"/> by the additive constructor, and only read
+    ///     once that builder has been found non-null.
+    /// </summary>
+    private readonly RagfairConfig? _ragfairConfig;
+
+    /// <summary>
+    ///     The constructor the container uses: the frozen 4.1.2 one plus the native request builder.
+    ///     Additive and apicompat-verified.
+    /// </summary>
+    public RagfairLinkedItemService(
+        TemplateTable templateTable,
+        ItemHelper itemHelper,
+        ISptLogger<RagfairLinkedItemService> logger,
+        RagfairLinkedItemNativeRequestBuilder requestBuilder,
+        RagfairConfig ragfairConfig
+    )
+        : this(templateTable, itemHelper, logger)
+    {
+        _requestBuilder = requestBuilder;
+        _ragfairConfig = ragfairConfig;
+    }
+
+    /// <summary>
+    ///     Which implementation the most recent table build ran - the spt-native path or the
+    ///     retained 4.1.2 C# path. Test seam; also handy in a debugger.
+    /// </summary>
+    internal LootGenerationPath LastPathTaken { get; private set; }
+
+    /// <summary>
+    ///     The built table, for parity tests to compare both paths' output.
+    /// </summary>
+    internal IReadOnlyDictionary<MongoId, HashSet<MongoId>> CacheForTests
+    {
+        get { return linkedItemsCache; }
+    }
+
+    /// <summary>
+    ///     The 4.1.2 members a mod can Harmony-patch. Public, protected and protected-internal
+    ///     methods declared on this class - exactly the surface the apicompat gate freezes, statics
+    ///     included. <see cref="BuildLinkedItemTable"/> is excluded: it is the dispatcher now, and a
+    ///     patch on it wraps whichever path runs. Everything else is never called natively, so a
+    ///     patch on one would silently do nothing.
+    /// </summary>
+    private static readonly List<MethodBase> _hookableMembers =
+    [
+        .. typeof(RagfairLinkedItemService)
+            .GetMethods(
+                BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly
+            )
+            // Property accessors and operators are IsSpecialName; constructors are not returned at all
+            .Where(method => !method.IsSpecialName && (method.IsPublic || method.IsFamily || method.IsFamilyOrAssembly))
+            .Where(method => method.Name != nameof(BuildLinkedItemTable)),
+    ];
+
+    /// <summary>
+    ///     The legacy path runs when the frozen 4.1.2 constructor built this instance (it has no
+    ///     native seam to dispatch to), when forced by config, when any of the frozen 4.1.2 members
+    ///     carries a live Harmony patch, or when a mod has substituted the service itself - running
+    ///     the retained C# implementation is the only way those hooks and replacements can take
+    ///     effect with real baseline semantics.
+    /// </summary>
+    private bool UseLegacyPath()
+    {
+        if (_requestBuilder is null || _ragfairConfig?.ForceLegacyRagfairLinkedItemBuild == true)
+        {
+            return true;
+        }
+
+        if (
+            _hookableMembers.Any(member =>
+                Harmony.GetPatchInfo(member) is { } patches
+                && (
+                    patches.Prefixes.Count > 0
+                    || patches.Postfixes.Count > 0
+                    || patches.Transpilers.Count > 0
+                    || patches.Finalizers.Count > 0
+                )
+            )
+        )
+        {
+            return true;
+        }
+
+        // A mod registered its own subclass with a higher TypePriority, so the container handed us
+        // an implementation the native side does not have
+        return GetType() != typeof(RagfairLinkedItemService);
+    }
 
     public HashSet<MongoId> GetLinkedItems(MongoId linkedSearchId)
     {
@@ -58,6 +166,31 @@ public class RagfairLinkedItemService(TemplateTable templateTable, ItemHelper it
     ///     Create Dictionary of every item and the items associated with it
     /// </summary>
     protected void BuildLinkedItemTable()
+    {
+        if (UseLegacyPath())
+        {
+            LastPathTaken = LootGenerationPath.Legacy;
+
+            BuildLinkedItemTableLegacy();
+
+            return;
+        }
+
+        LastPathTaken = LootGenerationPath.Native;
+
+        var result = SptNative.BuildRagfairLinkedItemTable(_requestBuilder!.Build());
+
+        // The same final copy loop legacy runs. Quirk 1, ported verbatim: `.Add`, never TryAdd or
+        // assignment - a rebuild over a warm cache throws on both paths, and the miss path's
+        // indexer quirk stays with it (RagfairLinkedItemService.cs:106-109, :19-24). Quirk 6: the
+        // service is lock-free; the native arm adds no lock.
+        foreach (var entry in result.LinkedItems)
+        {
+            linkedItemsCache.Add(entry.Key, entry.Value);
+        }
+    }
+
+    private void BuildLinkedItemTableLegacy()
     {
         var linkedItems = new Dictionary<MongoId, HashSet<MongoId>>();
 
