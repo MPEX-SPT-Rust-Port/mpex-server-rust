@@ -69,12 +69,22 @@ pub fn publish(request: PublishRequest) -> Result<u64, PublishError> {
         .or_else(|| previous.and_then(|db| db.globals.clone()));
 
     // Derived before the swap: a derivation error aborts the publish and leaves the previous
-    // resident DB fully intact.
+    // resident DB fully intact. The derive runs under the write guard, so a panic in it must
+    // not unwind past the guard — that would poison the static lock and take down every later
+    // resident call, including the C# self-heal republish. Caught and mapped to the same
+    // abort-before-swap path (the panic hook has already logged the payload to stderr).
     let ragfair_views = match (&templates, &traders, &globals) {
-        (Some(templates), Some(traders), Some(globals)) => Some(Arc::new(
-            crate::ragfair::views::derive(templates, traders, globals)
-                .map_err(PublishError::Views)?,
-        )),
+        (Some(templates), Some(traders), Some(globals)) => {
+            let derived = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                #[cfg(test)]
+                if tests::PANIC_ON_DERIVE.load(std::sync::atomic::Ordering::Relaxed) {
+                    panic!("injected derive panic");
+                }
+                crate::ragfair::views::derive(templates, traders, globals)
+            }))
+            .unwrap_or_else(|_| Err("ragfair view derivation panicked".to_string()));
+            Some(Arc::new(derived.map_err(PublishError::Views)?))
+        }
         _ => None,
     };
 
@@ -99,6 +109,10 @@ pub mod tests {
     /// Serializes every test that touches the process-global store — the same discipline the
     /// slice caches use (`quest/slice_cache.rs`).
     pub static DB_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Makes the next derive panic inside `publish` — proves the catch keeps the lock unpoisoned.
+    pub static PANIC_ON_DERIVE: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
 }
 
 #[cfg(test)]
@@ -237,6 +251,29 @@ mod store_tests {
             before.ragfair_views.as_ref().unwrap(),
             after.ragfair_views.as_ref().unwrap()
         ));
+    }
+
+    #[test]
+    fn derivation_panic_is_a_views_error_and_does_not_poison_the_lock() {
+        let _guard = tests::DB_TEST_LOCK.lock().unwrap();
+        use std::sync::atomic::Ordering;
+        clear();
+        publish(request(
+            r#"{"schema":1,"roots":{"templates":{"a":1},"traders":{"b":2},"globals":{"c":3}}}"#,
+        ))
+        .unwrap();
+        let before = current().unwrap();
+
+        tests::PANIC_ON_DERIVE.store(true, Ordering::Relaxed);
+        let error = publish(request(r#"{"schema":1,"roots":{"templates":{"a":9}}}"#)).unwrap_err();
+        tests::PANIC_ON_DERIVE.store(false, Ordering::Relaxed);
+        assert!(matches!(error, PublishError::Views(_)));
+
+        // The lock is not poisoned: reads and a follow-up publish still succeed
+        let after = current().unwrap();
+        assert_eq!(after.epoch, before.epoch);
+        let healed = publish(request(r#"{"schema":1,"roots":{"templates":{"a":9}}}"#)).unwrap();
+        assert_eq!(healed, before.epoch + 1);
     }
 
     #[test]

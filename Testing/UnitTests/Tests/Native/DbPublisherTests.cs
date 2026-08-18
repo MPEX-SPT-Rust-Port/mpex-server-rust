@@ -5,6 +5,7 @@ using SPTarkov.Server.Core.Services.Server;
 namespace UnitTests.Tests.Native;
 
 [TestFixture]
+[NonParallelizable]
 public class DbPublisherTests
 {
     [Test]
