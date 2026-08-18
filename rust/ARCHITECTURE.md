@@ -35,7 +35,7 @@ the mold linker on Linux. Both profiles use one codegen unit; release adds fat L
 
 | Path | Role |
 |---|---|
-| `src/lib.rs` | Module roots and `ABI_VERSION` (currently 21; must equal `SptNative.ExpectedAbiVersion`) |
+| `src/lib.rs` | Module roots and `ABI_VERSION` (currently 22; must equal `SptNative.ExpectedAbiVersion`) |
 | `src/ffi.rs` | The C-ABI surface. The **only** module containing `unsafe` |
 | `src/runtime.rs` | Process-wide multi-thread tokio runtime, `OnceLock`-built. Used only by `verify` |
 | `src/verify.rs` | Hashes `SPT_Data` with XXH3-128 and diffs it against `checks.dat` |
@@ -43,6 +43,8 @@ the mold linker on Linux. Both profiles use one codegen unit; release adds fat L
 | `src/logger.rs` | The log pipeline: `sptLogger.json`, filters, level gates, per-target formatting — and the console sink |
 | `src/log_sink.rs` | The file sink alone: where a formatted line lands on disk, with its rotation and archiving |
 | `src/diag.rs` | The generator families' way into that pipeline: the locale table, the render, and `DiagSink` |
+| `src/db.rs` | The resident DB: the epoch-versioned store of published roots (templates, traders, globals); a publish re-derives ragfair's views |
+| `src/db/models.rs` | The publish envelope's wire types |
 | `src/loot/` | Location loot (static containers, loose loot) and reward loot (airdrops, cases, containers) |
 | `src/bot/` | One bot's entire inventory: equipment, mods, weapons, magazines, loot |
 | `src/ragfair/` | One batch of dynamic flea offers: the assort walk, pricing, barter schemes, the offers |
@@ -76,11 +78,16 @@ C# SptNative → spt_generate_* (JSON in)
   3 carrying the message, because those families port a C#-sanctioned throw as a panic — a generation failure,
   not a library bug. The cost is that a real port bug in those two also arrives as 3, indistinguishable from a
   sanctioned failure. Deliberate.
-- **Two requests have a cached half**, ragfair's and the repeatable quest's. Each arrives as
-  `{invariantStamp, invariant?, varying}`; `ragfair/slice_cache.rs` and `quest/slice_cache.rs` each hold the
-  last parsed invariant slice under the stamp it came with, in **separate** slots, so a repeat pass can omit
-  it. A slice-less request whose stamp the cache does not hold returns `STATUS_STALE_EPOCH` and the C# caller
-  retries once with the slice included. Those two slices are the only request data held across calls.
+- **Ragfair rides the resident DB; the repeatable quest still carries a cached half.** `spt_db_publish`
+  (called by C#'s `DbPublisher` whenever `DatabaseMutationStamp` has moved) makes the templates, traders and
+  globals roots resident in `db.rs`, which derives ragfair's views at publish time. A ragfair request arrives
+  as `{epoch, viewsOverride?, varying}` and borrows those views; an epoch the store does not hold returns
+  `STATUS_STALE_EPOCH` and the C# caller force-publishes and retries once. An ineligible caller (mods loaded
+  without trust, or the kill switch) sends `viewsOverride` with `epoch: 0` instead — used for that call only,
+  never made resident. The quest request is still `{invariantStamp, invariant?, varying}`, with
+  `quest/slice_cache.rs` holding the last parsed invariant slice until flip #2 moves quests onto the resident
+  DB; it shares status 4's value. The resident roots and that quest slice are the only request data held
+  across calls.
 - **A buffer is written on failure too** — the parse error, the `LootError` message, or the panic text.
   Ownership is decided by the out-pointer being non-null, never by the status code. `spt_verify_database`'s
   free-on-success-only shape must not be copied into the generators.
@@ -177,7 +184,7 @@ a whole batch of offers, not one offer.
 | `assort_generator.rs` | `Generators/Ragfair/RagfairAssortGenerator.cs` | The assort walk: every flea-sold preset, then every sellable template, as (root + children) lists. Draws nothing |
 | `price_service.rs` | `Services/Ragfair/RagfairPriceService.cs` | The pricing math one offer needs — flea/handbook/trader arms, preset rollups, the one biased price draw |
 | `server_helper.rs` | `Helpers/Ragfair/RagfairServerHelper.cs` | Stack counts, offer counts, offer currency, item validity |
-| `slice_cache.rs` | — | The parsed invariant slice, keyed by the caller's `DatabaseMutationStamp` (see *FFI boundary*) |
+| `views.rs` | — | Publish-time derivation of the ragfair views from the resident roots in `src/db.rs` (see *FFI boundary*) |
 | `models.rs` | `Models/Spt/Config/RagfairConfig.cs`, `Models/…` | Config records and the request/response envelopes |
 
 Two crate-internal facts:
@@ -211,7 +218,7 @@ outcome (exhausted pool, or a generator that gave up and logged why), not a fail
 | `pickup.rs` | `Generators/RepeatableQuests/PickupQuestGenerator.cs` | The fetch-N-items-of-a-type quest. Reachable, but no shipped `quest.json` lists `Pickup` in its `types` |
 | `reward_generator.rs` | `Generators/RepeatableQuests/RepeatableQuestRewardGenerator.cs` | The reward chain every type ends with: XP, money, GP coins, an optional weapon preset, items, trader standing, an optional skill point |
 | `helper.rs` | `Helpers/Quest/RepeatableQuestHelper.cs` | The template clone/placeholder pass each generator opens with, and the level-band config lookups |
-| `slice_cache.rs` | — | The quest invariant slice, in its own slot separate from ragfair's (see *FFI boundary*) |
+| `slice_cache.rs` | — | The quest invariant slice, keyed by the caller's `DatabaseMutationStamp`; stays until flip #2 moves quests onto the resident DB (see *FFI boundary*) |
 | `models.rs` | `Models/Spt/Repeatable/…`, `Models/…` | Wire types |
 
 ## Conventions
