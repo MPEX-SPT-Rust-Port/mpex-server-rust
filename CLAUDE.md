@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 scripts/decompress-assets.sh                        # REQUIRED before first build (or .ps1 on Windows) - unpacks looseLoot.7z
 # rustup (Rust 1.97.1) is REQUIRED: dotnet build invokes cargo for rust/spt-native
-dotnet build                                        # solution is server-csharp.slnx (README's .sln path is stale)
+dotnet build                                        # solution is server-csharp.slnx
 dotnet test                                         # all tests (Testing/UnitTests, NUnit)
 dotnet test --filter "FullyQualifiedName~MongoIdTests"   # single fixture
 dotnet test --filter "Name=EveryRegisteredServiceCanBeResolved"   # single test
@@ -28,7 +28,7 @@ first, and a missing toolchain fails the build with `MSB3073`. Publishing for a 
 `-p:SptNativeRid=<rid>` as well (`dotnet publish -r` alone never reaches a RID-agnostic project reference, so cargo
 would silently emit a host-triple library); `Build.props` maps the RID to a Rust target triple and
 `SPTarkov.Server.csproj` errors out for unmapped RIDs. Only `linux-x64` on Linux hosts is mapped — arm64 is not a
-supported target, and Docker builds accept only `TARGETARCH=amd64`.
+supported target, and `Containerfile.release`/`Containerfile.dev` are x86_64-only (base image pinned `:44-x86_64`).
 
 Release builds also regenerate `SPT_Data/checks.dat` by running the `gen_checks` bin in `rust/spt-native`
 (`cargo run --bin gen_checks`), which shares the XXH3-128 implementation with the startup verifier.
@@ -56,6 +56,10 @@ persistence, websockets, admin panel, mods, build-time codegen. The rules that k
 ## Style
 
 **Rust Porting** - Follow the nomenclature and naming scheme of the C# you are replacing.
+[RUST-ROADMAP.md](RUST-ROADMAP.md) is the status/guidelines reference, [rust/ARCHITECTURE.md](rust/ARCHITECTURE.md) the
+FFI/wire-format one. Adding or changing an export means bumping `ABI_VERSION` in `rust/spt-native/src/lib.rs` *and*
+`SptNative.ExpectedAbiVersion` in `Libraries/SPTarkov.Server.Core/Native/SptNative.cs` — they are asserted equal at
+startup and in `ffi.rs` tests.
 
 CSharpier plus `.editorconfig` handle formatting. The rules a formatter can't catch:
 

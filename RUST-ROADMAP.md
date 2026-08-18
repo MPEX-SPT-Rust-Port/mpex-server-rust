@@ -52,118 +52,80 @@ known-answer tests both sides).
 
 ### Behaviour
 
-- **`get_flea_prices_as_array` is O(offers × price table) if a mod enables barters** — it re-derives
-  the whole filtered flea price list per barter offer. Dead on shipped data (`ragfair.json`
-  `dynamic.barter.chancePercent` is `0`), but a mod raising that pays it on every barter offer of a
-  full pass. Latent, not measured.
 - **Patches on collaborators do not reach the native path** and do not flip to legacy — only the
   ported classes' own members are detected. Affected: `RandomUtil`, `ItemHelper`,
   `CounterTrackerHelper`, `BotGeneratorHelper`, `DurabilityLimitsHelper`, `RepairService.AddBuff`,
   `BotWeaponGeneratorHelper`, `BotEquipmentModPoolService`, `BotLootCacheService`,
-  `WeightedRandomHelper`, `ItemFilterService`/`PresetHelper` predicates, `ICloner`. Ragfair adds
-  `HandbookHelper`, `PaymentHelper`, `BotHelper`, `TraderHelper` and `SeasonalEventService`.
-  Repeatable quests add `MathUtil`. Scav case adds `RagfairPriceService.GetStaticPriceForItem` and
-  the `HideoutTable` recipe reads, and checks no collaborator *substitution* at all — see
-  *Exceptions in force*.
+  `WeightedRandomHelper`, `ItemFilterService`/`PresetHelper` predicates, `ICloner`, plus ragfair's
+  `HandbookHelper`, `PaymentHelper`, `BotHelper`, `TraderHelper`, `SeasonalEventService`, quests'
+  `MathUtil` and scav case's `RagfairPriceService.GetStaticPriceForItem` and `HideoutTable` reads.
 - **Templates without `_props` read as "not in the db"** on the native *generator* paths — they are
-  dropped from `itemsView`. Only bites mod-added props-less templates. The base-class hydrate is the
-  exception: it projects the whole table, so a props-less template gets its cache entry as in C#.
+  dropped from `itemsView`. Only bites mod-added props-less templates. The base-class hydrate
+  projects the whole table and is unaffected.
 - **`customMoneyTpls` are not projected to the ragfair native path** — offers priced in a mod-added
   currency go through the unrounded arm.
 - **The native ragfair and scav case paths are fresher than legacy for runtime-added items** — C#
   caches `AllowedFleaPriceItemsForBarter` (ragfair) and `DbItemsCache`/`DbAmmoItemsCache` (scav
-  case) once per generator instance and effectively never invalidates them; Rust re-derives per
-  call. In native's favour, but a divergence.
+  case) per generator instance and effectively never invalidates; Rust re-derives per call.
 - **The item base-class and linked-item cache *keys* differ** — legacy stores under `item.Id`
   (`ItemBaseClassService.cs:194,199`; `RagfairLinkedItemService.cs:200`), native under the
-  `templateTable.Items` dictionary key. Separable only by a mod inserting a template under a key ≠
-  its `_id`, where legacy is the broken arm — for the linked items sharply so: every consumer
-  resolves templates by dictionary key, so `GetLinkedItems(key)` misses what legacy filed under
-  `_id`, rebuilds, and throws on the indexer where native answers. In native's favour.
+  `templateTable.Items` dictionary key. Separable only by a mod filing a template under a key ≠ its
+  `_id`, where legacy is the broken arm (consumers resolve by dictionary key).
 - **Golden-test parity is normalised, not raw-byte.** Every family has a full-output golden gate
-  (`LootParityTests`, `BotParityTests`, `RewardLootParityTests`, `RagfairParityTests`,
-  `RepeatableQuestParityTests`, `ScavCaseParityTests`, `ItemBaseClassParityTests`,
-  `RagfairLinkedItemParityTests` — the last two need no normaliser, their walks being deterministic
-  and compared for exact equality). The sanctioned gaps
-  are minted `MongoId`s (outside the seeded stream on both sides, masked by the normaliser) and, for
-  ragfair only, `intId` (a live C# counter) and `startTime`/`endTime` (one batch timestamp natively
-  vs a per-offer clock in legacy, so only the spread is compared).
-- **A failure crosses as a message for C# to throw with** — everything the run logged on the way
-  down is already in the log; the error text itself stays the C# caller's to log (one-buffer
-  contract). Since ABI 18 a panic crosses with its message too. The error line carries no category:
-  it arrives as an exception, not a log line.
+  (`*ParityTests` in `Testing/UnitTests`). Sanctioned gaps: minted `MongoId`s, and for ragfair
+  `intId` and `startTime`/`endTime` (one batch timestamp natively vs a per-offer clock in legacy).
+- **A failure crosses as a message for C# to throw with** — never as a log line, so it carries no
+  category. Since ABI 18 a panic crosses with its message too.
 - **Hangs are mostly undiagnosable** — ported retry loops can spin exactly as 4.1.2 does, inside an
-  FFI call with no managed stack trace. Generator diagnostics stream, so a hang beside a diagnostic
-  site shows its last line; elsewhere, nothing. Force legacy to get the managed stack back.
+  FFI call with no managed stack trace. Force legacy to get the managed stack back.
+- **`get_flea_prices_as_array` is O(offers × price table) if a mod enables barters.** Dead on
+  shipped data (`ragfair.json` `dynamic.barter.chancePercent` is `0`). Latent, not measured.
 
-The next five cannot fire on shipped data, and the parity gates would catch them if they started to.
-They are recorded because a mod could reach them:
-
-- **Unknown scav case recipe id** — native returns "no recipe found"; legacy NREs at the same call
-  site. A recipe missing any of the three `EndProducts` ranges is dropped by
-  `ScavCaseNativeRequestBuilder` and gets the same message; C# could never generate it either.
-- **An ammo pool with nothing in the rarity's price band** — native fails with a message, legacy
-  throws indexing the empty sequence. All three shipped rarity bands have ammo.
-- **A parentless Item-type template or a cyclic parent chain on the hydrate** — C# stores
-  `{ MongoId.Empty }` where native leaves `{}`, and recurses forever on a cycle where native breaks
-  at the first repeated parent. No shipped Item-type template is parentless and the chains are
-  acyclic.
-- **Five filter shapes on the linked-item walk** — a null-`Properties` revolver and a
-  valid-format-but-missing cylinder template NRE in legacy, an empty `Filters` list throws on
-  `.First()`, and a null-`Filter` group throws `ArgumentNullException` from any template's
-  slots/chambers/cartridges — native skips all four. The fifth is quiet: an empty **first** group
-  with a later full one adds no camora ammo in legacy, where native reads the flattened per-slot
-  list and adds the later group's edges. No shipped template carries any of the shapes.
-- **The native `_type` test is ASCII-only** — `eq_ignore_ascii_case` against C#'s
-  `StringComparison.OrdinalIgnoreCase`, so a `_type` matching `"Item"` only under non-ASCII case
-  folding diverges. Every shipped `_type` is `"Item"` or `"Node"`.
+Unreachable on shipped data, recorded because a mod could reach them: an unknown scav case recipe id
+or an ammo pool empty in its rarity band (native returns a message, legacy NREs); a parentless or
+cyclic parent chain on the hydrate (native terminates, C# stores `{ MongoId.Empty }` or recurses);
+five malformed filter shapes on the linked-item walk (native skips, legacy throws on four and
+silently drops camora ammo on the fifth); and the native `_type` test being
+`eq_ignore_ascii_case` against C#'s `OrdinalIgnoreCase`. The parity gates would catch any of them.
 
 ### Logging
 
 - **Generator lines carry one category per generator** — `typeof(T).FullName` of the C# class each
   Rust module ports, where the replay era logged the whole bot family through
-  `ISptLogger<BotInventoryGenerator>`. A `sptLogger.json` filter written against that class now
-  matches far fewer lines.
-- **Generator lines use a different `%tid%` space** — a process-local counter handed out per thread
-  in first-emit order, not the managed thread id. `%tname%` is the Rust thread name, usually empty.
-  `%date%` is the moment of emission, where replayed lines were stamped at the end of the call.
+  `ISptLogger<BotInventoryGenerator>`. A `sptLogger.json` filter against that class matches far
+  fewer lines now.
+- **Generator lines use a different `%tid%` space** — a process-local counter in first-emit order,
+  not the managed thread id. `%tname%` is the Rust thread name, usually empty. `%date%` is the
+  moment of emission, where replayed lines were stamped at the end of the call.
 - **Generator locale text is a startup snapshot** — `DatabaseImporter` pushes resolved server locales
-  once (`spt_locales_set`), so a mod mutating them later no longer changes generator line text. A
-  failed push is one stderr notice and every generator line falls back to its locale key.
+  once (`spt_locales_set`); a mod mutating them later no longer changes generator line text. A
+  failed push falls every generator line back to its locale key.
 - **Parallel generator lines interleave** — ragfair and bot rayon workers emit as they run, so lines
   no longer arrive grouped per bot or per assort entry.
-- **Console output is asynchronous and drops on a full queue** — each line goes to a writer thread
-  behind an 8192-line bounded channel. A hard crash loses what is queued; a burst deeper than the
-  queue drops lines rather than blocking.
+- **Console output is asynchronous and drops on a full queue** — an 8192-line bounded channel to a
+  writer thread. A hard crash loses what is queued; a deeper burst drops rather than blocks.
 - **Excluded categories still pay the per-line marshaling cost** — filtering moved native-side, so
-  every line is encoded and crosses the boundary before it is dropped.
+  every line crosses the boundary before it is dropped.
 - **Filter regexes are regex-lite** — no lookarounds, no backreferences, ASCII-only character
   classes. A pattern that will not compile is reported to stderr once and then never matches.
-- **A native logging failure has no C# fallback** — a failed `spt_logger_init` means one stderr
-  notice and no logging at all for the run. A config the C# parser tolerated but Rust rejects fails
-  the same way; the known cases (UTF-8 BOM, case-insensitive `logLevel`/filter `type`/`matchingType`)
-  are handled, but the `type` tag of a `loggers` entry stays case-sensitive on both sides.
+- **A native logging failure has no C# fallback** — a failed `spt_logger_init` means no logging at
+  all for the run, and the same for a config the C# parser tolerated but Rust rejects. The known
+  cases are handled except the `type` tag of a `loggers` entry, case-sensitive on both sides.
 - **The pipeline reads `sptLogger.json` once; runtime mutation needs an explicit reload** — mutating
-  `SptLoggerConfiguration.Loggers` alone changes what `IsLogEnabled` answers but not what is
-  written. `SPTLoggerDispatcher.ReloadConfiguration()` (additive, post-port) re-hands the object to
-  `spt_logger_reinit`; a reload the native parser rejects leaves the running pipeline untouched.
-  Mutate `Loggers` before the server serves traffic, or accept the enumeration race — unguarded,
-  exactly as pre-port.
-- **Line terminators are always `\n` and dates always Gregorian, culture-independent** — a Windows
-  log file loses its `\r` and a non-Gregorian locale no longer shows in `%date%`.
-- **File rotation was redesigned, not ported** — ZLogger rolled with an ascending sequence
-  (`spt.1.log` was the *next* file); the native sink cascades, so `.1` is always the *most recent*
-  archive and `spt.log` only ever holds the current run. Anyone comparing `spt.N.log` across the
-  upgrade reads the sequence in the opposite order.
-- **Lowering `maxRollingFiles` does not sweep the old high indices** — a change from 10 to 3 strands
+  `SptLoggerConfiguration.Loggers` changes what `IsLogEnabled` answers but not what is written.
+  `SPTLoggerDispatcher.ReloadConfiguration()` (additive, post-port) re-hands the object to
+  `spt_logger_reinit`; a rejected reload leaves the running pipeline untouched.
+- **Line terminators are always `\n` and dates always Gregorian, culture-independent.**
+- **File rotation was redesigned, not ported** — ZLogger rolled ascending (`spt.1.log` was the
+  *next* file); the native sink cascades, so `.1` is the *most recent* archive and `spt.log` only
+  ever holds the current run. Anyone comparing `spt.N.log` across the upgrade reads it backwards.
+- **Lowering `maxRollingFiles` does not sweep the old high indices** — 10 → 3 strands
   `spt.3.log`..`spt.9.log` until deleted by hand (the `ponytail:` note in `log_sink.rs`'s `cascade`).
 - **Mod `ILogHandler` routing goes through a hybrid tap.** The dispatcher fans C#-originated lines
-  out to handlers (original message and `Exception` object, per-reference filters and level);
-  `spt_log_set_tap`'s callback delivers Rust-originated generator lines, which arrive as rendered
-  text with no `Exception` object and the native `%tid%` counter. Registration changed shape:
-  resolve `SPTLoggerDispatcher` from DI and call `RegisterHandler` (additive, post-port), because
-  `AddSptLogger` builds the dispatcher from its own service collection and a constructor-injected
-  handler set is therefore always empty in a real run.
+  out to handlers; `spt_log_set_tap`'s callback delivers Rust-originated generator lines as rendered
+  text with no `Exception` object. Registration changed shape: resolve `SPTLoggerDispatcher` from DI
+  and call `RegisterHandler` (additive, post-port) — a constructor-injected handler set is always
+  empty in a real run.
 
 ## Guidelines
 
@@ -201,9 +163,8 @@ adds `LocationConfig`, the four quest generators add `QuestConfig` +
 `ItemBaseClassService` adds `ItemBaseClassNativeRequestBuilder` + `ItemConfig`,
 `RagfairLinkedItemService` adds `RagfairLinkedItemNativeRequestBuilder` + `RagfairConfig`. The
 container selects the overload; anything built through the frozen 4.1.2 constructor gets a null
-builder and runs legacy unconditionally. Ragfair offer generation needed no change —
-`RagfairConfig` was already injected there. `RepeatableQuestRewardGenerator` and `RepeatableQuestHelper` are folded in by their
-callers, so both keep their frozen constructors untouched.
+builder and runs legacy unconditionally. Ragfair offer generation, `RepeatableQuestRewardGenerator`
+and `RepeatableQuestHelper` needed no change at all.
 
 **Config flags.** `LocationConfig.ForceLegacyLootGeneration` covers *both* loot generators — there
 is no per-generator flag. Elsewhere: `BotConfig.ForceLegacyBotGeneration` and `ForcePerBotGeneration`,
@@ -220,29 +181,24 @@ dispatcher entry point itself — a patch there wraps whichever path runs, by de
 bots, the four generator classes; ragfair, `RagfairOfferGenerator`, `RagfairPriceService`,
 `RagfairServerHelper`, `RagfairAssortGenerator`; quests, the four `*QuestGenerator`s plus
 `RepeatableQuestRewardGenerator` and `RepeatableQuestHelper`; scav case, base class and the
-linked-item table, their own class only. A container-substituted subclass also flips — except for
-scav case, which checks no
-substitution at all, so swapping `PresetHelper`, `RagfairPriceService`, `ItemFilterService`,
-`SeasonalEventService` or `ItemHelper` under it is silently ignored. Bots additionally flip on an
-`InventoryMagGenComponents` set that isn't exactly the four built-ins. `PickupQuestGenerator`
-contributes **zero** frozen hookable members — its whole legacy body is inline in `Generate`.
+linked-item table, their own class only. A container-substituted subclass also flips — except scav
+case, which checks no substitution at all. Bots additionally flip on an `InventoryMagGenComponents`
+set that isn't exactly the four built-ins. `PickupQuestGenerator` contributes **zero** frozen
+hookable members — its whole legacy body is inline in `Generate`.
 
 **The bot wave batches before it iterates.** `BotController.GenerateBotWave` offers the wave to
 `BotWaveBatcher.TryGenerateWave` first; the batcher returns null — and the unchanged per-bot path
 runs — on `ForcePerBotGeneration`, on anything `BotInventoryGenerator.UseLegacyPath()` already
 catches, on a patch of any frozen `BotGenerator`/`BotController` member except `GenerateBotWave`, on
-a substituted `BotGenerator`, or on a wave that could write nighttime clamps (night raid **and** the
-role's equipment config carries `NighttimeChanges.EquipmentModsModifiers`) — only the per-bot path
-replays those. A `BotController` subclass on the frozen 14-parameter constructor gets a null batcher.
-The response is one `{result | error}` envelope per bot in request order (ABI 8): a failed bot is
-skipped with a Critical log and the rest of the wave still generates.
+a substituted `BotGenerator`, or on a wave that could write nighttime clamps (only the per-bot path
+replays those). The response is one `{result | error}` envelope per bot in request order (ABI 8): a
+failed bot is skipped with a Critical log and the rest of the wave still generates.
 
 **State replayed after a native call**, because Rust keeps it to itself: bot container grid occupancy
-(`RestoreContainerGrids`) and nighttime mod-chance clamps (`ReplayRandomisationClamps`, a cross-bot
-feedback loop through `BotEquipmentFilterService`); ragfair's `rejectedCanSellTemplates`, which sets
-`CanSellOnRagfair = false` on the live template table. The quest `QuestTypePool` round-trips and is
-copied *into* the caller's instance (`CopyPoolInto`), not swapped — the controller keeps reading that
-instance, so reference identity has to survive.
+(`RestoreContainerGrids`) and nighttime mod-chance clamps (`ReplayRandomisationClamps`); ragfair's
+`rejectedCanSellTemplates`, which sets `CanSellOnRagfair = false` on the live template table. The
+quest `QuestTypePool` round-trips and is copied *into* the caller's instance (`CopyPoolInto`), not
+swapped — the controller keeps reading that instance, so reference identity has to survive.
 
 **The reward-loot blacklist crosses as two collections** — `configBlacklist` for the reward pool,
 `globalBlacklist` for sealed-container filters. They differ once a mod calls
@@ -253,55 +209,44 @@ unparsed (faster, more faithful); a registered `LazyLoad` transformer (seasonal 
 the typed path instead, which is slower than both the raw path and the C# it replaced. A mod can
 therefore put a server on the slow path without saying so.
 
-**The ragfair batch walk is parallel only when unseeded.** An unseeded walk fans across rayon
-(`1.12.0`): a forked `RagfairContext` per assort entry, results merged back in assort order with
-`intId` reassigned during the merge. A **seeded** walk stays sequential — the seeded RNG is
-`thread_local` — and all `RagfairParityTests` cases set a seed, so parity rides the unchanged path.
-Production is unseeded on both arms, so the parallel path breaks no promise.
+**The ragfair batch walk is parallel only when unseeded.** An unseeded walk fans across rayon: a
+forked `RagfairContext` per assort entry, merged back in assort order with `intId` reassigned during
+the merge. A **seeded** walk stays sequential (the seeded RNG is `thread_local`) and every
+`RagfairParityTests` case sets a seed, so parity rides the unchanged path. Production is unseeded on
+both arms.
 
 **The ragfair response is a framed MessagePack envelope, not a JSON buffer** — one length-prefixed
 frame per offer behind a header frame (since ABI 10, encoding tag 1), deserialised with
-`Parallel.For` straight out of the native buffer, so no whole-response JSON document is ever
-materialised. Ragfair is the only export that uses it. Its batch also takes **one timestamp**, where
-legacy calls `TimeUtil.GetTimeStamp()` per offer, so `startTime` is uniform across a batch.
+`Parallel.For` straight out of the native buffer. Ragfair is the only export that uses it. Its batch
+also takes **one timestamp** where legacy calls `TimeUtil.GetTimeStamp()` per offer.
 
 **Ragfair and quests each cache an invariant slice natively — the only two exceptions to guideline
-3.** Separate native caches (`src/quest/slice_cache.rs` for quests) keyed on the same
-`DatabaseMutationStamp`, a monotonic counter bumped from `SeasonalEventService.UpdateGlobalEvents`,
-`ItemFilterService`'s two blacklist `Add*` methods, `CustomItemService`'s two `Create*` methods and a
-guarded replay bump when `CanSellOnRagfair` flips true→false. The request is
-`{invariantStamp, invariant?, varying}` (ragfair since ABI 13, quests since ABI 14); a slice-less
-request whose stamp the cache does not hold returns `STATUS_STALE_SLICE` (4), surfacing as
-`NativeStaleSliceException` and self-healing with one full-send retry, so a lost cache costs one
-pass's projection and never a wrong result. **A mod writing an injected table's dictionaries
-directly is invisible to the stamp by design** — the eligibility gate carries that weight instead:
-the cache is used only when no mods are loaded, with `TrustNativeRequestCacheWithMods` as the opt-in
-and `DisableNativeRequestCache` as the kill switch. A modded server therefore full-sends every call.
-**Known ceiling:** runtime *config* edits are slice inputs the stamp does not watch. No production
-path writes config at runtime today; test fixtures bump the stamp manually. Instrument the config
-objects if that changes. Every other payload in the crate — scav case, the base-class hydrate and
-the linked-item build included — is still projected per call; the linked-item build is also lazy
-and single-shot, so in practice that is one projection for the life of the process.
+3.** Separate caches keyed on the same `DatabaseMutationStamp`, a monotonic counter bumped from
+`SeasonalEventService.UpdateGlobalEvents`, `ItemFilterService`'s blacklist `Add*` methods,
+`CustomItemService`'s `Create*` methods and a guarded replay bump when `CanSellOnRagfair` flips
+true→false. The request is `{invariantStamp, invariant?, varying}` (ragfair ABI 13, quests ABI 14);
+a slice-less request whose stamp the cache does not hold returns `STATUS_STALE_SLICE` (4), surfacing
+as `NativeStaleSliceException` and self-healing with one full-send retry — a lost cache costs one
+pass's projection, never a wrong result. **A mod writing an injected table's dictionaries directly is
+invisible to the stamp by design** — the eligibility gate carries that weight instead: the cache is
+used only when no mods are loaded, with `TrustNativeRequestCacheWithMods` as the opt-in and
+`DisableNativeRequestCache` as the kill switch. **Known ceiling:** runtime *config* edits are slice
+inputs the stamp does not watch; no production path writes config at runtime today. Every other
+payload in the crate is still projected per call.
 
 **The ported 4.1.2 quirks are documented at their call sites**, as numbered `Quirk N` comments in
 `rust/spt-native/src/quest/*.rs`, `src/scav_case/generator.rs`, `src/base_class.rs` and
-`src/linked_items.rs` (`quest/helper.rs:169` carries an unnumbered one). Grep case-insensitively for
-`quirk` in those paths — that turns up base-class quirks 2, 3 and 5 and linked-item quirks 2, 3, 4,
-7 and 8 only: base-class quirk 1 is on the C# side (hydrate resets the cache dictionary but never
-`_rootNodeIds`, so the native arm unions the response's root ids into the existing set rather than
-replacing it), as are linked-item quirks 1, 5 and 6 (the `.Add` copy loop and the no-lock rule are
-the dispatcher's, the null-`Filter`-group projection the request builder's); base-class quirk 4 has
-no code site, its quirk being an unreachable error path. The behaviour these preserve is deliberate; reverting one silently diverges
-from C#. The bare `:N` line numbers in those comments are the 4.1.2 body the port was written
-against, not the current file — where a native seam was inserted above a retained legacy body, the
-C# line has since moved down.
+`src/linked_items.rs`; grep case-insensitively for `quirk`. Some numbers have no Rust site because
+the quirk lives on the C# side (the base-class hydrate never resetting `_rootNodeIds`, the
+linked-item dispatcher's copy loop and no-lock rule, the request builder's null-`Filter`-group
+projection) or on no code at all. The behaviour these preserve is deliberate; reverting one silently
+diverges from C#. The bare `:N` line numbers in those comments are the 4.1.2 body the port was
+written against, not the current file.
 
 ## Roadmap
 
 1. Next candidates and their costing live in [todo/TODO.md](todo/TODO.md); with #1 and #2 landed,
    the unstarted front is the tier-1 completeness trio (#4-#6) and tier 2.
-2. Convert `is_valid_reward_item`'s trader whitelist to the set form and measure.
-   `quest/reward_generator.rs` builds it as a `Vec<&str>` of up to 14 candidates, consumed 4,673
-   times per Completion pass; `ItemBaseClassCache::is_of_baseclasses_set` is the cheaper shape once
-   a candidate list is long enough, and 14 is the point where that is worth checking rather than
-   assuming. Narrow and unmeasured.
+2. Convert `is_valid_reward_item`'s trader whitelist (`quest/reward_generator.rs:869`, a `Vec<&str>`
+   of up to 14 candidates) to `ItemBaseClassCache::is_of_baseclasses_set` and measure whether 14 is
+   long enough for the set form to pay. Narrow and unmeasured.
