@@ -135,10 +135,15 @@ silently drops camora ammo on the fifth); and the native `_type` test being
 2. **Override contract.** Detect Harmony patches on the frozen members (`Harmony.GetPatchInfo`) and
    route to legacy so hooks fire with baseline semantics. Add a `forceLegacy...` config flag as the
    escape hatch for hooks detection can't see.
-3. **Project per call, never cache.** Payloads are rebuilt from the live database, configs and
-   services on every call — that is what keeps runtime mod mutations visible. Accept the cost. Two
-   exceptions are in force, the ragfair and repeatable-quest invariant slices; see *Exceptions in
-   force* for their terms.
+3. **Resident DB epoch, publish on dirty.** DB-derived state lives resident on the Rust side:
+   `DbPublisher` republishes every supported root when the global `DatabaseMutationStamp` has moved
+   and stamps the returned epoch into each request. Only the varying block — per-call service and
+   config state — and the optional `viewsOverride` remain per-call. Ineligible callers (mods loaded
+   without `TrustNativeRequestCacheWithMods`, or `DisableNativeRequestCache`) send the C#-built
+   view bundle as `viewsOverride` on every call at today's projection cost, never touching resident
+   state. Full protocol: the epoch-protocol section and its 2026-08-18 amendments in
+   docs/superpowers/specs/2026-08-17-rust-state-ownership-design.md. Quests still run the older
+   stamp-keyed invariant-slice cache until flip #2; see *Exceptions in force*.
 4. **RNG parity.** Both sides draw through the shared xoshiro256\*\* source behind test-only seams
    (`Utils/RandomSource.cs` / `random_util.rs`), pinned by twin known-answer tests. Production C#
    randomness stays bit-for-bit unchanged.
@@ -220,19 +225,34 @@ frame per offer behind a header frame (since ABI 10, encoding tag 1), deserialis
 `Parallel.For` straight out of the native buffer. Ragfair is the only export that uses it. Its batch
 also takes **one timestamp** where legacy calls `TimeUtil.GetTimeStamp()` per offer.
 
-**Ragfair and quests each cache an invariant slice natively — the only two exceptions to guideline
-3.** Separate caches keyed on the same `DatabaseMutationStamp`, a monotonic counter bumped from
-`SeasonalEventService.UpdateGlobalEvents`, `ItemFilterService`'s blacklist `Add*` methods,
-`CustomItemService`'s `Create*` methods and a guarded replay bump when `CanSellOnRagfair` flips
-true→false. The request is `{invariantStamp, invariant?, varying}` (ragfair ABI 13, quests ABI 14);
-a slice-less request whose stamp the cache does not hold returns `STATUS_STALE_EPOCH` (4), surfacing
-as `NativeStaleEpochException` and self-healing with one full-send retry — a lost cache costs one
-pass's projection, never a wrong result. **A mod writing an injected table's dictionaries directly is
-invisible to the stamp by design** — the eligibility gate carries that weight instead: the cache is
-used only when no mods are loaded, with `TrustNativeRequestCacheWithMods` as the opt-in and
-`DisableNativeRequestCache` as the kill switch. **Known ceiling:** runtime *config* edits are slice
-inputs the stamp does not watch; no production path writes config at runtime today. Every other
-payload in the crate is still projected per call.
+**Ragfair reads the resident DB; quests still cache an invariant slice — the two departures from
+per-call projection (guideline 3).** Both key freshness on the same `DatabaseMutationStamp`, a
+monotonic counter bumped from `SeasonalEventService.UpdateGlobalEvents`, `ItemFilterService`'s
+blacklist `Add*` methods, `CustomItemService`'s `Create*` methods and a guarded replay bump when
+`CanSellOnRagfair` flips true→false. **Ragfair (flip #1, ABI 22):** `DbPublisher` publishes the
+templates, traders and globals roots into the resident store (`rust/spt-native/src/db.rs`), which
+derives the ragfair views at publish time; each request carries the epoch, and an epoch the store
+does not hold returns `STATUS_STALE_EPOCH` (4), surfacing as `NativeStaleEpochException` and
+self-healing with one `ForcePublish` + retry — a lost epoch costs one republish, never a wrong
+result. **Quests:** the older stamp-keyed slice cache (`{invariantStamp, invariant?, varying}`,
+quests ABI 14) runs unchanged until flip #2 and shares status 4's value. **A mod writing an
+injected table's dictionaries directly is invisible to the stamp by design** — the eligibility gate
+carries that weight instead: resident state (and the quest cache) is trusted only when no mods are
+loaded, with `TrustNativeRequestCacheWithMods` as the opt-in and `DisableNativeRequestCache` as the
+kill switch; ineligible ragfair callers send a per-call `viewsOverride` instead (guideline 3).
+Every other payload in the crate is still projected per call.
+
+**Flip #1 ledger.** (a) `highestTraderPrices` freshness: legacy's `TraderHelper` price cache could
+serve stale values into a rebuilt slice; Rust re-derives the map on every publish, so the resident
+path can be *fresher* than legacy after runtime template mutations — favours correctness, recorded
+here rather than "fixed". (b) pmc name lists stay C#-projected in the varying block; flip #6 (bots
+root resident) is the named revisit point. (c) Runtime *config* edits still bypass the stamp — the
+pre-flip ceiling, unchanged, and Phase 4 closes it — but ragfair's config-derived fields now flow
+through the varying block on every call, which narrows the ceiling for ragfair. Net `Native/`
+delta for the flip (`git diff --stat da556e7..0287c7e -- Libraries/SPTarkov.Server.Core/Native/`):
++214/−70 lines across 7 files — the invariant half of the ragfair builder is gone, and `Db/`
+(`DbPublisher` + `DbPayloadProjection`, 105 lines) is new shared infrastructure every later flip
+reuses.
 
 **The ported 4.1.2 quirks are documented at their call sites**, as numbered `Quirk N` comments in
 `rust/spt-native/src/quest/*.rs`, `src/scav_case/generator.rs`, `src/base_class.rs` and
