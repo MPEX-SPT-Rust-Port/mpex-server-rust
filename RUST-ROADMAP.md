@@ -8,10 +8,9 @@ internals see [rust/ARCHITECTURE.md](rust/ARCHITECTURE.md); for the C# side of t
 
 The loot family, the bot family, dynamic ragfair offer generation, the repeatable-quest family, scav
 case rewards, the item base-class cache build and the ragfair linked-item table are ported and run
-natively by default. Every
-ported class keeps its full 4.1.2 C# implementation as a **legacy path**, selected automatically
-when a mod hooks it or manually via a config flag. The log pipeline is ported too, and has no legacy
-path: `SPTLoggerDispatcher` hands every line to the crate.
+natively by default. Every ported class keeps its full 4.1.2 C# implementation as a **legacy path**,
+selected automatically when a mod hooks it or manually via a config flag. The log pipeline is ported
+too, and has no legacy path: `SPTLoggerDispatcher` hands every line to the crate.
 Twenty-two C-ABI exports (`src/ffi.rs`) carry all of it, JSON in and JSON out — except the ragfair
 response, which is a framed MessagePack envelope, and `spt_log_emit`, which passes the fields of one
 line directly (current ABI 21).
@@ -143,25 +142,40 @@ the native pipeline; seeded-RNG parity at the primitive level (xoshiro256\*\*, t
   whichever request arrives first**, once, and nothing afterwards. Native stays the default for
   family consistency and `RagfairConfig.ForceLegacyRagfairLinkedItemBuild` is the opt-out. See
   [BENCHMARK.md](BENCHMARK.md) § *Results — ragfair linked item table*.
-- **Four shapes around the revolver cylinder throw or NRE in legacy where native skips or
-  proceeds** — all in `AddRevolverCylinderAmmoToLinkedItems`' cylinder resolution
-  (`RagfairLinkedItemService.cs:119-136`) and `GetSlotFilters` (`:165`), and all sanctioned. A
+- **Five filter shapes throw or NRE in legacy where native skips or proceeds** — four of them in
+  `AddRevolverCylinderAmmoToLinkedItems`' cylinder resolution
+  (`RagfairLinkedItemService.cs:119-136`), one on any template at all, and all sanctioned. A
   revolver-parented template with null `Properties` NREs at `:119`, which dereferences
-  `cylinder.Properties.Slots` unconditionally, and a cylinder tpl that is valid-format but absent
-  from the items table NREs at `:135-136` (`itemHelper.GetItem(…).Value` is null into
-  `GetSlotFilters`); native sees an absent `slots` in the projection and skips both. An **empty
-  `Filters` list** throws `InvalidOperationException` on C#'s `.First()` where native, reading the
-  flattened per-slot `filter` the builder sends, finds it empty and returns early. And a `Filters`
-  group with a **null `Filter`** throws `ArgumentNullException` from `UnionWith(null)` where
-  `RagfairLinkedItemNativeRequestBuilder` projects it as empty and native proceeds. There is a
-  fifth, quieter shape in the same resolution and it is the one that is *not* a C# failure: when
-  the **first** `Filters` group is empty or null-`Filter` while a later group carries ids, C#
-  resolves `MongoId.Empty`, fails the `IsValidMongoId` gate and adds no camora ammo, where the
-  flattened list native reads starts at the later group's first id and it adds the edges. None of
-  the five is reachable on shipped data — no template carries any of those shapes — and
+  `cylinder.Properties.Slots` unconditionally; native sees an absent `slots` in the projection and
+  returns before it looks anything up. A cylinder tpl that is valid-format but absent from the
+  items table NREs at `:135-136` (`itemHelper.GetItem(…).Value` is null into `GetSlotFilters`);
+  native gets that far and skips on the items-view lookup missing instead
+  (`linked_items.rs:121`) — a different mechanism from the one above, at a later point in the same
+  function. An **empty `Filters` list** throws `InvalidOperationException` on C#'s `.First()` where
+  native, reading the flattened per-slot `filter` the builder sends, finds it empty and returns
+  early. The fourth is the quiet one, and the only one that is *not* a C# failure: when the
+  **first** `Filters` group is empty or null-`Filter` while a later group carries ids, C# resolves
+  `MongoId.Empty`, fails the `IsValidMongoId` gate and adds no camora ammo, where the flattened
+  list native reads starts at the later group's first id and it adds the edges. The fifth is not a
+  cylinder shape at all: a `Filters` group with a **null `Filter`** throws `ArgumentNullException`
+  from `UnionWith(null)` in `GetSlotFilters`/`GetChamberFilters`/`GetCartridgeFilters` (`:165` and
+  their twins), so it fires on any template's slots, chambers or cartridges during the main walk —
+  `RagfairLinkedItemNativeRequestBuilder` projects such a group as empty and native proceeds. None
+  of the five is reachable on shipped data — no template carries any of those shapes — and
   `RagfairLinkedItemParityTests` compares both paths' whole output over the real table, so the
   legacy arm would throw rather than let one ship. Same class as the base-class hydrate's
   parentless/cyclic pair.
+- **The linked-item cache key is the same divergence as the base-class one, and lands the same
+  way** — legacy keys `linkedItemsCache` by `item.Id` while iterating `.Values`
+  (`RagfairLinkedItemService.cs:200`, `:67` in the 4.1.2 body the port cites), where native keys by
+  the `templateTable.Items` dictionary key echoed back from Rust (`linked_items.rs:40`), on both
+  the seeded entries and the reverse edges. Identical on shipped data — the parity test proves it
+  over the whole table — and separable only by a mod inserting a template under a key ≠ its `_id`.
+  There, as with the base class, **legacy is the broken arm**, and more sharply: every other
+  consumer resolves a template by dictionary key (`ItemHelper.GetItem` is a `TryGetValue` on it),
+  so the key is the only id anything can ask for, and legacy has filed the set under one nothing
+  looks up. `GetLinkedItems(key)` misses, rebuilds, and then throws on the indexer — where native
+  answers. Unreachable on shipped data, in native's favour.
 - **`get_flea_prices_as_array` is O(offers × price table) if a mod enables barters** — it re-derives
   the whole filtered flea price list per barter offer, with an ancestor-cache probe per entry.
   Dead on shipped data (`ragfair.json` `dynamic.barter.chancePercent` is `0`, so no barter offer is

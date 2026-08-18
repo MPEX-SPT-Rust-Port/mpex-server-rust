@@ -56,7 +56,7 @@ public record RagfairLinkedItemView
 
 /// <summary>
 /// A <c>Slot</c> flattened onto the union of all its filter groups, in order - not
-/// <c>Filters[0].Filter</c> like <c>PayloadProjection.ToSlotViews</c> (<c>LootPayloads.cs:319</c>) -
+/// <c>Filters[0].Filter</c> like <c>PayloadProjection.ToSlotViews</c> (<c>PayloadProjection.cs:150</c>) -
 /// because the walk unions every group (<c>RagfairLinkedItemService.cs:163-166</c>).
 /// </summary>
 public record RagfairLinkedSlotView

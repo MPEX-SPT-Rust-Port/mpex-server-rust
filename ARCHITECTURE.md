@@ -157,11 +157,10 @@ startup outside DEBUG. That format is a contract shared with `rust/spt-native/sr
 Server.Core. It owns database hash verification, the ported generation
 paths — location loot, reward loot, whole-bot inventory, dynamic ragfair offers, repeatable quests,
 scav case rewards — the item base-class cache build, the ragfair linked-item table, and the whole
-log pipeline. Twenty-two exports,
-JSON in / JSON out — except the ragfair response, which comes back as a framed MessagePack
-envelope, and the log exports, where `spt_logger_init` takes the raw `sptLogger.json` bytes and
-`spt_log_emit` passes one line's fields directly — with `spt_native_abi_version` handshaking against
-`SptNative.ExpectedAbiVersion`.
+log pipeline. Twenty-two exports, JSON in / JSON out — except the ragfair response, which comes back
+as a framed MessagePack envelope, and the log exports, where `spt_logger_init` takes the raw
+`sptLogger.json` bytes and `spt_log_emit` passes one line's fields directly — with
+`spt_native_abi_version` handshaking against `SptNative.ExpectedAbiVersion`.
 
 Payloads are projected from the live database on every call, with one exception: the ragfair
 request's call-invariant half is sent only when `DatabaseMutationStamp` — a singleton the
