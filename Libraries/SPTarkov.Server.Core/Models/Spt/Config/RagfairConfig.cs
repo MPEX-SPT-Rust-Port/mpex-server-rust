@@ -53,6 +53,14 @@ public record RagfairConfig : BaseConfig
     public bool ForceLegacyRagfairGeneration { get; set; }
 
     /// <summary>
+    ///     Force the ragfair linked item table build down the retained 4.1.2 C# path instead of
+    ///     spt-native. The escape hatch for hooks the patch detection cannot see - patches on
+    ///     helpers the service calls rather than on its own frozen members.
+    /// </summary>
+    [JsonPropertyName("forceLegacyRagfairLinkedItemBuild")]
+    public bool ForceLegacyRagfairLinkedItemBuild { get; set; }
+
+    /// <summary>
     ///     Keep the native request-slice cache live even with mods loaded. Off, any loaded mod
     ///     disables the cache. On, the instrumented mutation paths (CustomItemService, the
     ///     blacklist caches, seasonal events) still invalidate it, but a mod writing an injected

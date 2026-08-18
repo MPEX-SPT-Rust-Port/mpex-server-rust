@@ -51,11 +51,12 @@ internal enum LootExport
     RepeatableQuest,
     ScavCaseRewards,
     ItemBaseClass,
+    RagfairLinkedItems,
 }
 
 public static class SptNative
 {
-    private const uint ExpectedAbiVersion = 20;
+    private const uint ExpectedAbiVersion = 21;
 
     // ffi.rs
     private const int StatusOk = 0;
@@ -188,6 +189,19 @@ public static class SptNative
     {
         return Generate<ItemBaseClassResponse>(
             LootExport.ItemBaseClass,
+            JsonSerializer.SerializeToUtf8Bytes(request, LootJsonOptions)
+        ).Result;
+    }
+
+    /// <summary>
+    /// Builds the whole ragfair linked-item table in one call, handing back every template's
+    /// linked-tpl set, reverse edges included.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">The build failed, or the native side misbehaved.</exception>
+    public static RagfairLinkedItemResult BuildRagfairLinkedItemTable(RagfairLinkedItemRequest request)
+    {
+        return Generate<RagfairLinkedItemResponse>(
+            LootExport.RagfairLinkedItems,
             JsonSerializer.SerializeToUtf8Bytes(request, LootJsonOptions)
         ).Result;
     }
@@ -478,6 +492,12 @@ public static class SptNative
                     &outLen
                 ),
                 LootExport.ItemBaseClass => NativeMethods.BuildItemBaseClassCache(requestPtr, (nuint)requestUtf8.Length, &outPtr, &outLen),
+                LootExport.RagfairLinkedItems => NativeMethods.BuildRagfairLinkedItemTable(
+                    requestPtr,
+                    (nuint)requestUtf8.Length,
+                    &outPtr,
+                    &outLen
+                ),
                 _ => throw new ArgumentOutOfRangeException(nameof(export), export, null),
             };
         }

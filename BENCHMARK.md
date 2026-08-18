@@ -13,6 +13,7 @@ replaced. They live under `Testing/UnitTests/Tests/` as `[Explicit]` NUnit fixtu
 | `RepeatableQuestBenchmarkTests.cs` | one repeatable quest of each type — elapsed time per quest, native measured with the invariant slice cold and warm, with the slice projection timed separately |
 | `ScavCaseBenchmarkTests.cs` | one scav case of each shipped recipe — elapsed time per call, with the request projection timed separately |
 | `ItemBaseClassBenchmarkTests.cs` | one bulk item base class cache build over the shipped items table — elapsed time per hydrate, with the request projection timed separately |
+| `RagfairLinkedItemBenchmarkTests.cs` | one ragfair linked item table build over the shipped items table — elapsed time per build, with the request projection timed separately |
 
 There are no `cargo bench` targets. `Containerfile.dev` mentions `cargo bench` as a toolchain
 capability, not as a suite that exists.
@@ -52,6 +53,10 @@ dotnet test -c Release --filter "FullyQualifiedName~ScavCaseBenchmarkTests" \
 
 # one bulk base class cache build, both paths, plus the request projection on its own
 dotnet test -c Release --filter "FullyQualifiedName~ItemBaseClassBenchmarkTests" \
+  --logger "console;verbosity=detailed"
+
+# one linked item table build, both paths, plus the request projection on its own
+dotnet test -c Release --filter "FullyQualifiedName~RagfairLinkedItemBenchmarkTests" \
   --logger "console;verbosity=detailed"
 ```
 
@@ -839,6 +844,123 @@ Base-class-specific caveats, on top of the general ones below:
 - **The legacy arm's mean is not its cost.** 10.32 ms against an 8.19 ms median and a 7.42 ms min:
   a few slow early runs, the same artifact the other fixtures document. Read the median.
 - **Workstation GC**, as with the ragfair, quest and scav-case fixtures.
+
+## Results — ragfair linked item table
+
+Recorded 2026-08-17 on `dd96eb1` plus the working-tree fixture that produced them. Same machine as
+the bot-generation, ragfair, repeatable-quest, scav-case and item-base-class figures above, not the
+machine the location-loot figures came from.
+
+| | |
+|---|---|
+| CPU | AMD Ryzen 5 5600H (6C/12T) |
+| RAM | 23 GB |
+| OS | Linux 7.1.8-200.fc44.x86_64 |
+| .NET SDK | 10.0.110 |
+| rustc | 1.97.1 |
+| Configuration | Release, n=20 after 2 warmups, per arm |
+
+**Native loses this one too, and by more than the base class port did.** The build is a
+deterministic walk over the shipped items table, and the C# it replaces walks a dictionary the
+process already holds — no filtering, no draws, no clone. The design said so up front (the port
+design's *Transport expectation*: "native will likely lose the end-to-end benchmark"), and it does.
+It is a once-per-process lazy build — see *Why native stays the default anyway* below.
+
+**Workload.** One linked item table build over the live shipped items table: 4,673 templates in, a
+table of 4,673 tpls carrying 63,530 linked ids out. `BuildLinkedItemTable` is protected, so the
+timed call is `GetLinkedItems(tpl)` on a fresh instance — the cache miss triggers the build, exactly
+the way production reaches it. The miss and the indexer read that follows are both a dictionary
+probe against a full-table walk. This is the whole workload the service has; nothing else about it
+was ported.
+
+**Two arms**, asserted rather than assumed — the fixture checks `LastPathTaken` before it reports a
+number:
+
+- **native** — the additive constructor, which wires the request builder. What the container builds.
+- **legacy** — the frozen 4.1.2 constructor, which has no native seam and so builds legacy
+  unconditionally. Selected by construction rather than by
+  `RagfairConfig.ForceLegacyRagfairLinkedItemBuild`, so the fixture never touches the shared config;
+  the dispatcher reaches the same body either way.
+
+**A service instance per run**, built outside the stopwatch — not an optimisation but a requirement.
+The final copy loop is `Dictionary.Add` (quirk 1, ported verbatim on both paths), so a second build
+on a warm instance throws; each run must build its own. That is also the production shape, since the
+service is a singleton that builds once.
+
+A third phase times `RagfairLinkedItemNativeRequestBuilder.Build()` on its own.
+
+### Elapsed time per build
+
+Two full invocations of the fixture. The recorded figures are the second invocation's; the first
+invocation's median is the error bar on it.
+
+| Arm | median | median (1st run) | mean | min | max |
+|---|---|---|---|---|---|
+| **native (rust)** | **92.53 ms** | 92.91 ms | 87.12 ms | 53.43 ms | 111.09 ms |
+| **legacy (C# 4.1.2)** | **14.65 ms** | 15.19 ms | 15.07 ms | 10.66 ms | 19.52 ms |
+| `Build` (request only) | 3.85 ms | 3.97 ms | 7.23 ms | 2.73 ms | 19.14 ms |
+
+Speedup on median elapsed time per build: **0.16x** (0.16x on the first invocation) — native is
+**~6.3x slower** as the fixture measures it. Both arms move with measurement order, though, and
+position for position the loss is **~3.1-5.4x**; see below.
+
+**It is not the request projection.** `Build()` is **3.85 ms**, ~4% of the native median. The
+remaining ~89 ms is the serialise of that request, the native side's parse of it, the walk, and
+binding the response back into `Dictionary<MongoId, HashSet<MongoId>>`. Both legs are id-heavy: the
+request is 4,673 templates carrying 40,761 slot, chamber and cartridge filter ids, and the response
+is 63,530 linked ids across 4,673 sets, every one of them arriving through `MongoId`'s validating
+constructor. At 24 bytes per id that is ~1 MB out and ~1.5 MB back before any envelope — arithmetic
+off the counts the fixture prints, not a measured wire figure.
+
+The response keys exactly the 4,673 tpls the items table holds. The build's reverse edges (an id in
+some template's filter gets that template added to *its* set) key nothing the table did not already
+have, so the "may key entries the items table never held" allowance in `RagfairLinkedItemResult` is
+unused by the shipped database.
+
+The legacy path has nothing comparable to pay. It walks the same table in-process and unions the
+filter ids straight into the sets it is building — 14.7 ms for the whole table, ~3.1 µs per
+template.
+
+### Measurement order moves both arms
+
+Unlike the base-class fixture, where reversing the arms changed nothing, here whichever arm is
+measured **first** pays for it, on both paths:
+
+| Arm | measured first | measured second |
+|---|---|---|
+| native (rust) | 92.53 / 92.91 ms | 74.25 / 81.20 ms |
+| legacy (C# 4.1.2) | 30.12 / 29.74 ms | 14.65 / 15.19 ms |
+
+Legacy doubles — 30 ms in first position against 14.7 ms in second — which is what makes the
+headline ratio order-sensitive. Reading the two arms in the same position: **~3.1x** slower
+(both first) or **~5.1-5.4x** slower (both second). The shipped fixture's 6.3x pairs an inflated
+native arm with a settled legacy one and is the pessimistic end of that band; the design's ~3.5x
+expectation, taken from the base-class port, sits at the optimistic end. No cause was measured;
+each arm allocates a full table's worth of sets, so a heap already grown by the other arm is the
+obvious suspect, but that is a guess, not a finding.
+
+### Why native stays the default anyway
+
+The build is lazy and single-shot: the first `GetLinkedItems` miss builds the whole table, and every
+call after it is a dictionary hit. There are three call sites — `RagfairHelper`'s linked flea search
+and two in `LootGenerator`'s weapon reward loot — so one request in the life of the process pays it.
+The measured loss is **~60-66 ms added to whichever request arrives first** (native minus legacy,
+taken position for position), once, and nothing afterwards. Native stays the default for family
+consistency with the other ported services, and `RagfairConfig.ForceLegacyRagfairLinkedItemBuild` is
+the opt-out for anyone who disagrees.
+
+Linked-item-specific caveats, on top of the general ones below:
+
+- **No allocation or RSS figures.** This fixture times elapsed wall clock only. Native allocates the
+  4,673-entry request view and the whole response table per call, on the managed heap, and neither
+  is measured here.
+- **Order effects are not warmed away.** Two warmups per arm, the same methodology as the other
+  fixtures in this file, and they do not settle it — see above. Read the band, not the single ratio.
+- **`Build()`'s mean is not its cost.** 7.23 ms against a 3.85 ms median and a 2.73 ms min, in both
+  invocations: a few slow runs, the same artifact the scav-case fixture documents. Read the median.
+- **The timed call includes `GetLinkedItems`' miss and indexer read**, on both arms — two dictionary
+  probes against a ~15-90 ms build.
+- **Workstation GC**, as with the ragfair, quest, scav-case and base-class fixtures.
 
 ## Caveats
 

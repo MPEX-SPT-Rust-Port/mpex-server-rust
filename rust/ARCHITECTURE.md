@@ -30,7 +30,7 @@ Toolchain is pinned in `rust-toolchain.toml` (1.97.1, edition 2024). Dependencie
 pre-AVX2 hardware, and the mold linker on Linux. Both workspace profiles use one codegen unit; release adds fat
 LTO.
 
-Roughly 48k lines across the 51 files of `src/`, inline tests included. `src/bot/` is ~35% of that and
+Roughly 48k lines across the 52 files of `src/`, inline tests included. `src/bot/` is ~35% of that and
 `bot_equipment_mod_generator.rs` alone ~4.2k; `src/loot/` ~25%, `src/ragfair/` ~15%,
 `src/quest/` ~12%, `src/scav_case/` ~4%.
 
@@ -38,7 +38,7 @@ Roughly 48k lines across the 51 files of `src/`, inline tests included. `src/bot
 
 | Path | Role |
 |---|---|
-| `src/lib.rs` | Module roots and `ABI_VERSION` (currently 20; must equal `SptNative.ExpectedAbiVersion`) |
+| `src/lib.rs` | Module roots and `ABI_VERSION` (currently 21; must equal `SptNative.ExpectedAbiVersion`) |
 | `src/ffi.rs` | The C-ABI surface. The **only** module containing `unsafe` |
 | `src/runtime.rs` | Process-wide multi-thread tokio runtime, `OnceLock`-built. Used only by `verify` |
 | `src/verify.rs` | Hashes `SPT_Data` with XXH3-128 and diffs it against `checks.dat` |
@@ -52,11 +52,12 @@ Roughly 48k lines across the 51 files of `src/`, inline tests included. `src/bot
 | `src/quest/` | One repeatable quest of any of the four types, its rewards, and the mutated quest-type pool |
 | `src/scav_case/` | One scav case craft's rewards: the reward and ammo pools, the per-rarity picks, the money/ammo/preset arms |
 | `src/base_class.rs` | The whole `ItemBaseClassService` cache in one call, over `src/loot/item_helper.rs`'s `ItemBaseClassCache` |
+| `src/linked_items.rs` | The whole `RagfairLinkedItemService` table in one call: the bidirectional slot/chamber/cartridge walk plus the revolver cylinder case |
 
 ## FFI boundary (`ffi.rs`)
 
-Twenty-one `extern "C"` exports. Two are trivial (`spt_native_abi_version`, `spt_buf_free`); twelve take a UTF-8
-JSON generation request; `spt_verify_database` takes a UTF-8 directory path instead. All thirteen of those hand
+Twenty-two `extern "C"` exports. Two are trivial (`spt_native_abi_version`, `spt_buf_free`); thirteen take a UTF-8
+JSON generation request; `spt_verify_database` takes a UTF-8 directory path instead. All fourteen of those hand
 back a heap buffer the caller releases with `spt_buf_free`. `spt_locales_set` takes the resolved server-locale
 table as UTF-8 JSON and buffers a parse error, or panic text since ABI 18. The last five are the log pipeline
 (`spt_logger_init`, `spt_logger_reinit`, `spt_log_emit`, `spt_logger_close`, `spt_log_set_tap`):
@@ -75,7 +76,7 @@ C# SptNative → spt_generate_* (JSON in)
   → serde serialize the result, or the failure message (LootError or panic text), into an out-buffer
 ```
 
-- `run_generator_with` is the shared body of the twelve generation exports; nine reach it through
+- `run_generator_with` is the shared body of the thirteen generation exports; ten reach it through
   `run_generator`, the JSON-response-plus-`LootError` wrapper. Ragfair, quest and scav case call it
   directly — ragfair to frame its response instead of emitting one JSON document, the other two for
   their own error types.
