@@ -27,14 +27,19 @@ Publish flags (`dotnet publish`) feed the generated `ProgramStatics` class: `-p:
 first, and a missing toolchain fails the build with `MSB3073`. Publishing for a RID other than the build host's needs
 `-p:SptNativeRid=<rid>` as well (`dotnet publish -r` alone never reaches a RID-agnostic project reference, so cargo
 would silently emit a host-triple library); `Build.props` maps the RID to a Rust target triple and
-`SPTarkov.Server.csproj` errors out for unmapped RIDs. Only `linux-x64` on Linux hosts is mapped — arm64 is not a
-supported target, and `Containerfile.release`/`Containerfile.dev` are x86_64-only (base image pinned `:44-x86_64`).
+`SPTarkov.Server.csproj` errors out for unmapped RIDs.
 
 Release builds also regenerate `SPT_Data/checks.dat` by running the `gen_checks` bin in `rust/spt-native`
-(`cargo run --bin gen_checks`), which shares the XXH3-128 implementation with the startup verifier.
+(`cargo run --bin gen_checks`).
 
 ## Pull Requests
 Pull requests will target the `dev` branch unless explicitly told otherwise.
+
+## Supported CPU Architecture
+Only `x86_64` (64-bit) CPUs are supported.
+- Rust's `cargo` targets `x86_64-unknown-linux-gnu` and `x86_64-pc-windows-msvc`.
+- Rust also compiles with `target-cpu=x86-64-v3` for modern CPU extensions.
+- Docker/Podman's Containerfiles target `fedora-minimal:44-x86_64`.
 
 ## Architecture
 
