@@ -82,13 +82,14 @@ use crate::bot::bot_generator_helper::{
 };
 use crate::bot::bot_loot_generator::{BotLootConfig, generate_loot};
 use crate::bot::bot_weapon_generator::{add_extra_magazines_to_inventory, generate_random_weapon};
+use crate::bot::level_generator;
 use crate::bot::mod_pool_service::get_mods_for_gear_slot;
 use crate::bot::models::{
     BotBaseInventoryWire, BotGenerationDetailsWire, BotInventoryBatchResult, BotInventoryResult,
-    BotResultEnvelope, BotSliceWire, BotTemplateWire, BotTypeInventoryWire, ChancesWire,
-    EquipmentFilterDetails, GenerateBotInventoryBatchRequest, GenerateBotInventoryRequest,
-    GenerateEquipmentPropertiesWire, GenerationWire, PmcConfigWire, RandomisationDetails,
-    SharedBotViewsWire,
+    BotLootCacheWire, BotResultEnvelope, BotSliceWire, BotTemplateWire, BotTypeInventoryWire,
+    ChancesWire, EquipmentFilterDetails, GenerateBotInventoryBatchRequest,
+    GenerateBotInventoryRequest, GenerateEquipmentPropertiesWire, GenerationWire, PmcConfigWire,
+    RandomisationDetails, SharedBotViewsWire,
 };
 use crate::diag::DiagSink;
 use crate::loot::item_helper::{LootError, get_item};
@@ -168,7 +169,7 @@ pub fn generate_inventory(
     request: GenerateBotInventoryRequest,
 ) -> Result<BotInventoryResult, LootError> {
     let GenerateBotInventoryRequest {
-        bot_id,
+        bot_id: _,
         test_seed,
         details,
         template,
@@ -197,7 +198,9 @@ pub fn generate_inventory(
         mod_pool_slot_order,
     } = request;
 
-    generate_one(
+    let _seed_guard = test_seed.map(TestSeedGuard::install);
+
+    generate_prepared(
         &SharedBotViewsWire {
             generating_player_level,
             is_night_time,
@@ -220,10 +223,12 @@ pub fn generate_inventory(
             config_blacklist,
             items,
             mod_pool_slot_order,
+            // The single-bot path keeps C# level generation and C# filtering: no draw, no variant
+            // pick, and the template arrives pre-filtered exactly as it does today.
+            level_generation: None,
+            template_variants: Vec::new(),
         },
-        BotSliceWire {
-            bot_id,
-            test_seed,
+        PreparedBot {
             details,
             template,
             loot_pools,
@@ -240,9 +245,13 @@ pub fn generate_inventory(
 /// path (`BotWaveBatcher.CanBatch`), so a batch is clamp-free by construction and every envelope's
 /// `randomisation_clamps` comes back empty. That guarantee is what makes the parallel loop safe.
 ///
+/// Each bot's own preamble runs here rather than in [`generate_prepared`]: seed guard, then the
+/// level draw (`BotGenerator.cs:222-225`), then the variant pick. The draw has to be the first
+/// thing on the bot's seeded stream, because that is where the C# prelude does it.
+///
 /// Thread-safety inventory: the shared views are borrowed immutably; every `&mut` in
-/// `generate_one` is bot-local; `MongoId`'s counter is atomic; the RNG is `thread_local!` and
-/// `generate_one` installs its own seed guard per bot, so seeded output is deterministic per bot
+/// `generate_prepared` is bot-local; `MongoId`'s counter is atomic; the RNG is `thread_local!` and
+/// the closure installs its own seed guard per bot, so seeded output is deterministic per bot
 /// regardless of worker assignment — except `MongoId`s, which are drawn from entropy rather than
 /// the seeded stream and are therefore only guaranteed unique, never reproducible (the parity
 /// tests normalise ids before comparing). The guard's `Drop` also parks the stream in `PARKED_RNG`,
@@ -257,36 +266,119 @@ pub fn generate_inventory_batch(
 
     let bots = bots
         .into_par_iter()
-        .map(|slice| match generate_one(&shared, slice) {
-            Ok(result) => BotResultEnvelope {
-                result: Some(result),
-                error: None,
-            },
-            Err(error) => BotResultEnvelope {
-                result: None,
-                error: Some(error.message),
-            },
+        .map(|slice| {
+            let BotSliceWire {
+                test_seed,
+                mut details,
+                ..
+            } = slice;
+            let _seed_guard = test_seed.map(TestSeedGuard::install);
+
+            // `BotGenerator.cs:222-225` — the level is the first thing the prelude resolves, so it
+            // is the first seeded draw here too. Non-PMC is the constant `(1, 0)` with no draw at
+            // all (`BotLevelGenerator.cs:23-26`), which is what keeps non-PMC seeded runs pinned to
+            // the same stream as the single-bot path.
+            let (level, exp) = if details.is_pmc {
+                let Some(level_generation) = shared.level_generation.as_ref() else {
+                    return BotResultEnvelope {
+                        result: None,
+                        error: Some("levelGeneration missing for a PMC wave".to_owned()),
+                    };
+                };
+
+                level_generator::generate_bot_level(
+                    level_generation.level_min,
+                    level_generation.level_max,
+                    &level_generation.exp_table,
+                )
+            } else {
+                (1, 0)
+            };
+            // The projection sends 0; every Rust-side reader wants the level the bot actually drew.
+            details.bot_level = level;
+
+            let Some(variant) = shared
+                .template_variants
+                .iter()
+                .find(|variant| level >= variant.level_min && level <= variant.level_max)
+            else {
+                return BotResultEnvelope {
+                    result: None,
+                    error: Some(format!("no template variant covers level {level}")),
+                };
+            };
+
+            let mut template = variant.template.clone();
+            // `BotGenerator.cs:297-304` — rolled per bot C#-side (the game version rides in on the
+            // details), and applied after the filter's `AdjustGenerationChances`, which the variant
+            // already carries; cloning then setting keeps that order.
+            if details.is_pmc && details.game_version == UNHEARD {
+                add_additional_pocket_loot_weights_for_unheard_bot(&mut template);
+            }
+
+            let prepared = PreparedBot {
+                details,
+                template,
+                loot_pools: variant.loot_pools.clone(),
+                handbook_prices: variant.handbook_prices.clone(),
+            };
+
+            match generate_prepared(&shared, prepared) {
+                Ok(mut result) => {
+                    result.level = Some(level);
+                    result.exp = Some(exp);
+
+                    BotResultEnvelope {
+                        result: Some(result),
+                        error: None,
+                    }
+                }
+                Err(error) => BotResultEnvelope {
+                    result: None,
+                    error: Some(error.message),
+                },
+            }
         })
         .collect();
 
     Ok(BotInventoryBatchResult { bots })
 }
 
+/// `BotGenerator.AddAdditionalPocketLootWeightsForUnheardBot` (`BotGenerator.cs:415-421`).
+///
+/// **Deviation:** a template with no `pocketLoot` block is an NRE on the C# `Weights` deref; it is a
+/// no-op here, the same reading [`ItemCountsWire`](crate::bot::models::ItemCountsWire) already takes
+/// for every other absent generation block.
+fn add_additional_pocket_loot_weights_for_unheard_bot(template: &mut BotTemplateWire) {
+    // Adjust pocket loot weights to allow for 5 or 6 items
+    if let Some(pocket_loot) = template.generation.items.pocket_loot.as_mut() {
+        pocket_loot.weights.insert("5".to_owned(), 1.0);
+        pocket_loot.weights.insert("6".to_owned(), 1.0);
+    }
+}
+
+/// The per-bot inputs after the batch preamble (level draw, variant pick) or, on the single path,
+/// straight off the request.
+struct PreparedBot {
+    details: BotGenerationDetailsWire,
+    template: BotTemplateWire,
+    loot_pools: BotLootCacheWire,
+    handbook_prices: IndexMap<String, f64>,
+}
+
 /// `BotInventoryGenerator.GenerateInventory` (`:80-120`) proper - one bot against views the caller
-/// already owns.
-fn generate_one(
+/// already owns. The seed guard belongs to the caller: on the batch path it has to cover the level
+/// draw, which happens before this.
+fn generate_prepared(
     shared: &SharedBotViewsWire,
-    slice: BotSliceWire,
+    prepared: PreparedBot,
 ) -> Result<BotInventoryResult, LootError> {
-    let BotSliceWire {
-        test_seed,
+    let PreparedBot {
         details,
         template,
         loot_pools,
         handbook_prices,
-        ..
-    } = slice;
-    let _seed_guard = test_seed.map(TestSeedGuard::install);
+    } = prepared;
 
     let SharedBotViewsWire {
         is_night_time,
@@ -399,6 +491,9 @@ fn generate_one(
         inventory: bot_inventory,
         container_grids,
         randomisation_clamps,
+        // Set by the batch caller, which owns the draw; absent on the single-bot path.
+        level: None,
+        exp: None,
     })
 }
 
@@ -1464,25 +1559,42 @@ mod tests {
         assert_eq!(worn(&generate(night).unwrap()), baseline);
     }
 
-    #[test]
-    fn batch_isolates_a_failing_bot() {
-        // The flat single-bot request is shared views + slice merged; split it back apart.
-        const SLICE_KEYS: [&str; 6] = [
-            "botId",
-            "testSeed",
-            "details",
-            "template",
-            "lootPools",
-            "handbookPrices",
-        ];
-        let mut shared = base_request();
+    /// The flat single-bot request is shared views + slice merged; split it back apart. The three
+    /// level-banded members become one variant covering every level a fixture can draw, which is
+    /// the shape a non-PMC wave sends (`[1..1]`, widened here so PMC fixtures can reuse it).
+    fn split_batch(request: Value) -> (Value, Value) {
+        const SLICE_KEYS: [&str; 3] = ["botId", "testSeed", "details"];
+
+        let mut shared = request;
+        let object = shared.as_object_mut().unwrap();
         let mut slice = serde_json::Map::new();
         for key in SLICE_KEYS {
-            if let Some(value) = shared.as_object_mut().unwrap().remove(key) {
+            if let Some(value) = object.remove(key) {
                 slice.insert(key.to_string(), value);
             }
         }
-        let good = serde_json::Value::Object(slice);
+
+        let variant = json!({
+            "levelMin": 1,
+            "levelMax": 99,
+            "template": object.remove("template").unwrap(),
+            "lootPools": object.remove("lootPools").unwrap(),
+            "handbookPrices": object.remove("handbookPrices").unwrap(),
+        });
+        object.insert("templateVariants".to_owned(), json!([variant]));
+
+        (shared, Value::Object(slice))
+    }
+
+    fn batch(shared: Value, bots: Vec<Value>) -> Vec<BotResultEnvelope> {
+        let request = serde_json::from_value(json!({"shared": shared, "bots": bots})).unwrap();
+
+        generate_inventory_batch(request).unwrap().bots
+    }
+
+    #[test]
+    fn batch_isolates_a_failing_bot() {
+        let (mut shared, good) = split_batch(base_request());
 
         // Poison a role the good bot does not use: night + nighttimeChanges configured but no
         // equipmentMods is the error return at the top of equipment generation.
@@ -1496,18 +1608,156 @@ mod tests {
         let mut bad = good.clone();
         bad["details"]["roleLowercase"] = json!("poisoned");
 
-        let request =
-            serde_json::from_value(json!({"shared": shared, "bots": [good, bad]})).unwrap();
-        let result = generate_inventory_batch(request).unwrap();
+        let bots = batch(shared, vec![good, bad]);
 
-        assert_eq!(result.bots.len(), 2);
-        assert!(result.bots[0].result.is_some());
-        assert!(result.bots[0].error.is_none());
-        assert!(result.bots[1].result.is_none());
+        assert_eq!(bots.len(), 2);
+        assert!(bots[0].result.is_some());
+        assert!(bots[0].error.is_none());
+        assert!(bots[1].result.is_none());
         assert_eq!(
-            result.bots[1].error.as_deref(),
+            bots[1].error.as_deref(),
             Some("Object reference not set to an instance of an object.")
         );
+    }
+
+    /// The envelope carries the drawn level and exp; non-PMC is the constant pair, and — because it
+    /// consumes no draw for it (`BotLevelGenerator.cs:23-26`) — the bot's whole stream is the one
+    /// the single-bot path produces for the same level.
+    #[test]
+    fn a_non_pmc_bot_reports_level_one_and_no_exp() {
+        let mut single = base_request();
+        single["details"]["botLevel"] = json!(1);
+        let expected = worn(&generate(single).unwrap());
+
+        let (shared, slice) = split_batch(base_request());
+        let bots = batch(shared, vec![slice]);
+
+        let result = bots[0].result.as_ref().unwrap();
+        assert_eq!((result.level, result.exp), (Some(1), Some(0)));
+        assert_eq!(worn(result), expected);
+    }
+
+    /// A PMC slice with no `levelGeneration` on shared fails alone, like any per-bot error.
+    #[test]
+    fn a_pmc_wave_without_level_inputs_errors_per_bot() {
+        let (shared, mut pmc) = split_batch(base_request());
+        pmc["details"]["isPmc"] = json!(true);
+        let good = {
+            let (_, slice) = split_batch(base_request());
+            slice
+        };
+
+        let bots = batch(shared, vec![pmc, good]);
+
+        assert!(bots[0].result.is_none());
+        assert!(
+            bots[0]
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("levelGeneration")),
+            "{:?}",
+            bots[0].error
+        );
+        assert!(bots[1].result.is_some());
+    }
+
+    /// A drawn level outside every variant is an error envelope, not a panic.
+    #[test]
+    fn a_level_outside_variant_coverage_is_an_error_envelope() {
+        let (mut shared, slice) = split_batch(base_request());
+        shared["templateVariants"][0]["levelMin"] = json!(5);
+        shared["templateVariants"][0]["levelMax"] = json!(9);
+
+        let bots = batch(shared, vec![slice]);
+
+        assert!(bots[0].result.is_none());
+        assert_eq!(
+            bots[0].error.as_deref(),
+            Some("no template variant covers level 1")
+        );
+    }
+
+    /// The level draw is on the bot's own seeded stream, ahead of every other draw, so a fixed seed
+    /// pins the level, the exp and the inventory that follows them.
+    #[test]
+    fn a_seeded_pmc_batch_is_reproducible_including_its_level() {
+        let pmc_wave = || {
+            let (mut shared, mut slice) = split_batch(base_request());
+            slice["details"]["isPmc"] = json!(true);
+            // 79 levels of 1000 exp: a real biased draw plus a fractional-exp draw.
+            shared["levelGeneration"] = json!({
+                "levelMin": 5, "levelMax": 30, "expTable": vec![1000; 79],
+            });
+            (shared, slice)
+        };
+        // `MongoId`s come from process entropy, not the seeded stream, so the comparable part of a
+        // run is every field except the ids.
+        let rolled = || {
+            let (shared, slice) = pmc_wave();
+            let bots = batch(shared, vec![slice]);
+            let result = bots[0].result.as_ref().unwrap();
+            let items: Vec<_> = result
+                .inventory
+                .items
+                .iter()
+                .map(|item| {
+                    (
+                        item.slot_id.clone(),
+                        item.template.clone(),
+                        serde_json::to_value(&item.upd).unwrap(),
+                    )
+                })
+                .collect();
+
+            (result.level, result.exp, worn(result), items)
+        };
+
+        let (level, exp, worn_items, _) = rolled();
+        assert!((5..=30).contains(&level.unwrap()), "{level:?}");
+        // Base exp for the drawn level plus the fractional draw, which is under one level's worth.
+        let base = level.unwrap() * 1000;
+        assert!((base..base + 1000).contains(&exp.unwrap()), "{exp:?}");
+        assert!(!worn_items.is_empty());
+
+        assert_eq!(rolled(), rolled());
+    }
+
+    /// The unheard pocket weights are applied to the *cloned* variant template, PMC + unheard only
+    /// (`BotGenerator.cs:297-304`).
+    #[test]
+    fn an_unheard_pmc_batch_bot_gets_the_extra_pocket_weights() {
+        const POCKET_LOOT_TPL: &str = "pocket_bandage";
+
+        let wave = |game_version: &str| {
+            let mut request = base_request();
+            request["items"][POCKETS_1X4_TUE] = json!({"name": "tue pockets",
+                "grids": [{"name": "main", "cellsH": 4, "cellsV": 1}]});
+            request["items"][POCKET_LOOT_TPL] = json!({"name": "bandage", "width": 1, "height": 1});
+            request["lootPools"] = json!({"pocketLoot": {POCKET_LOOT_TPL: 1}});
+            // A lone zero-weight entry short-circuits `GetWeightedValue` without drawing, so the
+            // pocket count is 0 unless the unheard insertion adds the 5/6 entries.
+            request["template"]["generation"]["items"]["pocketLoot"] = json!({"weights": {"0": 0}});
+
+            let (mut shared, mut slice) = split_batch(request);
+            slice["details"]["isPmc"] = json!(true);
+            slice["details"]["gameVersion"] = json!(game_version);
+            shared["levelGeneration"] = json!({
+                "levelMin": 1, "levelMax": 1, "expTable": [1000],
+            });
+            (shared, slice)
+        };
+        let pocket_loot_count = |game_version: &str| {
+            let (shared, slice) = wave(game_version);
+            let bots = batch(shared, vec![slice]);
+
+            worn(bots[0].result.as_ref().unwrap())
+                .iter()
+                .filter(|(_, tpl)| tpl == POCKET_LOOT_TPL)
+                .count()
+        };
+
+        assert_eq!(pocket_loot_count("standard"), 0);
+        assert!(pocket_loot_count(UNHEARD) > 0);
     }
 
     #[test]

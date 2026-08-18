@@ -190,19 +190,35 @@ longer adds up and has not been re-measured.
 
 ### Batched wave
 
-`aa733a7` — 2026-08-14, not re-measured. `BotBatchTests.WaveCostPerBot`, medians of 5 per arm, two
-invocations.
+`ae325d8` — 2026-08-18, after the level fold (ABI 22). `BotBatchTests.WaveCostPerBot`, medians of 5
+per arm, two invocations.
 
 | wave | serial per-bot | `.AsParallel()` per-bot | batched (rayon) | batched vs parallel |
 |---|---|---|---|---|
-| 45 | 44.10 / 43.16 ms | 12.33 / 11.98 ms | **5.73 / 6.22 ms** | 2.15x / 1.92x |
-| 20 | 43.94 / 42.83 ms | 12.72 / 12.26 ms | **6.02 / 5.95 ms** | 2.11x / 2.06x |
-| 10 | 43.11 / 42.67 ms | 11.67 / 11.85 ms | **7.63 / 7.85 ms** | 1.53x / 1.51x |
-| 5 | 42.48 / 42.71 ms | 13.89 / 13.62 ms | **11.83 / 11.97 ms** | 1.17x / 1.14x |
-| 1 | 41.42 / 41.46 ms | 43.29 / 43.25 ms | **42.72 / 41.81 ms** | 1.01x / 1.03x |
+| 45 | 48.49 / 48.70 ms | 14.90 / 15.35 ms | **1.72 / 1.69 ms** | 8.68x / 9.08x |
+| 20 | 48.10 / 48.94 ms | 14.87 / 14.18 ms | **2.53 / 2.59 ms** | 5.88x / 5.48x |
+| 10 | 48.46 / 49.44 ms | 15.28 / 15.14 ms | **5.14 / 4.87 ms** | 2.97x / 3.11x |
+| 5 | 47.36 / 49.00 ms | 16.38 / 16.09 ms | **9.54 / 9.77 ms** | 1.72x / 1.65x |
+| 1 | 48.85 / 50.56 ms | 48.90 / 50.42 ms | **46.76 / 46.44 ms** | 1.05x / 1.09x |
 
-All figures ms per bot. Request bytes per bot: 3.78 MiB single-bot, against 0.30 (wave 45), 0.40 (20),
-0.58 (10), 0.94 (5), 3.78 (1) MiB batched.
+All figures ms per bot. Request bytes per bot: 3.81 MiB single-bot, against 0.08 (wave 45), 0.19 (20),
+0.38 (10), 0.76 (5), 3.81 (1) MiB batched.
+
+Against the previous measurement (`aa733a7`, 2026-08-14): batched cost per bot fell from 5.73 to 1.72
+ms at wave 45 and from 7.63 to 5.14 at wave 10, and per-bot request bytes fell from 0.30 to 0.08 MiB
+(45), 0.40 → 0.19 (20), 0.58 → 0.38 (10), 0.94 → 0.76 (5). Read the batched column against the
+*same-run* serial and parallel arms, not against the old table: both of those arms are unchanged code
+and still drifted 9.5-31% between the two dates (serial 9.5-18%, parallel 13-31%).
+
+The whole saving is wire volume. The batch's per-bot cost is `shared/N + slice`, and folding the
+template, loot pools and handbook prices out of the slice and onto the shared block as per-level-band
+variants left the slice at `botId` + `testSeed` + `details` — a few hundred bytes, small enough to
+vanish into the MiB rounding above (wave 45's 0.08 MiB/bot is `3.81/45` to two decimals). So the
+shared block is now effectively **100%** of the request, where before the fold it was the 95.7% that
+`SharedBotViewsWire`'s doc comment used to quote. Wave 1 is unchanged *in what it builds*: one bot,
+one segment, one copy of everything, the same bytes as before the fold. Its timing still moves run to
+run like every other row here (42.72 → 46.76 ms across the two dates, against unchanged-code arms
+that drifted as much) - the construction claim is not a claim that the number holds.
 
 ## Ragfair offer generation
 

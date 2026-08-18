@@ -8,6 +8,7 @@ using SPTarkov.Server.Core.Generators.Bot;
 using SPTarkov.Server.Core.Helpers;
 using SPTarkov.Server.Core.Helpers.Bot;
 using SPTarkov.Server.Core.Helpers.InRaid;
+using SPTarkov.Server.Core.Helpers.Profile;
 using SPTarkov.Server.Core.Models.Common;
 using SPTarkov.Server.Core.Models.Eft.Match;
 using SPTarkov.Server.Core.Models.Enums;
@@ -36,6 +37,7 @@ public class BotWaveBatcherTests
 {
     private BotWaveBatcher _batcher = default!;
     private BotConfig _botConfig = default!;
+    private MatchBotDetailsCacheService _matchBotDetailsCacheService = default!;
     private MongoId _sessionId;
 
     [OneTimeSetUp]
@@ -44,6 +46,7 @@ public class BotWaveBatcherTests
         var di = DI.GetInstance();
         _batcher = di.GetService<BotWaveBatcher>();
         _botConfig = di.GetService<BotConfig>();
+        _matchBotDetailsCacheService = di.GetService<MatchBotDetailsCacheService>();
         _sessionId = new MongoId();
         di.GetService<SaveServer>().CreateProfile(new ProfileInfo { ProfileId = _sessionId });
     }
@@ -65,6 +68,9 @@ public class BotWaveBatcherTests
     [Test]
     public void ABatchedWaveProducesCompleteBots()
     {
+        // Every bot starts as a clone of this, and the post-call draws are what overwrite it
+        var untouched = DI.GetInstance().GetService<BotTable>().Base.Customization!;
+
         var wave = _batcher.TryGenerateWave(_sessionId, BuildWaveDetails());
 
         Assert.That(wave, Is.Not.Null, "default configuration should take the batch path");
@@ -73,7 +79,28 @@ public class BotWaveBatcherTests
         {
             Assert.That(bot!.Inventory?.Items, Is.Not.Empty, "bot came back without an inventory");
             Assert.That(bot.Id, Is.Not.EqualTo(default(MongoId)));
+
+            // Voice and appearance are drawn after the native call, from the band the drawn level
+            // landed in. assault.json's voice pool does not contain base.json's default, so a
+            // missing voice draw is caught per bot.
+            Assert.That(bot.Customization!.Voice, Is.Not.Null.And.Not.EqualTo(default(MongoId)), "a bot came back without a voice");
+            Assert.That(bot.Customization.Voice, Is.Not.EqualTo(untouched.Voice), "the post-call voice draw never ran");
+            Assert.That(bot.Customization.Head, Is.Not.Null.And.Not.EqualTo(default(MongoId)), "a bot came back without a head");
         }
+
+        // The appearance pools do contain base.json's defaults, so per bot a default is a legal
+        // draw and only the wave is decidable: with the appearance draw gone every bot keeps every
+        // default, which is what this rejects.
+        Assert.That(
+            wave!.Any(bot =>
+                bot!.Customization!.Head != untouched.Head
+                || bot.Customization.Body != untouched.Body
+                || bot.Customization.Feet != untouched.Feet
+                || bot.Customization.Hands != untouched.Hands
+            ),
+            Is.True,
+            "the post-call appearance draw never ran - the whole wave still wears the bots/base.json default"
+        );
 
         // GenerateInventoryId reroots every bot onto a fresh equipment id - all distinct
         Assert.That(wave!.Select(bot => bot!.Inventory!.Equipment).Distinct().Count(), Is.EqualTo(3));
@@ -83,6 +110,13 @@ public class BotWaveBatcherTests
     /// The two behaviours an assault wave never reaches: the PMC side rewrite to <c>Savage</c> the
     /// batcher copies from <c>BotController.TryGenerateSingleBot</c>, and <c>GenerateBotFinish</c>'s
     /// dogtag branch, which only fires for the roles in <c>BotConfig.BotRolesWithDogTags</c>.
+    ///
+    /// Also the only place the level the native side drew is observable end to end: a PMC draws a
+    /// real level, and the one member that constrains where the batcher assigns it is
+    /// <c>CacheBot</c>, which reads <c>Info.Level</c> (<c>MatchBotDetailsCacheService.cs:54</c>) -
+    /// the dogtag branch beside it is level-independent, reading only <c>Info.Side</c> and
+    /// <c>Info.GameVersion</c>. So the cached copy pins both the assignment and its ordering ahead
+    /// of the caching step.
     /// </summary>
     [Test]
     public void APmcWaveIsRewrittenToSavageAndKeepsItsDogtag()
@@ -96,6 +130,14 @@ public class BotWaveBatcherTests
         {
             Assert.That(bot!.Info!.Side, Is.EqualTo(Sides.Savage));
             Assert.That(bot.Inventory!.Items!.Any(item => item.SlotId == Slots.Dogtag), Is.True, "a PMC came back without a dogtag");
+
+            Assert.That(bot.Info.Level, Is.GreaterThan(0), "a batched PMC came back without the level the native side drew");
+            Assert.That(bot.Info.Experience, Is.Not.Null, "a batched PMC came back without its experience total");
+            Assert.That(
+                _matchBotDetailsCacheService.GetBotById(bot.Id)?.Level,
+                Is.EqualTo(bot.Info.Level),
+                "CacheBot ran before the envelope's level was assigned"
+            );
         }
     }
 
@@ -179,6 +221,92 @@ public class BotWaveBatcherTests
     }
 
     /// <summary>
+    /// The level draw moved into the native call, so a mod-registered BotLevelGenerator is a
+    /// substitution only the per-bot path routes through - same contract as the BotGenerator one.
+    /// </summary>
+    [Test]
+    public void ASubstitutedBotLevelGeneratorDeclinesTheBatch()
+    {
+        var batcher = (BotWaveBatcher)Construct(typeof(BotWaveBatcher), Construct(typeof(TestBotLevelGeneratorSubclass)));
+
+        Assert.That(batcher.TryGenerateWave(_sessionId, BuildWaveDetails()), Is.Null);
+    }
+
+    /// <summary>
+    /// The batch runs the equipment filter once per level band instead of once per bot, so a
+    /// substituted BotEquipmentFilterService would be called a different number of times with
+    /// different levels - per-bot only.
+    /// </summary>
+    [Test]
+    public void ASubstitutedEquipmentFilterServiceDeclinesTheBatch()
+    {
+        var batcher = (BotWaveBatcher)Construct(typeof(BotWaveBatcher), Construct(typeof(TestBotEquipmentFilterServiceSubclass)));
+
+        Assert.That(batcher.TryGenerateWave(_sessionId, BuildWaveDetails()), Is.Null);
+    }
+
+    /// <summary>
+    /// GenerateBotLevel is frozen for the same reason GenerateBot is: the batch draws the level
+    /// natively, so a live Harmony patch on it would never fire.
+    /// </summary>
+    [Test]
+    public void AHarmonyPatchOnBotLevelGeneratorDeclinesTheBatch()
+    {
+        var harmony = new Harmony("unit-tests.botwave-batcher.GenerateBotLevel");
+        var generateBotLevel = typeof(BotLevelGenerator).GetMethod(nameof(BotLevelGenerator.GenerateBotLevel));
+        Assert.That(generateBotLevel, Is.Not.Null, "frozen member BotLevelGenerator.GenerateBotLevel not found");
+
+        try
+        {
+            harmony.Patch(generateBotLevel, prefix: new HarmonyMethod(typeof(BotWaveBatcherTests), nameof(Prefix)));
+
+            Assert.That(_batcher.TryGenerateWave(_sessionId, BuildWaveDetails()), Is.Null, "a patched wave must run per bot");
+        }
+        finally
+        {
+            harmony.UnpatchSelf();
+        }
+    }
+
+    /// <summary>
+    /// The batch runs the seasonal strip once per level band instead of once per bot, so a live
+    /// patch on either christmas member declines. SeasonalEventService is in the decline set
+    /// member-scoped rather than whole-type, so this also pins that both lookups still resolve - a
+    /// lookup that stopped resolving would drop out of the set silently.
+    /// </summary>
+    [Test]
+    public void AHarmonyPatchOnTheSeasonalStripDeclinesTheBatch()
+    {
+        string[] members =
+        [
+            nameof(SeasonalEventService.ChristmasEventEnabled),
+            nameof(SeasonalEventService.RemoveChristmasItemsFromBotInventory),
+        ];
+
+        foreach (var name in members)
+        {
+            var harmony = new Harmony($"unit-tests.botwave-batcher.{name}");
+            var member = typeof(SeasonalEventService).GetMethod(name);
+            Assert.That(member, Is.Not.Null, $"frozen member SeasonalEventService.{name} not found");
+
+            try
+            {
+                harmony.Patch(member, prefix: new HarmonyMethod(typeof(BotWaveBatcherTests), nameof(Prefix)));
+
+                Assert.That(
+                    _batcher.TryGenerateWave(_sessionId, BuildWaveDetails()),
+                    Is.Null,
+                    $"a wave with {name} patched must run per bot"
+                );
+            }
+            finally
+            {
+                harmony.UnpatchSelf();
+            }
+        }
+    }
+
+    /// <summary>
     /// The nighttime equipment clamp is a cross-bot feedback loop through the live BotConfig that
     /// only the per-bot path replays, so a nighttime wave whose role carries nighttime modifiers
     /// declines. The same config by day still batches - the decline is about the clamp firing, not
@@ -241,6 +369,135 @@ public class BotWaveBatcherTests
         );
     }
 
+    /// <summary>
+    /// The segmentation the variants are built from: every band edge the pre-call lookups read is a
+    /// cut, and nothing else is. A missed cut ships a variant filtered at the wrong level, which is
+    /// a silent generation difference rather than a crash - so these are pinned directly.
+    /// </summary>
+    [Test]
+    public void ANonPmcWaveIsOneSegmentAtLevelOne()
+    {
+        var segments = BotWaveBatcher.EnumerateLevelSegments(
+            BuildWaveDetails(),
+            new MinMax<int>(1, 79),
+            new EquipmentFilters { Blacklist = [new EquipmentFilterDetails { LevelRange = new MinMax<int>(10, 20) }] },
+            [LootBand(1.5, 10.5)]
+        );
+
+        Assert.That(segments, Is.EqualTo(new List<MinMax<int>> { new(1, 1) }), "non-PMC bots never draw a level");
+    }
+
+    [Test]
+    public void AWaveWithNoBandsIsOneSegmentCoveringTheRange()
+    {
+        var segments = BotWaveBatcher.EnumerateLevelSegments(BuildWaveDetails(isPmc: true), new MinMax<int>(5, 30), null, []);
+
+        Assert.That(segments, Is.EqualTo(new List<MinMax<int>> { new(5, 30) }));
+    }
+
+    [Test]
+    public void ABandInsideTheRangeCutsItAtBothEdges()
+    {
+        var segments = BotWaveBatcher.EnumerateLevelSegments(
+            BuildWaveDetails(isPmc: true),
+            new MinMax<int>(5, 30),
+            new EquipmentFilters { Blacklist = [new EquipmentFilterDetails { LevelRange = new MinMax<int>(10, 20) }] },
+            []
+        );
+
+        Assert.That(segments, Is.EqualTo(new List<MinMax<int>> { new(5, 9), new(10, 20), new(21, 30) }));
+    }
+
+    [Test]
+    public void OverlappingBandsCutAtEveryEdge()
+    {
+        var segments = BotWaveBatcher.EnumerateLevelSegments(
+            BuildWaveDetails(isPmc: true),
+            new MinMax<int>(1, 15),
+            new EquipmentFilters
+            {
+                Whitelist = [new EquipmentFilterDetails { LevelRange = new MinMax<int>(1, 10) }],
+                Randomisation = [new RandomisationDetails { LevelRange = new MinMax<int>(5, 20) }],
+            },
+            []
+        );
+
+        Assert.That(segments, Is.EqualTo(new List<MinMax<int>> { new(1, 4), new(5, 10), new(11, 15) }));
+    }
+
+    [Test]
+    public void AGapBetweenBandsIsItsOwnSegment()
+    {
+        var segments = BotWaveBatcher.EnumerateLevelSegments(
+            BuildWaveDetails(isPmc: true),
+            new MinMax<int>(1, 15),
+            new EquipmentFilters
+            {
+                WeightingAdjustmentsByBotLevel =
+                [
+                    new WeightingAdjustmentDetails { LevelRange = new MinMax<int>(1, 5) },
+                    new WeightingAdjustmentDetails { LevelRange = new MinMax<int>(10, 15) },
+                ],
+            },
+            []
+        );
+
+        Assert.That(segments, Is.EqualTo(new List<MinMax<int>> { new(1, 5), new(6, 9), new(10, 15) }));
+    }
+
+    /// <summary>
+    /// Loot price bands are double-valued (PmcConfig.cs:139), so the integer levels they cover start
+    /// at ceil(min) and end at floor(max) - (1.5, 10.5) covers levels 2 to 10.
+    /// </summary>
+    [Test]
+    public void ADoubleValuedLootBandCutsAtItsIntegerEdges()
+    {
+        var segments = BotWaveBatcher.EnumerateLevelSegments(
+            BuildWaveDetails(isPmc: true),
+            new MinMax<int>(1, 15),
+            null,
+            [LootBand(1.5, 10.5)]
+        );
+
+        Assert.That(segments, Is.EqualTo(new List<MinMax<int>> { new(1, 1), new(2, 10), new(11, 15) }));
+    }
+
+    [Test]
+    public void BandsOutsideTheRangeChangeNothing()
+    {
+        var segments = BotWaveBatcher.EnumerateLevelSegments(
+            BuildWaveDetails(isPmc: true),
+            new MinMax<int>(10, 20),
+            new EquipmentFilters
+            {
+                Blacklist =
+                [
+                    new EquipmentFilterDetails { LevelRange = new MinMax<int>(1, 5) },
+                    new EquipmentFilterDetails { LevelRange = new MinMax<int>(50, 60) },
+                ],
+            },
+            [LootBand(70, 80)]
+        );
+
+        Assert.That(segments, Is.EqualTo(new List<MinMax<int>> { new(10, 20) }));
+    }
+
+    /// <summary>
+    /// Only the level range matters here; the three per-container bands are required members the
+    /// segmentation never reads.
+    /// </summary>
+    private static MinMaxLootItemValue LootBand(double min, double max)
+    {
+        return new MinMaxLootItemValue
+        {
+            Min = min,
+            Max = max,
+            Backpack = new MinMax<double>(0, 0),
+            Pocket = new MinMax<double>(0, 0),
+            Vest = new MinMax<double>(0, 0),
+        };
+    }
+
     private static void Prefix() { }
 
     private static object Construct(Type type, params object[] substitutes)
@@ -296,4 +553,16 @@ public class BotWaveBatcherTests
             pmcConfig,
             cloner
         ) { }
+
+    /// <summary>
+    /// Stands in for a mod-registered level generator: identical behaviour, different type.
+    /// </summary>
+    private class TestBotLevelGeneratorSubclass(GlobalTable globalTable, RandomUtil randomUtil)
+        : BotLevelGenerator(globalTable, randomUtil) { }
+
+    /// <summary>
+    /// Stands in for a mod-registered equipment filter service: identical behaviour, different type.
+    /// </summary>
+    private class TestBotEquipmentFilterServiceSubclass(BotHelper botHelper, ProfileHelper profileHelper, BotConfig botConfig)
+        : BotEquipmentFilterService(botHelper, profileHelper, botConfig) { }
 }

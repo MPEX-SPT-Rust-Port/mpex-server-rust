@@ -86,20 +86,7 @@ internal static class BotPayloadProjection
                 BotDifficulty = botGenerationDetails.BotDifficulty ?? string.Empty,
                 ClearBotContainerCacheAfterGeneration = botGenerationDetails.ClearBotContainerCacheAfterGeneration,
             },
-            Template = new BotTemplateView
-            {
-                Inventory = new BotTypeInventoryView
-                {
-                    // Enumeration order is the slot order the equipment loop walks, so ToDictionary
-                    // has to keep it - it does, both maps being insertion ordered
-                    Equipment = botJsonTemplate.BotInventory.Equipment.ToDictionary(slot => slot.Key.ToString(), slot => slot.Value),
-                    Ammo = botJsonTemplate.BotInventory.Ammo,
-                    Items = botJsonTemplate.BotInventory.Items,
-                    Mods = botJsonTemplate.BotInventory.Mods,
-                },
-                Chances = botJsonTemplate.BotChances,
-                Generation = botJsonTemplate.BotGeneration,
-            },
+            Template = BuildTemplateView(botJsonTemplate),
             GeneratingPlayerLevel = generatingPlayerLevel,
             IsNightTime = isNightTime,
             // A null entry is a role the legacy path would have thrown on; dropping it makes the
@@ -131,9 +118,10 @@ internal static class BotPayloadProjection
     }
 
     /// <summary>
-    /// The 20 request members that do not vary between the bots of one wave, built once for the
+    /// The request members that do not vary between the bots of one wave, built once for the
     /// whole wave. The role and player level are the wave's, which is what lets the equipment
-    /// blacklist ride here rather than per bot.
+    /// blacklist ride here rather than per bot. The level inputs and the band variants are the
+    /// caller's - only it knows the wave's level range and the bands it splits into.
     /// </summary>
     internal static SharedBotViews BuildSharedViews(
         MongoId sessionId,
@@ -150,7 +138,9 @@ internal static class BotPayloadProjection
         GlobalTable globalTable,
         BotConfig botConfig,
         PmcConfig pmcConfig,
-        RepairConfig repairConfig
+        RepairConfig repairConfig,
+        LevelGenerationView? levelGeneration,
+        List<BotTemplateVariantView> templateVariants
     )
     {
         var pmcProfile = profileHelper.GetPmcProfile(sessionId);
@@ -188,24 +178,16 @@ internal static class BotPayloadProjection
             ConfigBlacklist = itemFilterService.GetBlacklistedItems(),
             Items = PayloadProjection.BuildItemsView(itemHelper.TemplateTable.Items),
             ModPoolSlotOrder = BuildModPoolSlotOrder(botEquipmentModPoolService, itemHelper.TemplateTable.Items),
+            LevelGeneration = levelGeneration,
+            TemplateVariants = templateVariants,
         };
     }
 
     /// <summary>
-    /// The six request members that do vary per bot.
+    /// The three request members that do vary per bot.
     /// </summary>
-    internal static BotSlice BuildBotSlice(
-        MongoId botId,
-        BotType botJsonTemplate,
-        BotGenerationDetails botGenerationDetails,
-        ulong? testSeed,
-        BotLootCacheService botLootCacheService,
-        HandbookHelper handbookHelper,
-        PmcConfig pmcConfig
-    )
+    internal static BotSlice BuildBotSlice(MongoId botId, BotGenerationDetails botGenerationDetails, ulong? testSeed)
     {
-        var lootPools = BuildLootPools(botLootCacheService, botJsonTemplate, botGenerationDetails, pmcConfig);
-
         return new BotSlice
         {
             BotId = botId,
@@ -223,20 +205,29 @@ internal static class BotPayloadProjection
                 BotDifficulty = botGenerationDetails.BotDifficulty ?? string.Empty,
                 ClearBotContainerCacheAfterGeneration = botGenerationDetails.ClearBotContainerCacheAfterGeneration,
             },
-            Template = new BotTemplateView
+        };
+    }
+
+    /// <summary>
+    /// The three <c>BotType</c> blocks the inventory generator reads, narrowed to
+    /// <see cref="BotTemplateView"/>. Shared by the single-bot request and the batch's per-band
+    /// variants, which project the very same template.
+    /// </summary>
+    internal static BotTemplateView BuildTemplateView(BotType botJsonTemplate)
+    {
+        return new BotTemplateView
+        {
+            Inventory = new BotTypeInventoryView
             {
-                Inventory = new BotTypeInventoryView
-                {
-                    Equipment = botJsonTemplate.BotInventory.Equipment.ToDictionary(slot => slot.Key.ToString(), slot => slot.Value),
-                    Ammo = botJsonTemplate.BotInventory.Ammo,
-                    Items = botJsonTemplate.BotInventory.Items,
-                    Mods = botJsonTemplate.BotInventory.Mods,
-                },
-                Chances = botJsonTemplate.BotChances,
-                Generation = botJsonTemplate.BotGeneration,
+                // Enumeration order is the slot order the equipment loop walks, so ToDictionary
+                // has to keep it - it does, both maps being insertion ordered
+                Equipment = botJsonTemplate.BotInventory.Equipment.ToDictionary(slot => slot.Key.ToString(), slot => slot.Value),
+                Ammo = botJsonTemplate.BotInventory.Ammo,
+                Items = botJsonTemplate.BotInventory.Items,
+                Mods = botJsonTemplate.BotInventory.Mods,
             },
-            LootPools = lootPools,
-            HandbookPrices = BuildHandbookPrices(lootPools, handbookHelper),
+            Chances = botJsonTemplate.BotChances,
+            Generation = botJsonTemplate.BotGeneration,
         };
     }
 
@@ -247,7 +238,7 @@ internal static class BotPayloadProjection
     /// <c>GenerateLoot</c> never asks for, and asking for it here would be a call legacy does not
     /// make.
     /// </summary>
-    private static BotLootCache BuildLootPools(
+    internal static BotLootCache BuildLootPools(
         BotLootCacheService botLootCacheService,
         BotType botJsonTemplate,
         BotGenerationDetails botGenerationDetails,
@@ -301,7 +292,7 @@ internal static class BotPayloadProjection
     /// <c>HandbookHelper.GetTemplatePrice</c> for every tpl that can be drawn out of a loot pool -
     /// the only tpls the native running-total ever prices.
     /// </summary>
-    private static Dictionary<MongoId, double> BuildHandbookPrices(BotLootCache lootPools, HandbookHelper handbookHelper)
+    internal static Dictionary<MongoId, double> BuildHandbookPrices(BotLootCache lootPools, HandbookHelper handbookHelper)
     {
         var prices = new Dictionary<MongoId, double>();
 

@@ -28,14 +28,14 @@ order), `rmp-serde` (the ragfair MessagePack envelope), `indexmap`, `rand`/`rand
 pins `-C target-cpu=x86-64-v3` on both x64 targets, so the built library will not run on pre-AVX2 hardware, and
 the mold linker on Linux. Both profiles use one codegen unit; release adds fat LTO.
 
-~49k lines across the 52 files of `src/`, inline tests included: `bot/` ~34%, `loot/` ~24%, `ragfair/` ~15%,
+~49k lines across the 53 files of `src/`, inline tests included: `bot/` ~34%, `loot/` ~24%, `ragfair/` ~15%,
 `quest/` ~12%, `scav_case/` ~4%. `bot_equipment_mod_generator.rs` alone is 4.2k.
 
 ## Layout
 
 | Path | Role |
 |---|---|
-| `src/lib.rs` | Module roots and `ABI_VERSION` (currently 21; must equal `SptNative.ExpectedAbiVersion`) |
+| `src/lib.rs` | Module roots and `ABI_VERSION` (currently 22; must equal `SptNative.ExpectedAbiVersion`) |
 | `src/ffi.rs` | The C-ABI surface. The **only** module containing `unsafe` |
 | `src/runtime.rs` | Process-wide multi-thread tokio runtime, `OnceLock`-built. Used only by `verify` |
 | `src/verify.rs` | Hashes `SPT_Data` with XXH3-128 and diffs it against `checks.dat` |
@@ -153,6 +153,7 @@ equipment filters…) one generation run borrows, plus its `DiagSink`. The bot f
 | Module | Stands in for | What it does |
 |---|---|---|
 | `bot_inventory_generator.rs` | `Generators/Bot/BotInventoryGenerator.cs` | `generate_inventory` — the orchestrator and the crate's bot entry point — plus `generate_inventory_batch`, one wave in one call over a rayon loop |
+| `level_generator.rs` | `Generators/Bot/BotLevelGenerator.cs` | `generate_bot_level` — the batch path's level/exp draw. Only `GenerateBotLevel` + `ChooseBotLevel`; `GetRelativePmcBotLevelRange` stays C#-side as hoisted wave state |
 | `bot_equipment_mod_generator.rs` | `Generators/Bot/BotEquipmentModGenerator.cs` | Both mod halves (equipment, weapon), plus the one `BotWeaponModLimitService` method they call |
 | `bot_generator_helper.rs` | `Helpers/Bot/BotGeneratorHelper.cs`, `BotInventoryContainerService.cs` | Per-item `Upd` blocks, compatibility probes, and the `ContainerGrids` occupancy state |
 | `bot_loot_generator.rs` | `Generators/Loot/BotLootGenerator.cs` | Fills pockets/vest/backpack/secure from pools the C# caller resolved |
@@ -251,8 +252,19 @@ These are what keep the port correct; break one and output silently diverges fro
   stream onto a pooled thread.
 - **Caches become per-call derivation.** C# DI singletons keyed by bot id or built over the whole database
   (`BotEquipmentModPoolService`, `BotInventoryContainerService`) are recomputed per call or handed across the
-  boundary by the caller. The unit is one bot, not one raid: the batch export hoists only the views every bot
-  in the wave shares (`SharedBotViewsWire`) and still derives the rest per bot, each with its own seed guard.
+  boundary by the caller. The unit is one bot, not one raid: the batch export hoists the views every bot in
+  the wave shares (`SharedBotViewsWire`) and still derives the rest per bot, each with its own seed guard.
+- **The bot batch request is `{shared, bots[]}`, and the slice is down to three members.** `BotSliceWire` is
+  `botId` + `testSeed` + `details`; the template and the two loot views it used to carry moved onto
+  `SharedBotViewsWire.templateVariants`, one entry per *level band* rather than per bot (`levelMin`,
+  `levelMax`, `template`, `lootPools`, `handbookPrices` — ascending, contiguous, covering the wave's range).
+  Alongside them rides `levelGeneration` (`levelMin`/`levelMax`/`expTable`), present iff the wave is PMC.
+  Each bot's rayon task opens with its seed guard, then `level_generator::generate_bot_level` — the *first*
+  seeded draw, matching where the C# prelude does it — writes the drawn level over `details.bot_level` (the
+  caller sends 0), picks the first variant covering it, and clones that variant's three members. Non-PMC
+  draws nothing and takes the constant `(1, 0)`, so non-PMC seeded streams are unchanged. The drawn `level`
+  and `exp` ride back on `BotInventoryResult`; both are omitted from the single-bot response, whose request
+  and reply shapes are untouched (it keeps C# level generation and C# filtering).
 
 ## Tests
 
