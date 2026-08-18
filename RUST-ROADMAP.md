@@ -15,7 +15,7 @@ too, and has no legacy path: `SPTLoggerDispatcher` hands every line to the crate
 
 Twenty-two C-ABI exports (`src/ffi.rs`) carry all of it, JSON in and JSON out — except the ragfair
 response, which is a framed MessagePack envelope, and `spt_log_emit`, which passes the fields of one
-line directly (current ABI 21).
+line directly (current ABI 22).
 
 Native is not uniformly faster. Loot and repeatable quests win; bots, reward loot, ragfair, scav
 case, the base-class hydrate and the linked-item table are slower than the C# they replace, and
@@ -189,10 +189,37 @@ hookable members — its whole legacy body is inline in `Generate`.
 **The bot wave batches before it iterates.** `BotController.GenerateBotWave` offers the wave to
 `BotWaveBatcher.TryGenerateWave` first; the batcher returns null — and the unchanged per-bot path
 runs — on `ForcePerBotGeneration`, on anything `BotInventoryGenerator.UseLegacyPath()` already
-catches, on a patch of any frozen `BotGenerator`/`BotController` member except `GenerateBotWave`, on
-a substituted `BotGenerator`, or on a wave that could write nighttime clamps (only the per-bot path
-replays those). The response is one `{result | error}` envelope per bot in request order (ABI 8): a
-failed bot is skipped with a Critical log and the rest of the wave still generates.
+catches, on a patch of any frozen `BotGenerator`/`BotLevelGenerator`/`BotEquipmentFilterService`/
+`BotController` member except `GenerateBotWave`, on a substituted `BotGenerator`,
+`BotLevelGenerator` or `BotEquipmentFilterService`, or on a wave that could write nighttime clamps
+(only the per-bot path replays those). The response is one `{result | error}` envelope per bot in
+request order (ABI 8): a failed bot is skipped with a Critical log and the rest of the wave still
+generates.
+
+**The wave's level draw is native and its template ships per level band, not per bot** (ABI 22).
+`BotLevelGenerator.GenerateBotLevel` + `ChooseBotLevel` are ported to `bot/level_generator.rs` with
+**no new export** — the draw is the first act of each bot's rayon task, ahead of every other seeded
+draw, exactly where the C# prelude does it, and the drawn `level`/`exp` ride back on the envelope
+for the caller to write into `details.BotLevel`/`Info.Level`/`Info.Experience` before `CacheBot`
+reads them. `GetRelativePmcBotLevelRange` stays C#-side: its inputs are wave-constant, so the
+batcher calls it once and ships the range plus the exp table as `levelGeneration` (PMC waves only —
+non-PMC takes the constant level 1 and draws nothing, which is what keeps non-PMC seeded pins
+byte-identical). Because every level-dependent pre-call step is a *pure band lookup*
+(`FilterBotEquipment`, the appearance/voice pools, `LootItemLimitsRub`) and none of them draws, the
+batcher splits the range at those bands' edges and runs the **unchanged C#** filter, seasonal strip,
+blacklist strip and pool hydration once per band — shipping one `templateVariants` entry per band
+instead of one filtered template per bot. Segments are typically 1-3 (up to ~8 for a full 1..79
+range on shipped config), and always exactly one `[1..1]` for a non-PMC or playerscav wave. The
+per-bot slice collapses to `botId` + `testSeed` + `details`. Voice and appearance move *after* the
+call, drawn from the band the drawn level lands in. Divergences: **none intended.** The one
+fidelity note is `AddAdditionalPocketLootWeightsForUnheardBot`, which the native side applies to the
+cloned variant template with an `if let` where C# dereferences `PocketLoot` unguarded — a
+template with no `pocketLoot` block NREs on the per-bot path and is a no-op here (documented at the
+port site in `bot_inventory_generator.rs`). A PMC batch bot gains 1-2 draws at the head of its
+stream by construction, so a PMC seeded pin repinning is expected and is *not* a divergence — none
+had to be, as it happens: every batch-vs-per-bot fixture is non-PMC, and no pinned value in the
+suite moved. A changed **non-PMC** pin would be a bug. Measurements in
+[BENCHMARK.md](BENCHMARK.md).
 
 **State replayed after a native call**, because Rust keeps it to itself: bot container grid occupancy
 (`RestoreContainerGrids`) and nighttime mod-chance clamps (`ReplayRandomisationClamps`); ragfair's
@@ -245,8 +272,8 @@ written against, not the current file.
 
 ## Roadmap
 
-1. Next candidates and their costing live in [todo/TODO.md](todo/TODO.md); with #1 and #2 landed,
-   the unstarted front is the tier-1 completeness trio (#4-#6) and tier 2.
+1. Next candidates and their costing live in [todo/TODO.md](todo/TODO.md); with #1, #2 and #3
+   landed, the unstarted front is the tier-1 completeness trio (#4-#6) and tier 2.
 2. Convert `is_valid_reward_item`'s trader whitelist (`quest/reward_generator.rs:869`, a `Vec<&str>`
    of up to 14 candidates) to `ItemBaseClassCache::is_of_baseclasses_set` and measure whether 14 is
    long enough for the set form to pay. Narrow and unmeasured.

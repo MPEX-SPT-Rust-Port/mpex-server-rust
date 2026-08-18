@@ -37,6 +37,7 @@ public class BotWaveBatcherTests
 {
     private BotWaveBatcher _batcher = default!;
     private BotConfig _botConfig = default!;
+    private MatchBotDetailsCacheService _matchBotDetailsCacheService = default!;
     private MongoId _sessionId;
 
     [OneTimeSetUp]
@@ -45,6 +46,7 @@ public class BotWaveBatcherTests
         var di = DI.GetInstance();
         _batcher = di.GetService<BotWaveBatcher>();
         _botConfig = di.GetService<BotConfig>();
+        _matchBotDetailsCacheService = di.GetService<MatchBotDetailsCacheService>();
         _sessionId = new MongoId();
         di.GetService<SaveServer>().CreateProfile(new ProfileInfo { ProfileId = _sessionId });
     }
@@ -84,6 +86,11 @@ public class BotWaveBatcherTests
     /// The two behaviours an assault wave never reaches: the PMC side rewrite to <c>Savage</c> the
     /// batcher copies from <c>BotController.TryGenerateSingleBot</c>, and <c>GenerateBotFinish</c>'s
     /// dogtag branch, which only fires for the roles in <c>BotConfig.BotRolesWithDogTags</c>.
+    ///
+    /// Also the only place the level the native side drew is observable end to end: a PMC draws a
+    /// real level, and <c>CacheBot</c> reads <c>Info.Level</c>
+    /// (<c>MatchBotDetailsCacheService.cs:54</c>), so the cached copy pins both the assignment and
+    /// its ordering ahead of the caching step.
     /// </summary>
     [Test]
     public void APmcWaveIsRewrittenToSavageAndKeepsItsDogtag()
@@ -97,6 +104,14 @@ public class BotWaveBatcherTests
         {
             Assert.That(bot!.Info!.Side, Is.EqualTo(Sides.Savage));
             Assert.That(bot.Inventory!.Items!.Any(item => item.SlotId == Slots.Dogtag), Is.True, "a PMC came back without a dogtag");
+
+            Assert.That(bot.Info.Level, Is.GreaterThan(0), "a batched PMC came back without the level the native side drew");
+            Assert.That(bot.Info.Experience, Is.Not.Null, "a batched PMC came back without its experience total");
+            Assert.That(
+                _matchBotDetailsCacheService.GetBotById(bot.Id)?.Level,
+                Is.EqualTo(bot.Info.Level),
+                "CacheBot ran before the envelope's level was assigned"
+            );
         }
     }
 

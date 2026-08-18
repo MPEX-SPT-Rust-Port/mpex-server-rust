@@ -183,9 +183,11 @@ internal record GenerateBotInventoryBatchRequest
 
 /// <summary>
 /// The <see cref="GenerateBotInventoryRequest"/> members that do not vary between the bots of one
-/// wave - every database view, every config slice, and the blacklist resolved from the wave's role
-/// and the player's level. 95.7% of a single-bot request's bytes by measurement, which is what
-/// makes batching worth anything.
+/// wave - every database view, every config slice, the blacklist resolved from the wave's role and
+/// the player's level, and (as <see cref="TemplateVariants"/>) the templates and loot views, which
+/// vary by level band rather than by bot. That leaves the per-bot slice at an id, a seed and the
+/// details, so this block is essentially the whole request - which is what makes batching worth
+/// anything. Measured in BENCHMARK.md's *Batched wave*.
 /// </summary>
 internal record SharedBotViews
 {

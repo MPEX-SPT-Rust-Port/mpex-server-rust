@@ -27,8 +27,10 @@ using ProfileInfo = SPTarkov.Server.Core.Models.Eft.Profile.Info;
 namespace UnitTests.Tests.Generators;
 
 /// <summary>
-/// Solution A: one native call per wave instead of one per bot. The shared database and config
-/// views are 95.7% of a single-bot request's bytes, so batching a wave of N divides that share by N.
+/// Solution A: one native call per wave instead of one per bot. Since the level fold the per-bot
+/// slice is only an id, a seed and the generation details - everything else, the templates and loot
+/// views included, rides the shared block - so batching a wave of N divides essentially the whole
+/// request by N. See BENCHMARK.md's *Batched wave* for the measurement.
 ///
 /// <see cref="BatchGeneratesTheSameBotsAsThePerBotPath"/> is the correctness gate - the whole
 /// exercise is worthless if the batched path draws differently - and
