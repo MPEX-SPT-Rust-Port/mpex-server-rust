@@ -7,13 +7,14 @@ internals see [rust/ARCHITECTURE.md](rust/ARCHITECTURE.md); for the C# side of t
 ## Status
 
 The loot family, the bot family, dynamic ragfair offer generation, the repeatable-quest family, scav
-case rewards and the item base-class cache build are ported and run natively by default. Every
+case rewards, the item base-class cache build and the ragfair linked-item table are ported and run
+natively by default. Every
 ported class keeps its full 4.1.2 C# implementation as a **legacy path**, selected automatically
 when a mod hooks it or manually via a config flag. The log pipeline is ported too, and has no legacy
 path: `SPTLoggerDispatcher` hands every line to the crate.
-Twenty-one C-ABI exports (`src/ffi.rs`) carry all of it, JSON in and JSON out — except the ragfair
+Twenty-two C-ABI exports (`src/ffi.rs`) carry all of it, JSON in and JSON out — except the ragfair
 response, which is a framed MessagePack envelope, and `spt_log_emit`, which passes the fields of one
-line directly (current ABI 20).
+line directly (current ABI 21).
 
 ## Working
 
@@ -31,6 +32,7 @@ line directly (current ABI 20).
 | Repeatable quests (all four types + rewards) | `*QuestGenerator.Generate` | `spt_generate_repeatable_quest` |
 | Scav case rewards | `ScavCaseRewardGenerator.Generate` | `spt_generate_scav_case_rewards` |
 | Item base-class cache hydrate | `ItemBaseClassService.HydrateItemBaseClassCache` | `spt_build_item_base_class_cache` |
+| Ragfair linked-item table | `RagfairLinkedItemService.BuildLinkedItemTable` | `spt_build_ragfair_linked_item_table` |
 | The whole log pipeline — filters, level gates, per-target formatting, console + file sinks | `SPTLoggerDispatcher.Log` | `spt_logger_init`, `spt_logger_reinit`, `spt_log_emit`, `spt_logger_close`, `spt_log_set_tap` |
 | Generator diagnostics, localised and logged natively as they happen | `DatabaseImporter` → `SptNative.SetServerLocales` | `spt_locales_set` |
 
@@ -128,6 +130,38 @@ the native pipeline; seeded-RNG parity at the primitive level (xoshiro256\*\*, t
   `StringComparison.OrdinalIgnoreCase`, so a `_type` that matches `"Item"` only under non-ASCII case
   folding would be a root node natively and an Item in legacy. Every shipped `_type` is `"Item"` or
   `"Node"`.
+- **The ragfair linked-item table build is ~3.1-5.4x slower** — 92.53 ms native against 14.65 ms
+  legacy at the median as the fixture reports it (6.3x), but both arms move with measurement order
+  here, and position for position the loss is ~3.1x (both measured first) to ~5.1-5.4x (both
+  measured second); read the band, not the single ratio. The request projection is not the cost:
+  `Build()` is 3.85 ms, ~4% of the native median. The rest is the round trip over an id-heavy
+  payload in both directions — 40,761 slot, chamber and cartridge filter ids out, 63,530 linked ids
+  back across 4,673 sets, every one of them arriving through `MongoId`'s validating constructor,
+  the same response-binding ceiling the ragfair pass and the base-class hydrate hit. The build is
+  lazy and single-shot — the first `GetLinkedItems` miss builds the whole table and every call
+  after it is a dictionary hit, across all three call sites — so the loss is **~60-66 ms added to
+  whichever request arrives first**, once, and nothing afterwards. Native stays the default for
+  family consistency and `RagfairConfig.ForceLegacyRagfairLinkedItemBuild` is the opt-out. See
+  [BENCHMARK.md](BENCHMARK.md) § *Results — ragfair linked item table*.
+- **Four shapes around the revolver cylinder throw or NRE in legacy where native skips or
+  proceeds** — all in `AddRevolverCylinderAmmoToLinkedItems`' cylinder resolution
+  (`RagfairLinkedItemService.cs:119-136`) and `GetSlotFilters` (`:165`), and all sanctioned. A
+  revolver-parented template with null `Properties` NREs at `:119`, which dereferences
+  `cylinder.Properties.Slots` unconditionally, and a cylinder tpl that is valid-format but absent
+  from the items table NREs at `:135-136` (`itemHelper.GetItem(…).Value` is null into
+  `GetSlotFilters`); native sees an absent `slots` in the projection and skips both. An **empty
+  `Filters` list** throws `InvalidOperationException` on C#'s `.First()` where native, reading the
+  flattened per-slot `filter` the builder sends, finds it empty and returns early. And a `Filters`
+  group with a **null `Filter`** throws `ArgumentNullException` from `UnionWith(null)` where
+  `RagfairLinkedItemNativeRequestBuilder` projects it as empty and native proceeds. There is a
+  fifth, quieter shape in the same resolution and it is the one that is *not* a C# failure: when
+  the **first** `Filters` group is empty or null-`Filter` while a later group carries ids, C#
+  resolves `MongoId.Empty`, fails the `IsValidMongoId` gate and adds no camora ammo, where the
+  flattened list native reads starts at the later group's first id and it adds the edges. None of
+  the five is reachable on shipped data — no template carries any of those shapes — and
+  `RagfairLinkedItemParityTests` compares both paths' whole output over the real table, so the
+  legacy arm would throw rather than let one ship. Same class as the base-class hydrate's
+  parentless/cyclic pair.
 - **`get_flea_prices_as_array` is O(offers × price table) if a mod enables barters** — it re-derives
   the whole filtered flea price list per barter offer, with an ancestor-cache probe per entry.
   Dead on shipped data (`ragfair.json` `dynamic.barter.chancePercent` is `0`, so no barter offer is
@@ -394,8 +428,11 @@ the native pipeline; seeded-RNG parity at the primitive level (xoshiro256\*\*, t
   the same way — and one of the base-class set is on the C# side of the seam: quirk 1, in
   `HydrateItemBaseClassCache`, is that hydrate resets only the cache dictionary and never
   `_rootNodeIds`, so the native arm unions the response's root ids into the existing set rather than
-  replacing it. Grep case-insensitively for `quirk` under `src/quest/`, `src/scav_case/` and
-  `src/base_class.rs` to find the rest (that grep turns up base-class quirks 2, 3 and 5 only:
+  replacing it. `src/linked_items.rs` numbers its own the same way, and three of that set have no
+  Rust site either: quirk 1 (the `.Add` copy loop) runs in C# on both arms, quirk 5 (the null
+  `Filter` group) is the C# request builder's, and quirk 6 is the absence of a lock. Grep
+  case-insensitively for `quirk` under `src/quest/`, `src/scav_case/`, `src/base_class.rs` and
+  `src/linked_items.rs` to find the rest (that grep turns up base-class quirks 2, 3 and 5 only:
   quirk 1's comment sits on the C# side just described, and quirk 4 has no code site, its quirk
   being an unreachable error path — nothing to port); the
   behaviour they preserve is deliberate and reverting one silently diverges from C#. The bare `:N`
@@ -437,11 +474,27 @@ the native pipeline; seeded-RNG parity at the primitive level (xoshiro256\*\*, t
   `HydrateItemBaseClassCache` call, guideline 3's default, even though the service is a singleton
   hydrated once at startup. Only the bulk build moved: `AddItemToCache`, the per-item fallback
   `ItemHasBaseClass` uses for a tpl the bulk build missed, is unchanged C# on both paths.
+- **`RagfairLinkedItemService` took a constructor overload and freezes one class, its own.** The
+  frozen 3-parameter 4.1.2 constructor stays (as the primary constructor); the container selects an
+  additive 5-parameter overload adding `RagfairLinkedItemNativeRequestBuilder` and `RagfairConfig`.
+  Additive only, and a service built through the frozen constructor gets a null builder and builds
+  legacy unconditionally. The hookable set is every declared public/protected member of
+  `RagfairLinkedItemService` **except `BuildLinkedItemTable`**, the dispatcher — 6 members
+  (`GetLinkedItems`, `GetLinkedDbItems`, `GetSlotFilters`, `GetChamberFilters`,
+  `GetCartridgeFilters`, `AddRevolverCylinderAmmoToLinkedItems`); a live patch on any of them, or a
+  subclass of the service from the container, flips to legacy. Same shape as the base-class
+  hydrate, and the family's collaborator reads add nothing new to the patches-do-not-reach list.
+- **A fourth `RagfairConfig` flag, C# default only.** `ForceLegacyRagfairLinkedItemBuild` is not
+  serialised into `ragfair.json` — same as the other family flags, it exists as a default on the
+  config object and a user who wants it adds it to the file.
+- **The linked-item build caches nothing either.** One full items-view projection per
+  `BuildLinkedItemTable` call, guideline 3's default — and the build is lazy, so in practice that
+  is one projection for the life of the process. The ragfair and quest invariant slices are still
+  the only two exceptions in the crate.
 
 ## Roadmap
 
-1. Later candidates, in `todo/TODO.md` order: weather, fence assorts, raid-time adjustment, ragfair
-   linked-item table.
+1. Later candidates, in `todo/TODO.md` order: weather, fence assorts, raid-time adjustment.
 2. Convert `is_valid_reward_item`'s trader whitelist to the set form and measure.
    `quest/reward_generator.rs` builds it as a `Vec<&str>` of up to 14 candidates, consumed 4,673
    times per Completion pass; `ItemBaseClassCache::is_of_baseclasses_set` is the cheaper shape once
