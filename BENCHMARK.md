@@ -14,6 +14,7 @@ runs them. There are no `cargo bench` targets.
 | `ScavCaseBenchmarkTests.cs` | one scav case of each shipped recipe — elapsed time per call |
 | `ItemBaseClassBenchmarkTests.cs` | one bulk item base class cache build — elapsed time per hydrate |
 | `RagfairLinkedItemBenchmarkTests.cs` | one ragfair linked item table build — elapsed time per build |
+| `DbPublishSpikeTests.cs` | phase 0 state-ownership spike — full-DB publish envelope: per-root size and projection time; paired with `rust/spt-native/tests/phase0_publish_spike.rs` for parse time and RSS |
 
 ## Running them
 
@@ -42,6 +43,55 @@ dotnet test -c Release --filter "FullyQualifiedName~RagfairLinkedItemBenchmarkTe
 
 `--logger "console;verbosity=detailed"` is required — the fixtures report through `TestContext.Out`.
 Grep for `median`, `speedup`, or `peak RSS`.
+
+## Phase 0 — full-DB publish spike (state ownership)
+
+`c660f9e` — 2026-08-18. One full `{"schema":1,"roots":{...}}` envelope (design doc:
+docs/superpowers/specs/2026-08-17-rust-state-ownership-design.md), crossed via a temp file — no FFI
+export exists yet. looseLoot (549 MiB raw) is excluded by design; locations project `Base` only.
+
+    dotnet test -c Release --filter "FullyQualifiedName~DbPublishSpikeTests" --logger "console;verbosity=detailed"
+    cd rust && cargo test --release --test phase0_publish_spike -- --ignored --nocapture
+
+| measure | value |
+|---|---|
+| envelope size | 92.4 MiB |
+| C# projection, warm (all roots) | 1260.8 ms |
+| envelope assembly | 148.7 ms |
+| Rust parse (`Value` bound) | 650.2 ms |
+| Rust RSS delta (`Value` bound) | 405.2 MiB |
+| end-to-end warm (projection + assembly + parse; FFI copy est. +10–50 ms) | 2059.7 ms |
+
+Per-root breakdown (Release, verbatim fixture output):
+
+```
+root          size MiB   cold ms   warm ms
+templates         22.4     692.5     391.7
+bots               5.7     252.2      94.6
+hideout            0.3      39.8       4.6
+locales           58.6     924.0     629.1
+locations          1.3      74.5      27.2
+match              0.0       1.9       0.0
+traders            2.5      71.2      33.4
+globals            0.7     185.0       7.3
+server             0.0       0.6       0.0
+settings           0.3      34.1       5.2
+configs            0.7     370.6      67.7
+TOTAL             92.4    2646.5    1260.8
+```
+
+Gates (design doc § Phase 0): end-to-end warm < ~1 s and RSS delta < ~1 GB → **go** for
+whole-DB publish. RSS-only trip → re-judge with `parse_locales_root_typed` (the `Value` bound
+over-counts string-map roots) before falling back to per-root granularity. Verdict: **no-go** for
+whole-DB publish. The latency gate trips — 2059.7 ms warm end-to-end, ≈2070–2110 ms with the
+FFI-copy estimate, against the ~1 s bar — while RSS passes (405.2 MiB), so the typed-locales
+refinement cannot rescue the verdict (it addresses RSS-only trips; for the record, the isolated-
+process typed run measured 232.3 ms / 99.2 MiB for the locales root). Fallback per the design doc:
+**per-root sync granularity**, which the breakdown supports — the C# projection dominates the
+total and locales is the worst root at 629.1 ms warm projection; a locales-only republish is
+≈861 ms (629.1 projection + 232.3 typed parse; ≈0.97–1.01 s with a byte-proportional assembly
+share and the copy estimate), inside the ~1 s bar but with little headroom, and every other root
+is far cheaper.
 
 ## Methodology
 
