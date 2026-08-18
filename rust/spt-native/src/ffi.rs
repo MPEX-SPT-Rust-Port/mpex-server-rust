@@ -31,9 +31,9 @@ pub const STATUS_BAD_ARGS: i32 = 1;
 pub const STATUS_PANIC: i32 = 2;
 /// Generation failed: the error message, not a result, is in the out-buffer.
 pub const STATUS_ERROR: i32 = 3;
-/// A slice-less ragfair or repeatable-quest request named a stamp this process has not cached; the
-/// caller resends.
-pub const STATUS_STALE_SLICE: i32 = 4;
+/// A request named a resident-DB epoch (ragfair) or a cached slice stamp (quests, until flip #2)
+/// this process does not hold; the caller republishes / resends.
+pub const STATUS_STALE_EPOCH: i32 = 4;
 
 /// How a generator failure crosses the boundary: which status code, and what message buffer.
 pub trait FfiFailure {
@@ -55,7 +55,7 @@ impl FfiFailure for RagfairError {
     fn status(&self) -> i32 {
         match self {
             RagfairError::Loot(_) => STATUS_ERROR,
-            RagfairError::StaleSlice => STATUS_STALE_SLICE,
+            RagfairError::StaleSlice => STATUS_STALE_EPOCH,
         }
     }
 
@@ -71,7 +71,7 @@ impl FfiFailure for QuestError {
     fn status(&self) -> i32 {
         match self {
             QuestError::Failed(_) => STATUS_ERROR,
-            QuestError::StaleSlice => STATUS_STALE_SLICE,
+            QuestError::StaleSlice => STATUS_STALE_EPOCH,
         }
     }
 
@@ -90,6 +90,20 @@ impl FfiFailure for ScavCaseError {
 
     fn into_message(self) -> String {
         self.message
+    }
+}
+
+impl FfiFailure for crate::db::PublishError {
+    fn status(&self) -> i32 {
+        STATUS_ERROR
+    }
+
+    fn into_message(self) -> String {
+        match self {
+            crate::db::PublishError::Schema(message) | crate::db::PublishError::Views(message) => {
+                message
+            }
+        }
     }
 }
 
@@ -551,6 +565,31 @@ pub unsafe extern "C" fn spt_build_ragfair_linked_item_table(
     }
 }
 
+/// Installs a publish envelope's roots into the process-global resident DB and answers the new
+/// epoch as `{"epoch":N}`. A parse failure (including an unknown root name) is `STATUS_BAD_ARGS`;
+/// a schema or view-derivation failure is `STATUS_ERROR` and leaves the previous DB intact.
+///
+/// # Safety
+/// See `spt_generate_static_containers`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn spt_db_publish(
+    req_ptr: *const u8,
+    req_len: usize,
+    out_ptr: *mut *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    unsafe {
+        run_generator_with(
+            req_ptr,
+            req_len,
+            out_ptr,
+            out_len,
+            crate::db::publish,
+            |epoch| format!("{{\"epoch\":{epoch}}}").into_bytes(),
+        )
+    }
+}
+
 /// The process-wide log pipeline and its init ref-count. A plain `Mutex<Option>` rather than a
 /// `OnceLock` so `spt_logger_close` can take it down (and tests can re-initialise afterwards); the
 /// count lives inside the same lock so init and close cannot race each other.
@@ -951,7 +990,7 @@ mod tests {
         assert_eq!(spt_native_abi_version(), crate::ABI_VERSION);
         assert_eq!(
             crate::ABI_VERSION,
-            21,
+            22,
             "bump SptNative.ExpectedAbiVersion too"
         );
     }
@@ -1601,7 +1640,7 @@ mod tests {
         // slice-less send with a different stamp is a stale-slice miss
         let miss = ragfair_request_with_stamp(42, false);
         let (status, _) = call_generate(spt_generate_dynamic_offers, miss.as_bytes());
-        assert_eq!(status, STATUS_STALE_SLICE);
+        assert_eq!(status, STATUS_STALE_EPOCH);
     }
 
     /// Every repeatable-quest call writes the quest family's own static slice slot — a different
@@ -1695,7 +1734,7 @@ mod tests {
             spt_generate_repeatable_quest,
             &quest_request(42, false, None),
         );
-        assert_eq!(status, STATUS_STALE_SLICE);
+        assert_eq!(status, STATUS_STALE_EPOCH);
         assert_eq!(
             String::from_utf8(out).unwrap(),
             "no cached invariant slice for this stamp"
@@ -1886,6 +1925,58 @@ mod tests {
         assert!(
             message.contains("expected ident"),
             "expected the serde error, got: {message}"
+        );
+    }
+
+    /// Every publish writes the one process-global resident DB, so these run under its test lock.
+    fn db_lock() -> std::sync::MutexGuard<'static, ()> {
+        crate::db::tests::DB_TEST_LOCK.lock().unwrap()
+    }
+
+    #[test]
+    fn db_publish_bumps_the_epoch_per_publish() {
+        let _guard = db_lock();
+        crate::db::clear();
+
+        // All three mini roots resident: the publish also derives the ragfair views.
+        let (status, out) = call_generate(
+            spt_db_publish,
+            br#"{"schema":1,"roots":{"templates":{"a":1},"traders":{"b":2},"globals":{"c":3}}}"#,
+        );
+        assert_eq!(status, STATUS_OK);
+        let body: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(body, serde_json::json!({"epoch": 1}));
+
+        let (status, out) = call_generate(
+            spt_db_publish,
+            br#"{"schema":1,"roots":{"templates":{"a":9}}}"#,
+        );
+        assert_eq!(status, STATUS_OK);
+        let body: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(body, serde_json::json!({"epoch": 2}));
+    }
+
+    #[test]
+    fn db_publish_rejects_an_unknown_root_as_bad_args() {
+        let (status, out) =
+            call_generate(spt_db_publish, br#"{"schema":1,"roots":{"tempaltes":{}}}"#);
+
+        assert_eq!(status, STATUS_BAD_ARGS);
+        let message = String::from_utf8(out).unwrap();
+        assert!(
+            message.contains("unknown field"),
+            "expected the serde error, got: {message}"
+        );
+    }
+
+    #[test]
+    fn db_publish_reports_a_schema_error_as_status_error() {
+        let (status, out) = call_generate(spt_db_publish, br#"{"schema":2,"roots":{}}"#);
+
+        assert_eq!(status, STATUS_ERROR);
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "unsupported publish schema 2"
         );
     }
 

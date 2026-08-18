@@ -100,7 +100,7 @@ public class RepeatableQuestNativeRequestBuilder(
             result = SptNative.GenerateRepeatableQuest(BuildRequest(sendSlice, stamp, varying));
             LastSendIncludedSlice = sendSlice;
         }
-        catch (NativeStaleSliceException)
+        catch (NativeStaleEpochException)
         {
             // The native cache does not hold the slice this stamp names - resend it whole
             result = SptNative.GenerateRepeatableQuest(BuildRequest(true, stamp, varying));

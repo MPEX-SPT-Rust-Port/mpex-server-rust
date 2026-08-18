@@ -26,7 +26,7 @@ pub fn store(stamp: i64, slice: QuestInvariantSlice) -> Arc<QuestInvariantSlice>
 /// through, or the cached slice when it carried none.
 ///
 /// `None` is the stale case — a slice-less request naming a stamp this process has not stored,
-/// which the caller answers by resending the slice (`STATUS_STALE_SLICE`). A miss is never a wrong
+/// which the caller answers by resending the slice (`STATUS_STALE_EPOCH`). A miss is never a wrong
 /// answer, only a retry.
 pub fn take_or_stale(
     stamp: i64,

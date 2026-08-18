@@ -163,7 +163,7 @@ public class SptNativeRagfairWireTests
             testSeed: 1234
         );
 
-        Assert.Throws<NativeStaleSliceException>(() => SptNative.GenerateDynamicOffers(request));
+        Assert.Throws<NativeStaleEpochException>(() => SptNative.GenerateDynamicOffers(request));
     }
 
     /// <summary>

@@ -71,7 +71,7 @@ C# SptNative → spt_generate_* (JSON in)
   rather than emit one JSON document; quest and scav case do so for their own error types.
   `spt_verify_database` is separate because it blocks on the tokio runtime.
 - Status codes: `STATUS_OK` 0, `STATUS_BAD_ARGS` 1 (null pointer, bad UTF-8, unparseable JSON), `STATUS_PANIC`
-  2 (message in the out-buffer since ABI 18), `STATUS_ERROR` 3, `STATUS_STALE_SLICE` 4 (ragfair and quest
+  2 (message in the out-buffer since ABI 18), `STATUS_ERROR` 3, `STATUS_STALE_EPOCH` 4 (ragfair and quest
   only). **Quest and scav case never return 2**: they catch the generator's panic themselves and report it as
   3 carrying the message, because those families port a C#-sanctioned throw as a panic — a generation failure,
   not a library bug. The cost is that a real port bug in those two also arrives as 3, indistinguishable from a
@@ -79,7 +79,7 @@ C# SptNative → spt_generate_* (JSON in)
 - **Two requests have a cached half**, ragfair's and the repeatable quest's. Each arrives as
   `{invariantStamp, invariant?, varying}`; `ragfair/slice_cache.rs` and `quest/slice_cache.rs` each hold the
   last parsed invariant slice under the stamp it came with, in **separate** slots, so a repeat pass can omit
-  it. A slice-less request whose stamp the cache does not hold returns `STATUS_STALE_SLICE` and the C# caller
+  it. A slice-less request whose stamp the cache does not hold returns `STATUS_STALE_EPOCH` and the C# caller
   retries once with the slice included. Those two slices are the only request data held across calls.
 - **A buffer is written on failure too** — the parse error, the `LootError` message, or the panic text.
   Ownership is decided by the out-pointer being non-null, never by the status code. `spt_verify_database`'s

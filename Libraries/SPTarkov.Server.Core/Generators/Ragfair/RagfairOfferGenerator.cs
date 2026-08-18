@@ -483,7 +483,7 @@ public class RagfairOfferGenerator(
             result = SptNative.GenerateDynamicOffers(BuildNativeRequest(sendSlice, stamp, expiredOffers));
             LastSendIncludedSlice = sendSlice;
         }
-        catch (NativeStaleSliceException)
+        catch (NativeStaleEpochException)
         {
             // The native cache does not hold the slice this stamp names - resend it whole
             result = SptNative.GenerateDynamicOffers(BuildNativeRequest(true, stamp, expiredOffers));

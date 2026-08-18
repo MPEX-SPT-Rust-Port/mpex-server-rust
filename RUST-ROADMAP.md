@@ -225,8 +225,8 @@ also takes **one timestamp** where legacy calls `TimeUtil.GetTimeStamp()` per of
 `SeasonalEventService.UpdateGlobalEvents`, `ItemFilterService`'s blacklist `Add*` methods,
 `CustomItemService`'s `Create*` methods and a guarded replay bump when `CanSellOnRagfair` flips
 true→false. The request is `{invariantStamp, invariant?, varying}` (ragfair ABI 13, quests ABI 14);
-a slice-less request whose stamp the cache does not hold returns `STATUS_STALE_SLICE` (4), surfacing
-as `NativeStaleSliceException` and self-healing with one full-send retry — a lost cache costs one
+a slice-less request whose stamp the cache does not hold returns `STATUS_STALE_EPOCH` (4), surfacing
+as `NativeStaleEpochException` and self-healing with one full-send retry — a lost cache costs one
 pass's projection, never a wrong result. **A mod writing an injected table's dictionaries directly is
 invisible to the stamp by design** — the eligibility gate carries that weight instead: the cache is
 used only when no mods are loaded, with `TrustNativeRequestCacheWithMods` as the opt-in and
