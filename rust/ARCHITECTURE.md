@@ -35,7 +35,7 @@ the mold linker on Linux. Both profiles use one codegen unit; release adds fat L
 
 | Path | Role |
 |---|---|
-| `src/lib.rs` | Module roots and `ABI_VERSION` (currently 23; must equal `SptNative.ExpectedAbiVersion`) |
+| `src/lib.rs` | Module roots and `ABI_VERSION` (currently 24; must equal `SptNative.ExpectedAbiVersion`) |
 | `src/ffi.rs` | The C-ABI surface. The **only** module containing `unsafe` |
 | `src/runtime.rs` | Process-wide multi-thread tokio runtime, `OnceLock`-built. Used only by `verify` |
 | `src/verify.rs` | Hashes `SPT_Data` with XXH3-128 and diffs it against `checks.dat` |
@@ -75,25 +75,31 @@ C# SptNative → spt_generate_* (JSON in)
   rather than emit one JSON document; quest and scav case do so for their own error types.
   `spt_verify_database` is separate because it blocks on the tokio runtime.
 - Status codes: `STATUS_OK` 0, `STATUS_BAD_ARGS` 1 (null pointer, bad UTF-8, unparseable JSON), `STATUS_PANIC`
-  2 (message in the out-buffer since ABI 18), `STATUS_ERROR` 3, `STATUS_STALE_EPOCH` 4 (ragfair and quest
-  only). **Quest and scav case never return 2**: they catch the generator's panic themselves and report it as
+  2 (message in the out-buffer since ABI 18), `STATUS_ERROR` 3, `STATUS_STALE_EPOCH` 4 (the resident-DB
+  riders only: ragfair, quest, base-class, linked-items). **Quest and scav case never return 2**: they catch the generator's panic themselves and report it as
   3 carrying the message, because those families port a C#-sanctioned throw as a panic — a generation failure,
   not a library bug. The cost is that a real port bug in those two also arrives as 3, indistinguishable from a
   sanctioned failure. Deliberate.
-- **Ragfair and the repeatable quest ride the resident DB.** `spt_db_publish` (called by C#'s
+- **Four families ride the resident DB: ragfair, the repeatable quest, and the two startup one-shots
+  (base-class cache, linked-item table).** `spt_db_publish` (called by C#'s
   `DbPublisher` whenever `DatabaseMutationStamp` has moved) makes the templates, traders, globals and
   locations roots resident in `db.rs` — every root optional, an absent one keeping the resident copy, and
   the epoch bumping on full and partial publishes alike; a bad schema or a failed view derivation aborts
-  before the swap, leaving the previous resident DB intact. It derives both families' views at publish
+  before the swap, leaving the previous resident DB intact. It derives ragfair's and quest's views at publish
   time — the quest views
   share `items`/`handbookPrices`/`fleaPrices` with ragfair's through one `Arc`; the quest-own views
   (`quest/views.rs`) derive off the same publish. The locations root is `Base` + `AllExtracts` only, keyed
-  by the locations' `JsonPropertyName` strings (a null `AllExtracts` ships as `[]`). Both families' requests
-  arrive as `{epoch, viewsOverride?, varying}` and borrow those views; an epoch the store does not hold
+  by the locations' `JsonPropertyName` strings (a null `AllExtracts` ships as `[]`). Ragfair and quest
+  requests arrive as `{epoch, viewsOverride?, varying}` and borrow those views. The one-shot requests
+  (`spt_build_item_base_class_cache`, `spt_build_ragfair_linked_item_table` — flip #3, ABI 24) arrive as
+  `{epoch, viewsOverride?}` — no varying block, the whole pre-flip payload was invariant — and derive
+  their walk input from the resident templates root at request time, deliberately **not** from the ragfair
+  items view, which drops props-less templates and keeps only the first `Filters` group per slot — both
+  fatal to these walks. An epoch the store does not hold
   returns `STATUS_STALE_EPOCH` and the C# caller force-publishes and retries once. An ineligible caller
   (mods loaded without trust, or the kill switch) sends `viewsOverride` with `epoch: 0` instead — a
   documented wire contract, not runtime-enforced — used for that call only, never made resident. The
-  resident roots are the only request data held across calls (ABI 23).
+  resident roots are the only request data held across calls (ABI 24).
 - **A buffer is written on failure too** — the parse error, the `LootError` message, or the panic text.
   Ownership is decided by the out-pointer being non-null, never by the status code. `spt_verify_database`'s
   free-on-success-only shape must not be copied into the generators.
@@ -320,12 +326,13 @@ Almost all tests are inline `#[cfg(test)]` modules (~750 of them). Three kinds:
   failure, generation failure and null arguments. `spt_generate_bot_inventory_batch` is the one export with no
   transport test of its own.
 
-Four `tests/` targets: `completion_whitelist_baseclass.rs`, a timing-and-equivalence guard for the
+Five `tests/` targets: `completion_whitelist_baseclass.rs`, a timing-and-equivalence guard for the
 Completion whitelist filter's base-class lookups (runs against the real shipped `items.json`, so it needs
 `scripts/decompress-assets.sh` to have run); `phase0_publish_spike.rs` (`#[ignore]`d, the Phase 0 publish
-measurements); and `phase1_ragfair_views.rs` / `phase1_quest_views.rs` (`#[ignore]`d), the Rust halves of the
-two views-equivalence harness pairs — each parses an envelope its C# twin (`RagfairViewsEquivalenceTests` /
-`QuestViewsEquivalenceTests`) wrote to `$TMPDIR` and asserts the Rust-derived views equivalent to the
-C#-built ones.
+measurements); and `phase1_ragfair_views.rs` / `phase1_quest_views.rs` / `flip3_oneshot_views.rs`
+(`#[ignore]`d), the Rust halves of the
+three views-equivalence harness pairs — each parses an envelope its C# twin (`RagfairViewsEquivalenceTests` /
+`QuestViewsEquivalenceTests` / `OneShotViewsEquivalenceTests`) wrote to `$TMPDIR` and asserts the
+Rust-derived views (for flip #3, the resident-derived walk inputs) equivalent to the C#-built ones.
 
 Run with `cd rust && cargo test && cargo fmt --check && cargo clippy --all-targets -- -D warnings`.

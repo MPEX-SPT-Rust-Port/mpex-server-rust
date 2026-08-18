@@ -95,6 +95,16 @@ impl FfiFailure for ScavCaseError {
     }
 }
 
+impl FfiFailure for crate::db::StaleEpoch {
+    fn status(&self) -> i32 {
+        STATUS_STALE_EPOCH
+    }
+
+    fn into_message(self) -> String {
+        "resident DB epoch mismatch; republish and retry".to_string()
+    }
+}
+
 impl FfiFailure for crate::db::PublishError {
     fn status(&self) -> i32 {
         STATUS_ERROR
@@ -505,9 +515,9 @@ struct BaseClassEnvelope {
     result: BaseClassResponse,
 }
 
-/// The whole `_itemBaseClassesCache` in one call, off the template table. The walk has no C# throw
-/// to port, so `STATUS_ERROR` is unreachable: only a parse error or a panic answers anything but
-/// `STATUS_OK`.
+/// The whole `_itemBaseClassesCache` in one call, off the resident templates root or the override
+/// this request carries. An override-less request naming an epoch the process does not hold is
+/// `STATUS_STALE_EPOCH`.
 ///
 /// # Safety
 /// See `spt_generate_static_containers`.
@@ -519,15 +529,17 @@ pub unsafe extern "C" fn spt_build_item_base_class_cache(
     out_len: *mut usize,
 ) -> i32 {
     unsafe {
-        run_generator(
+        run_generator_with(
             req_ptr,
             req_len,
             out_ptr,
             out_len,
             |request: BaseClassRequest| {
-                Ok(BaseClassEnvelope {
-                    result: base_class::build(&request),
-                })
+                base_class::run(request).map(|result| BaseClassEnvelope { result })
+            },
+            |envelope| {
+                serde_json::to_vec(&envelope)
+                    .expect("base class response serialization cannot fail")
             },
         )
     }
@@ -540,9 +552,9 @@ struct LinkedItemsEnvelope {
     result: LinkedItemsResponse,
 }
 
-/// The whole `linkedItemsCache` in one call, off the template table. The walk has no C# throw
-/// to port, so `STATUS_ERROR` is unreachable: only a parse error or a panic answers anything
-/// but `STATUS_OK`.
+/// The whole `linkedItemsCache` in one call, off the resident templates root or the override
+/// this request carries. An override-less request naming an epoch the process does not hold is
+/// `STATUS_STALE_EPOCH`.
 ///
 /// # Safety
 /// See `spt_generate_static_containers`.
@@ -554,15 +566,17 @@ pub unsafe extern "C" fn spt_build_ragfair_linked_item_table(
     out_len: *mut usize,
 ) -> i32 {
     unsafe {
-        run_generator(
+        run_generator_with(
             req_ptr,
             req_len,
             out_ptr,
             out_len,
             |request: LinkedItemsRequest| {
-                Ok(LinkedItemsEnvelope {
-                    result: linked_items::build(&request),
-                })
+                linked_items::run(request).map(|result| LinkedItemsEnvelope { result })
+            },
+            |envelope| {
+                serde_json::to_vec(&envelope)
+                    .expect("linked items response serialization cannot fail")
             },
         )
     }
@@ -993,7 +1007,7 @@ mod tests {
         assert_eq!(spt_native_abi_version(), crate::ABI_VERSION);
         assert_eq!(
             crate::ABI_VERSION,
-            23,
+            24,
             "bump SptNative.ExpectedAbiVersion too"
         );
     }
@@ -1923,10 +1937,10 @@ mod tests {
 
     /// `child` is an Item whose chain climbs through the `node` root to a `root` the view never
     /// holds — the three-template shape `base_class`'s own tests pin, here across the boundary.
-    const BASE_CLASS_REQUEST: &[u8] = br#"{"itemsView":{
+    const BASE_CLASS_REQUEST: &[u8] = br#"{"epoch":0,"viewsOverride":{"itemsView":{
         "child":{"parent":"node","type":"Item"},
         "node":{"parent":"root","type":"Node"}
-    }}"#;
+    }}}"#;
 
     #[test]
     fn build_item_base_class_cache_export_round_trips() {
@@ -1959,11 +1973,57 @@ mod tests {
         );
     }
 
+    #[test]
+    fn build_item_base_class_cache_epoch_protocol_gates_override_less_requests() {
+        let _guard = db_lock();
+        crate::db::clear();
+
+        // No publish yet: an override-less request has no resident DB to build from
+        let (status, _) = call_generate(spt_build_item_base_class_cache, br#"{"epoch":1}"#);
+        assert_eq!(status, STATUS_STALE_EPOCH);
+
+        // Publish a templates-only mini root and name the returned epoch: the request builds
+        let (status, out) = call_generate(
+            spt_db_publish,
+            br#"{"schema":1,"roots":{"templates":{"items":{
+                "child":{"_parent":"node","_type":"Item"},
+                "node":{"_parent":"root","_type":"Node"}
+            }}}}"#,
+        );
+        assert_eq!(status, STATUS_OK);
+        let epoch = serde_json::from_slice::<serde_json::Value>(&out).unwrap()["epoch"]
+            .as_u64()
+            .unwrap();
+
+        let (status, out) = call_generate(
+            spt_build_item_base_class_cache,
+            format!(r#"{{"epoch":{epoch}}}"#).as_bytes(),
+        );
+        assert_eq!(status, STATUS_OK);
+        let result: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        let chain = result["result"]["itemBaseClasses"]["child"]
+            .as_array()
+            .unwrap();
+        assert_eq!(chain.len(), 2);
+        assert_eq!(result["result"]["rootNodeIds"], serde_json::json!(["node"]));
+
+        // A mismatched epoch is a stale miss carrying the republish-and-retry message
+        let (status, out) = call_generate(
+            spt_build_item_base_class_cache,
+            format!(r#"{{"epoch":{}}}"#, epoch + 1).as_bytes(),
+        );
+        assert_eq!(status, STATUS_STALE_EPOCH);
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "resident DB epoch mismatch; republish and retry"
+        );
+    }
+
     /// One weapon linking one stock — enough to see both directions cross the boundary.
-    const LINKED_ITEMS_REQUEST: &[u8] = br#"{"itemsView":{
+    const LINKED_ITEMS_REQUEST: &[u8] = br#"{"epoch":0,"viewsOverride":{"itemsView":{
         "weapon":{"parent":"p","slots":[{"name":"mod_stock","filter":["stockA"]}]},
         "stockA":{"parent":"p"}
-    }}"#;
+    }}}"#;
 
     #[test]
     fn build_ragfair_linked_item_table_export_round_trips() {
@@ -1991,6 +2051,54 @@ mod tests {
         assert!(
             message.contains("expected ident"),
             "expected the serde error, got: {message}"
+        );
+    }
+
+    #[test]
+    fn build_ragfair_linked_item_table_epoch_protocol_gates_override_less_requests() {
+        let _guard = db_lock();
+        crate::db::clear();
+
+        let (status, _) = call_generate(spt_build_ragfair_linked_item_table, br#"{"epoch":1}"#);
+        assert_eq!(status, STATUS_STALE_EPOCH);
+
+        let (status, out) = call_generate(
+            spt_db_publish,
+            br#"{"schema":1,"roots":{"templates":{"items":{
+                "weapon":{"_parent":"p","_props":{"Slots":[{"_name":"mod_stock","_props":{"filters":[{"Filter":["stockA"]}]}}]}},
+                "stockA":{"_parent":"p"}
+            }}}}"#,
+        );
+        assert_eq!(status, STATUS_OK);
+        let epoch = serde_json::from_slice::<serde_json::Value>(&out).unwrap()["epoch"]
+            .as_u64()
+            .unwrap();
+
+        let (status, out) = call_generate(
+            spt_build_ragfair_linked_item_table,
+            format!(r#"{{"epoch":{epoch}}}"#).as_bytes(),
+        );
+        assert_eq!(status, STATUS_OK);
+        let result: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        let weapon = result["result"]["linkedItems"]["weapon"]
+            .as_array()
+            .unwrap();
+        assert!(weapon.contains(&serde_json::json!("stockA")));
+        assert!(
+            result["result"]["linkedItems"]["stockA"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("weapon"))
+        );
+
+        let (status, out) = call_generate(
+            spt_build_ragfair_linked_item_table,
+            format!(r#"{{"epoch":{}}}"#, epoch + 1).as_bytes(),
+        );
+        assert_eq!(status, STATUS_STALE_EPOCH);
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "resident DB epoch mismatch; republish and retry"
         );
     }
 

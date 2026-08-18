@@ -36,6 +36,11 @@ pub enum PublishError {
     Views(String),
 }
 
+/// An override-less request named an epoch this process does not hold (or the root it needs is
+/// not resident). The caller republishes and retries once — the epoch protocol's self-heal.
+#[derive(Debug)]
+pub struct StaleEpoch;
+
 static DB: RwLock<Option<Arc<ResidentDb>>> = RwLock::new(None);
 
 /// The resident DB right now, or `None` before the first publish. Arc clone under a read lock,

@@ -178,9 +178,10 @@ silently drops camora ammo on the fifth); and the native `_type` test being
    without `TrustNativeRequestCacheWithMods`, or `DisableNativeRequestCache`) send the C#-built
    view bundle as `viewsOverride` on every call at today's projection cost, never touching resident
    state. Full protocol: the epoch-protocol section and its 2026-08-18 amendments in
-   docs/superpowers/specs/2026-08-17-rust-state-ownership-design.md. Ragfair (flip #1) and the
-   repeatable quests (flip #2) ride it today; every other family still projects per call — see
-   *Exceptions in force*.
+   docs/superpowers/specs/2026-08-17-rust-state-ownership-design.md. Ragfair (flip #1), the
+   repeatable quests (flip #2) and the two startup one-shots — the base-class hydrate and the
+   ragfair linked-item table (flip #3) — ride it today; every other family still projects per
+   call — see *Exceptions in force*.
 4. **RNG parity.** Both sides draw through the shared xoshiro256\*\* source behind test-only seams
    (`Utils/RandomSource.cs` / `random_util.rs`), pinned by twin known-answer tests. Production C#
    randomness stays bit-for-bit unchanged.
@@ -214,7 +215,8 @@ is no per-generator flag. Elsewhere: `BotConfig.ForceLegacyBotGeneration` and `F
 `QuestConfig.ForceLegacyRepeatableQuestGeneration`,
 `ScavCaseConfig.ForceLegacyScavCaseGeneration`, `ItemConfig.ForceLegacyItemBaseClassHydration`, plus
 `TrustNativeRequestCacheWithMods` / `DisableNativeRequestCache`, which carry the resident-DB
-eligibility gate and exist on `RagfairConfig` and `QuestConfig` only, the two flipped families. Only
+eligibility gate and exist on `RagfairConfig`, `QuestConfig` and (since flip #3) `ItemConfig`;
+the linked-item table reads `RagfairConfig`'s pair rather than gaining its own. Only
 `forceLegacyLootGeneration` is serialised into a shipped `.json` (`location.json`); the rest exist
 as C# defaults and a user who wants one adds it to the file.
 
@@ -301,8 +303,8 @@ frame per offer behind a header frame (since ABI 10, encoding tag 1), deserialis
 `Parallel.For` straight out of the native buffer. Ragfair is the only export that uses it. Its batch
 also takes **one timestamp** where legacy calls `TimeUtil.GetTimeStamp()` per offer.
 
-**Ragfair and the repeatable quests read the resident DB — the two departures from per-call
-projection (guideline 3).** Both key freshness on the same `DatabaseMutationStamp`, a
+**Ragfair, the repeatable quests and the two startup one-shots read the resident DB — the
+departures from per-call projection (guideline 3).** All key freshness on the same `DatabaseMutationStamp`, a
 monotonic counter bumped from `SeasonalEventService.UpdateGlobalEvents`, `ItemFilterService`'s
 blacklist `Add*` methods, `CustomItemService`'s `Create*` methods and a guarded replay bump when
 `CanSellOnRagfair` flips true→false. **Ragfair (flip #1, ABI 22) and quests (flip #2, ABI 23)
@@ -311,7 +313,10 @@ into the resident store (`rust/spt-native/src/db.rs`), which derives both famili
 publish time; each request arrives as `{epoch, viewsOverride?, varying}`, and an epoch the store
 does not hold returns `STATUS_STALE_EPOCH` (4), surfacing as `NativeStaleEpochException` and
 self-healing with one `ForcePublish` + retry — a lost epoch costs one republish, never a wrong
-result. Six quest service/config-backed fields (`itemBlacklist`, `rewardItemBlacklist`,
+result. **Flip #3 (ABI 24) put both startup one-shots — the base-class hydrate and the ragfair
+linked-item table — on the same protocol**: no varying block, no new roots; their resident walk
+inputs derive from the templates root at request time, deliberately not from the ragfair items
+view (props-less drop, first-filter-group-only). Six quest service/config-backed fields (`itemBlacklist`, `rewardItemBlacklist`,
 `bossItems`, `seasonalItemTplBlacklist`, `repeatableQuestTemplateIds`, `locationIdMap`) ride the
 varying block per call until Phases 2/4 — the same carve-out ragfair's config-derived fields took.
 **A mod writing an injected table's dictionaries directly is invisible to the stamp by design** —
@@ -356,6 +361,20 @@ flip (`git diff --stat 1360a28..e7c2852 -- Libraries/SPTarkov.Server.Core/Native
 lines across 5 files — the quest builder's stamp machinery and invariant-slice half are gone,
 replaced by the four-root publish through the `Db/` infrastructure flip #1 built.
 
+**Flip #3 ledger.** (a) Freshness delta: pre-flip, every hydrate/rebuild projected the live
+tables at call time; post-flip an eligible hydrate — including `GetLinkedItems`' rebuild on a
+cache miss mid-run (`RagfairLinkedItemService.cs:126-133`) — reads last-published state, so an
+un-stamped table mutation is invisible to it until the next stamped publish. Override sends are
+unchanged: the ineligible arm still projects the live tables per call. (b) The walk-input
+equivalence handshake (`OneShotViewsEquivalenceTests` / `flip3_oneshot_views.rs`) ran green over
+the full real database: 4,553 base-class chains and 4,673 linked-item sets identical between the
+resident-derived and C#-built override inputs. (c) Net `Native/` delta for the flip
+(`git diff --stat 80ce2ae..4f66860 -- Libraries/SPTarkov.Server.Core/Native/`): +207/−1 lines
+across 5 files — growth, not the usual shrinkage, because the one-shots' whole pre-flip payload
+*was* the projection, which survives intact as the ineligible `viewsOverride` arm; what was added
+is each builder's eligibility gate + epoch request assembly and the additive internal wrappers in
+`SptNative.cs`.
+
 **The ported 4.1.2 quirks are documented at their call sites**, as numbered `Quirk N` comments in
 `rust/spt-native/src/quest/*.rs`, `src/scav_case/generator.rs`, `src/base_class.rs`,
 `src/linked_items.rs` and `src/loot/container_extensions.rs`; grep case-insensitively for `quirk`,
@@ -373,10 +392,9 @@ written against, not the current file.
    `docs/superpowers/specs/2026-08-17-rust-state-ownership-design.md` moves every generation
    export onto the epoch protocol, one family per flip — each its own plan, own ABI bump,
    goldens passing *unchanged*, BENCHMARK.md re-measured before the next starts. Landed: #1
-   ragfair, #2 repeatable quests. Remaining: **#3 base-class hydrate + linked-item table** (two
-   startup one-shots shipping whole-table payloads today, so their measured regressions should
-   collapse to near-zero marginal cost — the next one worth doing), #4 loot (the
-   loose-loot raw-bytes splice becomes a per-map resident root so the fast arm stays fast), #5
+   ragfair, #2 repeatable quests, #3 base-class hydrate + linked-item table. Remaining: **#4 loot** (the
+   loose-loot raw-bytes splice becomes a per-map resident root so the fast arm stays fast — the
+   next one worth doing), #5
    scav case, #6 bots (biggest expected win; `SharedBotViewsWire` dissolves into resident views).
    Then Phase 2 (Ceciler write barriers, which retires the mods-off eligibility gate and flips
    `TrustNativeRequestCacheWithMods` default-on), Phase 3 (Rust loads `SPT_Data`), Phase 4

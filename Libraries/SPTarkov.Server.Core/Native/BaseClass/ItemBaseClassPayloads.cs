@@ -62,3 +62,17 @@ internal record ItemBaseClassResponse
     [JsonPropertyName("result")]
     public required ItemBaseClassResult Result { get; init; }
 }
+
+/// <summary>
+/// The epoch-protocol envelope of <c>spt_build_item_base_class_cache</c>: an eligible send names
+/// the resident-DB epoch <see cref="Db.DbPublisher"/> guarantees current; an ineligible one
+/// carries the C#-built projection as the override with epoch 0.
+/// </summary>
+internal record ItemBaseClassNativeRequest
+{
+    [JsonPropertyName("epoch")]
+    public required ulong Epoch { get; set; }
+
+    [JsonPropertyName("viewsOverride")]
+    public ItemBaseClassRequest? ViewsOverride { get; set; }
+}

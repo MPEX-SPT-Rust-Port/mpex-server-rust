@@ -100,3 +100,17 @@ internal record RagfairLinkedItemResponse
     [JsonPropertyName("result")]
     public required RagfairLinkedItemResult Result { get; init; }
 }
+
+/// <summary>
+/// The epoch-protocol envelope of <c>spt_build_ragfair_linked_item_table</c>: an eligible send
+/// names the resident-DB epoch <see cref="Db.DbPublisher"/> guarantees current; an ineligible
+/// one carries the C#-built projection as the override with epoch 0.
+/// </summary>
+internal record RagfairLinkedItemNativeRequest
+{
+    [JsonPropertyName("epoch")]
+    public required ulong Epoch { get; set; }
+
+    [JsonPropertyName("viewsOverride")]
+    public RagfairLinkedItemRequest? ViewsOverride { get; set; }
+}
