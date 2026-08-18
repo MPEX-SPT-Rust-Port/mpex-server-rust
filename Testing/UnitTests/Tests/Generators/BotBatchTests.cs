@@ -89,12 +89,15 @@ public class BotBatchTests
     public void BatchGeneratesTheSameBotsAsThePerBotPath()
     {
         const int botCount = 4;
-        // One case per bot, shared by both paths: FilterBotEquipment randomises the template it
-        // returns, so calling BuildCase once per path would compare two different waves
-        var cases = Enumerable.Range(0, botCount).Select(index => (Case: BuildCase(), Seed: (ulong?)(1000 + index))).ToList();
+        // One case for the whole wave, shared by both paths. FilterBotEquipment randomises the
+        // template it returns, so building one per path would compare two different waves - and the
+        // batch now carries one filtered template per level band, which for a non-PMC wave (every
+        // bot level 1) is the single [1, 1] band, so the per-bot arm has to run the same template
+        var waveCase = BuildCase();
+        var seeds = Enumerable.Range(0, botCount).Select(index => (ulong?)(1000 + index)).ToList();
 
-        var perBot = cases.Select(entry => SptNative.GenerateBotInventory(BuildSingleRequest(entry.Case, entry.Seed))).ToList();
-        var batched = SptNative.GenerateBotInventoryBatch(BuildBatchRequest(cases));
+        var perBot = seeds.Select(seed => SptNative.GenerateBotInventory(BuildSingleRequest(waveCase, seed))).ToList();
+        var batched = SptNative.GenerateBotInventoryBatch(BuildBatchRequest(waveCase, seeds));
 
         Assert.That(batched.Bots, Has.Count.EqualTo(botCount));
         for (var index = 0; index < botCount; index++)
@@ -116,7 +119,7 @@ public class BotBatchTests
     [Test]
     public void AFailingBotComesBackAsAnErrorEnvelopeOnItsOwn()
     {
-        var request = BuildBatchRequest(Enumerable.Range(0, 2).Select(_ => (Case: BuildCase(), Seed: (ulong?)null)).ToList());
+        var request = BuildBatchRequest(BuildCase(), [null, null]);
 
         request.Shared.IsNightTime = true;
         request.Shared.Equipment["poisoned"] = new EquipmentFilters
@@ -161,14 +164,18 @@ public class BotBatchTests
         // a median of 10 - and 45 for `assault`, the role most waves are made of
         foreach (var waveSize in new[] { 45, 20, 10, 5, 1 })
         {
-            // Cases are built outside the timed regions: FilterBotEquipment is identical work on
-            // both paths, and leaving it in would charge both for the same thing while adding its
-            // randomisation to the variance
-            var cases = Enumerable.Range(0, waveSize).Select(_ => (Case: BuildCase(), Seed: (ulong?)null)).ToList();
+            // The wave's case is built outside the timed regions: FilterBotEquipment is identical
+            // work on both paths, and leaving it in would charge both for the same thing while
+            // adding its randomisation to the variance. Production splits that differently now -
+            // the batch arm runs the filter once per level band inside TryGenerateWave, which is
+            // work the per-bot arms here pay outside the clock - so this measures the native call,
+            // not the whole dispatch
+            var waveCase = BuildCase();
+            var seeds = Enumerable.Repeat((ulong?)null, waveSize).ToList();
 
             // Warm both paths so neither pays the other's first-call heap growth
-            _ = SptNative.GenerateBotInventory(BuildSingleRequest(cases[0].Case, null));
-            _ = SptNative.GenerateBotInventoryBatch(BuildBatchRequest(cases[..1]));
+            _ = SptNative.GenerateBotInventory(BuildSingleRequest(waveCase, null));
+            _ = SptNative.GenerateBotInventoryBatch(BuildBatchRequest(waveCase, seeds[..1]));
 
             GC.Collect();
             GC.WaitForPendingFinalizers();
@@ -181,29 +188,30 @@ public class BotBatchTests
             // Measured outside the timed loops - each path serialises its own request once inside
             // the native wrapper, and counting the bytes there would charge it a second pass
             var perBotBytes = JsonSerializer
-                .SerializeToUtf8Bytes(BuildSingleRequest(cases[0].Case, null), JsonUtil.JsonSerializerOptionsNoIndent!)
+                .SerializeToUtf8Bytes(BuildSingleRequest(waveCase, null), JsonUtil.JsonSerializerOptionsNoIndent!)
                 .Length;
             var batchBytes =
-                JsonSerializer.SerializeToUtf8Bytes(BuildBatchRequest(cases), JsonUtil.JsonSerializerOptionsNoIndent!).Length / waveSize;
+                JsonSerializer.SerializeToUtf8Bytes(BuildBatchRequest(waveCase, seeds), JsonUtil.JsonSerializerOptionsNoIndent!).Length
+                / waveSize;
 
             for (var run = 0; run < 5; run++)
             {
                 var stopwatch = Stopwatch.StartNew();
-                foreach (var entry in cases)
+                foreach (var seed in seeds)
                 {
-                    _ = SptNative.GenerateBotInventory(BuildSingleRequest(entry.Case, null));
+                    _ = SptNative.GenerateBotInventory(BuildSingleRequest(waveCase, seed));
                 }
                 stopwatch.Stop();
                 perBotTimings.Add(stopwatch.Elapsed.TotalMilliseconds / waveSize);
 
                 // What GenerateBotWave actually does
                 stopwatch = Stopwatch.StartNew();
-                cases.AsParallel().ForAll(entry => SptNative.GenerateBotInventory(BuildSingleRequest(entry.Case, null)));
+                seeds.AsParallel().ForAll(seed => SptNative.GenerateBotInventory(BuildSingleRequest(waveCase, seed)));
                 stopwatch.Stop();
                 parallelTimings.Add(stopwatch.Elapsed.TotalMilliseconds / waveSize);
 
                 stopwatch = Stopwatch.StartNew();
-                _ = SptNative.GenerateBotInventoryBatch(BuildBatchRequest(cases));
+                _ = SptNative.GenerateBotInventoryBatch(BuildBatchRequest(waveCase, seeds));
                 stopwatch.Stop();
                 batchTimings.Add(stopwatch.Elapsed.TotalMilliseconds / waveSize);
             }
@@ -245,10 +253,22 @@ public class BotBatchTests
         );
     }
 
+    /// <summary>
+    /// One wave off one case: the template and its two loot views ride the shared block as a single
+    /// level-band variant, and each bot contributes only its identity, details and seed.
+    /// </summary>
     private GenerateBotInventoryBatchRequest BuildBatchRequest(
-        IEnumerable<((BotType Template, BotGenerationDetails Details) Case, ulong? Seed)> cases
+        (BotType Template, BotGenerationDetails Details) waveCase,
+        IEnumerable<ulong?> seeds
     )
     {
+        var lootPools = BotPayloadProjection.BuildLootPools(
+            _botLootGenerator.BotLootCacheService,
+            waveCase.Template,
+            waveCase.Details,
+            _pmcConfig
+        );
+
         return new GenerateBotInventoryBatchRequest
         {
             Shared = BotPayloadProjection.BuildSharedViews(
@@ -266,22 +286,22 @@ public class BotBatchTests
                 _botWeaponGenerator.GlobalTable,
                 _botConfig,
                 _pmcConfig,
-                _botWeaponGenerator.RepairConfig
+                _botWeaponGenerator.RepairConfig,
+                // Non-PMC: the native side takes the constant level 1 without drawing, so the wave
+                // ships no level inputs and its one band is [1, 1]
+                null,
+                [
+                    new BotTemplateVariantView
+                    {
+                        LevelMin = 1,
+                        LevelMax = 1,
+                        Template = BotPayloadProjection.BuildTemplateView(waveCase.Template),
+                        LootPools = lootPools,
+                        HandbookPrices = BotPayloadProjection.BuildHandbookPrices(lootPools, _botLootGenerator.HandbookHelper),
+                    },
+                ]
             ),
-            Bots =
-            [
-                .. cases.Select(entry =>
-                    BotPayloadProjection.BuildBotSlice(
-                        new MongoId(),
-                        entry.Case.Template,
-                        entry.Case.Details,
-                        entry.Seed,
-                        _botLootGenerator.BotLootCacheService,
-                        _botLootGenerator.HandbookHelper,
-                        _pmcConfig
-                    )
-                ),
-            ],
+            Bots = [.. seeds.Select(seed => BotPayloadProjection.BuildBotSlice(new MongoId(), waveCase.Details, seed))],
         };
     }
 

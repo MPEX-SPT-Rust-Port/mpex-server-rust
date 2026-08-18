@@ -8,6 +8,7 @@ using SPTarkov.Server.Core.Generators.Bot;
 using SPTarkov.Server.Core.Helpers;
 using SPTarkov.Server.Core.Helpers.Bot;
 using SPTarkov.Server.Core.Helpers.InRaid;
+using SPTarkov.Server.Core.Helpers.Profile;
 using SPTarkov.Server.Core.Models.Common;
 using SPTarkov.Server.Core.Models.Eft.Match;
 using SPTarkov.Server.Core.Models.Enums;
@@ -179,6 +180,54 @@ public class BotWaveBatcherTests
     }
 
     /// <summary>
+    /// The level draw moved into the native call, so a mod-registered BotLevelGenerator is a
+    /// substitution only the per-bot path routes through - same contract as the BotGenerator one.
+    /// </summary>
+    [Test]
+    public void ASubstitutedBotLevelGeneratorDeclinesTheBatch()
+    {
+        var batcher = (BotWaveBatcher)Construct(typeof(BotWaveBatcher), Construct(typeof(TestBotLevelGeneratorSubclass)));
+
+        Assert.That(batcher.TryGenerateWave(_sessionId, BuildWaveDetails()), Is.Null);
+    }
+
+    /// <summary>
+    /// The batch runs the equipment filter once per level band instead of once per bot, so a
+    /// substituted BotEquipmentFilterService would be called a different number of times with
+    /// different levels - per-bot only.
+    /// </summary>
+    [Test]
+    public void ASubstitutedEquipmentFilterServiceDeclinesTheBatch()
+    {
+        var batcher = (BotWaveBatcher)Construct(typeof(BotWaveBatcher), Construct(typeof(TestBotEquipmentFilterServiceSubclass)));
+
+        Assert.That(batcher.TryGenerateWave(_sessionId, BuildWaveDetails()), Is.Null);
+    }
+
+    /// <summary>
+    /// GenerateBotLevel is frozen for the same reason GenerateBot is: the batch draws the level
+    /// natively, so a live Harmony patch on it would never fire.
+    /// </summary>
+    [Test]
+    public void AHarmonyPatchOnBotLevelGeneratorDeclinesTheBatch()
+    {
+        var harmony = new Harmony("unit-tests.botwave-batcher.GenerateBotLevel");
+        var generateBotLevel = typeof(BotLevelGenerator).GetMethod(nameof(BotLevelGenerator.GenerateBotLevel));
+        Assert.That(generateBotLevel, Is.Not.Null, "frozen member BotLevelGenerator.GenerateBotLevel not found");
+
+        try
+        {
+            harmony.Patch(generateBotLevel, prefix: new HarmonyMethod(typeof(BotWaveBatcherTests), nameof(Prefix)));
+
+            Assert.That(_batcher.TryGenerateWave(_sessionId, BuildWaveDetails()), Is.Null, "a patched wave must run per bot");
+        }
+        finally
+        {
+            harmony.UnpatchSelf();
+        }
+    }
+
+    /// <summary>
     /// The nighttime equipment clamp is a cross-bot feedback loop through the live BotConfig that
     /// only the per-bot path replays, so a nighttime wave whose role carries nighttime modifiers
     /// declines. The same config by day still batches - the decline is about the clamp firing, not
@@ -241,6 +290,135 @@ public class BotWaveBatcherTests
         );
     }
 
+    /// <summary>
+    /// The segmentation the variants are built from: every band edge the pre-call lookups read is a
+    /// cut, and nothing else is. A missed cut ships a variant filtered at the wrong level, which is
+    /// a silent generation difference rather than a crash - so these are pinned directly.
+    /// </summary>
+    [Test]
+    public void ANonPmcWaveIsOneSegmentAtLevelOne()
+    {
+        var segments = BotWaveBatcher.EnumerateLevelSegments(
+            BuildWaveDetails(),
+            new MinMax<int>(1, 79),
+            new EquipmentFilters { Blacklist = [new EquipmentFilterDetails { LevelRange = new MinMax<int>(10, 20) }] },
+            [LootBand(1.5, 10.5)]
+        );
+
+        Assert.That(segments, Is.EqualTo(new List<MinMax<int>> { new(1, 1) }), "non-PMC bots never draw a level");
+    }
+
+    [Test]
+    public void AWaveWithNoBandsIsOneSegmentCoveringTheRange()
+    {
+        var segments = BotWaveBatcher.EnumerateLevelSegments(BuildWaveDetails(isPmc: true), new MinMax<int>(5, 30), null, []);
+
+        Assert.That(segments, Is.EqualTo(new List<MinMax<int>> { new(5, 30) }));
+    }
+
+    [Test]
+    public void ABandInsideTheRangeCutsItAtBothEdges()
+    {
+        var segments = BotWaveBatcher.EnumerateLevelSegments(
+            BuildWaveDetails(isPmc: true),
+            new MinMax<int>(5, 30),
+            new EquipmentFilters { Blacklist = [new EquipmentFilterDetails { LevelRange = new MinMax<int>(10, 20) }] },
+            []
+        );
+
+        Assert.That(segments, Is.EqualTo(new List<MinMax<int>> { new(5, 9), new(10, 20), new(21, 30) }));
+    }
+
+    [Test]
+    public void OverlappingBandsCutAtEveryEdge()
+    {
+        var segments = BotWaveBatcher.EnumerateLevelSegments(
+            BuildWaveDetails(isPmc: true),
+            new MinMax<int>(1, 15),
+            new EquipmentFilters
+            {
+                Whitelist = [new EquipmentFilterDetails { LevelRange = new MinMax<int>(1, 10) }],
+                Randomisation = [new RandomisationDetails { LevelRange = new MinMax<int>(5, 20) }],
+            },
+            []
+        );
+
+        Assert.That(segments, Is.EqualTo(new List<MinMax<int>> { new(1, 4), new(5, 10), new(11, 15) }));
+    }
+
+    [Test]
+    public void AGapBetweenBandsIsItsOwnSegment()
+    {
+        var segments = BotWaveBatcher.EnumerateLevelSegments(
+            BuildWaveDetails(isPmc: true),
+            new MinMax<int>(1, 15),
+            new EquipmentFilters
+            {
+                WeightingAdjustmentsByBotLevel =
+                [
+                    new WeightingAdjustmentDetails { LevelRange = new MinMax<int>(1, 5) },
+                    new WeightingAdjustmentDetails { LevelRange = new MinMax<int>(10, 15) },
+                ],
+            },
+            []
+        );
+
+        Assert.That(segments, Is.EqualTo(new List<MinMax<int>> { new(1, 5), new(6, 9), new(10, 15) }));
+    }
+
+    /// <summary>
+    /// Loot price bands are double-valued (PmcConfig.cs:139), so the integer levels they cover start
+    /// at ceil(min) and end at floor(max) - (1.5, 10.5) covers levels 2 to 10.
+    /// </summary>
+    [Test]
+    public void ADoubleValuedLootBandCutsAtItsIntegerEdges()
+    {
+        var segments = BotWaveBatcher.EnumerateLevelSegments(
+            BuildWaveDetails(isPmc: true),
+            new MinMax<int>(1, 15),
+            null,
+            [LootBand(1.5, 10.5)]
+        );
+
+        Assert.That(segments, Is.EqualTo(new List<MinMax<int>> { new(1, 1), new(2, 10), new(11, 15) }));
+    }
+
+    [Test]
+    public void BandsOutsideTheRangeChangeNothing()
+    {
+        var segments = BotWaveBatcher.EnumerateLevelSegments(
+            BuildWaveDetails(isPmc: true),
+            new MinMax<int>(10, 20),
+            new EquipmentFilters
+            {
+                Blacklist =
+                [
+                    new EquipmentFilterDetails { LevelRange = new MinMax<int>(1, 5) },
+                    new EquipmentFilterDetails { LevelRange = new MinMax<int>(50, 60) },
+                ],
+            },
+            [LootBand(70, 80)]
+        );
+
+        Assert.That(segments, Is.EqualTo(new List<MinMax<int>> { new(10, 20) }));
+    }
+
+    /// <summary>
+    /// Only the level range matters here; the three per-container bands are required members the
+    /// segmentation never reads.
+    /// </summary>
+    private static MinMaxLootItemValue LootBand(double min, double max)
+    {
+        return new MinMaxLootItemValue
+        {
+            Min = min,
+            Max = max,
+            Backpack = new MinMax<double>(0, 0),
+            Pocket = new MinMax<double>(0, 0),
+            Vest = new MinMax<double>(0, 0),
+        };
+    }
+
     private static void Prefix() { }
 
     private static object Construct(Type type, params object[] substitutes)
@@ -296,4 +474,16 @@ public class BotWaveBatcherTests
             pmcConfig,
             cloner
         ) { }
+
+    /// <summary>
+    /// Stands in for a mod-registered level generator: identical behaviour, different type.
+    /// </summary>
+    private class TestBotLevelGeneratorSubclass(GlobalTable globalTable, RandomUtil randomUtil)
+        : BotLevelGenerator(globalTable, randomUtil) { }
+
+    /// <summary>
+    /// Stands in for a mod-registered equipment filter service: identical behaviour, different type.
+    /// </summary>
+    private class TestBotEquipmentFilterServiceSubclass(BotHelper botHelper, ProfileHelper profileHelper, BotConfig botConfig)
+        : BotEquipmentFilterService(botHelper, profileHelper, botConfig) { }
 }

@@ -214,7 +214,9 @@ public class BotPayloadSizeTests
     /// The batch request carries the shared block once for the whole wave, so its per-bot cost is
     /// <c>shared/N + slice</c>. Nothing else guards that block from re-inflating - which is the very
     /// thing both fixes exist to protect - so this pins the ratio rather than an absolute size: at a
-    /// wave of 10 a bot must cost under a fifth of a single-bot request.
+    /// wave of 10 a bot must cost under a fifth of a single-bot request. The margin is wider than
+    /// that now: the template and its loot views moved onto the shared block as per-level-band
+    /// variants, leaving a slice with only an id, a seed and the generation details.
     /// </summary>
     [Test]
     public void BatchAmortisesTheSharedBlock()
@@ -244,6 +246,13 @@ public class BotPayloadSizeTests
             IsPmc = true,
         };
 
+        // One filtered template for the whole wave, on the shared block as a level-band variant -
+        // production splits the wave's level range into bands and ships one of these per band
+        var template = _cloner.Clone(_botTable.Types["usec"])!;
+        _botEquipmentFilterService.FilterBotEquipment(_sessionId, template, details);
+        var lootPools = BotPayloadProjection.BuildLootPools(_botLootGenerator.BotLootCacheService, template, details, _pmcConfig);
+        var expTable = _botWeaponGenerator.GlobalTable.Configuration.Exp.Level.ExperienceTable;
+
         return new GenerateBotInventoryBatchRequest
         {
             Shared = BotPayloadProjection.BuildSharedViews(
@@ -261,28 +270,26 @@ public class BotPayloadSizeTests
                 _botWeaponGenerator.GlobalTable,
                 _botConfig,
                 _pmcConfig,
-                _botWeaponGenerator.RepairConfig
-            ),
-            Bots =
-            [
-                .. Enumerable
-                    .Range(0, waveSize)
-                    .Select(_ =>
+                _botWeaponGenerator.RepairConfig,
+                // A PMC wave draws its levels natively, so it carries the draw's inputs once
+                new LevelGenerationView
+                {
+                    LevelMin = 1,
+                    LevelMax = expTable.Length,
+                    ExpTable = [.. expTable.Select(entry => entry.Experience)],
+                },
+                [
+                    new BotTemplateVariantView
                     {
-                        var template = _cloner.Clone(_botTable.Types["usec"])!;
-                        _botEquipmentFilterService.FilterBotEquipment(_sessionId, template, details);
-
-                        return BotPayloadProjection.BuildBotSlice(
-                            new MongoId(),
-                            template,
-                            details,
-                            null,
-                            _botLootGenerator.BotLootCacheService,
-                            _botLootGenerator.HandbookHelper,
-                            _pmcConfig
-                        );
-                    }),
-            ],
+                        LevelMin = 1,
+                        LevelMax = expTable.Length,
+                        Template = BotPayloadProjection.BuildTemplateView(template),
+                        LootPools = lootPools,
+                        HandbookPrices = BotPayloadProjection.BuildHandbookPrices(lootPools, _botLootGenerator.HandbookHelper),
+                    },
+                ]
+            ),
+            Bots = [.. Enumerable.Range(0, waveSize).Select(_ => BotPayloadProjection.BuildBotSlice(new MongoId(), details, null))],
         };
     }
 
