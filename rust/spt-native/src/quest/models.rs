@@ -938,7 +938,7 @@ impl QuestInvariantSlice {
 
 /// `Models/Eft/Common/Tables/RepeatableQuests.cs:57-70`. The C# member names are the wire names;
 /// a missing or null template is the `null` arm of `GetClonedQuestTemplateForType`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct RepeatableTemplates {
     #[serde(rename = "Elimination")]
     pub elimination: Option<RepeatableQuest>,
@@ -952,7 +952,7 @@ pub struct RepeatableTemplates {
 
 /// `Models/Eft/Common/Tables/RepeatableQuests.cs:153-169` — C# declares two identical records,
 /// `ItemsWhitelist` and `ItemsBlacklist`; one type serves both.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LevelledItemFilter {
     /// `int?` in the C#, and a null one never passes the `MinPlayerLevel <= pmcLevel` filter

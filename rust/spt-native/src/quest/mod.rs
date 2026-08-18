@@ -6,6 +6,7 @@ pub mod models;
 pub mod pickup;
 pub mod reward_generator;
 pub mod slice_cache;
+pub mod views;
 
 use std::any::Any;
 use std::collections::HashSet;

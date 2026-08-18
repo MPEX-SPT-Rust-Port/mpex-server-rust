@@ -220,8 +220,10 @@ fn build_preset_cache(
 }
 
 /// The items side of `HandbookHelper.HydrateHandbookCache` (`HandbookHelper.cs:51-68`): first
-/// occurrence of a duplicate id wins (`TryAdd`), a null price caches as 0.
-fn build_handbook_price_map(handbook: &HandbookBase) -> HashMap<&str, f64> {
+/// occurrence of a duplicate id wins (`TryAdd`), a null price caches as 0. `pub(crate)`: the
+/// quest derive answers `HandbookHelper.GetTemplatePrice` from the same cache
+/// (`crate::quest::views`).
+pub(crate) fn build_handbook_price_map(handbook: &HandbookBase) -> HashMap<&str, f64> {
     let mut by_id = HashMap::with_capacity(handbook.items.len());
     for item in &handbook.items {
         by_id
@@ -457,8 +459,9 @@ fn to_grid_view(grid: &Grid) -> GridView {
     }
 }
 
-/// `PayloadProjection.ToPresetView` (`PayloadProjection.cs:167-176`).
-fn to_preset_view(preset: &Preset) -> PresetView {
+/// `PayloadProjection.ToPresetView` (`PayloadProjection.cs:167-176`). `pub(crate)`: the same
+/// projection the quest slice's `DefaultWeaponPresets` crossed with (`crate::quest::views`).
+pub(crate) fn to_preset_view(preset: &Preset) -> PresetView {
     PresetView {
         items: preset.items.clone(),
         // `Preset.Id` is a non-nullable MongoId in C#, so the view member is always present.
