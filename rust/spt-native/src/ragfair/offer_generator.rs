@@ -55,6 +55,7 @@
 //!   branch selected on, which real data never does.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Instant;
 
 use indexmap::IndexSet;
@@ -79,8 +80,8 @@ use crate::loot::random_util::{
 use crate::ragfair::assort_generator::generate_ragfair_assort_items;
 use crate::ragfair::models::{
     ArmorPlateBlacklistSettingsWire, BarterDetailsWire, DynamicOffersResult,
-    GenerateDynamicOffersRequest, OfferRequirementWire, PreparedSlice, RagfairOfferUserWire,
-    RagfairOfferWire, VaryingFields,
+    GenerateDynamicOffersRequest, OfferRequirementWire, RagfairOfferUserWire, RagfairOfferWire,
+    VaryingFields,
 };
 use crate::ragfair::price_service::{
     DOLLARS, EUROS, GP, ROUBLES, get_dynamic_offer_price_for_offer, get_flea_price_for_item,
@@ -90,7 +91,7 @@ use crate::ragfair::server_helper::{
     calculate_dynamic_stack_count, get_dynamic_offer_currency, get_offer_count_by_base_type,
     is_item_valid_ragfair_item,
 };
-use crate::ragfair::slice_cache;
+use crate::ragfair::views::RagfairDbViews;
 
 /// The `typeof(T).FullName` this file's diagnostics log under.
 const CATEGORY: &str = "SPTarkov.Server.Core.Generators.Ragfair.RagfairOfferGenerator";
@@ -386,12 +387,13 @@ pub fn get_offer_end_time(
     }
 }
 
-/// What a dynamic-offers pass can fail with: a ported error, or a slice-less request naming a
-/// stamp this process has not stored — the C# caller answers the latter by resending the slice.
+/// What a dynamic-offers pass can fail with: a ported error, or an override-less request naming a
+/// resident-DB epoch this process does not hold — the C# caller answers the latter by
+/// republishing and retrying once.
 #[derive(Debug)]
 pub enum RagfairError {
     Loot(LootError),
-    StaleSlice,
+    StaleEpoch,
 }
 
 /// `RagfairOfferGenerator.GenerateDynamicOffers` (`:293-324`) — one whole dynamic pass: the assort
@@ -429,26 +431,34 @@ pub enum RagfairError {
 /// # Errors
 ///
 /// [`RagfairError::Loot`] for whatever the assort walk and the per-offer path propagate, or
-/// [`RagfairError::StaleSlice`] when a slice-less request names a stamp the cache does not hold.
+/// [`RagfairError::StaleEpoch`] when an override-less request names an epoch the resident DB
+/// does not hold.
 pub fn generate_dynamic_offers(
     request: GenerateDynamicOffersRequest,
 ) -> Result<DynamicOffersResult, RagfairError> {
-    let slice = match request.invariant {
-        Some(slice) => slice_cache::store(request.invariant_stamp, slice),
-        None => slice_cache::fetch(request.invariant_stamp).ok_or(RagfairError::StaleSlice)?,
+    let views: Arc<RagfairDbViews> = match request.views_override {
+        Some(wire) => Arc::new(RagfairDbViews::from(wire)),
+        None => {
+            let db = crate::db::current().ok_or(RagfairError::StaleEpoch)?;
+            if db.epoch != request.epoch {
+                return Err(RagfairError::StaleEpoch);
+            }
+
+            db.ragfair_views.clone().ok_or(RagfairError::StaleEpoch)?
+        }
     };
 
-    generate_with_slice(&slice, request.varying).map_err(RagfairError::Loot)
+    generate_with_views(&views, request.varying).map_err(RagfairError::Loot)
 }
 
-/// [`generate_dynamic_offers`] over an already-prepared invariant slice, which a cache can hand in
-/// instead of the caller resending it.
+/// [`generate_dynamic_offers`] over an already-derived view bundle — the resident DB's or one
+/// built from the caller's override.
 ///
 /// # Errors
 ///
 /// Whatever the assort walk and the per-offer path propagate.
-pub fn generate_with_slice(
-    slice: &PreparedSlice,
+pub fn generate_with_views(
+    views: &RagfairDbViews,
     varying: VaryingFields,
 ) -> Result<DynamicOffersResult, LootError> {
     let _seed_guard = varying.test_seed.map(TestSeedGuard::install);
@@ -457,26 +467,32 @@ pub fn generate_with_slice(
         timestamp,
         offer_counter_start,
         expired_offers,
+        dynamic,
+        config_blacklist,
+        seasonal_event_active,
+        seasonal_item_tpl_blacklist,
+        pmc_names_usec,
+        pmc_names_bear,
         ..
     } = varying;
 
     let mut ctx = RagfairContext {
-        items: &slice.items,
-        base_classes: &slice.base_classes,
-        dynamic: &slice.dynamic,
-        item_presets: &slice.item_presets,
-        default_presets: &slice.default_presets,
-        default_presets_by_tpl: &slice.default_presets_by_tpl,
-        presets_by_tpl: &slice.presets_by_tpl,
-        flea_prices: &slice.flea_prices,
-        handbook_prices: &slice.handbook_prices,
-        highest_trader_prices: &slice.highest_trader_prices,
-        config_blacklist: &slice.config_blacklist,
-        seasonal_item_tpl_blacklist: &slice.seasonal_item_tpl_blacklist,
-        pmc_names_usec: &slice.pmc_names_usec,
-        pmc_names_bear: &slice.pmc_names_bear,
+        items: &views.items,
+        base_classes: &views.base_classes,
+        dynamic: &dynamic,
+        item_presets: &views.item_presets,
+        default_presets: &views.default_presets,
+        default_presets_by_tpl: &views.default_presets_by_tpl,
+        presets_by_tpl: &views.presets_by_tpl,
+        flea_prices: &views.flea_prices,
+        handbook_prices: &views.handbook_prices,
+        highest_trader_prices: &views.highest_trader_prices,
+        config_blacklist: &config_blacklist,
+        seasonal_item_tpl_blacklist: &seasonal_item_tpl_blacklist,
+        pmc_names_usec: &pmc_names_usec,
+        pmc_names_bear: &pmc_names_bear,
         timestamp,
-        seasonal_event_active: slice.seasonal_event_active,
+        seasonal_event_active,
         diagnostics: DiagSink::Pipeline,
     };
 
@@ -1393,7 +1409,7 @@ mod tests {
     use crate::loot::item_helper::{ARMOR, BUILT_IN_INSERTS, ItemBaseClassCache};
     use crate::loot::models::{ItemView, PresetView, Upd};
     use crate::loot::random_util::TestSeedGuard;
-    use crate::ragfair::models::{DynamicConfigWire, InvariantSlice, MinMaxIntWire};
+    use crate::ragfair::models::{DynamicConfigWire, MinMaxIntWire, RagfairViewsWire};
     use crate::ragfair::{NO_BLACKLIST, NO_DEFAULT_PRESETS};
 
     const SEED: u64 = 20260813;
@@ -3030,9 +3046,8 @@ mod tests {
     /// them, and no fixture offer is a weapon preset.
     fn request(fixture: Fixture) -> GenerateDynamicOffersRequest {
         GenerateDynamicOffersRequest {
-            invariant_stamp: 0,
-            invariant: Some(InvariantSlice {
-                dynamic: fixture.dynamic,
+            epoch: 0,
+            views_override: Some(RagfairViewsWire {
                 item_presets: fixture.presets,
                 default_presets: Vec::new(),
                 default_presets_by_tpl: IndexMap::new(),
@@ -3040,11 +3055,6 @@ mod tests {
                 flea_prices: fixture.prices.clone(),
                 handbook_prices: fixture.prices.clone(),
                 highest_trader_prices: fixture.prices,
-                config_blacklist: fixture.blacklist.into_iter().collect(),
-                seasonal_event_active: false,
-                seasonal_item_tpl_blacklist: Vec::new(),
-                pmc_names_usec: fixture.names_usec,
-                pmc_names_bear: fixture.names_bear,
                 items: fixture.items,
             }),
             varying: VaryingFields {
@@ -3052,6 +3062,12 @@ mod tests {
                 timestamp: OFFER_TIME,
                 offer_counter_start: 0,
                 expired_offers: None,
+                dynamic: fixture.dynamic,
+                config_blacklist: fixture.blacklist,
+                seasonal_event_active: false,
+                seasonal_item_tpl_blacklist: HashSet::new(),
+                pmc_names_usec: fixture.names_usec,
+                pmc_names_bear: fixture.names_bear,
             },
         }
     }
@@ -3084,14 +3100,14 @@ mod tests {
         }
     }
 
-    /// The batch pass with the cache stepped over: these tests pin generation, and the one static
-    /// slot is exercised in `slice_cache` and `ffi` instead of being clobbered from here.
+    /// The batch pass with the resident DB stepped over: these tests pin generation, and the
+    /// process-global store is exercised in `db` and `ffi` instead of being clobbered from here.
     fn generate(request: GenerateDynamicOffersRequest) -> Result<DynamicOffersResult, LootError> {
-        generate_with_slice(
-            &PreparedSlice::from(
+        generate_with_views(
+            &RagfairDbViews::from(
                 request
-                    .invariant
-                    .expect("the fixture request carries a slice"),
+                    .views_override
+                    .expect("the fixture request carries a views override"),
             ),
             request.varying,
         )

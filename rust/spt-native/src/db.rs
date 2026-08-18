@@ -97,7 +97,7 @@ pub fn clear() {
 #[cfg(test)]
 pub mod tests {
     /// Serializes every test that touches the process-global store — the same discipline the
-    /// slice caches used (`ragfair/slice_cache.rs`).
+    /// slice caches use (`quest/slice_cache.rs`).
     pub static DB_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 }
 

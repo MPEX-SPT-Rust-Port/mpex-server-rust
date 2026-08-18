@@ -1,9 +1,10 @@
 //! Ragfair database views derived natively at publish time (Phase 1 ragfair flip).
 //!
-//! Bug-for-bug ports of the C# that builds today's `RagfairInvariantSlice` database members —
-//! the C# bodies are the authority and every quirk is preserved at its port site:
+//! Bug-for-bug ports of the C# that built the pre-flip `RagfairInvariantSlice` database members
+//! (now `RagfairViewsOverride`) — the C# bodies are the authority and every quirk is preserved at
+//! its port site:
 //!
-//! * `RagfairPayloadProjection.BuildInvariantSlice` (`Native/Ragfair/RagfairPayloadProjection.cs`)
+//! * `RagfairPayloadProjection.BuildViewsOverride` (`Native/Ragfair/RagfairPayloadProjection.cs`)
 //!   — the assembly shape and the one-pass items-table loop.
 //! * `PayloadProjection.BuildItemsView` / `ToPresetView` (`Native/Loot/PayloadProjection.cs`).
 //! * `PresetController.Initialize` (`Controllers/PresetController.cs`) + `PresetHelper`
@@ -28,9 +29,8 @@ use crate::db::models::{
 use crate::loot::item_helper::{ARMOR, HEADWEAR, ItemBaseClassCache, VEST, WEAPON};
 use crate::loot::models::{GridFilterView, GridView, ItemView, PresetView, SlotView};
 
-/// The eight wire views of today's `InvariantSlice` database members (`ragfair/models.rs:52-87`)
-/// plus the prepared base-class cache exactly as `PreparedSlice::from` builds it
-/// (`ragfair/models.rs:111-133`).
+/// The eight database views a dynamic ragfair pass consults ([`crate::ragfair::models::RagfairViewsWire`]
+/// on the wire) plus the prepared base-class cache.
 #[derive(Debug)]
 pub struct RagfairDbViews {
     /// `PayloadProjection.BuildItemsView` over the whole items table.
@@ -50,8 +50,8 @@ pub struct RagfairDbViews {
     pub default_presets_by_tpl: IndexMap<String, PresetView>,
     /// `PresetHelper.GetPresets(tpl)` for every tpl with presets, in items-table order.
     pub presets_by_tpl: IndexMap<String, Vec<PresetView>>,
-    /// [`ItemBaseClassCache::build`] over [`Self::items`], the same call `PreparedSlice::from`
-    /// makes.
+    /// [`ItemBaseClassCache::build`] over [`Self::items`], the same call
+    /// `From<RagfairViewsWire>` makes for an override.
     pub base_classes: ItemBaseClassCache,
 }
 
@@ -64,7 +64,7 @@ pub fn derive(
     globals: &GlobalsRoot,
 ) -> Result<RagfairDbViews, String> {
     let items = build_items_view(&templates.items);
-    // The same call `PreparedSlice::from` makes (`ragfair/models.rs:113`); also what the preset
+    // The same call `From<RagfairViewsWire>` makes for an override; also what the preset
     // classification below answers `ItemHelper.IsOfBaseclass(es)` from, standing in for
     // `ItemBaseClassService` (whose answers agree for every real item tpl — see item_helper.rs).
     let base_classes = ItemBaseClassCache::build(&items);

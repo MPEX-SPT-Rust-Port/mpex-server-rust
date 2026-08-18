@@ -22,6 +22,7 @@ using SPTarkov.Server.Core.Models.Spt.Mod;
 using SPTarkov.Server.Core.Models.Spt.Ragfair;
 using SPTarkov.Server.Core.Models.Spt.Tables;
 using SPTarkov.Server.Core.Native;
+using SPTarkov.Server.Core.Native.Db;
 using SPTarkov.Server.Core.Native.Ragfair;
 using SPTarkov.Server.Core.Servers;
 using SPTarkov.Server.Core.Services;
@@ -64,6 +65,7 @@ public class RagfairOfferGenerator(
 
     private readonly DatabaseMutationStamp? _databaseMutationStamp;
     private readonly IReadOnlyList<SptMod>? _loadedMods;
+    private readonly DbPublisher? _dbPublisher;
 
     /// Internal counter to ensure each offer created has a unique value for its intId property
     protected int OfferCounter;
@@ -81,22 +83,15 @@ public class RagfairOfferGenerator(
     internal ulong? NativeTestSeed { get; set; }
 
     /// <summary>
-    ///     The native side caches the parsed invariant slice under the stamp value it was sent
-    ///     with; this is the stamp of the last slice it accepted, so an unchanged stamp can skip
-    ///     the slice entirely. Null until a slice is sent under an eligible cache. Internal set:
-    ///     the desync test seam.
+    ///     Whether the most recent native send carried the C#-built views override rather than
+    ///     naming a resident-DB epoch. Test seam.
     /// </summary>
-    internal long? LastSentSliceStamp { get; set; }
+    internal bool LastSendIncludedViewsOverride { get; private set; }
 
     /// <summary>
-    ///     Whether the most recent native send carried the invariant slice. Test seam.
-    /// </summary>
-    internal bool LastSendIncludedSlice { get; private set; }
-
-    /// <summary>
-    ///     The constructor the container uses: the frozen 4.1.2 one plus the mutation stamp and
-    ///     the loaded-mod list the request-slice cache eligibility gate reads. Additive and
-    ///     apicompat-verified.
+    ///     The constructor the container uses: the frozen 4.1.2 one plus the mutation stamp, the
+    ///     loaded-mod list the residency eligibility gate reads, and the resident-DB publisher.
+    ///     Additive and apicompat-verified.
     /// </summary>
     public RagfairOfferGenerator(
         ISptLogger<RagfairOfferGenerator> logger,
@@ -122,7 +117,8 @@ public class RagfairOfferGenerator(
         RagfairConfig ragfairConfig,
         ICloner cloner,
         DatabaseMutationStamp databaseMutationStamp,
-        IReadOnlyList<SptMod> loadedMods
+        IReadOnlyList<SptMod> loadedMods,
+        DbPublisher dbPublisher
     )
         : this(
             logger,
@@ -151,19 +147,20 @@ public class RagfairOfferGenerator(
     {
         _databaseMutationStamp = databaseMutationStamp;
         _loadedMods = loadedMods;
+        _dbPublisher = dbPublisher;
     }
 
     /// <summary>
-    ///     Whether a slice-less send is ever allowed: the stamp exists, the kill switch is off,
-    ///     and either no mods are loaded or the user vouched their mods don't write tables
-    ///     directly. A generator built on the frozen constructor has neither the stamp nor the
-    ///     mod list and never caches.
+    ///     Whether an override-less send off the resident DB is ever allowed: the stamp and
+    ///     publisher exist, the kill switch is off, and either no mods are loaded or the user
+    ///     vouched their mods don't write tables directly. A generator built on the frozen
+    ///     constructor has none of the three services and always sends the override.
     /// </summary>
-    private bool SliceCacheEligible()
+    private bool ResidentDbEligible()
     {
-        // Both null together (the frozen constructor) - checking each keeps the trust flag from ever
+        // All null together (the frozen constructor) - checking each keeps the trust flag from ever
         // vouching for a mod list this instance was never handed
-        if (_databaseMutationStamp is null || _loadedMods is null || ragfairConfig.DisableNativeRequestCache)
+        if (_databaseMutationStamp is null || _loadedMods is null || _dbPublisher is null || ragfairConfig.DisableNativeRequestCache)
         {
             return false;
         }
@@ -473,24 +470,30 @@ public class RagfairOfferGenerator(
 
         LastPathTaken = LootGenerationPath.Native;
 
-        var stamp = _databaseMutationStamp?.Current ?? 0;
-        var eligible = SliceCacheEligible();
-        var sendSlice = !eligible || LastSentSliceStamp != stamp;
+        var eligible = ResidentDbEligible();
 
         FramedOffersResult result;
-        try
+        if (!eligible)
         {
-            result = SptNative.GenerateDynamicOffers(BuildNativeRequest(sendSlice, stamp, expiredOffers));
-            LastSendIncludedSlice = sendSlice;
+            result = SptNative.GenerateDynamicOffers(BuildNativeRequest(viewsOverride: true, epoch: 0, expiredOffers));
+            LastSendIncludedViewsOverride = true;
         }
-        catch (NativeStaleEpochException)
+        else
         {
-            // The native cache does not hold the slice this stamp names - resend it whole
-            result = SptNative.GenerateDynamicOffers(BuildNativeRequest(true, stamp, expiredOffers));
-            LastSendIncludedSlice = true;
-        }
+            var epoch = _dbPublisher!.EnsureCurrent();
+            try
+            {
+                result = SptNative.GenerateDynamicOffers(BuildNativeRequest(viewsOverride: false, epoch, expiredOffers));
+            }
+            catch (NativeStaleEpochException)
+            {
+                // The resident DB does not hold this epoch - republish everything and retry once
+                epoch = _dbPublisher.ForcePublish();
+                result = SptNative.GenerateDynamicOffers(BuildNativeRequest(viewsOverride: false, epoch, expiredOffers));
+            }
 
-        LastSentSliceStamp = eligible ? stamp : null;
+            LastSendIncludedViewsOverride = false;
+        }
 
         // The native side decided these templates are unsellable and, unlike everything else it
         // touched, that decision belongs to the live database (RagfairServerHelper.cs:61). A write
@@ -527,31 +530,31 @@ public class RagfairOfferGenerator(
     }
 
     /// <summary>
-    ///     One native request for this pass, with the invariant slice included only when the
-    ///     native cache cannot already be holding it.
+    ///     One native request for this pass, with the C#-built views override included only when
+    ///     the caller is ineligible to generate off the resident DB.
     /// </summary>
-    private GenerateDynamicOffersRequest BuildNativeRequest(bool sendSlice, long stamp, IEnumerable<List<Item>>? expiredOffers)
+    private GenerateDynamicOffersRequest BuildNativeRequest(bool viewsOverride, ulong epoch, IEnumerable<List<Item>>? expiredOffers)
     {
         return RagfairPayloadProjection.BuildRequest(
-            sendSlice
-                ? RagfairPayloadProjection.BuildInvariantSlice(
+            viewsOverride
+                ? RagfairPayloadProjection.BuildViewsOverride(
                     templateTable,
                     handbookHelper,
                     ragfairPriceService.TraderHelper,
                     presetHelper,
-                    ragfairAssortGenerator.ItemFilterService,
-                    ragfairAssortGenerator.SeasonalEventService,
-                    botHelper.BotTable,
-                    itemHelper,
-                    botConfig,
-                    ragfairConfig
+                    itemHelper
                 )
                 : null,
-            stamp,
+            epoch,
             expiredOffers,
             timeUtil.GetTimeStamp(),
             OfferCounter,
-            NativeTestSeed
+            NativeTestSeed,
+            ragfairConfig,
+            ragfairAssortGenerator.ItemFilterService,
+            ragfairAssortGenerator.SeasonalEventService,
+            botHelper.BotTable,
+            botConfig
         );
     }
 

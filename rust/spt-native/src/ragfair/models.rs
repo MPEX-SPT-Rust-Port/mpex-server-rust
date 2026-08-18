@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::loot::item_helper::ItemBaseClassCache;
 use crate::loot::models::{Item, ItemView, PresetView};
+use crate::ragfair::views::RagfairDbViews;
 
 /// Mod-added fields captured on the way in.
 type Extra = serde_json::Map<String, serde_json::Value>;
@@ -23,15 +24,16 @@ type Extra = serde_json::Map<String, serde_json::Value>;
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GenerateDynamicOffersRequest {
-    /// The caller's `DatabaseMutationStamp` the invariant slice was (or would be) built at.
-    pub invariant_stamp: i64,
-    /// Absent on a slice-less send, where the native side reuses the slice it stored under
-    /// [`Self::invariant_stamp`]. Always present until the cache gate lands.
-    pub invariant: Option<InvariantSlice>,
+    /// Resident-DB epoch this request was built against; 0 with `views_override` present
+    /// (spec amendment 4).
+    pub epoch: u64,
+    /// The distrust fallback (spec amendment 3): the C#-built view bundle, used for this call
+    /// only and never made resident. Present iff the caller is ineligible for residency.
+    pub views_override: Option<RagfairViewsWire>,
     pub varying: VaryingFields,
 }
 
-/// The members that change every call — everything not projected off the database.
+/// The members that change every call — everything not derived off the resident database.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VaryingFields {
@@ -45,14 +47,28 @@ pub struct VaryingFields {
     /// `null` for a full pass; the cloned expired-offer item lists for a regeneration pass
     /// (`RagfairServer.cs:69-79`).
     pub expired_offers: Option<Vec<Vec<Item>>>,
+    // Moved from the invariant slice (spec amendment 2): service/config state with no resident
+    // home until Phases 2/4. Wire names and value shapes are byte-identical to the old slice
+    // members.
+    /// `RagfairConfig.Dynamic`, whole.
+    pub dynamic: DynamicConfigWire,
+    /// `ItemFilterService.GetBlacklistedItems()` — read by `ItemHelper.IsValidItem`.
+    pub config_blacklist: HashSet<String>,
+    /// `SeasonalEventService.SeasonalEventEnabled()` (`RagfairAssortGenerator.cs:57`).
+    pub seasonal_event_active: bool,
+    /// `SeasonalEventService.GetInactiveSeasonalEventItems()` (`:58`).
+    pub seasonal_item_tpl_blacklist: HashSet<String>,
+    /// `BotHelper.GatherPmcNamesOfLength` for each faction at `botConfig.BotNameLengthLimit`,
+    /// pre-filtered. The faction is still drawn natively (`BotHelper.cs:151`, `GetInt(0, 1)`).
+    pub pmc_names_usec: Vec<String>,
+    pub pmc_names_bear: Vec<String>,
 }
 
-/// The call-invariant half of the request: the database, config and service projections, which only
-/// change when the database does.
+/// The C#-built override of the eight database views [`crate::ragfair::views::derive`] would have
+/// derived — the wire form of [`RagfairDbViews`], sent by callers ineligible for residency.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct InvariantSlice {
-    pub dynamic: DynamicConfigWire,
+pub struct RagfairViewsWire {
     /// `GlobalTable.ItemPresets` — `PresetHelper.IsPreset`/`GetPreset` read this map, and
     /// `GetAllPresets()` is its `Values` in insertion order.
     pub item_presets: IndexMap<String, PresetView>,
@@ -73,60 +89,22 @@ pub struct InvariantSlice {
     /// `TraderHelper.GetHighestSellToTraderPrice` resolved per template (a cache-backed C# loop, so
     /// it stays on the C# side and crosses as a map).
     pub highest_trader_prices: IndexMap<String, f64>,
-    /// `ItemFilterService.GetBlacklistedItems()` — read by `ItemHelper.IsValidItem`.
-    pub config_blacklist: Vec<String>,
-    /// `SeasonalEventService.SeasonalEventEnabled()` (`RagfairAssortGenerator.cs:57`).
-    pub seasonal_event_active: bool,
-    /// `SeasonalEventService.GetInactiveSeasonalEventItems()` (`:58`).
-    pub seasonal_item_tpl_blacklist: Vec<String>,
-    /// `BotHelper.GatherPmcNamesOfLength` for each faction at `botConfig.BotNameLengthLimit`,
-    /// pre-filtered. The faction is still drawn natively (`BotHelper.cs:151`, `GetInt(0, 1)`).
-    pub pmc_names_usec: Vec<String>,
-    pub pmc_names_bear: Vec<String>,
     pub items: IndexMap<String, ItemView>,
 }
 
-/// [`InvariantSlice`] with the per-pass conversions already done, so a cached slice pays them once
-/// at store time instead of every call.
-pub struct PreparedSlice {
-    pub dynamic: DynamicConfigWire,
-    pub item_presets: IndexMap<String, PresetView>,
-    pub default_presets: Vec<PresetView>,
-    pub default_presets_by_tpl: IndexMap<String, PresetView>,
-    pub presets_by_tpl: IndexMap<String, Vec<PresetView>>,
-    pub flea_prices: IndexMap<String, f64>,
-    pub handbook_prices: IndexMap<String, f64>,
-    pub highest_trader_prices: IndexMap<String, f64>,
-    pub config_blacklist: HashSet<String>,
-    pub seasonal_event_active: bool,
-    pub seasonal_item_tpl_blacklist: HashSet<String>,
-    pub pmc_names_usec: Vec<String>,
-    pub pmc_names_bear: Vec<String>,
-    pub items: IndexMap<String, ItemView>,
-    /// [`ItemBaseClassCache`] over [`Self::items`] — what `ItemHelper.IsOfBaseclass(es)` answers
-    /// from in C# (`ItemBaseClassService`), so the ported call sites probe it instead of walking.
-    pub base_classes: ItemBaseClassCache,
-}
-
-impl From<InvariantSlice> for PreparedSlice {
-    fn from(slice: InvariantSlice) -> Self {
-        let base_classes = ItemBaseClassCache::build(&slice.items);
+impl From<RagfairViewsWire> for RagfairDbViews {
+    fn from(wire: RagfairViewsWire) -> Self {
+        let base_classes = ItemBaseClassCache::build(&wire.items);
 
         Self {
-            dynamic: slice.dynamic,
-            item_presets: slice.item_presets,
-            default_presets: slice.default_presets,
-            default_presets_by_tpl: slice.default_presets_by_tpl,
-            presets_by_tpl: slice.presets_by_tpl,
-            flea_prices: slice.flea_prices,
-            handbook_prices: slice.handbook_prices,
-            highest_trader_prices: slice.highest_trader_prices,
-            config_blacklist: slice.config_blacklist.into_iter().collect(),
-            seasonal_event_active: slice.seasonal_event_active,
-            seasonal_item_tpl_blacklist: slice.seasonal_item_tpl_blacklist.into_iter().collect(),
-            pmc_names_usec: slice.pmc_names_usec,
-            pmc_names_bear: slice.pmc_names_bear,
-            items: slice.items,
+            items: wire.items,
+            flea_prices: wire.flea_prices,
+            handbook_prices: wire.handbook_prices,
+            highest_trader_prices: wire.highest_trader_prices,
+            item_presets: wire.item_presets,
+            default_presets: wire.default_presets,
+            default_presets_by_tpl: wire.default_presets_by_tpl,
+            presets_by_tpl: wire.presets_by_tpl,
             base_classes,
         }
     }
@@ -387,15 +365,14 @@ pub struct OfferRequirementWire {
     pub side: Option<i32>,
 }
 
-/// `pub` so `slice_cache`'s tests can build an [`InvariantSlice`] off the same fixtures.
 #[cfg(test)]
-pub mod tests {
+mod tests {
     use super::*;
 
     /// `RagfairConfig.Dynamic` in full, including the three members the wire type leaves to
     /// `extra` (`purchasesAreFoundInRaid`, `expiredOfferThreshold`, `itemPriceOverrideRouble`) and
     /// one mod-added key.
-    pub const DYNAMIC_JSON: &str = r#"{
+    const DYNAMIC_JSON: &str = r#"{
         "purchasesAreFoundInRaid":true,
         "useTraderPriceForOffersIfHigher":true,
         "barter":{"chancePercent":50.0,"itemCountMin":1,"itemCountMax":3,
@@ -442,9 +419,8 @@ pub mod tests {
         "modAddedDynamicField":42
     }"#;
 
-    /// Every member of the invariant slice but `dynamic`, which is spliced in from
-    /// [`DYNAMIC_JSON`].
-    pub const INVARIANT_TAIL: &str = r#"
+    /// Every member of the views override.
+    const VIEWS_TAIL: &str = r#"
         "itemPresets":{"preset1":{"items":[{"_id":"aaaaaaaaaaaaaaaaaaaaaaaa",
             "_tpl":"bbbbbbbbbbbbbbbbbbbbbbbb"}],"id":"preset1","name":"AK",
             "encyclopedia":"bbbbbbbbbbbbbbbbbbbbbbbb"}},
@@ -455,21 +431,26 @@ pub mod tests {
         "fleaPrices":{"bbbbbbbbbbbbbbbbbbbbbbbb":25000.0,"cccccccccccccccccccccccc":100.0},
         "handbookPrices":{"bbbbbbbbbbbbbbbbbbbbbbbb":20000.0},
         "highestTraderPrices":{"bbbbbbbbbbbbbbbbbbbbbbbb":12000.0},
-        "configBlacklist":["999999999999999999999999"],
-        "seasonalEventActive":false,
-        "seasonalItemTplBlacklist":["888888888888888888888888"],
-        "pmcNamesUsec":["Deagle"],
-        "pmcNamesBear":["Kirill"],
         "items":{"bbbbbbbbbbbbbbbbbbbbbbbb":{"parent":"cccccccccccccccccccccccc",
             "stackMaxSize":1,"durability":100.0,"maximumNumberOfUsage":10,
             "maxRepairResource":1200,"canSellOnRagfair":true}}
     "#;
 
+    /// The six members moved off the old invariant slice (spec amendment 2), minus `dynamic`,
+    /// which is spliced in from [`DYNAMIC_JSON`].
+    const VARYING_TAIL: &str = r#"
+        "configBlacklist":["999999999999999999999999"],
+        "seasonalEventActive":false,
+        "seasonalItemTplBlacklist":["888888888888888888888888"],
+        "pmcNamesUsec":["Deagle"],
+        "pmcNamesBear":["Kirill"]
+    "#;
+
     fn request_json(varying: &str) -> String {
         format!(
-            "{{\"invariantStamp\":0,\
-             \"invariant\":{{\"dynamic\":{DYNAMIC_JSON},{INVARIANT_TAIL}}},\
-             \"varying\":{{{varying}}}}}"
+            "{{\"epoch\":0,\
+             \"viewsOverride\":{{{VIEWS_TAIL}}},\
+             \"varying\":{{{varying},\"dynamic\":{DYNAMIC_JSON},{VARYING_TAIL}}}}}"
         )
     }
 
@@ -481,7 +462,7 @@ pub mod tests {
         );
         let parsed: GenerateDynamicOffersRequest = serde_json::from_str(&json).unwrap();
 
-        assert_eq!(parsed.invariant_stamp, 0);
+        assert_eq!(parsed.epoch, 0);
         assert_eq!(parsed.varying.test_seed, Some(42));
         assert_eq!(parsed.varying.timestamp, 1_700_000_000);
         assert_eq!(parsed.varying.offer_counter_start, 7);
@@ -489,45 +470,46 @@ pub mod tests {
             parsed.varying.expired_offers.as_ref().unwrap()[0][0].template,
             "bbbbbbbbbbbbbbbbbbbbbbbb"
         );
-        let invariant = parsed.invariant.as_ref().unwrap();
+        assert!(
+            parsed
+                .varying
+                .config_blacklist
+                .contains("999999999999999999999999")
+        );
+        assert!(!parsed.varying.seasonal_event_active);
+        assert!(
+            parsed
+                .varying
+                .seasonal_item_tpl_blacklist
+                .contains("888888888888888888888888")
+        );
+        assert_eq!(parsed.varying.pmc_names_usec, vec!["Deagle"]);
+        assert_eq!(parsed.varying.pmc_names_bear, vec!["Kirill"]);
+        let views = parsed.views_override.as_ref().unwrap();
         assert_eq!(
-            invariant.item_presets["preset1"].encyclopedia.as_deref(),
+            views.item_presets["preset1"].encyclopedia.as_deref(),
             Some("bbbbbbbbbbbbbbbbbbbbbbbb")
         );
-        assert_eq!(invariant.default_presets.len(), 1);
+        assert_eq!(views.default_presets.len(), 1);
         assert!(
-            invariant
+            views
                 .default_presets_by_tpl
                 .contains_key("bbbbbbbbbbbbbbbbbbbbbbbb")
         );
-        assert_eq!(
-            invariant.presets_by_tpl["bbbbbbbbbbbbbbbbbbbbbbbb"].len(),
-            1
-        );
+        assert_eq!(views.presets_by_tpl["bbbbbbbbbbbbbbbbbbbbbbbb"].len(), 1);
         // Insertion order is load-bearing: `GetFleaPricesAsArray` draws by index
         assert_eq!(
-            invariant.flea_prices.keys().collect::<Vec<_>>(),
+            views.flea_prices.keys().collect::<Vec<_>>(),
             vec!["bbbbbbbbbbbbbbbbbbbbbbbb", "cccccccccccccccccccccccc"]
         );
+        assert_eq!(views.handbook_prices["bbbbbbbbbbbbbbbbbbbbbbbb"], 20000.0);
         assert_eq!(
-            invariant.handbook_prices["bbbbbbbbbbbbbbbbbbbbbbbb"],
-            20000.0
-        );
-        assert_eq!(
-            invariant.highest_trader_prices["bbbbbbbbbbbbbbbbbbbbbbbb"],
+            views.highest_trader_prices["bbbbbbbbbbbbbbbbbbbbbbbb"],
             12000.0
         );
-        assert_eq!(invariant.config_blacklist, vec!["999999999999999999999999"]);
-        assert!(!invariant.seasonal_event_active);
-        assert_eq!(
-            invariant.seasonal_item_tpl_blacklist,
-            vec!["888888888888888888888888"]
-        );
-        assert_eq!(invariant.pmc_names_usec, vec!["Deagle"]);
-        assert_eq!(invariant.pmc_names_bear, vec!["Kirill"]);
 
         // The four `ItemView` members this port added
-        let item = &invariant.items["bbbbbbbbbbbbbbbbbbbbbbbb"];
+        let item = &views.items["bbbbbbbbbbbbbbbbbbbbbbbb"];
         assert_eq!(item.durability, Some(100.0));
         assert_eq!(item.maximum_number_of_usage, Some(10));
         assert_eq!(item.max_repair_resource, Some(1200.0));
@@ -539,8 +521,7 @@ pub mod tests {
         let json = request_json(r#""testSeed":null,"timestamp":1,"offerCounterStart":0"#);
         let dynamic = serde_json::from_str::<GenerateDynamicOffersRequest>(&json)
             .unwrap()
-            .invariant
-            .unwrap()
+            .varying
             .dynamic;
 
         assert!(dynamic.use_trader_price_for_offers_if_higher);
@@ -689,7 +670,7 @@ pub mod tests {
         let parsed: GenerateDynamicOffersRequest = serde_json::from_str(&json).unwrap();
 
         // Config passthrough: members the wire type does not name stay reachable
-        let dynamic = &parsed.invariant.as_ref().unwrap().dynamic;
+        let dynamic = &parsed.varying.dynamic;
         assert_eq!(dynamic.extra["modAddedDynamicField"], 42);
         assert_eq!(dynamic.extra["purchasesAreFoundInRaid"], true);
         assert_eq!(dynamic.extra["expiredOfferThreshold"], 1500);

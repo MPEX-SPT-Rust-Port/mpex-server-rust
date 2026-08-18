@@ -111,27 +111,27 @@ public class RagfairBenchmarkTests
 
         RunScenario("full pass", null);
         RunScenario("regeneration pass", _expiredOffers);
-        RunSliceCacheScenario();
+        RunResidentDbScenario();
     }
 
     /// <summary>
-    /// What the stamp-gated invariant-slice cache buys on the regeneration pass. Cold bumps
-    /// <see cref="DatabaseMutationStamp"/> before every run, so every send projects and serialises
-    /// the whole invariant slice; warm leaves the stamp alone, so the send carries the varying
-    /// fields only and the native side reuses its already-parsed copy.
+    /// What the stamp-gated resident DB buys on the regeneration pass. Cold bumps
+    /// <see cref="DatabaseMutationStamp"/> before every run, so every pass republishes the whole
+    /// database first; warm leaves the stamp alone, so the send carries the varying fields only
+    /// and the native side generates off the views it already derived.
     /// </summary>
-    private void RunSliceCacheScenario()
+    private void RunResidentDbScenario()
     {
         var cold = Measure(forceLegacy: false, LootGenerationPath.Native, _expiredOffers, () => _databaseMutationStamp.Bump());
-        Assert.That(_offerGenerator.LastSendIncludedSlice, Is.True, "the cold arm must send the slice on every pass");
+        Assert.That(_offerGenerator.LastSendIncludedViewsOverride, Is.False, "the cold arm still rides the resident path");
 
         var warm = Measure(forceLegacy: false, LootGenerationPath.Native, _expiredOffers);
-        Assert.That(_offerGenerator.LastSendIncludedSlice, Is.False, "the warm arm must hit the native slice cache");
+        Assert.That(_offerGenerator.LastSendIncludedViewsOverride, Is.False, "the warm arm must generate off the resident views");
 
-        Report("regeneration pass cache cold", cold);
-        Report("regeneration pass cache warm", warm);
+        Report("regeneration pass publish cold", cold);
+        Report("regeneration pass publish warm", warm);
         TestContext.Out.WriteLine(
-            $"{"slice cache", -20} speedup (median cold / median warm): {Median(cold.Timings) / Median(warm.Timings):F2}x  "
+            $"{"resident db", -20} speedup (median cold / median warm): {Median(cold.Timings) / Median(warm.Timings):F2}x  "
                 + $"warm share of cold median: {Median(warm.Timings) / Median(cold.Timings) * 100:F1}%"
         );
     }
@@ -253,23 +253,17 @@ public class RagfairBenchmarkTests
     private GenerateDynamicOffersRequest BuildRequest(List<List<Item>>? expiredOffers)
     {
         return RagfairPayloadProjection.BuildRequest(
-            RagfairPayloadProjection.BuildInvariantSlice(
-                _templateTable,
-                _handbookHelper,
-                _traderHelper,
-                _presetHelper,
-                _itemFilterService,
-                _seasonalEventService,
-                _botTable,
-                _itemHelper,
-                _botConfig,
-                _ragfairConfig
-            ),
+            RagfairPayloadProjection.BuildViewsOverride(_templateTable, _handbookHelper, _traderHelper, _presetHelper, _itemHelper),
             0,
             expiredOffers,
             _timeUtil.GetTimeStamp(),
             0,
-            null
+            null,
+            _ragfairConfig,
+            _itemFilterService,
+            _seasonalEventService,
+            _botTable,
+            _botConfig
         );
     }
 

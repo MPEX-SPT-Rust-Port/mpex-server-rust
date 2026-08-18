@@ -3,11 +3,8 @@ using NUnit.Framework;
 using SPTarkov.Server.Core.Helpers.Items;
 using SPTarkov.Server.Core.Helpers.Profile;
 using SPTarkov.Server.Core.Helpers.Traders;
-using SPTarkov.Server.Core.Models.Spt.Config;
 using SPTarkov.Server.Core.Models.Spt.Tables;
 using SPTarkov.Server.Core.Native.Ragfair;
-using SPTarkov.Server.Core.Services.Items;
-using SPTarkov.Server.Core.Services.Server;
 using SPTarkov.Server.Core.Utils;
 
 namespace UnitTests.Tests.Utils;
@@ -32,18 +29,13 @@ public class RagfairViewsEquivalenceTests
         // Built BEFORE the roots are serialized: the first handbook price lookup hydrates
         // HandbookHelper's cache, which applies ItemConfig.HandbookPriceOverride INTO
         // templateTable.Handbook itself (HandbookHelper.cs:26-49). Serializing the roots after
-        // guarantees the envelope carries the same handbook the slice priced from.
-        var slice = RagfairPayloadProjection.BuildInvariantSlice(
+        // guarantees the envelope carries the same handbook the views priced from.
+        var views = RagfairPayloadProjection.BuildViewsOverride(
             templateTable,
             di.GetService<HandbookHelper>(),
             di.GetService<TraderHelper>(),
             di.GetService<PresetHelper>(),
-            di.GetService<ItemFilterService>(),
-            di.GetService<SeasonalEventService>(),
-            di.GetService<BotTable>(),
-            di.GetService<ItemHelper>(),
-            di.GetService<BotConfig>(),
-            di.GetService<RagfairConfig>()
+            di.GetService<ItemHelper>()
         );
 
         var rootsPath = Path.Combine(Path.GetTempPath(), "spt-phase1-ragfair-roots.json");
@@ -69,25 +61,25 @@ public class RagfairViewsEquivalenceTests
             writer.WriteEndObject();
         }
 
-        // Exactly the eight views the resident DB derives natively; the slice's other members
-        // (dynamic, blacklists, seasonal, pmc names) are varying-block state and deliberately absent
+        // Exactly the eight views the resident DB derives natively - the views override carries
+        // them and nothing else
         var viewsPath = Path.Combine(Path.GetTempPath(), "spt-phase1-ragfair-views-expected.json");
-        var views = new (string Name, byte[] Bytes)[]
+        var expectedViews = new (string Name, byte[] Bytes)[]
         {
-            ("items", JsonSerializer.SerializeToUtf8Bytes(slice.Items, options)),
-            ("itemPresets", JsonSerializer.SerializeToUtf8Bytes(slice.ItemPresets, options)),
-            ("defaultPresets", JsonSerializer.SerializeToUtf8Bytes(slice.DefaultPresets, options)),
-            ("defaultPresetsByTpl", JsonSerializer.SerializeToUtf8Bytes(slice.DefaultPresetsByTpl, options)),
-            ("presetsByTpl", JsonSerializer.SerializeToUtf8Bytes(slice.PresetsByTpl, options)),
-            ("fleaPrices", JsonSerializer.SerializeToUtf8Bytes(slice.FleaPrices, options)),
-            ("handbookPrices", JsonSerializer.SerializeToUtf8Bytes(slice.HandbookPrices, options)),
-            ("highestTraderPrices", JsonSerializer.SerializeToUtf8Bytes(slice.HighestTraderPrices, options)),
+            ("items", JsonSerializer.SerializeToUtf8Bytes(views.Items, options)),
+            ("itemPresets", JsonSerializer.SerializeToUtf8Bytes(views.ItemPresets, options)),
+            ("defaultPresets", JsonSerializer.SerializeToUtf8Bytes(views.DefaultPresets, options)),
+            ("defaultPresetsByTpl", JsonSerializer.SerializeToUtf8Bytes(views.DefaultPresetsByTpl, options)),
+            ("presetsByTpl", JsonSerializer.SerializeToUtf8Bytes(views.PresetsByTpl, options)),
+            ("fleaPrices", JsonSerializer.SerializeToUtf8Bytes(views.FleaPrices, options)),
+            ("handbookPrices", JsonSerializer.SerializeToUtf8Bytes(views.HandbookPrices, options)),
+            ("highestTraderPrices", JsonSerializer.SerializeToUtf8Bytes(views.HighestTraderPrices, options)),
         };
         using (var stream = File.Create(viewsPath))
         using (var writer = new Utf8JsonWriter(stream))
         {
             writer.WriteStartObject();
-            foreach (var (name, bytes) in views)
+            foreach (var (name, bytes) in expectedViews)
             {
                 writer.WritePropertyName(name);
                 writer.WriteRawValue(bytes, skipInputValidation: true);
