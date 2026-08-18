@@ -25,9 +25,9 @@ type Extra = serde_json::Map<String, serde_json::Value>;
 #[serde(rename_all = "camelCase")]
 pub struct GenerateDynamicOffersRequest {
     /// Resident-DB epoch this request was built against; 0 with `views_override` present
-    /// (spec amendment 4).
+    /// (spec § Exports).
     pub epoch: u64,
-    /// The distrust fallback (spec amendment 3): the C#-built view bundle, used for this call
+    /// The distrust fallback (spec § Exports): the C#-built view bundle, used for this call
     /// only and never made resident. Present iff the caller is ineligible for residency.
     pub views_override: Option<RagfairViewsWire>,
     pub varying: VaryingFields,
@@ -47,7 +47,7 @@ pub struct VaryingFields {
     /// `null` for a full pass; the cloned expired-offer item lists for a regeneration pass
     /// (`RagfairServer.cs:69-79`).
     pub expired_offers: Option<Vec<Vec<Item>>>,
-    // Moved from the invariant slice (spec amendment 2): service/config state with no resident
+    // Moved from the invariant slice (spec § C# driver carve-out): service/config state with no resident
     // home until Phases 2/4. Wire names and value shapes are byte-identical to the old slice
     // members.
     /// `RagfairConfig.Dynamic`, whole.
@@ -436,7 +436,7 @@ mod tests {
             "maxRepairResource":1200,"canSellOnRagfair":true}}
     "#;
 
-    /// The six members moved off the old invariant slice (spec amendment 2), minus `dynamic`,
+    /// The six members moved off the old invariant slice (spec § C# driver carve-out), minus `dynamic`,
     /// which is spliced in from [`DYNAMIC_JSON`].
     const VARYING_TAIL: &str = r#"
         "configBlacklist":["999999999999999999999999"],

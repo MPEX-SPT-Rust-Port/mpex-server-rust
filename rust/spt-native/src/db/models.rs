@@ -1,4 +1,4 @@
-//! Wire models of the resident database (spec § The epoch protocol, as amended 2026-08-18).
+//! Wire models of the resident database (spec § The epoch protocol).
 //!
 //! Task-1 shape rule: every root is a `#[serde(flatten)]` superset map. Typed fields are lifted
 //! out of `extra` only when Rust-side derivation reads them (`ragfair::views::derive` today, the

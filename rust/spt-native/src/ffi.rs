@@ -1468,7 +1468,7 @@ mod tests {
         )
     }
 
-    /// The varying half, config and service state included (spec amendment 2). Starts with
+    /// The varying half, config and service state included (spec § C# driver carve-out). Starts with
     /// `timestamp` so the expired-pass test can splice `expiredOffers` in front of it.
     fn ragfair_varying(offer_item_count: &str) -> String {
         let dynamic = ragfair_dynamic(offer_item_count);

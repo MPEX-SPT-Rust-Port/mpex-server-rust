@@ -177,7 +177,7 @@ silently drops camora ammo on the fifth); and the native `_type` test being
    config state — and the optional `viewsOverride` remain per-call. Ineligible callers (mods loaded
    without `TrustNativeRequestCacheWithMods`, or `DisableNativeRequestCache`) send the C#-built
    view bundle as `viewsOverride` on every call at today's projection cost, never touching resident
-   state. Full protocol: the epoch-protocol section and its 2026-08-18 amendments in
+   state. Full protocol: the epoch-protocol section of
    docs/superpowers/specs/2026-08-17-rust-state-ownership-design.md. Ragfair (flip #1), the
    repeatable quests (flip #2) and the two startup one-shots — the base-class hydrate and the
    ragfair linked-item table (flip #3) — ride it today; every other family still projects per

@@ -26,13 +26,13 @@ internal record GenerateDynamicOffersRequest
 {
     /// <summary>
     ///     Resident-DB epoch this request was built against; 0 with <see cref="ViewsOverride"/>
-    ///     present (spec amendment 4).
+    ///     present (spec § Exports).
     /// </summary>
     [JsonPropertyName("epoch")]
     public required ulong Epoch { get; set; }
 
     /// <summary>
-    ///     The distrust fallback (spec amendment 3): the C#-built view bundle, used for this call
+    ///     The distrust fallback (spec § Exports): the C#-built view bundle, used for this call
     ///     only and never made resident. Present iff the caller is ineligible for residency.
     /// </summary>
     [JsonPropertyName("viewsOverride")]
@@ -77,7 +77,7 @@ internal record RagfairVaryingFields
 
     /// <summary>
     /// <c>RagfairConfig.Dynamic</c>, the live object - mods mutate it at runtime and the native side
-    /// has to see that. Moved off the old invariant slice (spec amendment 2): service/config state
+    /// has to see that. Moved off the old invariant slice (spec § C# driver carve-out): service/config state
     /// with no resident home until Phases 2/4.
     /// </summary>
     [JsonPropertyName("dynamic")]

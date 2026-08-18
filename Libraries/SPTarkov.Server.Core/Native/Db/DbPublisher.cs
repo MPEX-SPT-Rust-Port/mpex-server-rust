@@ -7,8 +7,8 @@ using SPTarkov.Server.Core.Services.Server;
 namespace SPTarkov.Server.Core.Native.Db;
 
 /// <summary>
-/// The one write path to the native resident DB (spec § The epoch protocol, amended
-/// 2026-08-18). Dirty tracking is the global <see cref="DatabaseMutationStamp"/>: a publish
+/// The one write path to the native resident DB (spec § The epoch protocol). Dirty tracking is
+/// the global <see cref="DatabaseMutationStamp"/>: a publish
 /// resends every supported root when the stamp has moved since the last publish. Callers stamp
 /// the returned epoch into their requests; a <c>NativeStaleEpochException</c> self-heals with
 /// <see cref="ForcePublish"/> + one retry.

@@ -1,4 +1,4 @@
-//! The process-global resident database (spec § The epoch protocol, as amended 2026-08-18).
+//! The process-global resident database (spec § The epoch protocol).
 //!
 //! One `RwLock<Option<Arc<ResidentDb>>>`: readers clone the `Arc` at entry and never hold the
 //! lock across a generation; a publish builds the merged replacement and swaps it under the

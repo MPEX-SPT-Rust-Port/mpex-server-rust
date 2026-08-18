@@ -279,8 +279,8 @@ longer builds or sends any view. The forced publish, 456.73 ms, is the whole per
 (3-root projection + FFI copy + parse + view derivation; Phase 0's warm three-root figure was
 432.4 ms); the cold arm's 440.02 ms median reading *below* it is run-to-run noise — the two arms'
 ranges overlap — not generation being free. The resident warm arm reads 11.58 ms against the deleted slice cache's warm 10.59 ms —
-the varying block now carries per call what the slice held resident (the 2026-08-18 amendment 2
-fields, O(KB)); at ~1 ms on an 11 ms pass the fixture cannot fully resolve it, and it is the
+the varying block now carries per call what the slice held resident (the spec § C# driver
+carve-out fields, O(KB)); at ~1 ms on an 11 ms pass the fixture cannot fully resolve it, and it is the
 accepted price of retiring the slice cache. Working set over the timed
 phase: native +370 MB on the full pass (2nd run +390 MB), legacy +0 MB — same shape as pre-flip's
 +387 MB.
