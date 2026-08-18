@@ -242,13 +242,21 @@ loaded, with `TrustNativeRequestCacheWithMods` as the opt-in and `DisableNativeR
 kill switch; ineligible ragfair callers send a per-call `viewsOverride` instead (guideline 3).
 Every other payload in the crate is still projected per call.
 
-**Flip #1 ledger.** (a) `highestTraderPrices` freshness: legacy's `TraderHelper` price cache could
-serve stale values into a rebuilt slice; Rust re-derives the map on every publish, so the resident
-path can be *fresher* than legacy after runtime template mutations — favours correctness, recorded
-here rather than "fixed". (b) pmc name lists stay C#-projected in the varying block; flip #6 (bots
+**Flip #1 ledger.** (a) Helper-cache freshness: legacy's hydrate-once caches — `TraderHelper`'s
+trader prices, `HandbookHelper`'s handbook price lookup, `PresetHelper`'s preset store and
+default-preset maps — could serve stale values into a rebuilt slice; Rust re-derives every view
+from the published roots on each publish, so the resident path is uniformly *fresher*, never
+staler, after runtime mutations — favours correctness, recorded here rather than "fixed". The
+practical edge: a resident send and a `viewsOverride` send can diverge after a runtime mutation,
+because the override is still built through those hydrate-once caches. (b) pmc name lists stay
+C#-projected in the varying block; flip #6 (bots
 root resident) is the named revisit point. (c) Runtime *config* edits still bypass the stamp — the
 pre-flip ceiling, unchanged, and Phase 4 closes it — but ragfair's config-derived fields now flow
-through the varying block on every call, which narrows the ceiling for ragfair. Net `Native/`
+through the varying block on every call, which narrows the ceiling for ragfair. (d) An
+`_items: []` preset added at runtime by a trusted mod (stamp bumped) now aborts the publish loudly
+on every eligible pass, naming the preset (`views.rs`'s `build_preset_cache`), where the old slice
+path tolerated it — the startup `PresetCache` never saw it and the live `itemPresets` view carried
+it harmlessly; stricter and louder, deliberately. Net `Native/`
 delta for the flip (`git diff --stat da556e7..0287c7e -- Libraries/SPTarkov.Server.Core/Native/`):
 +214/−70 lines across 7 files — the invariant half of the ragfair builder is gone, and `Db/`
 (`DbPublisher` + `DbPayloadProjection`, 105 lines) is new shared infrastructure every later flip
