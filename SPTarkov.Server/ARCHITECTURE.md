@@ -64,7 +64,7 @@ Prepatcher definitions live in `user/patchers/<ModGuid>/<one>.json`.
 
 | File | Role |
 |---|---|
-| `ModLoader.cs` | Discovers and loads mod assemblies (sorted by `ModGuid`, so load order is deterministic), collects enum prepatch definitions, applies them, and — if any applied cleanly — reboots the server in-process against the patched Core. Returns `ModLoaderRunResult(ShouldStartServer, ValidRuntimeMods)` |
+| `ModLoader.cs` | Discovers and loads mod assemblies (sorted by `ModGuid`, so load order is deterministic), collects enum prepatch definitions, applies them, and — if all applied cleanly — reboots the server in-process against the patched Core. Returns `ModLoaderRunResult(ShouldStartServer, ValidRuntimeMods)` |
 | `ModValidator.cs` | Rejects/warns: bad GUID format (`^[a-zA-Z0-9-]+(\.[a-zA-Z0-9-]+)*$`), duplicates, unmet/outdated `ModDependencies`, declared `Incompatibilities`, `SptVersion` semver mismatch, folder shapes that mean the user installed a client or legacy JS mod. Any error → **no mods load at all**. Also hard-throws if a mod references a newer `SPTarkov.Server.Core` assembly than the running one |
 | `EnumPatcher.cs` | Adds a literal field to an existing Core enum via AsmResolver; validates name/value collisions and underlying-type fit |
 | `PrepatchAssemblyWriter.cs` | Writes the module with `MetadataBuilderFlags.PreserveAll` so the original PDB stays valid |

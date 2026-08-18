@@ -28,7 +28,7 @@ order), `rmp-serde` (the ragfair MessagePack envelope), `indexmap`, `rand`/`rand
 pins `-C target-cpu=x86-64-v3` on both x64 targets, so the built library will not run on pre-AVX2 hardware, and
 the mold linker on Linux. Both profiles use one codegen unit; release adds fat LTO.
 
-~49k lines across the 53 files of `src/`, inline tests included: `bot/` ~34%, `loot/` ~24%, `ragfair/` ~15%,
+~51k lines across the 55 files of `src/`, inline tests included: `bot/` ~34%, `loot/` ~24%, `ragfair/` ~15%,
 `quest/` ~12%, `scav_case/` ~4%. `bot_equipment_mod_generator.rs` alone is 4.2k.
 
 ## Layout
@@ -55,11 +55,12 @@ the mold linker on Linux. Both profiles use one codegen unit; release adds fat L
 
 ## FFI boundary (`ffi.rs`)
 
-Twenty-two `extern "C"` exports: two trivial (`spt_native_abi_version`, `spt_buf_free`), thirteen taking a
-UTF-8 JSON generation request, `spt_verify_database` taking a directory path, `spt_locales_set` taking the
-resolved server-locale table as JSON, and five for the log pipeline (`spt_logger_init`, `spt_logger_reinit`,
-`spt_log_emit`, `spt_logger_close`, `spt_log_set_tap` — see *The log pipeline*). The fourteen
-generation/verify exports hand back a heap buffer the caller releases with `spt_buf_free`.
+Twenty-three `extern "C"` exports: two trivial (`spt_native_abi_version`, `spt_buf_free`), thirteen taking a
+UTF-8 JSON generation request, `spt_db_publish` taking the publish envelope, `spt_verify_database` taking a
+directory path, `spt_locales_set` taking the resolved server-locale table as JSON, and five for the log
+pipeline (`spt_logger_init`, `spt_logger_reinit`, `spt_log_emit`, `spt_logger_close`, `spt_log_set_tap` — see
+*The log pipeline*). The fifteen generation/publish/verify exports hand back a heap buffer the caller
+releases with `spt_buf_free`.
 
 ```
 C# SptNative → spt_generate_* (JSON in)
@@ -68,7 +69,7 @@ C# SptNative → spt_generate_* (JSON in)
   → serde out the result, or the failure message, into an out-buffer
 ```
 
-- `run_generator_with` is the shared body of the thirteen generation exports; ten reach it through
+- `run_generator_with` is the shared body of the thirteen generation exports and `spt_db_publish`; ten reach it through
   `run_generator`, the JSON-response-plus-`LootError` wrapper. Ragfair calls it directly to frame its response
   rather than emit one JSON document; quest and scav case do so for their own error types.
   `spt_verify_database` is separate because it blocks on the tokio runtime.
@@ -102,7 +103,7 @@ asserts the constant so the bump can't be forgotten.
 
 `checks.dat` is base64-wrapped JSON (`Path`/`Hash` pairs) written at Release build time by `generate` in this
 same module, via the `gen_checks` bin (invoked by `PreBuildHashFile` in `SPTarkov.Server.Assets.csproj`).
-Hashing fans out over the runtime through a `JoinSet` capped at `MAX_CONCURRENT_HASHES` (32), producing a
+Hashing fans out over the runtime through a `JoinSet`, semaphore-capped at `MAX_CONCURRENT_HASHES` (32), producing a
 `VerifyReport { ok, failures, checked }`. Three properties are load-bearing:
 
 - **Scope comes from the manifest, not the tree.** Only the top-level `SPT_Data` roots the manifest names
@@ -275,7 +276,7 @@ These are what keep the port correct; break one and output silently diverges fro
 
 ## Tests
 
-Almost all tests are inline `#[cfg(test)]` modules (~720 of them). Three kinds:
+Almost all tests are inline `#[cfg(test)]` modules (~750 of them). Three kinds:
 
 - **Parity fixtures** — replay a C# scenario and assert the exact item list.
 - **Seeded-RNG tests** — an optional seed on every request envelope (`testSeed`, spelled `seed` on the quest
@@ -286,8 +287,10 @@ Almost all tests are inline `#[cfg(test)]` modules (~720 of them). Three kinds:
   failure, generation failure and null arguments. `spt_generate_bot_inventory_batch` is the one export with no
   transport test of its own.
 
-The only `tests/` target is `completion_whitelist_baseclass.rs`, a timing-and-equivalence guard for the
-Completion whitelist filter's base-class lookups. It runs against the real shipped `items.json`, so it needs
-`scripts/decompress-assets.sh` to have run.
+Three `tests/` targets. `completion_whitelist_baseclass.rs` is a timing-and-equivalence guard for the
+Completion whitelist filter's base-class lookups; it runs against the real shipped `items.json`, so it needs
+`scripts/decompress-assets.sh` to have run. `phase0_publish_spike.rs` and `phase1_ragfair_views.rs` are the
+resident-DB flip's run-by-hand (`--ignored`) harnesses: the publish parse-cost/RSS spike and the
+native-vs-C# ragfair views equivalence check, each fed fixture files a C# test writes first.
 
 Run with `cd rust && cargo test && cargo fmt --check && cargo clippy --all-targets -- -D warnings`.

@@ -25,7 +25,7 @@ SPTarkov.Server.Assets                          (content-only; the host project-
 | `SPTarkov.Common` | 22 | — | SemanticVersioning, ZLinq |
 | `SPTarkov.DI` | 3 | — | MS.Extensions.DependencyInjection.Abstractions, Hosting.Abstractions |
 | `SPTarkov.Reflection` | 8 | `SPTarkov.DI` | HarmonyX |
-| `SPTarkov.Server.Core` | 853 | `SPTarkov.Common`, `SPTarkov.DI` | HarmonyX, FastCloner, System.IO.Hashing, MessagePack |
+| `SPTarkov.Server.Core` | 855 | `SPTarkov.Common`, `SPTarkov.DI` | HarmonyX, FastCloner, System.IO.Hashing, MessagePack |
 | `SPTarkov.Server.Web` | 50 | `SPTarkov.Server.Core` | MudBlazor, Argon2Sharp |
 | `SPTarkov.Server.Assets` | 0 | — | — |
 
@@ -76,7 +76,7 @@ Runtime method patching for mods, over HarmonyX.
 
 ## SPTarkov.Server.Core
 
-All game logic — 853 of the 936 `.cs` files under `Libraries/`. Referenced by
+All game logic — 855 of the 938 `.cs` files under `Libraries/`. Referenced by
 `SPTarkov.Server.Web` and by the host; references only `SPTarkov.Common` and `SPTarkov.DI`.
 
 → **[`SPTarkov.Server.Core/ARCHITECTURE.md`](SPTarkov.Server.Core/ARCHITECTURE.md)**.

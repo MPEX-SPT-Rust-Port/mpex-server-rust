@@ -1,6 +1,6 @@
 # SPTarkov.Server.Core — Architecture
 
-All game logic. 852 tracked `.cs` files, ~91% of the code under `Libraries/`. Every path below is
+All game logic. 854 tracked `.cs` files, ~91% of the code under `Libraries/`. Every path below is
 relative to `Libraries/SPTarkov.Server.Core/`.
 
 A map of Core: what each folder is for and where to add things. For repo-spanning behaviour (Rust
@@ -27,7 +27,7 @@ csproj invokes `cargo`, so any `dotnet build` needs the Rust toolchain on `PATH`
 | `Controllers/` | 30 | Orchestration |
 | `Extensions/` | 23 | Domain extension methods, one file per extended type (`ProfileExtensions` extends `PmcData`, `FullProfileExtensions` extends `SptProfile`) |
 | `Migration/` | 21 | Versioned profile migrations (`3.11`, `4.0`, `4.1`) plus unversioned `Migrations/Fixes/` (7) |
-| `Native/` | 18 | C# side of the Rust FFI |
+| `Native/` | 20 | C# side of the Rust FFI |
 | `Exceptions/` | 13 | Typed exceptions (`Helpers/` 7, `Items/` 3, `Database/` 3) |
 | `Servers/` | 11 | HTTP, WebSocket, save, ragfair |
 | `DI/` | 8 | Router base classes + lifecycle interfaces |
@@ -114,7 +114,8 @@ Seven `ForceLegacy*` flags are the Rust-port escape hatches, one per dual-path f
 `QuestConfig.ForceLegacyRepeatableQuestGeneration`, `ScavCaseConfig.ForceLegacyScavCaseGeneration`
 and `ItemConfig.ForceLegacyItemBaseClassHydration`. Narrower knobs:
 `BotConfig.ForcePerBotGeneration` (unbatch waves without leaving native) and, on `RagfairConfig` and
-`QuestConfig`, `TrustNativeRequestCacheWithMods` / `DisableNativeRequestCache`.
+`QuestConfig`, `TrustNativeRequestCacheWithMods` / `DisableNativeRequestCache` (on ragfair these now
+gate resident-DB eligibility rather than a request cache).
 
 ## JSON layer (`Utils/Json/`, 23 files)
 
@@ -176,8 +177,7 @@ fallback — nine generators (`LocationLootGenerator`, `LootGenerator`, `BotInve
 `RagfairOfferGenerator`, `ScavCaseRewardGenerator` and the four `RepeatableQuests/` quest-type
 generators) and two services (`ItemBaseClassService`, `RagfairLinkedItemService`). Each holds a
 frozen list of 4.1.2 members and uses HarmonyX to detect a live patch before dispatching, as does
-`BotWaveBatcher` — thirteen Core files reference HarmonyX (the eleven, plus `BotWaveBatcher` and
-`BotController`).
+`BotWaveBatcher` — twelve Core files reference HarmonyX (the eleven, plus `BotWaveBatcher`).
 
 Two families fold collaborators into the native call, so those collaborators run legacy-only while
 still participating in the dispatch decision:
@@ -224,12 +224,13 @@ template it copies — **do not delete it**, despite nothing referencing it in s
 | Folder | Contents |
 |---|---|
 | `Servers/` | `HttpServer`, `WebSocketServer`, `SaveServer` (owns `user/profiles/`), `RagfairServer`; `Http/` listener + `RequestLogger`; `Ws/` connection and message handlers |
-| `Native/` | `NativeMethods` (`[LibraryImport]`), `SptNative` (safe wrapper), and payload/projection/request-builder types under `BaseClass/`, `Bot/`, `Loot/`, `Ragfair/`, `RepeatableQuests/`, `ScavCase/`. Contract details in the root ARCHITECTURE.md |
+| `Native/` | `NativeMethods` (`[LibraryImport]`), `SptNative` (safe wrapper), and payload/projection/request-builder types under `BaseClass/`, `Bot/`, `Db/` (also `DbPublisher`, the resident-DB publish site), `Loot/`, `Ragfair/`, `RepeatableQuests/`, `ScavCase/`. Contract details in the root ARCHITECTURE.md |
 | `Migration/` | `IProfileMigration` / `AbstractProfileMigration` / context, versioned sets under `Migrations/3.11`, `4.0`, `4.1`, plus unversioned `Migrations/Fixes/` (7 corruption repairs) |
 | `Exceptions/` | `Helpers/` (7, one per helper that throws), `Items/` (3, modded item/trader/clothing validation), `Database/` (3) |
 
-The ragfair and repeatable-quest requests skip their call-invariant half when `DatabaseMutationStamp`
-has not moved and no mods are loaded.
+The repeatable-quest request skips its call-invariant half when `DatabaseMutationStamp` has not
+moved and no mods are loaded; the ragfair request instead rides the native resident DB, republished
+by `Native/Db/DbPublisher` when the stamp moves.
 
 `WebSocketServer` matches `IWebSocketConnectionHandler.GetHookUrl()` as a substring of the path and
 notifies *every* matching handler — unlike `IHttpListener`, where only the first match runs.
