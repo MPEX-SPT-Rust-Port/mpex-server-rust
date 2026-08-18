@@ -5,6 +5,7 @@ using SPTarkov.Server.Core.Constants;
 using SPTarkov.Server.Core.Helpers;
 using SPTarkov.Server.Core.Helpers.Bot;
 using SPTarkov.Server.Core.Models.Common;
+using SPTarkov.Server.Core.Models.Eft.Bot;
 using SPTarkov.Server.Core.Models.Eft.Common;
 using SPTarkov.Server.Core.Models.Eft.Common.Tables;
 using SPTarkov.Server.Core.Models.Enums;
@@ -214,21 +215,37 @@ public class BotGenerator(
     ///     Everything GenerateBot does before the inventory call: level, ids, equipment filter,
     ///     names, seasonal/blacklist strips, stats, health, skills, PMC game version, appearance.
     ///     Internal so the batched wave path can run it per bot ahead of the single native call.
+    ///     nativeLevelAndFilter is that path's batch mode: it skips the steps the batch runs
+    ///     elsewhere - the level draw natively, the template mutations once per level band, the
+    ///     level-dependent draws after the call. Default false, which is the unchanged per-bot
+    ///     prelude.
     /// </summary>
-    internal void GenerateBotPrelude(MongoId sessionId, BotBase bot, BotType botJsonTemplate, BotGenerationDetails botGenerationDetails)
+    internal void GenerateBotPrelude(
+        MongoId sessionId,
+        BotBase bot,
+        BotType botJsonTemplate,
+        BotGenerationDetails botGenerationDetails,
+        bool nativeLevelAndFilter = false
+    )
     {
         botGenerationDetails.RoleLowercase = botGenerationDetails.Role.ToLowerInvariant();
 
-        var botLevelDetails = botLevelGenerator.GenerateBotLevel(botJsonTemplate.BotExperience.Level, botGenerationDetails, bot);
+        RandomisedBotLevelResult? botLevelDetails = null;
+        // Batch: drawn natively, so the level rides back on the response instead
+        if (!nativeLevelAndFilter)
+        {
+            botLevelDetails = botLevelGenerator.GenerateBotLevel(botJsonTemplate.BotExperience.Level, botGenerationDetails, bot);
 
-        // Assign value for later use
-        botGenerationDetails.BotLevel = botLevelDetails.Level.GetValueOrDefault();
+            // Assign value for later use
+            botGenerationDetails.BotLevel = botLevelDetails.Level.GetValueOrDefault();
+        }
 
         // Generate Id/AId for bot
         AddIdsToBot(bot);
 
         // Only filter bot equipment, never players
-        if (!botGenerationDetails.IsPlayerScav)
+        // Batch: run once per level-band variant instead (ApplyBatchTemplateMutations)
+        if (!nativeLevelAndFilter && !botGenerationDetails.IsPlayerScav)
         {
             botEquipmentFilterService.FilterBotEquipment(sessionId, botJsonTemplate, botGenerationDetails);
         }
@@ -249,16 +266,20 @@ public class BotGenerator(
             SetRandomisedGameVersionAndCategory(bot.Info);
         }
 
-        if (!seasonalEventService.ChristmasEventEnabled())
-        // Process all bots EXCEPT gifter, he needs christmas items
+        // Batch: both strips run once per level-band variant instead (ApplyBatchTemplateMutations)
+        if (!nativeLevelAndFilter)
         {
-            if (botGenerationDetails.Role != "gifter")
+            if (!seasonalEventService.ChristmasEventEnabled())
+            // Process all bots EXCEPT gifter, he needs christmas items
             {
-                seasonalEventService.RemoveChristmasItemsFromBotInventory(botJsonTemplate.BotInventory, botGenerationDetails.Role);
+                if (botGenerationDetails.Role != "gifter")
+                {
+                    seasonalEventService.RemoveChristmasItemsFromBotInventory(botJsonTemplate.BotInventory, botGenerationDetails.Role);
+                }
             }
-        }
 
-        RemoveBlacklistedLootFromBotTemplate(botJsonTemplate.BotInventory);
+            RemoveBlacklistedLootFromBotTemplate(botJsonTemplate.BotInventory);
+        }
 
         // Remove hideout data if bot is not a PMC or pscav - match what live sends
         if (!(botGenerationDetails.IsPmc || botGenerationDetails.IsPlayerScav))
@@ -266,8 +287,13 @@ public class BotGenerator(
             bot.Hideout = null;
         }
 
-        bot.Info.Experience = botLevelDetails.Exp;
-        bot.Info.Level = botLevelDetails.Level;
+        // Batch: assigned after the call, from the level the native side drew
+        if (!nativeLevelAndFilter)
+        {
+            bot.Info.Experience = botLevelDetails!.Exp;
+            bot.Info.Level = botLevelDetails.Level;
+        }
+
         bot.Info.Settings.Experience = GetExperienceRewardForKillByDifficulty(
             botJsonTemplate.BotExperience.Reward,
             botGenerationDetails.BotDifficulty,
@@ -284,7 +310,12 @@ public class BotGenerator(
             botGenerationDetails.Role
         );
         bot.Info.Settings.UseSimpleAnimator = botJsonTemplate.BotExperience.UseSimpleAnimator;
-        bot.Customization.Voice = weightedRandomHelper.GetWeightedValue(botJsonTemplate.BotAppearance.Voice);
+        // Batch: drawn after the call, from the variant the drawn level lands in
+        if (!nativeLevelAndFilter)
+        {
+            bot.Customization.Voice = weightedRandomHelper.GetWeightedValue(botJsonTemplate.BotAppearance.Voice);
+        }
+
         bot.Health = GenerateHealth(botJsonTemplate.BotHealth, botGenerationDetails.IsPlayerScav);
         bot.Skills = GenerateSkills(botJsonTemplate.BotSkills);
 
@@ -298,7 +329,8 @@ public class BotGenerator(
         {
             bot.Info.IsStreamerModeAvailable = true; // Set to true so client patches can pick it up later - client sometimes alters botrole to assaultGroup
             SetRandomisedGameVersionAndCategory(bot.Info);
-            if (bot.Info.GameVersion == GameEditions.UNHEARD)
+            // Batch: applied natively, off the game version the wire carries
+            if (!nativeLevelAndFilter && bot.Info.GameVersion == GameEditions.UNHEARD)
             {
                 AddAdditionalPocketLootWeightsForUnheardBot(botJsonTemplate);
             }
@@ -307,7 +339,44 @@ public class BotGenerator(
         }
 
         // Add drip
-        SetBotAppearance(bot, botJsonTemplate.BotAppearance, botGenerationDetails);
+        // Batch: set after the call, from the variant the drawn level lands in
+        if (!nativeLevelAndFilter)
+        {
+            SetBotAppearance(bot, botJsonTemplate.BotAppearance, botGenerationDetails);
+        }
+    }
+
+    /// <summary>
+    ///     The prelude's template mutations (filter :250, christmas strip :277, blacklist strip
+    ///     :281) with their conditions verbatim, for the batch path to run once per level-band
+    ///     variant instead of once per bot. Internal so it falls out of the Harmony decline set;
+    ///     the members it calls keep their visibility and stay in it.
+    /// </summary>
+    internal void ApplyBatchTemplateMutations(MongoId sessionId, BotType botJsonTemplate, BotGenerationDetails botGenerationDetails)
+    {
+        if (!botGenerationDetails.IsPlayerScav)
+        {
+            botEquipmentFilterService.FilterBotEquipment(sessionId, botJsonTemplate, botGenerationDetails);
+        }
+
+        if (!seasonalEventService.ChristmasEventEnabled())
+        {
+            if (botGenerationDetails.Role != "gifter")
+            {
+                seasonalEventService.RemoveChristmasItemsFromBotInventory(botJsonTemplate.BotInventory, botGenerationDetails.Role);
+            }
+        }
+
+        RemoveBlacklistedLootFromBotTemplate(botJsonTemplate.BotInventory);
+    }
+
+    /// <summary>
+    ///     SetBotAppearance for the batch path's post-call step. Internal wrapper for the same
+    ///     decline-set reason as ApplyBatchTemplateMutations.
+    /// </summary>
+    internal void ApplyBatchBotAppearance(BotBase bot, Appearance appearance, BotGenerationDetails botGenerationDetails)
+    {
+        SetBotAppearance(bot, appearance, botGenerationDetails);
     }
 
     /// <summary>

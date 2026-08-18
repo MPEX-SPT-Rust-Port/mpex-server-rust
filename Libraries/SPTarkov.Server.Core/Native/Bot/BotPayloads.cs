@@ -256,13 +256,82 @@ internal record SharedBotViews
     /// <inheritdoc cref="GenerateBotInventoryRequest.ModPoolSlotOrder"/>
     [JsonPropertyName("modPoolSlotOrder")]
     public required Dictionary<MongoId, List<int>> ModPoolSlotOrder { get; set; }
+
+    /// <summary>
+    /// The wave's level-draw inputs, for the native side to draw each bot's level with. Set only
+    /// when the wave is PMC - every other bot takes the constant level 1 without drawing
+    /// (<c>BotLevelGenerator.cs:23-26</c>), so there is nothing to send and this stays null, which
+    /// omits it from the wire.
+    /// </summary>
+    [JsonPropertyName("levelGeneration")]
+    public LevelGenerationView? LevelGeneration { get; set; }
+
+    /// <summary>
+    /// Ascending, contiguous, covering <c>[LevelMin..LevelMax]</c> of
+    /// <see cref="LevelGeneration"/>; exactly one <c>[1..1]</c> entry for a non-PMC wave.
+    /// </summary>
+    [JsonPropertyName("templateVariants")]
+    public required List<BotTemplateVariantView> TemplateVariants { get; set; }
 }
 
 /// <summary>
-/// The <see cref="GenerateBotInventoryRequest"/> members that do vary per bot.
-/// <see cref="Template"/> is per-bot because <c>BotEquipmentFilterService.FilterBotEquipment</c>
-/// mutates a fresh clone for each one, and the two loot members because the price bands are
-/// resolved from the bot's own level.
+/// <c>BotLevelGenerator.GenerateBotLevel</c>'s inputs for a whole wave: the range
+/// <c>GetRelativePmcBotLevelRange</c> resolved from the wave's details
+/// (<c>BotLevelGenerator.cs:67-101</c>), and the experience table the drawn level is turned into an
+/// exp total with. Plain ints rather than a <c>MinMax</c> envelope - nothing on the far side reads
+/// them as one.
+/// </summary>
+internal record LevelGenerationView
+{
+    [JsonPropertyName("levelMin")]
+    public required int LevelMin { get; set; }
+
+    [JsonPropertyName("levelMax")]
+    public required int LevelMax { get; set; }
+
+    /// <summary>
+    /// <c>GlobalTable.Configuration.Exp.Level.ExperienceTable</c> projected to its exp values, in
+    /// order.
+    /// </summary>
+    [JsonPropertyName("expTable")]
+    public required List<int> ExpTable { get; set; }
+}
+
+/// <summary>
+/// The template and the two loot views for one band of levels. Every level-dependent step the
+/// prelude runs before the native call is a band lookup over inclusive ranges
+/// (<c>BotEquipmentFilterService.cs:137-189</c>, <c>BotHelper.cs:83-90</c>,
+/// <c>BotPayloadProjection.GetSingleItemLootPriceLimits</c>) and none of them draws, so the caller
+/// runs the unchanged C# filter and pool hydration once per band on which all of them are constant
+/// and ships one variant per band instead of one filtered template per bot.
+/// </summary>
+internal record BotTemplateVariantView
+{
+    [JsonPropertyName("levelMin")]
+    public required int LevelMin { get; set; }
+
+    [JsonPropertyName("levelMax")]
+    public required int LevelMax { get; set; }
+
+    [JsonPropertyName("template")]
+    public required BotTemplateView Template { get; set; }
+
+    [JsonPropertyName("lootPools")]
+    public required BotLootCache LootPools { get; set; }
+
+    [JsonPropertyName("handbookPrices")]
+    public required Dictionary<MongoId, double> HandbookPrices { get; set; }
+}
+
+/// <summary>
+/// The <see cref="GenerateBotInventoryRequest"/> members that do vary per bot: identity, the test
+/// seed and the generation details. The template and the two loot views ride per level band on
+/// <see cref="SharedBotViews.TemplateVariants"/> instead, because the batch path draws the level
+/// natively and picks the band that covers it.
+///
+/// <c>Details.BotLevel</c> still rides the wire - the single-bot request reuses the view - but the
+/// batch projection sends 0 and the native side overwrites it with the drawn level before any
+/// consumer reads it.
 /// </summary>
 internal record BotSlice
 {
@@ -274,15 +343,6 @@ internal record BotSlice
 
     [JsonPropertyName("details")]
     public required BotGenerationDetailsView Details { get; set; }
-
-    [JsonPropertyName("template")]
-    public required BotTemplateView Template { get; set; }
-
-    [JsonPropertyName("lootPools")]
-    public required BotLootCache LootPools { get; set; }
-
-    [JsonPropertyName("handbookPrices")]
-    public required Dictionary<MongoId, double> HandbookPrices { get; set; }
 }
 
 /// <summary>
@@ -403,6 +463,22 @@ internal record BotInventoryResult
     /// </summary>
     [JsonPropertyName("randomisationClamps")]
     public required Dictionary<string, double> RandomisationClamps { get; set; }
+
+    /// <summary>
+    /// The level this bot drew, for the caller to write into <c>details.BotLevel</c> and
+    /// <c>Info.Level</c> (<c>BotGenerator.cs:222-225</c>, <c>:270</c>). Set by the batch path only -
+    /// the single-bot path keeps its C# level generation, so that response omits it.
+    /// </summary>
+    [JsonPropertyName("level")]
+    public int? Level { get; set; }
+
+    /// <summary>
+    /// The experience total that goes with <see cref="Level"/>
+    /// (<c>BotLevelGenerator.cs:39-44</c>) -> <c>Info.Experience</c>. Null alongside it, for the
+    /// same reason.
+    /// </summary>
+    [JsonPropertyName("exp")]
+    public int? Exp { get; set; }
 }
 
 /// <summary>
