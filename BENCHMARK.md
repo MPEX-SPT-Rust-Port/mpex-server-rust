@@ -51,7 +51,10 @@ docs/superpowers/specs/2026-08-17-rust-state-ownership-design.md), crossed via a
 export exists yet. looseLoot (549 MiB raw) is excluded by design; locations project `Base` only.
 
     dotnet test -c Release --filter "FullyQualifiedName~DbPublishSpikeTests" --logger "console;verbosity=detailed"
-    cd rust && cargo test --release --test phase0_publish_spike -- --ignored --nocapture
+    cd rust && cargo test --release --test phase0_publish_spike -- parse_full_publish_envelope_value_bound --ignored --nocapture
+
+(Each spike test must run in its own process for its RSS figure to be valid — run the typed
+locales test by its own name, `parse_locales_root_typed`, in a separate invocation.)
 
 | measure | value |
 |---|---|
@@ -90,8 +93,7 @@ process typed run measured 232.3 ms / 99.2 MiB for the locales root). Fallback p
 **per-root sync granularity**, which the breakdown supports — the C# projection dominates the
 total and locales is the worst root at 629.1 ms warm projection; a locales-only republish is
 ≈861 ms (629.1 projection + 232.3 typed parse; ≈0.97–1.01 s with a byte-proportional assembly
-share and the copy estimate), inside the ~1 s bar but with little headroom, and every other root
-is far cheaper.
+share and the copy estimate), straddles the ~1 s bar, and every other root is far cheaper.
 
 ## Methodology
 

@@ -4,7 +4,7 @@
 //! The first test parses the whole envelope into `serde_json::Value` — a deliberately
 //! conservative bound: `Value` over-counts RSS versus the typed models Phase 1 will hold.
 //! The second parses only the locales root into its real final representation (string maps)
-//! and runs only if the `Value` bound trips a gate.
+//! and gives the corrected bound if the `Value` bound trips a gate.
 //!
 //! Run by hand, after `DbPublishSpikeTests` has written the payload:
 //!   cargo test --release --test phase0_publish_spike -- --ignored --nocapture
@@ -74,7 +74,7 @@ struct LocalesRoot {
 }
 
 #[test]
-#[ignore = "phase 0 spike refinement — run only if the Value bound trips a gate"]
+#[ignore = "phase 0 spike refinement — gives the corrected locales bound (run each test in its own process for valid RSS)"]
 fn parse_locales_root_typed() {
     let path = payload_path();
     let bytes = std::fs::read(&path)
