@@ -156,7 +156,7 @@ startup outside DEBUG. That format is a contract shared with `rust/spt-native/sr
 `Libraries/SPTarkov.Common/Native/NativeMethods.cs`, because `SPTarkov.Common` cannot reference
 Server.Core. It owns database hash verification, the ported generation
 paths — location loot, reward loot, whole-bot inventory, dynamic ragfair offers, repeatable quests,
-scav case rewards — the item base-class cache build, and the whole log pipeline. Nineteen exports,
+scav case rewards — the item base-class cache build, and the whole log pipeline. Twenty-one exports,
 JSON in / JSON out — except the ragfair response, which comes back as a framed MessagePack
 envelope, and the log exports, where `spt_logger_init` takes the raw `sptLogger.json` bytes and
 `spt_log_emit` passes one line's fields directly — with `spt_native_abi_version` handshaking against
@@ -176,8 +176,11 @@ or ABI-mismatched library fails fast.
 
 Logging is the exception with no legacy path: `AddSptLogger` initialises the native pipeline from the
 raw `sptLogger.json` bytes and `SPTLoggerDispatcher.Log` emits straight into it, so the C# side keeps
-only the `ISptLogger`/`SptLogger` front end. It is failure-tolerant by contract — a broken library or
-config produces one stderr notice and logging stays off rather than stopping the server. The ported
+the `ISptLogger`/`SptLogger` front end and the mod `ILogHandler` fan-out (`BaseLogHandler`), which sees
+Rust-originated lines through the `spt_log_set_tap` callback. A mod resolves `SPTLoggerDispatcher` from
+DI and calls `RegisterHandler` — the dispatcher is built from `AddSptLogger`'s own service collection,
+so registering an `ILogHandler` in the host container alone never reaches it. It is failure-tolerant by contract — a
+broken library or config produces one stderr notice and logging stays off rather than stopping the server. The ported
 generators log into that pipeline directly rather than handing lines back for C# to replay, so
 `DatabaseImporter` pushes the resolved server locales over `spt_locales_set` before anything can generate;
 a failed push is one stderr notice and generator lines fall back to their locale keys.

@@ -38,7 +38,7 @@ Roughly 48k lines across the 51 files of `src/`, inline tests included. `src/bot
 
 | Path | Role |
 |---|---|
-| `src/lib.rs` | Module roots and `ABI_VERSION` (currently 19; must equal `SptNative.ExpectedAbiVersion`) |
+| `src/lib.rs` | Module roots and `ABI_VERSION` (currently 21; must equal `SptNative.ExpectedAbiVersion`) |
 | `src/ffi.rs` | The C-ABI surface. The **only** module containing `unsafe` |
 | `src/runtime.rs` | Process-wide multi-thread tokio runtime, `OnceLock`-built. Used only by `verify` |
 | `src/verify.rs` | Hashes `SPT_Data` with XXH3-128 and diffs it against `checks.dat` |
@@ -55,13 +55,17 @@ Roughly 48k lines across the 51 files of `src/`, inline tests included. `src/bot
 
 ## FFI boundary (`ffi.rs`)
 
-Nineteen `extern "C"` exports. Two are trivial (`spt_native_abi_version`, `spt_buf_free`); twelve take a UTF-8
+Twenty-one `extern "C"` exports. Two are trivial (`spt_native_abi_version`, `spt_buf_free`); twelve take a UTF-8
 JSON generation request; `spt_verify_database` takes a UTF-8 directory path instead. All thirteen of those hand
 back a heap buffer the caller releases with `spt_buf_free`. `spt_locales_set` takes the resolved server-locale
-table as UTF-8 JSON and buffers a parse error, or panic text since ABI 18. The last three are the log pipeline
-(`spt_logger_init`, `spt_log_emit`, `spt_logger_close`): `spt_logger_init` takes the raw `sptLogger.json`
-bytes and hands back a buffer only on failure, `spt_log_emit` passes one line's fields directly rather
-than a JSON document, and `spt_logger_close` takes nothing — see *The log pipeline* below.
+table as UTF-8 JSON and buffers a parse error, or panic text since ABI 18. The last five are the log pipeline
+(`spt_logger_init`, `spt_logger_reinit`, `spt_log_emit`, `spt_logger_close`, `spt_log_set_tap`):
+`spt_logger_init` takes the raw `sptLogger.json` bytes and hands back a buffer only on failure, `spt_log_emit`
+passes one line's fields directly rather than a JSON document, and `spt_logger_close` takes nothing;
+`spt_logger_reinit` swaps the running pipeline's configuration in place — parse failure leaves it untouched,
+and a same-path target reopens in append mode instead of cascading the archives again — and `spt_log_set_tap`
+registers (null clears) the C# callback that receives Rust-originated lines so mod log handlers see the full
+stream — see *The log pipeline* below.
 
 ```
 C# SptNative → spt_generate_* (JSON in)
@@ -145,6 +149,14 @@ renders a locale-keyed diagnostic against the table C# pushes once over `spt_loc
 import — a startup snapshot, and a missing table or key leaves the key itself as the text — then hands the
 line to the logger through `ffi::emit_pipeline`. Those lines carry a process-local per-thread counter as
 `%tid%` rather than a managed thread id, and the Rust thread name (usually empty) as `%tname%`.
+
+`spt_logger_reinit` re-runs the config half of init against the live pipeline: new sinks open
+under the pipeline lock, the entry list swaps, and the old sinks flush and join after the swap.
+The init ref-count never moves — C# calls it from `SPTLoggerDispatcher.ReloadConfiguration()`
+after a mod mutates `SptLoggerConfiguration.Loggers`, which is also what re-syncs `IsLogEnabled`
+with what is actually written. Mod-facing `ILogHandler`s are fed from two legs: the dispatcher
+fans C#-originated lines out itself, and `spt_log_set_tap`'s callback delivers the Rust-originated
+ones.
 
 ## `src/loot/`
 
