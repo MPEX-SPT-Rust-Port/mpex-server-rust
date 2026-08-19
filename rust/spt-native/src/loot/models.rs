@@ -519,15 +519,15 @@ pub struct ContainerData {
 // Request / response envelopes
 // ---------------------------------------------------------------------------
 
+/// The per-call half of both location-loot envelopes: services, config, per-raid state, and the
+/// caller-supplied `staticAmmoDist` (a frozen public-API parameter, so the resident DB can never
+/// stand in for it). `moneyTpls` is service-backed (`ItemHelper.GetMoneyTpls`) and rides here
+/// under the Phases-2/4 carve-out.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct LootCommon {
-    /// Already lowercased by the C# caller.
+pub struct LootVarying {
+    /// Already lowercased by the C# caller; the resident arm's key into the locations root.
     pub location_id: String,
-    /// `IndexMap` only so the whole loot module shares one map type with [`RewardLootDb`] — this
-    /// envelope's view is looked up by key, never iterated, so the order never reaches the RNG.
-    pub items_view: IndexMap<String, ItemView>,
-    pub default_presets: HashMap<String, PresetView>,
     pub money_tpls: Vec<String>,
     pub static_ammo_dist: HashMap<String, Vec<StaticAmmoDetails>>,
     pub config: LootConfigView,
@@ -537,6 +537,24 @@ pub struct LootCommon {
     /// Test-only: when present, every draw comes from a seeded xoshiro256** for the duration of
     /// the call (see `random_util::TestSeedGuard`). Never set on the production path.
     pub test_seed: Option<u64>,
+}
+
+/// The distrust fallback (spec § Exports): the C#-built database half, present iff the caller is
+/// ineligible for residency. The statics members are present on static-container sends and
+/// absent on dynamic sends, mirroring the two old envelopes.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LootViewsWire {
+    /// `IndexMap` only so the whole loot module shares one map type with [`RewardLootDb`] — this
+    /// envelope's view is looked up by key, never iterated, so the order never reaches the RNG.
+    pub items_view: IndexMap<String, ItemView>,
+    /// `GetDefaultPresetByTpl()` projected Items-only (`LocationLootGenerator.BuildViewsOverride`).
+    pub default_presets: IndexMap<String, PresetView>,
+    pub static_weapons: Option<Vec<SpawnpointTemplate>>,
+    pub static_containers: Option<Vec<StaticContainerData>>,
+    pub static_forced: Option<Vec<StaticForced>>,
+    pub static_loot_dist: Option<HashMap<String, StaticLootDetails>>,
+    pub statics: Option<StaticContainer>,
 }
 
 /// The slice of `TemplateItem` the generator actually reads, flattened by the C# caller.
@@ -758,23 +776,25 @@ pub struct CounterState {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StaticContainersRequest {
-    #[serde(flatten)]
-    pub common: LootCommon,
-    /// The three `StaticContainerDetails` members are `Option` because
-    /// `LocationLootGenerator.cs:105,114,121` each test theirs for null and log a map-specific
-    /// error; keeping them non-optional would make those three branches unreachable.
-    pub static_weapons: Option<Vec<SpawnpointTemplate>>,
-    pub static_containers: Option<Vec<StaticContainerData>>,
-    pub static_forced: Option<Vec<StaticForced>>,
-    pub static_loot_dist: HashMap<String, StaticLootDetails>,
-    pub statics: Option<StaticContainer>,
+    pub epoch: u64,
+    pub views_override: Option<Box<LootViewsWire>>,
+    pub varying: LootVarying,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DynamicLootRequest {
+    pub epoch: u64,
+    pub views_override: Option<Box<LootViewsWire>>,
+    pub varying: DynamicLootVarying,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DynamicLootVarying {
     #[serde(flatten)]
-    pub common: LootCommon,
+    pub common: LootVarying,
+    /// The raw splice or the LazyLoad-typed loot — per-call in both arms (flip #4 decision).
     pub loose_loot: LooseLoot,
 }
 
@@ -981,13 +1001,10 @@ pub struct RewardLootResult {
 mod tests {
     use super::*;
 
-    /// Every required `LootCommon` member, for splicing into an envelope test literal. `testSeed`
+    /// Every required `LootVarying` member, for splicing into an envelope test literal. `testSeed`
     /// is deliberately absent — its omission is what exercises the missing-field → `None` path.
-    const COMMON_JSON: &str = r#"
+    const VARYING_JSON: &str = r#"
         "locationId":"bigmap",
-        "itemsView":{"aaaaaaaaaaaaaaaaaaaaaaaa":{"parent":"bbbbbbbbbbbbbbbbbbbbbbbb","width":2,"height":1,
-            "slots":[{"name":"mod_magazine","required":false,"filter":["cccccccccccccccccccccccc"]}]}},
-        "defaultPresets":{"p1":{"items":[{"_id":"aaaaaaaaaaaaaaaaaaaaaaaa","_tpl":"bbbbbbbbbbbbbbbbbbbbbbbb"}]}},
         "moneyTpls":["5449016a4bdc2d6f028b456f"],
         "staticAmmoDist":{"Caliber762x39":[{"tpl":"dddddddddddddddddddddddd","relativeProbability":5}]},
         "config":{"containerRandomisationEnabled":true,"locationInRandomisationMaps":true,
@@ -1002,6 +1019,14 @@ mod tests {
             "inactiveSeasonalItems":[],"christmasContainerIds":[]},
         "lootableItemBlacklist":[],
         "counter":{"maxCounts":{"ffffffffffffffffffffffff":2},"trackedCounts":{}}
+    "#;
+
+    /// The two `LootViewsWire` members every override carries, for splicing beside the per-send
+    /// statics members.
+    const VIEWS_JSON: &str = r#"
+        "itemsView":{"aaaaaaaaaaaaaaaaaaaaaaaa":{"parent":"bbbbbbbbbbbbbbbbbbbbbbbb","width":2,"height":1,
+            "slots":[{"name":"mod_magazine","required":false,"filter":["cccccccccccccccccccccccc"]}]}},
+        "defaultPresets":{"p1":{"items":[{"_id":"aaaaaaaaaaaaaaaaaaaaaaaa","_tpl":"bbbbbbbbbbbbbbbbbbbbbbbb"}]}}
     "#;
 
     #[test]
@@ -1112,7 +1137,7 @@ mod tests {
     #[test]
     fn static_containers_request_deserializes() {
         let json = format!(
-            r#"{{{COMMON_JSON},
+            r#"{{"epoch":7,"viewsOverride":{{{VIEWS_JSON},
             "staticWeapons":[{{"Id":"w1","Root":"aaaaaaaaaaaaaaaaaaaaaaaa","Items":[]}}],
             "staticContainers":[{{"probability":0.35,"template":{{"Id":"c1","IsContainer":true}}}}],
             "staticForced":[{{"containerId":"c1","itemTpl":"dddddddddddddddddddddddd"}}],
@@ -1120,25 +1145,25 @@ mod tests {
                 "itemcountDistribution":[{{"count":1,"relativeProbability":10}}],
                 "itemDistribution":[{{"tpl":"dddddddddddddddddddddddd","relativeProbability":10}}]}}}},
             "statics":{{"containersGroups":{{"g1":{{"minContainers":1,"maxContainers":3}}}},
-                "containers":{{"c1":{{"groupId":"g1"}}}}}}}}"#
+                "containers":{{"c1":{{"groupId":"g1"}}}}}}}},
+            "varying":{{{VARYING_JSON}}}}}"#
         );
         let parsed: StaticContainersRequest = serde_json::from_str(&json).unwrap();
 
-        assert_eq!(parsed.common.location_id, "bigmap");
-        assert_eq!(parsed.common.config.static_loot_multiplier, 1.5);
+        assert_eq!(parsed.epoch, 7);
+        assert_eq!(parsed.varying.location_id, "bigmap");
+        assert_eq!(parsed.varying.config.static_loot_multiplier, 1.5);
         assert_eq!(
-            parsed.common.counter.max_counts["ffffffffffffffffffffffff"],
+            parsed.varying.counter.max_counts["ffffffffffffffffffffffff"],
             2
         );
+        let views = parsed.views_override.unwrap();
+        assert_eq!(views.items_view["aaaaaaaaaaaaaaaaaaaaaaaa"].width, Some(2));
+        assert_eq!(views.static_weapons.unwrap()[0].id.as_deref(), Some("w1"));
+        assert_eq!(views.static_containers.unwrap()[0].probability, Some(0.35));
+        assert_eq!(views.static_forced.unwrap()[0].container_id, "c1");
         assert_eq!(
-            parsed.common.items_view["aaaaaaaaaaaaaaaaaaaaaaaa"].width,
-            Some(2)
-        );
-        assert_eq!(parsed.static_weapons.unwrap()[0].id.as_deref(), Some("w1"));
-        assert_eq!(parsed.static_containers.unwrap()[0].probability, Some(0.35));
-        assert_eq!(parsed.static_forced.unwrap()[0].container_id, "c1");
-        assert_eq!(
-            parsed.static_loot_dist["eeeeeeeeeeeeeeeeeeeeeeee"]
+            views.static_loot_dist.as_ref().unwrap()["eeeeeeeeeeeeeeeeeeeeeeee"]
                 .item_count_distribution
                 .as_ref()
                 .unwrap()[0]
@@ -1146,24 +1171,29 @@ mod tests {
             Some(1)
         );
         assert_eq!(
-            parsed.statics.unwrap().containers_groups.unwrap()["g1"].max_containers,
+            views.statics.unwrap().containers_groups.unwrap()["g1"].max_containers,
             Some(3)
         );
     }
 
     #[test]
     fn dynamic_loot_request_deserializes() {
+        // No viewsOverride: the resident arm's send is just `{epoch, varying}`.
         let json = format!(
-            r#"{{{COMMON_JSON},
+            r#"{{"epoch":7,"varying":{{{VARYING_JSON},
             "looseLoot":{{"spawnpointCount":{{"mean":12.5,"std":2}},
                 "spawnpointsForced":[{{"locationId":"f1","probability":1,"template":{{"Id":"t1"}}}}],
                 "spawnpoints":[{{"locationId":"s1","probability":0.5,"template":{{"Id":"t2"}},
-                    "itemDistribution":[{{"composedKey":{{"key":"ck1"}},"relativeProbability":4}}]}}]}}}}"#
+                    "itemDistribution":[{{"composedKey":{{"key":"ck1"}},"relativeProbability":4}}]}}]}}}}}}"#
         );
         let parsed: DynamicLootRequest = serde_json::from_str(&json).unwrap();
 
-        assert_eq!(parsed.common.money_tpls, vec!["5449016a4bdc2d6f028b456f"]);
-        let loose = &parsed.loose_loot;
+        assert!(parsed.views_override.is_none());
+        assert_eq!(
+            parsed.varying.common.money_tpls,
+            vec!["5449016a4bdc2d6f028b456f"]
+        );
+        let loose = &parsed.varying.loose_loot;
         assert_eq!(loose.spawnpoint_count.as_ref().unwrap().mean, 12.5);
         assert_eq!(loose.spawnpoints_forced.as_ref().unwrap().len(), 1);
         let distribution = loose.spawnpoints.as_ref().unwrap()[0]

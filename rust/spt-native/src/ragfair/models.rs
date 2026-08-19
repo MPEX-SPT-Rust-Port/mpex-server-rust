@@ -104,6 +104,8 @@ impl From<RagfairViewsWire> for RagfairDbViews {
             item_presets: wire.item_presets,
             default_presets: wire.default_presets,
             default_presets_by_tpl: wire.default_presets_by_tpl,
+            // Not part of the ragfair override wire — only the resident loot arm reads it.
+            default_presets_by_tpl_key: IndexMap::new(),
             presets_by_tpl: wire.presets_by_tpl,
             base_classes,
         }

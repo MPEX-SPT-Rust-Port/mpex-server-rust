@@ -95,7 +95,7 @@ public class LocationLootGeneratorNativeTests
         // the Models records on release builds. A debug build has no such property, so the field is
         // placed on the wire by hand here.
         var request = JsonNode.Parse(_jsonUtil.Serialize(BuildStaticRequest())!)!;
-        request["staticContainers"]![0]!["template"]!["modAddedField"] = "kept";
+        request["viewsOverride"]!["staticContainers"]![0]!["template"]!["modAddedField"] = "kept";
 
         var result = SptNative.Generate<JsonNode>(LootExport.StaticContainers, Encoding.UTF8.GetBytes(request.ToJsonString()));
 
@@ -106,7 +106,7 @@ public class LocationLootGeneratorNativeTests
     public void SpawnLimitsCrossTheBoundaryInBothDirections()
     {
         var request = BuildStaticRequest();
-        request.Counter = new CounterState
+        request.Varying.Counter = new CounterState
         {
             MaxCounts = new Dictionary<MongoId, int> { [_moneyTpl] = 5 },
             TrackedCounts = new Dictionary<MongoId, int> { [_moneyTpl] = 4 },
@@ -141,18 +141,21 @@ public class LocationLootGeneratorNativeTests
     public void RawLooseLootJsonIsWrittenIntoTheRequestVerbatim()
     {
         var request = BuildDynamicRequest();
-        var rawJson = JsonNode.Parse(_jsonUtil.Serialize(request.LooseLoot.Typed)!)!;
+        var rawJson = JsonNode.Parse(_jsonUtil.Serialize(request.Varying.LooseLoot.Typed)!)!;
         rawJson["modAddedField"] = "kept";
         rawJson["modAddedNull"] = null;
 
-        request.LooseLoot = LooseLootPayload.FromRawJson(Encoding.UTF8.GetBytes(rawJson.ToJsonString()));
+        request.Varying.LooseLoot = LooseLootPayload.FromRawJson(Encoding.UTF8.GetBytes(rawJson.ToJsonString()));
         var serialised = JsonNode.Parse(_jsonUtil.Serialize(request)!)!;
 
         Assert.Multiple(() =>
         {
-            Assert.That(JsonNode.DeepEquals(serialised["looseLoot"], rawJson), "the raw JSON was not written through unchanged");
+            Assert.That(
+                JsonNode.DeepEquals(serialised["varying"]!["looseLoot"], rawJson),
+                "the raw JSON was not written through unchanged"
+            );
             // Spliced into a normal request, not in place of one
-            Assert.That(serialised["locationId"]!.GetValue<string>(), Is.EqualTo(TestLocationId));
+            Assert.That(serialised["varying"]!["locationId"]!.GetValue<string>(), Is.EqualTo(TestLocationId));
         });
     }
 
@@ -165,8 +168,8 @@ public class LocationLootGeneratorNativeTests
     {
         var request = BuildDynamicRequest();
 
-        var throughTheRequest = JsonNode.Parse(_jsonUtil.Serialize(request)!)!["looseLoot"];
-        var onItsOwn = JsonNode.Parse(_jsonUtil.Serialize(request.LooseLoot.Typed)!);
+        var throughTheRequest = JsonNode.Parse(_jsonUtil.Serialize(request)!)!["varying"]!["looseLoot"];
+        var onItsOwn = JsonNode.Parse(_jsonUtil.Serialize(request.Varying.LooseLoot.Typed)!);
 
         Assert.That(JsonNode.DeepEquals(throughTheRequest, onItsOwn), "the wrapper changed the JSON the model serialises to");
     }
@@ -180,7 +183,9 @@ public class LocationLootGeneratorNativeTests
     {
         var typedRequest = BuildDynamicRequest();
         var rawRequest = BuildDynamicRequest();
-        rawRequest.LooseLoot = LooseLootPayload.FromRawJson(Encoding.UTF8.GetBytes(_jsonUtil.Serialize(typedRequest.LooseLoot.Typed)!));
+        rawRequest.Varying.LooseLoot = LooseLootPayload.FromRawJson(
+            Encoding.UTF8.GetBytes(_jsonUtil.Serialize(typedRequest.Varying.LooseLoot.Typed)!)
+        );
 
         var fromTyped = SptNative.GenerateDynamicLoot(typedRequest);
         var fromRaw = SptNative.GenerateDynamicLoot(rawRequest);
@@ -198,7 +203,7 @@ public class LocationLootGeneratorNativeTests
     {
         var request = BuildStaticRequest();
         // The container still draws items, but its loot distribution is gone.
-        request.StaticLootDist = [];
+        request.ViewsOverride!.StaticLootDist = [];
 
         var error = Assert.Throws<InvalidOperationException>(() => SptNative.GenerateStaticContainers(request));
 
@@ -222,7 +227,7 @@ public class LocationLootGeneratorNativeTests
     public void TestSeedIsOnTheWireOnlyWhenSet()
     {
         var withSeed = BuildStaticRequest();
-        withSeed.TestSeed = 42;
+        withSeed.Varying.TestSeed = 42;
 
         Assert.That(_jsonUtil.Serialize(withSeed), Does.Contain("\"testSeed\":42"));
         Assert.That(_jsonUtil.Serialize(BuildStaticRequest()), Does.Not.Contain("testSeed"));
@@ -243,9 +248,9 @@ public class LocationLootGeneratorNativeTests
         for (ulong seed = 0; seed < 10; seed++)
         {
             var requestA = BuildGroupedStaticRequest();
-            requestA.TestSeed = seed;
+            requestA.Varying.TestSeed = seed;
             var requestB = BuildGroupedStaticRequest();
-            requestB.TestSeed = seed;
+            requestB.Varying.TestSeed = seed;
 
             var resultA = SptNative.GenerateStaticContainers(requestA);
             var resultB = SptNative.GenerateStaticContainers(requestB);
@@ -273,15 +278,16 @@ public class LocationLootGeneratorNativeTests
     private static StaticContainersRequest BuildGroupedStaticRequest()
     {
         var request = BuildStaticRequest();
+        var views = request.ViewsOverride!;
 
-        request.StaticContainers =
+        views.StaticContainers =
         [
-            .. request.StaticContainers!,
+            .. views.StaticContainers!,
             BuildRandomisableContainer("r1"),
             BuildRandomisableContainer("r2"),
             BuildRandomisableContainer("r3"),
         ];
-        request.Statics = new StaticContainer
+        views.Statics = new StaticContainer
         {
             ContainersGroups = new Dictionary<string, ContainerMinMax>
             {
@@ -298,7 +304,7 @@ public class LocationLootGeneratorNativeTests
 
         // Ceilings high enough never to bite, purely so tpls land in `trackedCounts` — it stays
         // empty under the base fixture, which would hide its ordering from the comparison.
-        request.Counter = new CounterState
+        request.Varying.Counter = new CounterState
         {
             MaxCounts = new Dictionary<MongoId, int> { [_moneyTpl] = 9999, [_containerTpl] = 9999 },
             TrackedCounts = [],
@@ -324,92 +330,104 @@ public class LocationLootGeneratorNativeTests
     }
 
     /// <summary>
-    /// One guaranteed container holding a 2x2 grid, with money as the only thing it can draw.
+    /// One guaranteed container holding a 2x2 grid, with money as the only thing it can draw —
+    /// sent as an override at epoch 0, the shape an ineligible caller puts on the wire.
     /// <c>Statics</c> is left null so the nullable-statics branch is exercised too.
     /// </summary>
     private static StaticContainersRequest BuildStaticRequest()
     {
         return new StaticContainersRequest
         {
-            LocationId = TestLocationId,
-            ItemsView = BuildItemsView(),
-            DefaultPresets = [],
-            MoneyTpls = [_moneyTpl],
-            StaticAmmoDist = [],
-            Config = BuildConfig(),
-            Seasonal = BuildSeasonal(),
-            LootableItemBlacklist = [],
-            Counter = new CounterState { MaxCounts = [], TrackedCounts = [] },
-            StaticWeapons = [],
-            StaticContainers =
-            [
-                new StaticContainerData
-                {
-                    Probability = 1,
-                    Template = new SpawnpointTemplate
+            Epoch = 0,
+            ViewsOverride = new LootViewsOverride
+            {
+                ItemsView = BuildItemsView(),
+                DefaultPresets = [],
+                StaticWeapons = [],
+                StaticContainers =
+                [
+                    new StaticContainerData
                     {
-                        Id = ContainerSpawnpointId,
-                        IsContainer = true,
-                        Root = new MongoId().ToString(),
-                        Items =
-                        [
-                            new SptLootItem
-                            {
-                                Id = new MongoId(),
-                                Template = _containerTpl,
-                                Upd = new Upd { UnlimitedCount = true },
-                            },
-                        ],
+                        Probability = 1,
+                        Template = new SpawnpointTemplate
+                        {
+                            Id = ContainerSpawnpointId,
+                            IsContainer = true,
+                            Root = new MongoId().ToString(),
+                            Items =
+                            [
+                                new SptLootItem
+                                {
+                                    Id = new MongoId(),
+                                    Template = _containerTpl,
+                                    Upd = new Upd { UnlimitedCount = true },
+                                },
+                            ],
+                        },
+                    },
+                ],
+                StaticForced = [],
+                StaticLootDist = new Dictionary<MongoId, StaticLootDetails>
+                {
+                    [_containerTpl] = new StaticLootDetails
+                    {
+                        ItemCountDistribution = [new ItemCountDistribution { Count = 1, RelativeProbability = 1 }],
+                        ItemDistribution = [new ItemDistribution { Tpl = _moneyTpl, RelativeProbability = 1 }],
                     },
                 },
-            ],
-            StaticForced = [],
-            StaticLootDist = new Dictionary<MongoId, StaticLootDetails>
-            {
-                [_containerTpl] = new StaticLootDetails
-                {
-                    ItemCountDistribution = [new ItemCountDistribution { Count = 1, RelativeProbability = 1 }],
-                    ItemDistribution = [new ItemDistribution { Tpl = _moneyTpl, RelativeProbability = 1 }],
-                },
+                Statics = null,
             },
-            Statics = null,
+            Varying = new LootVarying
+            {
+                LocationId = TestLocationId,
+                MoneyTpls = [_moneyTpl],
+                StaticAmmoDist = [],
+                Config = BuildConfig(),
+                Seasonal = BuildSeasonal(),
+                LootableItemBlacklist = [],
+                Counter = new CounterState { MaxCounts = [], TrackedCounts = [] },
+            },
         };
     }
 
     /// <summary>
-    /// A single forced loose loot point holding money, and no random points to draw.
+    /// A single forced loose loot point holding money, and no random points to draw. The dynamic
+    /// override carries no statics members.
     /// </summary>
     private static DynamicLootRequest BuildDynamicRequest()
     {
         return new DynamicLootRequest
         {
-            LocationId = TestLocationId,
-            ItemsView = BuildItemsView(),
-            DefaultPresets = [],
-            MoneyTpls = [_moneyTpl],
-            StaticAmmoDist = [],
-            Config = BuildConfig(),
-            Seasonal = BuildSeasonal(),
-            LootableItemBlacklist = [],
-            Counter = new CounterState { MaxCounts = [], TrackedCounts = [] },
-            LooseLoot = new LooseLoot
+            Epoch = 0,
+            ViewsOverride = new LootViewsOverride { ItemsView = BuildItemsView(), DefaultPresets = [] },
+            Varying = new DynamicLootVarying
             {
-                SpawnpointCount = new SpawnpointCount { Mean = 0, Std = 0 },
-                SpawnpointsForced =
-                [
-                    new Spawnpoint
-                    {
-                        LocationId = ForcedSpawnpointId,
-                        Probability = 1,
-                        Template = new SpawnpointTemplate
+                LocationId = TestLocationId,
+                MoneyTpls = [_moneyTpl],
+                StaticAmmoDist = [],
+                Config = BuildConfig(),
+                Seasonal = BuildSeasonal(),
+                LootableItemBlacklist = [],
+                Counter = new CounterState { MaxCounts = [], TrackedCounts = [] },
+                LooseLoot = new LooseLoot
+                {
+                    SpawnpointCount = new SpawnpointCount { Mean = 0, Std = 0 },
+                    SpawnpointsForced =
+                    [
+                        new Spawnpoint
                         {
-                            Id = ForcedSpawnpointId,
-                            Root = new MongoId().ToString(),
-                            Items = [new SptLootItem { Id = new MongoId(), Template = _moneyTpl }],
+                            LocationId = ForcedSpawnpointId,
+                            Probability = 1,
+                            Template = new SpawnpointTemplate
+                            {
+                                Id = ForcedSpawnpointId,
+                                Root = new MongoId().ToString(),
+                                Items = [new SptLootItem { Id = new MongoId(), Template = _moneyTpl }],
+                            },
                         },
-                    },
-                ],
-                Spawnpoints = [],
+                    ],
+                    Spawnpoints = [],
+                },
             },
         };
     }

@@ -13,7 +13,7 @@ use crate::bot::bot_inventory_generator::{generate_inventory, generate_inventory
 use crate::diag::DiagSink;
 use crate::linked_items::{self, LinkedItemsRequest, LinkedItemsResponse};
 use crate::logger::{LogLevel, LogRecord, Logger};
-use crate::loot::item_helper::LootError;
+use crate::loot::item_helper::{LootEpochError, LootError};
 use crate::loot::location_loot_generator::{generate_dynamic_loot, generate_static_containers};
 use crate::loot::loot_generator::{
     create_forced_loot, create_random_loot, get_random_loot_container_loot,
@@ -48,6 +48,24 @@ impl FfiFailure for LootError {
 
     fn into_message(self) -> String {
         self.message
+    }
+}
+
+impl FfiFailure for LootEpochError {
+    fn status(&self) -> i32 {
+        match self {
+            LootEpochError::Loot(_) => STATUS_ERROR,
+            LootEpochError::StaleEpoch => STATUS_STALE_EPOCH,
+        }
+    }
+
+    fn into_message(self) -> String {
+        match self {
+            LootEpochError::Loot(error) => error.message,
+            LootEpochError::StaleEpoch => {
+                "resident DB epoch mismatch; republish and retry".to_string()
+            }
+        }
     }
 }
 
@@ -286,12 +304,13 @@ pub unsafe extern "C" fn spt_generate_static_containers(
     out_len: *mut usize,
 ) -> i32 {
     unsafe {
-        run_generator(
+        run_generator_with(
             req_ptr,
             req_len,
             out_ptr,
             out_len,
             generate_static_containers,
+            |response| serde_json::to_vec(&response).expect("result serialization cannot fail"),
         )
     }
 }
@@ -305,7 +324,16 @@ pub unsafe extern "C" fn spt_generate_dynamic_loot(
     out_ptr: *mut *mut u8,
     out_len: *mut usize,
 ) -> i32 {
-    unsafe { run_generator(req_ptr, req_len, out_ptr, out_len, generate_dynamic_loot) }
+    unsafe {
+        run_generator_with(
+            req_ptr,
+            req_len,
+            out_ptr,
+            out_len,
+            generate_dynamic_loot,
+            |response| serde_json::to_vec(&response).expect("result serialization cannot fail"),
+        )
+    }
 }
 
 /// # Safety
@@ -1007,7 +1035,7 @@ mod tests {
         assert_eq!(spt_native_abi_version(), crate::ABI_VERSION);
         assert_eq!(
             crate::ABI_VERSION,
-            24,
+            25,
             "bump SptNative.ExpectedAbiVersion too"
         );
     }
@@ -1052,14 +1080,13 @@ mod tests {
     }
 
     /// The container tpl the error-path request below spawns; matches the `itemsView` key in
-    /// `COMMON_JSON`, which cannot interpolate a const.
+    /// `VIEWS_JSON`, which cannot interpolate a const.
     const CONTAINER_TPL: &str = "111111111111111111111111";
 
-    /// Every required `LootCommon` member, spliced into the request literals below.
-    const COMMON_JSON: &str = r#"
+    /// Every required `LootVarying` member, spliced into the request literals below.
+    const VARYING_JSON: &str = r#"
         "locationId":"bigmap",
-        "itemsView":{"111111111111111111111111":{"width":1,"height":1,"gridCellsH":2,"gridCellsV":2}},
-        "defaultPresets":{},"moneyTpls":[],"staticAmmoDist":{},
+        "moneyTpls":[],"staticAmmoDist":{},
         "config":{"containerRandomisationEnabled":false,"locationInRandomisationMaps":false,
             "containerTypesToNotRandomise":[],"containerGroupMinSizeMultiplier":1,
             "containerGroupMaxSizeMultiplier":1,"allowDuplicateItemsInStaticContainers":true,
@@ -1071,6 +1098,12 @@ mod tests {
         "seasonal":{"seasonalEventActive":false,"christmasEventEnabled":false,
             "inactiveSeasonalItems":[],"christmasContainerIds":[]},
         "lootableItemBlacklist":[],"counter":{"maxCounts":{},"trackedCounts":{}}
+    "#;
+
+    /// The two `LootViewsWire` members every override send carries.
+    const VIEWS_JSON: &str = r#"
+        "itemsView":{"111111111111111111111111":{"width":1,"height":1,"gridCellsH":2,"gridCellsV":2}},
+        "defaultPresets":{}
     "#;
 
     type Export = unsafe extern "C" fn(*const u8, usize, *mut *mut u8, *mut usize) -> i32;
@@ -1091,8 +1124,8 @@ mod tests {
     /// An empty map: no weapons, no containers, nothing to draw from.
     fn empty_static_request() -> String {
         format!(
-            r#"{{{COMMON_JSON},"staticWeapons":[],"staticContainers":[],"staticForced":[],
-            "staticLootDist":{{}}}}"#
+            r#"{{"epoch":0,"viewsOverride":{{{VIEWS_JSON},"staticWeapons":[],"staticContainers":[],
+            "staticForced":[],"staticLootDist":{{}}}},"varying":{{{VARYING_JSON}}}}}"#
         )
     }
 
@@ -1113,8 +1146,9 @@ mod tests {
     #[test]
     fn dynamic_loot_roundtrips_result_json() {
         let request = format!(
-            r#"{{{COMMON_JSON},"looseLoot":{{"spawnpointCount":{{"mean":0,"std":0}},
-            "spawnpointsForced":[],"spawnpoints":[]}}}}"#
+            r#"{{"epoch":0,"viewsOverride":{{{VIEWS_JSON}}},"varying":{{{VARYING_JSON},
+            "looseLoot":{{"spawnpointCount":{{"mean":0,"std":0}},
+            "spawnpointsForced":[],"spawnpoints":[]}}}}}}"#
         );
 
         let (status, out) = call_generate(spt_generate_dynamic_loot, request.as_bytes());
@@ -1123,6 +1157,23 @@ mod tests {
         let result: serde_json::Value = serde_json::from_slice(&out).unwrap();
         assert_eq!(result["spawnpoints"], serde_json::json!([]));
         assert_eq!(result["trackedCounts"], serde_json::json!({}));
+    }
+
+    #[test]
+    fn a_stale_loot_epoch_returns_status_4() {
+        // No viewsOverride and an epoch the store can never hold (u64::MAX is unreachable —
+        // epochs count up from 1). The varying block is the fixture's, so the JSON fully parses
+        // and the epoch check in resolve_views is what answers.
+        let request = format!(
+            r#"{{"epoch":18446744073709551615,"varying":{{{VARYING_JSON},
+            "looseLoot":{{"spawnpointCount":{{"mean":0,"std":0}},
+            "spawnpointsForced":[],"spawnpoints":[]}}}}}}"#
+        );
+
+        let (status, out) = call_generate(spt_generate_dynamic_loot, request.as_bytes());
+
+        assert_eq!(status, STATUS_STALE_EPOCH);
+        assert!(String::from_utf8(out).unwrap().contains("epoch mismatch"));
     }
 
     #[test]
@@ -1151,10 +1202,12 @@ mod tests {
         // The container draws items, but `staticLootDist` has no entry for its tpl — the C#
         // `staticLootDist[containerTypeId]` throws a KeyNotFoundException here.
         let request = format!(
-            r#"{{{COMMON_JSON},"staticWeapons":[],"staticForced":[],"staticLootDist":{{}},
+            r#"{{"epoch":0,"viewsOverride":{{{VIEWS_JSON},
+            "staticWeapons":[],"staticForced":[],"staticLootDist":{{}},
             "staticContainers":[{{"probability":1,"template":{{"Id":"c1","IsContainer":true,
                 "Root":"aaaaaaaaaaaaaaaaaaaaaaaa",
-                "Items":[{{"_id":"aaaaaaaaaaaaaaaaaaaaaaaa","_tpl":"{CONTAINER_TPL}"}}]}}}}]}}"#
+                "Items":[{{"_id":"aaaaaaaaaaaaaaaaaaaaaaaa","_tpl":"{CONTAINER_TPL}"}}]}}}}]}},
+            "varying":{{{VARYING_JSON}}}}}"#
         );
 
         let (status, out) = call_generate(spt_generate_static_containers, request.as_bytes());

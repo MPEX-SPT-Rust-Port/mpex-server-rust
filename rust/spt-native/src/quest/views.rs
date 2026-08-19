@@ -314,7 +314,7 @@ mod tests {
                 "presetNoEnc": {"_id":"presetNoEnc","_name":"ak-mod",
                     "_items":[{"_id":"root2","_tpl":"weapon1"}]},
                 "preset3": {"_id":"presetX","_name":"key-mismatch",
-                    "_items":[{"_id":"root3","_tpl":"weapon1"}],"_encyclopedia":"weapon1"},
+                    "_items":[{"_id":"root3","_tpl":"root_tpl"}],"_encyclopedia":"weapon1"},
                 "presetM": {"_id":"presetM","_name":"mag-preset",
                     "_items":[{"_id":"rootM","_tpl":"mod1"}],"_encyclopedia":"mod1"}
             }

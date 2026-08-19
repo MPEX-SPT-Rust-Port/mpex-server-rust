@@ -48,6 +48,10 @@ pub struct RagfairDbViews {
     pub default_presets: Vec<PresetView>,
     /// `PresetHelper.GetDefaultPresetByTpl()`.
     pub default_presets_by_tpl: IndexMap<String, PresetView>,
+    /// `PresetHelper.GetDefaultPresetsByTplKey()` (`PresetHelper.cs:42-52`) — the loot flip's
+    /// forced-loot map. Weapon then equipment default *values*, skipping items-less presets,
+    /// keyed by each preset's first item's tpl.
+    pub default_presets_by_tpl_key: IndexMap<String, PresetView>,
     /// `PresetHelper.GetPresets(tpl)` for every tpl with presets, in items-table order.
     pub presets_by_tpl: IndexMap<String, Vec<PresetView>>,
     /// [`ItemBaseClassCache::build`] over [`Self::items`], the same call
@@ -124,6 +128,24 @@ pub fn derive(
         default_presets_by_tpl.insert(template_id.clone(), to_preset_view(default_preset));
     }
 
+    // PresetHelper.GetDefaultPresetsByTplKey (PresetHelper.cs:42-52): C#'s ToDictionary throws
+    // on a duplicate first-item tpl at every forced-loot call; here it aborts the publish
+    // naming the culprit instead (spec-sanctioned strictness — the lazy crash becomes loud).
+    let mut default_presets_by_tpl_key = IndexMap::new();
+    for preset in weapon_defaults.values().chain(equipment_defaults.values()) {
+        let Some(tpl) = preset.items.first().map(|item| item.template.clone()) else {
+            continue; // .Where(preset => preset.Items.Count > 0)
+        };
+        if default_presets_by_tpl_key
+            .insert(tpl.clone(), to_preset_view(preset))
+            .is_some()
+        {
+            return Err(format!(
+                "two default presets share first-item tpl '{tpl}' — C# GetDefaultPresetsByTplKey throws ArgumentException here"
+            ));
+        }
+    }
+
     // One pass over the items table (RagfairPayloadProjection.cs:43-54): the pricing math
     // reaches arbitrary tpls through barter schemes and preset children, so both price maps
     // cover the whole table rather than a pool — and presets group under the same keys.
@@ -170,6 +192,7 @@ pub fn derive(
         item_presets,
         default_presets,
         default_presets_by_tpl,
+        default_presets_by_tpl_key,
         presets_by_tpl,
         base_classes,
     })
@@ -525,7 +548,7 @@ mod tests {
                 "preset1": {"_id":"preset1","_name":"ak-default",
                     "_items":[{"_id":"root1","_tpl":"weapon1"}],"_encyclopedia":"weapon1"},
                 "preset3": {"_id":"presetX","_name":"key-mismatch",
-                    "_items":[{"_id":"root3","_tpl":"weapon1"}],"_encyclopedia":"weapon1"},
+                    "_items":[{"_id":"root3","_tpl":"root_tpl"}],"_encyclopedia":"weapon1"},
                 "presetM": {"_id":"presetM","_name":"mag-preset",
                     "_items":[{"_id":"rootM","_tpl":"mod1"}],"_encyclopedia":"mod1"}
             }
@@ -631,6 +654,15 @@ mod tests {
                 ("mod1", vec!["presetM"])
             ]
         );
+    }
+
+    #[test]
+    fn default_presets_by_tpl_key_keys_defaults_by_first_item_tpl() {
+        // One weapon default whose first item's tpl is "root_tpl"; the map keys by that tpl,
+        // not by preset id (PresetHelper.GetDefaultPresetsByTplKey, PresetHelper.cs:42-52).
+        let views = derive(&templates(), &TradersRoot::default(), &globals()).unwrap();
+        let preset = &views.default_presets_by_tpl_key["root_tpl"];
+        assert!(!preset.items.is_empty());
     }
 
     #[test]
