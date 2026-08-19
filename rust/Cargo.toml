@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["spt-native", "spectre-facade"]
+members = ["spt-native", "mpex-server", "spectre-facade"]
 
 [profile.release]
 lto = "fat"
