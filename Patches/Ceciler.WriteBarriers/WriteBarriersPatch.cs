@@ -86,9 +86,9 @@ public class WriteBarriersPatch : IPatcher
     }
 
     /// <summary>
-    /// Breadth-first over property types from the published roots, staying inside this assembly's
-    /// Models namespace. Element types of generic collections are followed (List&lt;Preset&gt;
-    /// reaches Preset), arrays are followed through their element type.
+    /// Breadth-first over property types and base types from the published roots, staying inside
+    /// this assembly's Models namespace. Element types of generic collections are followed
+    /// (List&lt;Preset&gt; reaches Preset), arrays are followed through their element type.
     /// </summary>
     private static List<TypeDefinition> CollectReachableTypes(ModuleDefinition module)
     {
@@ -109,18 +109,28 @@ public class WriteBarriersPatch : IPatcher
         while (queue.Count > 0)
         {
             var current = queue.Dequeue();
-            foreach (var property in current.Properties)
-            {
-                foreach (var candidate in Unwrap(property.PropertyType))
-                {
-                    if (!IsBarrierCandidate(candidate, out var definition) || !seen.Add(definition.FullName))
-                    {
-                        continue;
-                    }
 
-                    result.Add(definition);
-                    queue.Enqueue(definition);
+            // BaseType is an edge too, not just property types. TradersTable declares no properties
+            // at all - it is a `Dictionary<MongoId, Trader>` subclass, so Trader is reachable only
+            // through the base type's generic argument and the whole traders subgraph would go
+            // uninstrumented without this. It also means a Models type inherits barriers on setters
+            // it does not declare; denied types stay out either way, since IsBarrierCandidate
+            // rejects them wherever they are found.
+            var edges = current.Properties.Select(property => property.PropertyType);
+            if (current.BaseType is not null)
+            {
+                edges = edges.Prepend(current.BaseType);
+            }
+
+            foreach (var candidate in edges.SelectMany(Unwrap))
+            {
+                if (!IsBarrierCandidate(candidate, out var definition) || !seen.Add(definition.FullName))
+                {
+                    continue;
                 }
+
+                result.Add(definition);
+                queue.Enqueue(definition);
             }
         }
 
