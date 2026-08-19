@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using NUnit.Framework;
 using SPTarkov.Server.Core.Native;
+using SPTarkov.Server.Core.Services.Server;
 
 namespace UnitTests.Tests.Utils;
 
@@ -12,6 +13,7 @@ namespace UnitTests.Tests.Utils;
 /// out as the files the importer would have read them from (rust/spt-native/src/db/load.rs).
 /// </summary>
 [TestFixture]
+[NonParallelizable]
 public class SptNativeDbLoadTests
 {
     /// Prapor, so the trader directory carries a name the importer's MongoId branch accepts.
@@ -83,6 +85,15 @@ public class SptNativeDbLoadTests
     public void TearDown()
     {
         Directory.Delete(_sptDataDir, true);
+    }
+
+    [OneTimeTearDown]
+    public void OneTimeTearDown()
+    {
+        // DbLoad installs this mini tree into the process-global resident DB without touching
+        // DbPublisher's bookkeeping, so EnsureCurrent() would happily leave it resident. Leave the
+        // shared container fresher than we found it for whatever fixture runs next.
+        DI.GetInstance().GetService<DatabaseMutationStamp>().Bump();
     }
 
     [Test]
