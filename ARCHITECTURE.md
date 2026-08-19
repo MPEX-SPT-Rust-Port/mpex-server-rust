@@ -104,6 +104,11 @@ failure — a prepatcher re-hosts the server in its own `AssemblyLoadContext`, s
 over `SPT.Server` before that decision must not pull `SPTarkov.Server.Web` into the default context;
 a duplicate there kills every Blazor circuit and the admin panel goes dead.
 
+Shipped builds launch through `rust/mpex-server`, a thin Rust executable that hosts the CLR via
+netcorehost and `run_app`s the published server assembly with argv forwarded — the C# code,
+FFI boundary, and mod contract are unchanged, and dev builds still run the `SPT.Server`
+executable directly. `Containerfile.release`'s entrypoint is `/app/mpex-server`.
+
 ## Persistence
 
 `Servers/SaveServer.cs` owns the on-disk JSON profiles in `user/profiles/`. `SaveCallbacks` loads

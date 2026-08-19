@@ -400,9 +400,9 @@ written against, not the current file.
    `TrustNativeRequestCacheWithMods` default-on), Phase 3 (Rust loads `SPT_Data`), Phase 4
    (configs join the resident set, closing the runtime-config ceiling flip #1's ledger records),
    Phase 5 (profile persistence) and Phase 6 (process inversion: a `spt-server` bin crate hosts
-   the CLR via `netcorehost`, making Rust the executable). Phase 6a — a thin `run_app` bootstrap
-   that must **not** link `spt-native` (the spec's split-brain rule) — is independent of every
-   other phase and can land any time; 6b (the delegate-loader shim flip, where the resident DB's
+   the CLR via `netcorehost`, making Rust the executable). Phase 6a — the `run_app` bootstrap (`rust/mpex-server`,
+   shipped by publish and the release container's entrypoint; `scripts/smoke-mpex-server.sh` is
+   its e2e check) — landed 2026-08-18; 6b (the delegate-loader shim flip, where the resident DB's
    statics move into the exe and `SptNative.cs`'s `DllImport` layer dissolves into a vtable of
    the existing exports) waits on Phases 3 and 5.
 2. Port candidates and their costing live in [todo/TODO.md](todo/TODO.md); with #1, #2 and #3

@@ -13,6 +13,7 @@ dotnet test --filter "FullyQualifiedName~MongoIdTests"   # single fixture
 dotnet test --filter "Name=EveryRegisteredServiceCanBeResolved"   # single test
 csharpier format .                                  # run before opening a PR
 cd rust && cargo test && cargo fmt --check && cargo clippy --all-targets -- -D warnings   # Rust checks
+scripts/smoke-mpex-server.sh                         # e2e: Rust mpex-server launcher boots the CLR, asserts /health
 ```
 
 The server refuses to start unless the working directory contains `sptLogger.json`/`sptLogger.Development.json`, so run
