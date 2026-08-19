@@ -372,10 +372,24 @@ const CONSOLE_QUEUE_CAPACITY: usize = 8192;
 /// Boxed so a test can substitute the terminal; production always hands over `std::io::stdout()`.
 type ConsoleWriter = Box<dyn Write + Send>;
 
+/// What travels through the console channel. `Line` is a rendered log line (the sink appends the
+/// newline, and a full queue drops it — same policy as before). `Raw` is a verbatim byte
+/// passthrough from `spt_console_write` — no newline synthesis, and senders block rather than
+/// drop, because a prompt must reach the terminal. `Flush` is a drain barrier: the writer thread
+/// flushes and acks, so a stdin read can wait until everything queued before it is visible.
+// `Raw` and `Flush` are constructed by the FFI console entry points, which land in a later commit;
+// until then only tests build them.
+#[allow(dead_code)]
+pub(crate) enum ConsoleMessage {
+    Line(Vec<u8>),
+    Raw(Vec<u8>),
+    Flush(SyncSender<()>),
+}
+
 /// Stdout twin of `FileSink`: a writer thread behind a bounded channel, so a blocked terminal
 /// stalls the writer thread, not the logging call.
 struct ConsoleSink {
-    sender: Option<SyncSender<Vec<u8>>>,
+    sender: Option<SyncSender<ConsoleMessage>>,
     worker: Option<JoinHandle<()>>,
 }
 
@@ -385,7 +399,7 @@ impl ConsoleSink {
     }
 
     fn open_with(out: ConsoleWriter) -> std::io::Result<ConsoleSink> {
-        let (sender, receiver) = sync_channel::<Vec<u8>>(CONSOLE_QUEUE_CAPACITY);
+        let (sender, receiver) = sync_channel::<ConsoleMessage>(CONSOLE_QUEUE_CAPACITY);
         let worker = std::thread::Builder::new()
             .name("spt-log-console".to_owned())
             .spawn(move || console_run(&receiver, out))?;
@@ -398,7 +412,7 @@ impl ConsoleSink {
 
     fn write(&self, line: Vec<u8>) {
         if let Some(sender) = &self.sender {
-            let _ = sender.try_send(line);
+            let _ = sender.try_send(ConsoleMessage::Line(line));
         }
     }
 
@@ -410,18 +424,33 @@ impl ConsoleSink {
     }
 }
 
-/// Drains bursts the same way the file writer does: block for one line, drain the backlog, one
-/// flush per burst. `Stdout`'s internal locking replaces the old burst-scoped `lock()` — nothing
-/// else in this crate writes stdout, so burst contiguity is unchanged in practice.
-fn console_run(receiver: &Receiver<Vec<u8>>, mut out: ConsoleWriter) {
+/// Drains bursts the same way the file writer does: block for one message, drain the backlog, one
+/// flush per burst. `Stdout`'s internal locking replaces the old burst-scoped `lock()` — and
+/// `spt_console_write`'s raw bytes now travel through this same queue, which is the point: one
+/// FIFO is what orders raw writes against log lines.
+fn console_run(receiver: &Receiver<ConsoleMessage>, mut out: ConsoleWriter) {
     while let Ok(first) = receiver.recv() {
-        let _ = out.write_all(&first);
-        let _ = out.write_all(b"\n");
+        write_console_message(&mut out, first);
         while let Ok(next) = receiver.try_recv() {
-            let _ = out.write_all(&next);
-            let _ = out.write_all(b"\n");
+            write_console_message(&mut out, next);
         }
         let _ = out.flush();
+    }
+}
+
+fn write_console_message(out: &mut ConsoleWriter, message: ConsoleMessage) {
+    match message {
+        ConsoleMessage::Line(line) => {
+            let _ = out.write_all(&line);
+            let _ = out.write_all(b"\n");
+        }
+        ConsoleMessage::Raw(bytes) => {
+            let _ = out.write_all(&bytes);
+        }
+        ConsoleMessage::Flush(ack) => {
+            let _ = out.flush();
+            let _ = ack.send(());
+        }
     }
 }
 
@@ -524,6 +553,23 @@ impl Logger {
                 Sink::Console(sink) => sink.write(line),
             }
         }
+    }
+
+    /// A clone of the first console sink's channel, for `spt_console_write`'s raw passthrough.
+    /// None when no console logger is configured (or every one failed to open).
+    // The FFI caller lands in a later commit; until then this is reachable only from tests.
+    #[allow(dead_code)]
+    pub(crate) fn console_sender(&self) -> Option<SyncSender<ConsoleMessage>> {
+        self.entries.iter().find_map(|entry| match &entry.sink {
+            Sink::Console(sink) => sink.sender.clone(),
+            Sink::File(_) => Option::None,
+        })
+    }
+
+    /// The `IsLogEnabled` gate: does any configured target's level admit `level`? Level-only by
+    /// design — the C# original never consulted filters, and neither does this.
+    pub fn enabled(&self, level: LogLevel) -> bool {
+        self.entries.iter().any(|entry| level >= entry.level)
     }
 
     /// Flushes and joins every writer thread.
@@ -1015,5 +1061,99 @@ mod tests {
             1 + CONSOLE_QUEUE_CAPACITY,
             "the burst beyond the queue capacity must drop, not block"
         );
+    }
+
+    #[test]
+    fn raw_bytes_interleave_in_queue_order_without_newline_synthesis() {
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let sink = ConsoleSink::open_with(Box::new(SharedWriter(Arc::clone(&lines)))).unwrap();
+
+        sink.write(b"one".to_vec());
+        // The clone must not outlive this statement: a live sender keeps the channel connected,
+        // so `close`'s join would wait on a `recv` that never disconnects.
+        sink.sender
+            .clone()
+            .unwrap()
+            .send(ConsoleMessage::Raw(b">>> ".to_vec()))
+            .unwrap();
+        sink.write(b"two".to_vec());
+        sink.close();
+
+        let text = String::from_utf8(lines.lock().unwrap().clone()).unwrap();
+        assert_eq!(text, "one\n>>> two\n");
+    }
+
+    #[test]
+    fn flush_acks_only_after_everything_queued_before_it_was_written() {
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let sink = ConsoleSink::open_with(Box::new(SharedWriter(Arc::clone(&lines)))).unwrap();
+
+        for index in 0..100 {
+            sink.write(format!("line {index}").into_bytes());
+        }
+        let (ack_sender, ack_receiver) = sync_channel::<()>(1);
+        sink.sender
+            .clone()
+            .unwrap()
+            .send(ConsoleMessage::Flush(ack_sender))
+            .unwrap();
+        ack_receiver.recv().unwrap();
+
+        // The ack fired, so all 100 lines must already be in the writer — before close.
+        let text = String::from_utf8(lines.lock().unwrap().clone()).unwrap();
+        let expected: String = (0..100).map(|index| format!("line {index}\n")).collect();
+        assert_eq!(text, expected);
+        sink.close();
+    }
+
+    /// The inverse of the Line drop test: Raw uses a blocking send, so a burst deeper than the
+    /// queue delivers everything once the writer drains — a prompt must never be dropped.
+    #[test]
+    fn a_raw_burst_deeper_than_the_queue_blocks_and_delivers_everything() {
+        let (gate_sender, gate_receiver) = std::sync::mpsc::channel();
+        let (entered_sender, entered_receiver) = std::sync::mpsc::channel();
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let sink = ConsoleSink::open_with(Box::new(GatedWriter {
+            gate: gate_receiver,
+            entered: entered_sender,
+            lines: Arc::clone(&lines),
+            opened: false,
+        }))
+        .unwrap();
+
+        sink.write(b"first".to_vec());
+        entered_receiver.recv().unwrap();
+
+        let sender = sink.sender.clone().unwrap();
+        let flood = std::thread::spawn(move || {
+            for index in 0..(CONSOLE_QUEUE_CAPACITY + 101) {
+                sender
+                    .send(ConsoleMessage::Raw(format!("raw {index}\n").into_bytes()))
+                    .unwrap();
+            }
+        });
+
+        gate_sender.send(()).unwrap();
+        flood.join().unwrap();
+        sink.close();
+
+        let written = lines.lock().unwrap().clone();
+        let count = written
+            .split(|&byte| byte == b'\n')
+            .filter(|piece| !piece.is_empty())
+            .count();
+        assert_eq!(count, 1 + CONSOLE_QUEUE_CAPACITY + 101);
+    }
+
+    #[test]
+    fn enabled_is_the_level_only_gate_across_entries() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let config = file_config(dir.path(), "Warning", "");
+        let logger = Logger::from_json(config.as_bytes()).unwrap();
+        assert!(logger.enabled(LogLevel::Warning));
+        assert!(logger.enabled(LogLevel::Critical));
+        assert!(!logger.enabled(LogLevel::Information));
+        // Filters deliberately do not participate: this mirrors the C# IsLogEnabled contract.
+        logger.close();
     }
 }
