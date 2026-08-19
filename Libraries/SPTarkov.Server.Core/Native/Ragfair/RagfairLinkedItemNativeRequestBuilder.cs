@@ -51,12 +51,13 @@ public class RagfairLinkedItemNativeRequestBuilder(TemplateTable templateTable)
     /// </summary>
     internal bool ResidentDbEligible()
     {
-        if (_ragfairConfig is null || _loadedMods is null || _dbPublisher is null || _ragfairConfig.DisableNativeRequestCache)
-        {
-            return false;
-        }
-
-        return _loadedMods.Count == 0 || _ragfairConfig.TrustNativeRequestCacheWithMods;
+        return _ragfairConfig is not null
+            && ResidentDbDispatch.Eligible(
+                _dbPublisher,
+                _loadedMods?.Count,
+                _ragfairConfig.DisableNativeRequestCache,
+                _ragfairConfig.TrustNativeRequestCacheWithMods
+            );
     }
 
     /// <summary>
@@ -72,18 +73,10 @@ public class RagfairLinkedItemNativeRequestBuilder(TemplateTable templateTable)
             return SptNative.BuildRagfairLinkedItemTable(new RagfairLinkedItemNativeRequest { Epoch = 0, ViewsOverride = Build() });
         }
 
-        var epoch = _dbPublisher!.EnsureCurrent();
-        RagfairLinkedItemResult result;
-        try
-        {
-            result = SptNative.BuildRagfairLinkedItemTable(new RagfairLinkedItemNativeRequest { Epoch = epoch });
-        }
-        catch (NativeStaleEpochException)
-        {
-            // The resident DB does not hold this epoch - republish everything and retry once
-            epoch = _dbPublisher.ForcePublish();
-            result = SptNative.BuildRagfairLinkedItemTable(new RagfairLinkedItemNativeRequest { Epoch = epoch });
-        }
+        var result = ResidentDbDispatch.Send(
+            _dbPublisher!,
+            epoch => SptNative.BuildRagfairLinkedItemTable(new RagfairLinkedItemNativeRequest { Epoch = epoch })
+        );
 
         LastSendIncludedViewsOverride = false;
 

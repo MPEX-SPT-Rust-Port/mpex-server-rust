@@ -160,12 +160,13 @@ public class RagfairOfferGenerator(
     {
         // All null together (the frozen constructor) - checking each keeps the trust flag from ever
         // vouching for a mod list this instance was never handed
-        if (_databaseMutationStamp is null || _loadedMods is null || _dbPublisher is null || ragfairConfig.DisableNativeRequestCache)
-        {
-            return false;
-        }
-
-        return _loadedMods.Count == 0 || ragfairConfig.TrustNativeRequestCacheWithMods;
+        return _databaseMutationStamp is not null
+            && ResidentDbDispatch.Eligible(
+                _dbPublisher,
+                _loadedMods?.Count,
+                ragfairConfig.DisableNativeRequestCache,
+                ragfairConfig.TrustNativeRequestCacheWithMods
+            );
     }
 
     /// <summary>
@@ -480,18 +481,10 @@ public class RagfairOfferGenerator(
         }
         else
         {
-            var epoch = _dbPublisher!.EnsureCurrent();
-            try
-            {
-                result = SptNative.GenerateDynamicOffers(BuildNativeRequest(viewsOverride: false, epoch, expiredOffers));
-            }
-            catch (NativeStaleEpochException)
-            {
-                // The resident DB does not hold this epoch - republish everything and retry once
-                epoch = _dbPublisher.ForcePublish();
-                result = SptNative.GenerateDynamicOffers(BuildNativeRequest(viewsOverride: false, epoch, expiredOffers));
-            }
-
+            result = ResidentDbDispatch.Send(
+                _dbPublisher!,
+                epoch => SptNative.GenerateDynamicOffers(BuildNativeRequest(viewsOverride: false, epoch, expiredOffers))
+            );
             LastSendIncludedViewsOverride = false;
         }
 

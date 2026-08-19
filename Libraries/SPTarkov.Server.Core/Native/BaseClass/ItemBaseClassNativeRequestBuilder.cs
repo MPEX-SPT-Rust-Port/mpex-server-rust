@@ -50,12 +50,13 @@ public class ItemBaseClassNativeRequestBuilder(TemplateTable templateTable)
     /// </summary>
     internal bool ResidentDbEligible()
     {
-        if (_itemConfig is null || _loadedMods is null || _dbPublisher is null || _itemConfig.DisableNativeRequestCache)
-        {
-            return false;
-        }
-
-        return _loadedMods.Count == 0 || _itemConfig.TrustNativeRequestCacheWithMods;
+        return _itemConfig is not null
+            && ResidentDbDispatch.Eligible(
+                _dbPublisher,
+                _loadedMods?.Count,
+                _itemConfig.DisableNativeRequestCache,
+                _itemConfig.TrustNativeRequestCacheWithMods
+            );
     }
 
     /// <summary>
@@ -71,18 +72,10 @@ public class ItemBaseClassNativeRequestBuilder(TemplateTable templateTable)
             return SptNative.BuildItemBaseClassCache(new ItemBaseClassNativeRequest { Epoch = 0, ViewsOverride = Build() });
         }
 
-        var epoch = _dbPublisher!.EnsureCurrent();
-        ItemBaseClassResult result;
-        try
-        {
-            result = SptNative.BuildItemBaseClassCache(new ItemBaseClassNativeRequest { Epoch = epoch });
-        }
-        catch (NativeStaleEpochException)
-        {
-            // The resident DB does not hold this epoch - republish everything and retry once
-            epoch = _dbPublisher.ForcePublish();
-            result = SptNative.BuildItemBaseClassCache(new ItemBaseClassNativeRequest { Epoch = epoch });
-        }
+        var result = ResidentDbDispatch.Send(
+            _dbPublisher!,
+            epoch => SptNative.BuildItemBaseClassCache(new ItemBaseClassNativeRequest { Epoch = epoch })
+        );
 
         LastSendIncludedViewsOverride = false;
 

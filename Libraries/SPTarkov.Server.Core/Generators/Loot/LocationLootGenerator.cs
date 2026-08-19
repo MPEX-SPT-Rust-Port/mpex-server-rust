@@ -121,12 +121,12 @@ public class LocationLootGenerator(
     /// </summary>
     internal bool ResidentDbEligible()
     {
-        if (_loadedMods is null || _dbPublisher is null || locationConfig.DisableNativeRequestCache)
-        {
-            return false;
-        }
-
-        return _loadedMods.Count == 0 || locationConfig.TrustNativeRequestCacheWithMods;
+        return ResidentDbDispatch.Eligible(
+            _dbPublisher,
+            _loadedMods?.Count,
+            locationConfig.DisableNativeRequestCache,
+            locationConfig.TrustNativeRequestCacheWithMods
+        );
     }
 
     /// <summary>
@@ -252,18 +252,10 @@ public class LocationLootGenerator(
         }
         else
         {
-            var epoch = _dbPublisher!.EnsureCurrent();
-            try
-            {
-                result = SptNative.GenerateStaticContainers(new StaticContainersRequest { Epoch = epoch, Varying = varying });
-            }
-            catch (NativeStaleEpochException)
-            {
-                // The resident DB does not hold this epoch - republish everything and retry once
-                epoch = _dbPublisher.ForcePublish();
-                result = SptNative.GenerateStaticContainers(new StaticContainersRequest { Epoch = epoch, Varying = varying });
-            }
-
+            result = ResidentDbDispatch.Send(
+                _dbPublisher!,
+                epoch => SptNative.GenerateStaticContainers(new StaticContainersRequest { Epoch = epoch, Varying = varying })
+            );
             LastSendIncludedViewsOverride = false;
         }
 
@@ -323,18 +315,10 @@ public class LocationLootGenerator(
         }
         else
         {
-            var epoch = _dbPublisher!.EnsureCurrent();
-            try
-            {
-                result = SptNative.GenerateDynamicLoot(new DynamicLootRequest { Epoch = epoch, Varying = varying });
-            }
-            catch (NativeStaleEpochException)
-            {
-                // The resident DB does not hold this epoch - republish everything and retry once
-                epoch = _dbPublisher.ForcePublish();
-                result = SptNative.GenerateDynamicLoot(new DynamicLootRequest { Epoch = epoch, Varying = varying });
-            }
-
+            result = ResidentDbDispatch.Send(
+                _dbPublisher!,
+                epoch => SptNative.GenerateDynamicLoot(new DynamicLootRequest { Epoch = epoch, Varying = varying })
+            );
             LastSendIncludedViewsOverride = false;
         }
 
