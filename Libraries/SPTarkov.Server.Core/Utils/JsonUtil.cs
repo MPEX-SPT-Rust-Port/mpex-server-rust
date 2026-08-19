@@ -61,6 +61,19 @@ public class JsonUtil
     }
 
     /// <summary>
+    ///     Convert UTF-8 JSON bytes into an object, on the same options as
+    ///     <see cref="DeserializeFromFileAsync(string, Type, CancellationToken)"/> - a buffer the native
+    ///     loader already read is the same JSONC the file was.
+    /// </summary>
+    /// <param name="utf8Json">The UTF-8 encoded JSON to deserialize</param>
+    /// <param name="type">The type of the object to deserialize to</param>
+    /// <returns>object</returns>
+    internal object? Deserialize(ReadOnlySpan<byte> utf8Json, Type type)
+    {
+        return JsonSerializer.Deserialize(utf8Json, type, JsonSerializerOptionsNoIndent);
+    }
+
+    /// <summary>
     ///     Convert JSON into an object from a file
     /// </summary>
     /// <param name="file">The JSON File to read</param>

@@ -25,7 +25,30 @@ public sealed class ImporterUtil(ISptLogger<ImporterUtil> logger, FileUtil fileU
         CancellationToken cancellationToken = default
     )
     {
-        var result = await LoadRecursiveAsync(filePath, typeof(T), onReadCallback, onObjectDeserialized, cancellationToken);
+        var result = await LoadRecursiveAsync(filePath, typeof(T), null, onReadCallback, onObjectDeserialized, cancellationToken);
+
+        return (T)result;
+    }
+
+    /// <summary>
+    ///     Load files into objects recursively, reading from <paramref name="preloadedFiles"/> in place of
+    ///     disk wherever the walk reaches a file the map holds.
+    /// </summary>
+    /// <param name="filePath">Path to folder with files</param>
+    /// <param name="preloadedFiles">
+    /// File bodies keyed manifest-style (<c>database/…</c>), or null to read everything from disk.
+    /// </param>
+    /// <param name="cancellationToken">
+    /// The <see cref="CancellationToken"/> that can be used to cancel the loading operation.
+    /// </param>
+    /// <returns>Task</returns>
+    internal async Task<T> LoadRecursiveAsync<T>(
+        string filePath,
+        IReadOnlyDictionary<string, ReadOnlyMemory<byte>>? preloadedFiles,
+        CancellationToken cancellationToken = default
+    )
+    {
+        var result = await LoadRecursiveAsync(filePath, typeof(T), preloadedFiles, null, null, cancellationToken);
 
         return (T)result;
     }
@@ -35,6 +58,7 @@ public sealed class ImporterUtil(ISptLogger<ImporterUtil> logger, FileUtil fileU
     /// </summary>
     /// <param name="filePath">Path to folder with files</param>
     /// <param name="loadedType"></param>
+    /// <param name="preloadedFiles"></param>
     /// <param name="onReadCallback"></param>
     /// <param name="onObjectDeserialized"></param>
     /// <param name="cancellationToken">
@@ -44,6 +68,7 @@ public sealed class ImporterUtil(ISptLogger<ImporterUtil> logger, FileUtil fileU
     private async Task<object> LoadRecursiveAsync(
         string filePath,
         Type loadedType,
+        IReadOnlyDictionary<string, ReadOnlyMemory<byte>>? preloadedFiles,
         Func<string, CancellationToken, Task>? onReadCallback = null,
         Func<string, object, CancellationToken, Task>? onObjectDeserialized = null,
         CancellationToken cancellationToken = default
@@ -72,7 +97,18 @@ public sealed class ImporterUtil(ISptLogger<ImporterUtil> logger, FileUtil fileU
                 continue;
             }
 
-            tasks.Add(ProcessFileAsync(file, loadedType, onReadCallback, onObjectDeserialized, result, dictionaryLock, cancellationToken));
+            tasks.Add(
+                ProcessFileAsync(
+                    file,
+                    loadedType,
+                    preloadedFiles,
+                    onReadCallback,
+                    onObjectDeserialized,
+                    result,
+                    dictionaryLock,
+                    cancellationToken
+                )
+            );
         }
 
         // Process directories
@@ -90,6 +126,7 @@ public sealed class ImporterUtil(ISptLogger<ImporterUtil> logger, FileUtil fileU
                     directory,
                     loadedType,
                     result,
+                    preloadedFiles,
                     onReadCallback,
                     onObjectDeserialized,
                     dictionaryLock,
@@ -107,6 +144,7 @@ public sealed class ImporterUtil(ISptLogger<ImporterUtil> logger, FileUtil fileU
     private async Task ProcessFileAsync(
         string file,
         Type loadedType,
+        IReadOnlyDictionary<string, ReadOnlyMemory<byte>>? preloadedFiles,
         Func<string, CancellationToken, Task>? onReadCallback,
         Func<string, object, CancellationToken, Task>? onObjectDeserialized,
         object result,
@@ -133,7 +171,7 @@ public sealed class ImporterUtil(ISptLogger<ImporterUtil> logger, FileUtil fileU
                 out var isDictionary
             );
 
-            var fileDeserialized = await DeserializeFileAsync(file, propertyType, cancellationToken);
+            var fileDeserialized = await DeserializeFileAsync(file, propertyType, preloadedFiles, cancellationToken);
 
             if (onObjectDeserialized != null)
             {
@@ -164,6 +202,7 @@ public sealed class ImporterUtil(ISptLogger<ImporterUtil> logger, FileUtil fileU
         string directory,
         Type loadedType,
         object result,
+        IReadOnlyDictionary<string, ReadOnlyMemory<byte>>? preloadedFiles,
         Func<string, CancellationToken, Task>? onReadCallback,
         Func<string, object, CancellationToken, Task>? onObjectDeserialized,
         Lock dictionaryLock,
@@ -187,6 +226,7 @@ public sealed class ImporterUtil(ISptLogger<ImporterUtil> logger, FileUtil fileU
                 var loadedData = await LoadRecursiveAsync(
                     $"{directory}/",
                     matchedProperty,
+                    preloadedFiles,
                     onReadCallback,
                     onObjectDeserialized,
                     cancellationToken
@@ -210,6 +250,7 @@ public sealed class ImporterUtil(ISptLogger<ImporterUtil> logger, FileUtil fileU
                 var loadedData = await LoadRecursiveAsync(
                     $"{directory}/",
                     matchedProperty,
+                    preloadedFiles,
                     onReadCallback,
                     onObjectDeserialized,
                     cancellationToken
@@ -231,14 +272,38 @@ public sealed class ImporterUtil(ISptLogger<ImporterUtil> logger, FileUtil fileU
         }
     }
 
-    private async Task<object> DeserializeFileAsync(string file, Type propertyType, CancellationToken cancellationToken = default)
+    private async Task<object> DeserializeFileAsync(
+        string file,
+        Type propertyType,
+        IReadOnlyDictionary<string, ReadOnlyMemory<byte>>? preloadedFiles,
+        CancellationToken cancellationToken = default
+    )
     {
         if (propertyType.IsGenericType && propertyType.GetGenericTypeDefinition() == typeof(LazyLoad<>))
         {
             return CreateLazyLoadDeserialization(file, propertyType);
         }
 
+        if (preloadedFiles is not null && preloadedFiles.TryGetValue(PreloadKey(file), out var preloaded))
+        {
+            return jsonUtil.Deserialize(preloaded.Span, propertyType)
+                ?? throw new Exception($"Preloaded buffer for '{file}' deserialized to null");
+        }
+
+        // Absent from the map (lazy-adjacent files, or native/importer skip-list drift): disk, as always.
         return await jsonUtil.DeserializeFromFileAsync(file, propertyType, cancellationToken);
+    }
+
+    /// <summary>
+    ///     "./SPT_Data/database/templates/items.json" -> "database/templates/items.json". Keys off the last
+    ///     "database/" segment so test trees under any root resolve too.
+    /// </summary>
+    private static string PreloadKey(string file)
+    {
+        var normalized = file.Replace('\\', '/');
+        var index = normalized.LastIndexOf("database/", StringComparison.Ordinal);
+
+        return index < 0 ? normalized : normalized[index..];
     }
 
     private object CreateLazyLoadDeserialization(string file, Type propertyType)
