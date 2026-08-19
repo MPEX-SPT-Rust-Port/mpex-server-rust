@@ -13,8 +13,10 @@ using SPTarkov.Server.Core.Models.Eft.Hideout;
 using SPTarkov.Server.Core.Models.Enums;
 using SPTarkov.Server.Core.Models.Spt.Config;
 using SPTarkov.Server.Core.Models.Spt.Hideout;
+using SPTarkov.Server.Core.Models.Spt.Mod;
 using SPTarkov.Server.Core.Models.Spt.Tables;
 using SPTarkov.Server.Core.Native;
+using SPTarkov.Server.Core.Native.Db;
 using SPTarkov.Server.Core.Native.ScavCase;
 using SPTarkov.Server.Core.Services;
 using SPTarkov.Server.Core.Services.Commerce;
@@ -56,10 +58,13 @@ public class ScavCaseRewardGenerator(
     protected List<TemplateItem> DbItemsCache = [];
 
     private readonly ScavCaseNativeRequestBuilder? _requestBuilder;
+    private readonly IReadOnlyList<SptMod>? _loadedMods;
+    private readonly DbPublisher? _dbPublisher;
 
     /// <summary>
-    ///     The constructor the container uses: the frozen 4.1.2 one plus the native request builder.
-    ///     Additive and apicompat-verified.
+    ///     The frozen 4.1.2 constructor plus the native request builder. Additive and
+    ///     apicompat-verified; without the epoch-protocol services, every native send carries the
+    ///     views override.
     /// </summary>
     public ScavCaseRewardGenerator(
         ISptLogger<ScavCaseRewardGenerator> logger,
@@ -95,16 +100,79 @@ public class ScavCaseRewardGenerator(
     }
 
     /// <summary>
+    ///     The constructor the container uses: the builder overload above plus the epoch-protocol
+    ///     services. Additive and apicompat-verified.
+    /// </summary>
+    public ScavCaseRewardGenerator(
+        ISptLogger<ScavCaseRewardGenerator> logger,
+        HideoutTable hideoutTable,
+        TemplateTable templateTable,
+        RandomUtil randomUtil,
+        ItemHelper itemHelper,
+        PresetHelper presetHelper,
+        RagfairPriceService ragfairPriceService,
+        SeasonalEventService seasonalEventService,
+        ItemFilterService itemFilterService,
+        ServerLocalisationService localisationService,
+        ScavCaseConfig scavCaseConfig,
+        ICloner cloner,
+        ScavCaseNativeRequestBuilder requestBuilder,
+        IReadOnlyList<SptMod> loadedMods,
+        DbPublisher dbPublisher
+    )
+        : this(
+            logger,
+            hideoutTable,
+            templateTable,
+            randomUtil,
+            itemHelper,
+            presetHelper,
+            ragfairPriceService,
+            seasonalEventService,
+            itemFilterService,
+            localisationService,
+            scavCaseConfig,
+            cloner,
+            requestBuilder
+        )
+    {
+        _loadedMods = loadedMods;
+        _dbPublisher = dbPublisher;
+    }
+
+    /// <summary>
     ///     Which implementation the most recent generation call ran - the spt-native path or the
     ///     retained 4.1.2 C# path. Test seam; also handy in a debugger.
     /// </summary>
     internal LootGenerationPath LastPathTaken { get; private set; }
 
     /// <summary>
-    ///     Test-only seed forwarded as <see cref="ScavCaseRewardsRequest.TestSeed"/> on every native
+    ///     Test-only seed forwarded as <see cref="ScavCaseVarying.TestSeed"/> on every native
     ///     request.
     /// </summary>
     internal ulong? NativeTestSeed { get; set; }
+
+    /// <summary>
+    ///     Whether the most recent native send carried the C#-built views override rather than
+    ///     naming a resident-DB epoch. Test seam.
+    /// </summary>
+    internal bool LastSendIncludedViewsOverride { get; private set; }
+
+    /// <summary>
+    ///     Whether an override-less send off the resident DB is ever allowed: the services exist,
+    ///     the kill switch is off, and either no mods are loaded or the user vouched their mods
+    ///     don't write tables directly. A generator built without the epoch-protocol services has
+    ///     neither and always sends the override.
+    /// </summary>
+    private bool ResidentDbEligible()
+    {
+        if (_loadedMods is null || _dbPublisher is null || scavCaseConfig.DisableNativeRequestCache)
+        {
+            return false;
+        }
+
+        return _loadedMods.Count == 0 || scavCaseConfig.TrustNativeRequestCacheWithMods;
+    }
 
     /// <summary>
     ///     The 4.1.2 members a mod can Harmony-patch. Public, protected and protected-internal
@@ -174,7 +242,40 @@ public class ScavCaseRewardGenerator(
 
         LastPathTaken = LootGenerationPath.Native;
 
-        return SptNative.GenerateScavCaseRewards(_requestBuilder!.Build(recipeId, NativeTestSeed)).Result;
+        var varying = _requestBuilder!.BuildVarying(recipeId, NativeTestSeed);
+        List<List<Item>> result;
+        if (!ResidentDbEligible())
+        {
+            LastSendIncludedViewsOverride = true;
+            result = SptNative
+                .GenerateScavCaseRewards(
+                    new ScavCaseRewardsRequest
+                    {
+                        Epoch = 0,
+                        ViewsOverride = _requestBuilder.BuildViewsOverride(),
+                        Varying = varying,
+                    }
+                )
+                .Result;
+        }
+        else
+        {
+            var epoch = _dbPublisher!.EnsureCurrent();
+            try
+            {
+                result = SptNative.GenerateScavCaseRewards(new ScavCaseRewardsRequest { Epoch = epoch, Varying = varying }).Result;
+            }
+            catch (NativeStaleEpochException)
+            {
+                // The resident DB does not hold this epoch - republish everything and retry once
+                epoch = _dbPublisher.ForcePublish();
+                result = SptNative.GenerateScavCaseRewards(new ScavCaseRewardsRequest { Epoch = epoch, Varying = varying }).Result;
+            }
+
+            LastSendIncludedViewsOverride = false;
+        }
+
+        return result;
     }
 
     private IEnumerable<List<Item>> GenerateLegacy(MongoId recipeId)

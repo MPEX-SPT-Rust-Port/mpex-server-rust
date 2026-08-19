@@ -74,7 +74,10 @@
       >$(SptNativeDir)/target/$(SptNativeTargetTriple)/$(CargoProfile)/$(SptNativeLibName)</SptNativeLibPath>
   </PropertyGroup>
   <ItemGroup>
-    <SptNativeSource Include="$(SptNativeDir)/**/*.rs;$(SptNativeDir)/**/Cargo.toml;$(SptNativeDir)/Cargo.lock" Exclude="$(SptNativeDir)/target/**" />
+    <SptNativeSource
+      Include="$(SptNativeDir)/**/*.rs;$(SptNativeDir)/**/Cargo.toml;$(SptNativeDir)/Cargo.lock"
+      Exclude="$(SptNativeDir)/target/**"
+    />
   </ItemGroup>
   <Target Name="BuildSptNative" BeforeTargets="AssignTargetPaths" Inputs="@(SptNativeSource)" Outputs="$(SptNativeLibPath)">
     <!-- locked: fail fast on Cargo.lock drift instead of silently rewriting it (this fork has no CI to catch that). -->

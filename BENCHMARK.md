@@ -11,7 +11,7 @@ runs them. There are no `cargo bench` targets.
 | `BotBenchmarkTests.cs` | one bot's inventory — elapsed time per bot, payload projection timed separately |
 | `RagfairBenchmarkTests.cs` | a dynamic flea offer pass — elapsed time per pass, views-override projection and forced publish timed separately |
 | `RepeatableQuestBenchmarkTests.cs` | one repeatable quest of each type — elapsed time per quest, publish cold/warm and views-override projection timed separately |
-| `ScavCaseBenchmarkTests.cs` | one scav case of each shipped recipe — elapsed time per call |
+| `ScavCaseBenchmarkTests.cs` | one scav case of each shipped recipe — elapsed time per call, publish cold/warm and the override projections timed separately |
 | `ItemBaseClassBenchmarkTests.cs` | one bulk item base class cache build — elapsed time per hydrate |
 | `RagfairLinkedItemBenchmarkTests.cs` | one ragfair linked item table build — elapsed time per build |
 | `DbPublishSpikeTests.cs` | phase 0 state-ownership spike — full-DB publish envelope: per-root size and projection time; paired with `rust/spt-native/tests/phase0_publish_spike.rs` for parse time and RSS |
@@ -456,6 +456,52 @@ across recipes. The first two positions measured are inflated on both arms; reve
 order on `d31a000` reproduced the gradient positionally, so read those two rows as ~39 / ~0.44 ms.
 
 `ScavCaseConfig.ForceLegacyScavCaseGeneration` is the opt-out.
+
+`cecdd5c` — 2026-08-19, post resident-DB flip (phase 1 flip #5, ABI 26). Same fixture shape and
+workload. The native arms now ride the resident DB: `DbPublisher.EnsureCurrent` publishes the
+five roots once (absorbed in warmup — the hideout root, `production.scavRecipes` only, joined
+the envelope for this flip) and every timed pass sends `{epoch, varying}` only. The fixture
+gained the publish cold/warm split the quest fixture established: cold bumps
+`DatabaseMutationStamp` before every run, so each pass republishes all five roots first. `Build`
+survives as the whole epoch-0 override request an ineligible (modded, untrusted) send pays per
+call — the same composition it always measured — and `BuildViewsOverride` is timed on its own
+as its database-views half.
+
+| Recipe | End products (common/rare/superrare) | Arm | median | median (2nd run) | mean | min | max |
+|---|---|---|---|---|---|---|---|
+| `6271093e…` moonshine | 0 / 1 / 3-5 | native, publish **warm** | 1.58 ms | 1.60 ms | 1.77 ms | 1.52 ms | 2.64 ms |
+| `6271093e…` moonshine | 0 / 1 / 3-5 | legacy (C# 4.1.2) | 1.46 ms | 1.51 ms | 1.66 ms | 1.40 ms | 4.02 ms |
+| `6271093e…` moonshine | 0 / 1 / 3-5 | native, publish **cold** (stamp bumped per run) | 733.68 ms | 736.03 ms | 739.59 ms | 712.26 ms | 791.14 ms |
+| `62710a8c…` 15,000 ₽ | 1 / 1-3 / 0 | native, publish **warm** | 1.77 ms | 1.68 ms | 2.02 ms | 1.60 ms | 3.13 ms |
+| `62710a8c…` 15,000 ₽ | 1 / 1-3 / 0 | legacy (C# 4.1.2) | 1.46 ms | 1.49 ms | 1.50 ms | 1.41 ms | 2.18 ms |
+| `62710a8c…` 15,000 ₽ | 1 / 1-3 / 0 | native, publish **cold** (stamp bumped per run) | 737.83 ms | 738.10 ms | 744.92 ms | 714.55 ms | 794.49 ms |
+| `62710974…` 2,500 ₽ | 1-2 / 0-1 / 0 | **native, publish warm** | **1.68 ms** | **1.66 ms** | 2.00 ms | 1.61 ms | 3.05 ms |
+| `62710974…` 2,500 ₽ | 1-2 / 0-1 / 0 | **legacy (C# 4.1.2)** | **0.43 ms** | **0.42 ms** | 0.46 ms | 0.38 ms | 1.04 ms |
+| `62710974…` 2,500 ₽ | 1-2 / 0-1 / 0 | native, publish **cold** (stamp bumped per run) | 744.80 ms | 743.57 ms | 749.01 ms | 717.88 ms | 809.29 ms |
+| `62710a69…` 95,000 ₽ | 0 / 1-3 / 1-2 | **native, publish warm** | **1.74 ms** | **1.68 ms** | 2.19 ms | 1.60 ms | 4.50 ms |
+| `62710a69…` 95,000 ₽ | 0 / 1-3 / 1-2 | **legacy (C# 4.1.2)** | **0.43 ms** | **0.43 ms** | 0.48 ms | 0.39 ms | 1.11 ms |
+| `62710a69…` 95,000 ₽ | 0 / 1-3 / 1-2 | native, publish **cold** (stamp bumped per run) | 740.42 ms | 736.29 ms | 751.10 ms | 722.28 ms | 805.53 ms |
+| `62710a0e…` intel folder | 0 / 2-4 / 2-3 | **native, publish warm** | **1.81 ms** | **1.88 ms** | 2.20 ms | 1.58 ms | 5.93 ms |
+| `62710a0e…` intel folder | 0 / 2-4 / 2-3 | **legacy (C# 4.1.2)** | **0.46 ms** | **0.47 ms** | 0.85 ms | 0.43 ms | 7.37 ms |
+| `62710a0e…` intel folder | 0 / 2-4 / 2-3 | native, publish **cold** (stamp bumped per run) | 740.86 ms | 741.30 ms | 754.32 ms | 724.95 ms | 806.96 ms |
+| — | — | `Build` (request only) | 13.99 ms | 11.93 ms | 12.28 ms | 5.37 ms | 27.32 ms |
+| — | — | `BuildViewsOverride` only | 6.78 ms | 6.41 ms | 10.91 ms | 4.98 ms | 37.80 ms |
+
+Steady state (positions 3-5): **~1.7 ms native warm against ~0.44 ms legacy — ~0.25x, ~4x
+slower**, against the pre-flip **0.011x, ~88x slower**. The warm path shed ~37.5 of its ~39 ms
+(39.35 → 1.68 ms on the settled 2,500 ₽ recipe, **23.4x**, 23.5x on the second invocation):
+the ~7.75 ms C# projection, its serialise and the native-side parse of the whole views bundle,
+all gone from eligible sends — the claim the flip made, confirmed. What remains against legacy
+is the whole ~1.7 ms pass — varying-block build and serialise, the FFI round trip and the
+native generation, unsplit by this fixture — against ~0.44 ms of plain C#. The positional
+gradient the baseline noted is now legacy-only: the warm arm reads flat ~1.6-1.9 ms across all
+five recipes while legacy's first two positions still read ~1.5 ms against its settled
+~0.44 ms. The cold arm's ~734-745 ms cold−warm delta is the whole per-*mutation* cost (5-root
+projection + FFI copy + parse + every family's view derivation), flat across recipes — read
+against flip #4's 730.08 ms forced publish, the hideout root's share (`production.scavRecipes`,
+O(KB)) sits inside the noise. The projection arms are bimodal (spread 5-38 ms across both
+invocations): `Build` 13.99 / 11.93 ms and `BuildViewsOverride` 6.78 / 6.41 ms against the old
+`Build`'s 7.75 / 6.86 ms — the ineligible caller's per-call price held.
 
 ## Item base class cache
 

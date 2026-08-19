@@ -40,7 +40,8 @@ public class QuestViewsEquivalenceTests
                 di.GetService<TemplateTable>(),
                 di.GetService<TradersTable>(),
                 di.GetService<GlobalTable>(),
-                di.GetService<LocationTable>()
+                di.GetService<LocationTable>(),
+                di.GetService<HideoutTable>()
             )
         );
 

@@ -14,18 +14,36 @@ namespace SPTarkov.Server.Core.Native.ScavCase;
 /// <c>required</c>.
 ///
 /// The blacklists are membership tests on the native side, so their order never reaches the RNG;
-/// <see cref="ItemsView"/> and <see cref="DefaultPresetsByTpl"/> are drawn from in iteration order
-/// and must be built in the order the C# generator would have walked them.
+/// <see cref="ScavCaseViewsOverride.ItemsView"/> and
+/// <see cref="ScavCaseViewsOverride.DefaultPresetsByTpl"/> are drawn from in iteration order and
+/// must be built in the order the C# generator would have walked them.
 /// </summary>
 public record ScavCaseRewardsRequest
 {
     /// <summary>
-    /// The recipe <see cref="ScavRecipes"/> is searched for. Absent from that list, the native side
-    /// fails the request where the C# threw an NRE dereferencing <c>EndProducts</c>.
+    ///     Resident-DB epoch this request was built against; 0 with <see cref="ViewsOverride"/>
+    ///     present (spec § Exports).
     /// </summary>
-    [JsonPropertyName("recipeId")]
-    public required MongoId RecipeId { get; set; }
+    [JsonPropertyName("epoch")]
+    public required ulong Epoch { get; set; }
 
+    /// <summary>
+    ///     The distrust fallback (spec § Exports): the C#-built view bundle, used for this call
+    ///     only and never made resident. Present iff the caller is ineligible for residency.
+    /// </summary>
+    [JsonPropertyName("viewsOverride")]
+    public ScavCaseViewsOverride? ViewsOverride { get; set; }
+
+    [JsonPropertyName("varying")]
+    public required ScavCaseVarying Varying { get; set; }
+}
+
+/// <summary>
+/// The C#-built invariant bundle: the distrust fallback. Member shapes are the pre-flip request's,
+/// unchanged.
+/// </summary>
+public record ScavCaseViewsOverride
+{
     /// <summary>
     /// <c>hideoutTable.Production.ScavRecipes</c>, projected: the model's own JSON names are
     /// <c>_id</c> and capitalised <c>Common</c>/<c>Rare</c>/<c>Superrare</c>, which the native side
@@ -33,14 +51,6 @@ public record ScavCaseRewardsRequest
     /// </summary>
     [JsonPropertyName("scavRecipes")]
     public required List<ScavCaseRecipeView> ScavRecipes { get; set; }
-
-    /// <summary>
-    /// The live <c>ScavCaseConfig</c>, sent whole: its JSON names already match the native view, and
-    /// the three members that view omits - <c>kind</c>, <c>ammoRewards.ammoRewardBlacklist</c> (dead
-    /// config, nothing reads it) and <c>MinMax.type</c> - are ignored on arrival.
-    /// </summary>
-    [JsonPropertyName("config")]
-    public required ScavCaseConfig Config { get; set; }
 
     /// <summary>
     /// The slice of every <c>TemplateItem</c> the generator reads, keyed by tpl.
@@ -61,6 +71,29 @@ public record ScavCaseRewardsRequest
     /// </summary>
     [JsonPropertyName("defaultPresetsByTpl")]
     public required Dictionary<MongoId, PresetView> DefaultPresetsByTpl { get; set; }
+}
+
+/// <summary>
+/// The per-request and service-backed half, riding every send.
+/// </summary>
+public record ScavCaseVarying
+{
+    /// <summary>
+    /// The recipe <see cref="ScavCaseViewsOverride.ScavRecipes"/> (or the resident recipe view) is
+    /// searched for. Absent from that list, the native side fails the request where the C# threw an
+    /// NRE dereferencing <c>EndProducts</c>.
+    /// </summary>
+    [JsonPropertyName("recipeId")]
+    public required MongoId RecipeId { get; set; }
+
+    /// <summary>
+    /// The live <c>ScavCaseConfig</c>, sent whole: its JSON names already match the native view, and
+    /// the members that view omits - <c>kind</c>, <c>ammoRewards.ammoRewardBlacklist</c> (dead
+    /// config, nothing reads it), <c>MinMax.type</c> and the dispatch/residency flags - are ignored
+    /// on arrival.
+    /// </summary>
+    [JsonPropertyName("config")]
+    public required ScavCaseConfig Config { get; set; }
 
     /// <summary>
     /// <c>SeasonalEventService.GetInactiveSeasonalEventItems()</c>.

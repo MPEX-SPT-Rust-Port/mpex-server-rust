@@ -9,7 +9,9 @@ pub mod models;
 
 use std::sync::{Arc, RwLock};
 
-use crate::db::models::{GlobalsRoot, LocationsRoot, PublishRequest, TemplatesRoot, TradersRoot};
+use crate::db::models::{
+    GlobalsRoot, HideoutRoot, LocationsRoot, PublishRequest, TemplatesRoot, TradersRoot,
+};
 use crate::quest::views::QuestDbViews;
 use crate::ragfair::views::RagfairDbViews;
 
@@ -19,6 +21,7 @@ pub struct ResidentDb {
     pub traders: Option<Arc<TradersRoot>>,
     pub globals: Option<Arc<GlobalsRoot>>,
     pub locations: Option<Arc<LocationsRoot>>,
+    pub hideout: Option<Arc<HideoutRoot>>,
     /// `Some` whenever all three source roots are resident — re-derived on every such publish,
     /// `None` otherwise.
     pub ragfair_views: Option<Arc<RagfairDbViews>>,
@@ -83,6 +86,11 @@ pub fn publish(request: PublishRequest) -> Result<u64, PublishError> {
         .locations
         .map(Arc::new)
         .or_else(|| previous.and_then(|db| db.locations.clone()));
+    let hideout = request
+        .roots
+        .hideout
+        .map(Arc::new)
+        .or_else(|| previous.and_then(|db| db.hideout.clone()));
 
     // Derived before the swap: a derivation error aborts the publish and leaves the previous
     // resident DB fully intact. The derive runs under the write guard, so a panic in it must
@@ -126,6 +134,7 @@ pub fn publish(request: PublishRequest) -> Result<u64, PublishError> {
         traders,
         globals,
         locations,
+        hideout,
         ragfair_views,
         quest_views,
     }));
@@ -207,6 +216,32 @@ mod store_tests {
             before.templates.as_ref().unwrap(),
             after.templates.as_ref().unwrap()
         ));
+    }
+
+    #[test]
+    fn a_hideout_root_publishes_and_survives_a_partial_republish() {
+        let _guard = tests::DB_TEST_LOCK.lock().unwrap();
+        clear();
+        let epoch = publish(request(
+            r#"{"schema":1,"roots":{"hideout":{"production":{"scavRecipes":[
+                {"_id":"6662e9aca7e0b43baa3d5f9c",
+                 "endProducts":{"Common":{"min":1,"max":2},"Rare":{"min":0,"max":1},"Superrare":{"min":0,"max":0}},
+                 "productionTime":3.0,"someUnliftedKey":true}
+            ]}}}}"#,
+        ))
+        .unwrap();
+        assert_eq!(epoch, 1);
+        let db = current().unwrap();
+        let recipes = &db.hideout.as_ref().unwrap().production.scav_recipes;
+        assert_eq!(recipes.len(), 1);
+        assert_eq!(recipes[0].id, "6662e9aca7e0b43baa3d5f9c");
+        let common = recipes[0].end_products.as_ref().unwrap().common.unwrap();
+        assert_eq!(common.max, 2);
+
+        // partial republish without the root keeps it resident, epoch still moves
+        let epoch2 = publish(request(r#"{"schema":1,"roots":{}}"#)).unwrap();
+        assert_eq!(epoch2, 2);
+        assert!(current().unwrap().hideout.is_some());
     }
 
     #[test]

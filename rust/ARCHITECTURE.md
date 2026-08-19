@@ -35,7 +35,7 @@ the mold linker on Linux. Both profiles use one codegen unit; release adds fat L
 
 | Path | Role |
 |---|---|
-| `src/lib.rs` | Module roots and `ABI_VERSION` (currently 25; must equal `SptNative.ExpectedAbiVersion`) |
+| `src/lib.rs` | Module roots and `ABI_VERSION` (currently 26; must equal `SptNative.ExpectedAbiVersion`) |
 | `src/ffi.rs` | The C-ABI surface. The **only** module containing `unsafe` |
 | `src/runtime.rs` | Process-wide multi-thread tokio runtime, `OnceLock`-built. Used only by `verify` |
 | `src/verify.rs` | Hashes `SPT_Data` with XXH3-128 and diffs it against `checks.dat` |
@@ -43,7 +43,7 @@ the mold linker on Linux. Both profiles use one codegen unit; release adds fat L
 | `src/logger.rs` | The log pipeline: `sptLogger.json`, filters, level gates, per-target formatting — and the console sink |
 | `src/log_sink.rs` | The file sink alone: where a formatted line lands on disk, with its rotation and archiving |
 | `src/diag.rs` | The generator families' way into that pipeline: the locale table, the render, and `DiagSink` |
-| `src/db.rs` | The resident DB: the epoch-versioned store of published roots (templates, traders, globals, locations); a publish re-derives the ragfair and quest views |
+| `src/db.rs` | The resident DB: the epoch-versioned store of published roots (templates, traders, globals, locations, hideout); a publish re-derives the ragfair and quest views |
 | `src/db/models.rs` | The publish envelope's wire types |
 | `src/loot/` | Location loot (static containers, loose loot) and reward loot (airdrops, cases, containers) |
 | `src/bot/` | One bot's entire inventory: equipment, mods, weapons, magazines, loot |
@@ -76,14 +76,15 @@ C# SptNative → spt_generate_* (JSON in)
   `spt_verify_database` is separate because it blocks on the tokio runtime.
 - Status codes: `STATUS_OK` 0, `STATUS_BAD_ARGS` 1 (null pointer, bad UTF-8, unparseable JSON), `STATUS_PANIC`
   2 (message in the out-buffer since ABI 18), `STATUS_ERROR` 3, `STATUS_STALE_EPOCH` 4 (the resident-DB
-  riders only: ragfair, quest, base-class, linked-items, and the six loot exports). **Quest and scav case never return 2**: they catch the generator's panic themselves and report it as
+  riders only: ragfair, quest, base-class, linked-items, the six loot exports, and scav case). **Quest and scav case never return 2**: they catch the generator's panic themselves and report it as
   3 carrying the message, because those families port a C#-sanctioned throw as a panic — a generation failure,
   not a library bug. The cost is that a real port bug in those two also arrives as 3, indistinguishable from a
   sanctioned failure. Deliberate.
-- **Six families ride the resident DB: ragfair, the repeatable quest, the two startup one-shots
-  (base-class cache, linked-item table), and the loot pair — location loot and reward loot.** `spt_db_publish` (called by C#'s
-  `DbPublisher` whenever `DatabaseMutationStamp` has moved) makes the templates, traders, globals and
-  locations roots resident in `db.rs` — every root optional, an absent one keeping the resident copy, and
+- **Seven families ride the resident DB: ragfair, the repeatable quest, the two startup one-shots
+  (base-class cache, linked-item table), the loot pair — location loot and reward loot — and the
+  scav case.** `spt_db_publish` (called by C#'s
+  `DbPublisher` whenever `DatabaseMutationStamp` has moved) makes the templates, traders, globals,
+  locations and hideout roots resident in `db.rs` — every root optional, an absent one keeping the resident copy, and
   the epoch bumping on full and partial publishes alike; a bad schema or a failed view derivation aborts
   before the swap, leaving the previous resident DB intact. It derives ragfair's and quest's views at publish
   time — the quest views
@@ -100,7 +101,11 @@ C# SptNative → spt_generate_* (JSON in)
   (random), `defaultPresetsByTplKey` (forced — the one view derivation flip #4 added), and
   `defaultPresetsByTpl` + `presetsByTpl`/its key domain (sealed / container). Loose loot and
   `staticAmmoDist` deliberately ride each call's varying block instead (RUST-ROADMAP.md flip #4 ledger:
-  the 549 MiB decision; the frozen public-signature parameter). The one-shot requests
+  the 549 MiB decision; the frozen public-signature parameter). The scav case request
+  (`spt_generate_scav_case_rewards` — flip #5, ABI 26) arrives the same way and borrows ragfair's
+  `items`/`handbookPrices`/`defaultPresetsByTpl`; its recipe views derive at request time from the
+  hideout root — `production.scavRecipes` only, the flip's one root addition (see *src/scav_case/*).
+  The one-shot requests
   (`spt_build_item_base_class_cache`, `spt_build_ragfair_linked_item_table` — flip #3, ABI 24) arrive as
   `{epoch, viewsOverride?}` — no varying block, the whole pre-flip payload was invariant — and derive
   their walk input from the resident templates root at request time, deliberately **not** from the ragfair
@@ -109,7 +114,7 @@ C# SptNative → spt_generate_* (JSON in)
   returns `STATUS_STALE_EPOCH` and the C# caller force-publishes and retries once. An ineligible caller
   (mods loaded without trust, or the kill switch) sends `viewsOverride` with `epoch: 0` instead — a
   documented wire contract, not runtime-enforced — used for that call only, never made resident. The
-  resident roots are the only request data held across calls (ABI 25).
+  resident roots are the only request data held across calls (ABI 26).
 - **A buffer is written on failure too** — the parse error, the `LootError` message, or the panic text.
   Ownership is decided by the out-pointer being non-null, never by the status code. `spt_verify_database`'s
   free-on-success-only shape must not be copied into the generators.
@@ -253,9 +258,15 @@ outcome (exhausted pool, or a generator that gave up and logged why), not a fail
 
 ## `src/scav_case/`
 
-The one family with **no context type**: `ScavCaseRequest` *is* the view, passed by reference alongside the
-`DiagSink` rather than projected into a borrowed struct, because a craft reads few enough members that the
-extra type would earn nothing. It is also the one family whose `mod.rs` carries a `//!` header — it holds the
+Since flip #5 the request splits as the loot family's — `{epoch, viewsOverride?, varying}` — and the
+`mod.rs` resolver picks the database half: the resident arm borrows the shared ragfair views
+(`items`/`handbookPrices`/`defaultPresetsByTpl`) and derives its recipe views from the hideout root at
+request time — a filter over a handful of recipes that keeps the C# skip-a-malformed-recipe semantics
+and maps the root's capitalized `Common`/`Rare`/`Superrare` onto the view's lowercase names — while the
+override arm is the pre-flip C#-built bundle, field-for-field unchanged. Still the one family with **no
+context type**: the resolved views and the varying block pass by reference alongside the `DiagSink`
+rather than projected into a borrowed struct, because a craft reads few enough members that the extra
+type would earn nothing. It is also the one family whose `mod.rs` carries a `//!` header — it holds the
 entry point, and it states the family's citation convention: a bare `` `:N` `` is a line of the 4.1.2 body
 the port was written against, which now lives on in the C# file as `GenerateLegacy` about 131 lines below
 where the citation points. Citations naming a file are current. One native call generates **one** craft's
@@ -263,7 +274,7 @@ rewards.
 
 | Module | Stands in for | What it does |
 |---|---|---|
-| `mod.rs` | `Generators/ScavCaseRewardGenerator.cs` (entry) | `generate_scav_case_rewards` — installs the seed guard and `catch_unwind`s the generator, so the dictionary-index throws come back as `ScavCaseError` rather than `STATUS_PANIC` (see *Conventions*) |
+| `mod.rs` | `Generators/ScavCaseRewardGenerator.cs` (entry) | `generate_scav_case_rewards` — resolves the epoch's views (a stale epoch answers before any draw), installs the seed guard and `catch_unwind`s the generator, so the dictionary-index throws come back as `ScavCaseError` rather than `STATUS_PANIC` (see *Conventions*) |
 | `generator.rs` | `Generators/ScavCaseRewardGenerator.cs` | The craft: the reward pool (rebuilt per request, not cached on an instance), the per-rarity counts and price bands, the picks, and the money/ammo/preset arms |
 | `models.rs` | — | Request/response envelopes only; the DB/EFT types they carry are `loot::models`' |
 
@@ -342,13 +353,16 @@ Almost all tests are inline `#[cfg(test)]` modules (~750 of them). Three kinds:
   failure, generation failure and null arguments. `spt_generate_bot_inventory_batch` is the one export with no
   transport test of its own.
 
-Five `tests/` targets: `completion_whitelist_baseclass.rs`, a timing-and-equivalence guard for the
+Seven `tests/` targets: `completion_whitelist_baseclass.rs`, a timing-and-equivalence guard for the
 Completion whitelist filter's base-class lookups (runs against the real shipped `items.json`, so it needs
 `scripts/decompress-assets.sh` to have run); `phase0_publish_spike.rs` (`#[ignore]`d, the Phase 0 publish
-measurements); and `phase1_ragfair_views.rs` / `phase1_quest_views.rs` / `flip3_oneshot_views.rs`
+measurements); `phase1_ragfair_views.rs` / `phase1_quest_views.rs` / `flip3_oneshot_views.rs`
 (`#[ignore]`d), the Rust halves of the
 three views-equivalence harness pairs — each parses an envelope its C# twin (`RagfairViewsEquivalenceTests` /
 `QuestViewsEquivalenceTests` / `OneShotViewsEquivalenceTests`) wrote to `$TMPDIR` and asserts the
-Rust-derived views (for flip #3, the resident-derived walk inputs) equivalent to the C#-built ones.
+Rust-derived views (for flip #3, the resident-derived walk inputs) equivalent to the C#-built ones; and
+`flip4_loot_resident.rs` / `flip5_scavcase_resident.rs`, self-contained resident-arm integration tests —
+each publishes a minimal DB and proves an `{epoch}` send generates identically to the same data sent as
+`viewsOverride`.
 
 Run with `cd rust && cargo test && cargo fmt --check && cargo clippy --all-targets -- -D warnings`.

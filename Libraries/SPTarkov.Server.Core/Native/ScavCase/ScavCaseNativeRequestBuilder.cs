@@ -26,7 +26,43 @@ public class ScavCaseNativeRequestBuilder(
     ScavCaseConfig scavCaseConfig
 )
 {
+    /// <summary>
+    /// The full override send: an epoch-0 envelope carrying both halves. What every native call
+    /// paid before the resident-DB flip - kept whole so the request-build benchmark keeps measuring
+    /// exactly that.
+    /// </summary>
     public ScavCaseRewardsRequest Build(MongoId recipeId, ulong? testSeed)
+    {
+        return new ScavCaseRewardsRequest
+        {
+            Epoch = 0,
+            ViewsOverride = BuildViewsOverride(),
+            Varying = BuildVarying(recipeId, testSeed),
+        };
+    }
+
+    /// <summary>
+    /// The per-request and service-backed half, riding every send.
+    /// </summary>
+    public ScavCaseVarying BuildVarying(MongoId recipeId, ulong? testSeed)
+    {
+        return new ScavCaseVarying
+        {
+            RecipeId = recipeId,
+            Config = scavCaseConfig,
+            InactiveSeasonalItems = seasonalEventService.GetInactiveSeasonalEventItems(),
+            GlobalBlacklist = itemFilterService.GetItemBlacklistCache(),
+            RewardItemBlacklist = itemFilterService.GetItemRewardBlacklist(),
+            BossItems = itemFilterService.GetBossItems(),
+            TestSeed = testSeed,
+        };
+    }
+
+    /// <summary>
+    /// The database views an override send carries - the distrust fallback, built fresh per call so
+    /// a mod that swaps an item or blacklists one at runtime is picked up.
+    /// </summary>
+    public ScavCaseViewsOverride BuildViewsOverride()
     {
         var itemsView = PayloadProjection.BuildItemsView(templateTable.Items);
 
@@ -38,21 +74,14 @@ public class ScavCaseNativeRequestBuilder(
             staticPrices[tpl] = ragfairPriceService.GetStaticPriceForItem(tpl) ?? 0;
         }
 
-        return new ScavCaseRewardsRequest
+        return new ScavCaseViewsOverride
         {
-            RecipeId = recipeId,
             ScavRecipes = BuildRecipeViews(),
-            Config = scavCaseConfig,
             ItemsView = itemsView,
             StaticPrices = staticPrices,
             DefaultPresetsByTpl = presetHelper
                 .GetDefaultPresetByTpl()
                 .ToDictionary(preset => preset.Key, preset => PayloadProjection.ToPresetView(preset.Value)),
-            InactiveSeasonalItems = seasonalEventService.GetInactiveSeasonalEventItems(),
-            GlobalBlacklist = itemFilterService.GetItemBlacklistCache(),
-            RewardItemBlacklist = itemFilterService.GetItemRewardBlacklist(),
-            BossItems = itemFilterService.GetBossItems(),
-            TestSeed = testSeed,
         };
     }
 

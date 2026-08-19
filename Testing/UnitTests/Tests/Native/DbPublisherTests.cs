@@ -40,7 +40,8 @@ public class DbPublisherTests
             di.GetService<TemplateTable>(),
             di.GetService<TradersTable>(),
             di.GetService<GlobalTable>(),
-            locationTable
+            locationTable,
+            di.GetService<HideoutTable>()
         );
 
         using var document = JsonDocument.Parse(envelope);
@@ -71,5 +72,28 @@ public class DbPublisherTests
                 $"locations[{location.Name}] must carry base + allExtracts + the three statics only"
             );
         }
+    }
+
+    [Test]
+    public void BuildPublishEnvelopeCarriesTheScavRecipesBearingHideoutRoot()
+    {
+        var di = DI.GetInstance();
+
+        var envelope = DbPayloadProjection.BuildPublishEnvelope(
+            di.GetService<TemplateTable>(),
+            di.GetService<TradersTable>(),
+            di.GetService<GlobalTable>(),
+            di.GetService<LocationTable>(),
+            di.GetService<HideoutTable>()
+        );
+
+        using var document = JsonDocument.Parse(envelope);
+
+        // Flip #5: the hideout root carries production.scavRecipes only, serialized from the live
+        // recipe objects so the models' JsonPropertyNames stay the wire authority.
+        var recipes = document.RootElement.GetProperty("roots").GetProperty("hideout").GetProperty("production").GetProperty("scavRecipes");
+        Assert.That(recipes.GetArrayLength(), Is.GreaterThan(0));
+        Assert.That(recipes[0].TryGetProperty("_id", out _), Is.True);
+        Assert.That(recipes[0].GetProperty("endProducts").TryGetProperty("Common", out _), Is.True);
     }
 }

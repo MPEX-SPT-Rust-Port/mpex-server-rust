@@ -1,17 +1,19 @@
 //! `Generators/ScavCaseRewardGenerator.cs`.
 
-use std::collections::HashMap;
+use std::collections::HashSet;
+
+use indexmap::IndexMap;
 
 use crate::bot::repair_service::MinMax;
 use crate::diag::DiagSink;
 use crate::loot::item_helper::{self, AMMO, AMMO_BOX, MONEY, WEAPON};
-use crate::loot::models::{Diagnostic, Item, ItemView, Upd, WARNING};
+use crate::loot::models::{Diagnostic, Item, ItemView, PresetView, Upd, WARNING};
 use crate::loot::mongo_id;
 use crate::loot::random_util::{get_array_value, get_chance_100, get_int};
-use crate::scav_case::ScavCaseError;
 use crate::scav_case::models::{
-    MoneyLevelsView, ScavCaseConfigView, ScavCaseRequest, ScavCaseResponse, ScavRecipeView,
+    MoneyLevelsView, ScavCaseConfigView, ScavCaseResponse, ScavCaseVarying, ScavRecipeView,
 };
+use crate::scav_case::{ScavCaseError, ScavCaseViews, StaticPrices};
 
 /// The `typeof(T).FullName` this file's diagnostics log under.
 const CATEGORY: &str = "SPTarkov.Server.Core.Generators.ScavCaseRewardGenerator";
@@ -32,6 +34,40 @@ const RARE: &str = "rare";
 /// See [`COMMON`].
 const SUPERRARE: &str = "superrare";
 
+/// What used to be the flattened request, resolved to borrows: the per-request view mapping out
+/// of [`ScavCaseViews`] plus the varying block's config and service-backed sets — so the ported
+/// bodies below keep reading `req.*` verbatim, as the loot family's `RewardDbRefs` does.
+pub(crate) struct ScavCaseRefs<'a> {
+    recipe_id: &'a str,
+    scav_recipes: &'a [ScavRecipeView],
+    config: &'a ScavCaseConfigView,
+    items_view: &'a IndexMap<String, ItemView>,
+    static_prices: StaticPrices<'a>,
+    default_presets_by_tpl: &'a IndexMap<String, PresetView>,
+    inactive_seasonal_items: &'a HashSet<String>,
+    global_blacklist: &'a HashSet<String>,
+    reward_item_blacklist: &'a HashSet<String>,
+    boss_items: &'a HashSet<String>,
+}
+
+impl<'a> ScavCaseRefs<'a> {
+    /// Binds the varying block to the resolved views' borrows.
+    pub(crate) fn new(varying: &'a ScavCaseVarying, views: &'a ScavCaseViews) -> Self {
+        Self {
+            recipe_id: &varying.recipe_id,
+            scav_recipes: views.scav_recipes(),
+            config: &varying.config,
+            items_view: views.items_view(),
+            static_prices: views.static_prices(),
+            default_presets_by_tpl: views.default_presets_by_tpl(),
+            inactive_seasonal_items: &varying.inactive_seasonal_items,
+            global_blacklist: &varying.global_blacklist,
+            reward_item_blacklist: &varying.reward_item_blacklist,
+            boss_items: &varying.boss_items,
+        }
+    }
+}
+
 /// `CacheDbItems`' `DbItemsCache` filter (`:87-143`).
 ///
 /// C# caches the two lists on the generator instance and refills them only when empty; there is no
@@ -40,7 +76,7 @@ const SUPERRARE: &str = "superrare";
 ///
 /// `TemplateItem` carries its own `Id`, [`ItemView`] does not — hence the tpl in the tuple, which
 /// every caller of the pool needs (prices, presets, baseclass tests are all keyed by it).
-pub(crate) fn build_reward_pool(req: &ScavCaseRequest) -> Vec<(&str, &ItemView)> {
+pub(crate) fn build_reward_pool<'a>(req: &ScavCaseRefs<'a>) -> Vec<(&'a str, &'a ItemView)> {
     let parent_blacklist: Vec<&str> = req
         .config
         .reward_item_parent_blacklist
@@ -90,7 +126,7 @@ pub(crate) fn build_reward_pool(req: &ScavCaseRequest) -> Vec<(&str, &ItemView)>
             }
 
             // Skip item if parent id is blacklisted (`:130`).
-            if item_helper::is_of_baseclasses(&req.items_view, tpl, &parent_blacklist) {
+            if item_helper::is_of_baseclasses(req.items_view, tpl, &parent_blacklist) {
                 return false;
             }
 
@@ -111,7 +147,7 @@ pub(crate) fn build_reward_pool(req: &ScavCaseRequest) -> Vec<(&str, &ItemView)>
 /// `QuestItem` (`ScavCaseRewardGenerator.cs:103`) and never checks `RewardItemParentBlacklist`
 /// (`ScavCaseRewardGenerator.cs:130`), so quest-item ammo and ammo under a blacklisted parent are
 /// both drawable as ammo rewards while the reward pool rejects them.
-pub(crate) fn build_ammo_pool(req: &ScavCaseRequest) -> Vec<(&str, &ItemView)> {
+pub(crate) fn build_ammo_pool<'a>(req: &ScavCaseRefs<'a>) -> Vec<(&'a str, &'a ItemView)> {
     req.items_view
         .iter()
         .filter(|(tpl, item)| {
@@ -126,7 +162,7 @@ pub(crate) fn build_ammo_pool(req: &ScavCaseRequest) -> Vec<(&str, &ItemView)> {
             }
 
             // Not ammo, skip (`:162`).
-            if !item_helper::is_of_baseclass(&req.items_view, tpl, AMMO) {
+            if !item_helper::is_of_baseclass(req.items_view, tpl, AMMO) {
                 return false;
             }
 
@@ -214,7 +250,7 @@ pub fn get_reward_counts_and_prices(
 pub fn get_filtered_items_by_price<'a>(
     db_items: &[(&'a str, &'a ItemView)],
     item_filters: &RewardCountAndPriceDetails,
-    static_prices: &HashMap<String, f64>,
+    static_prices: StaticPrices<'_>,
 ) -> Vec<(&'a str, &'a ItemView)> {
     db_items
         .iter()
@@ -232,8 +268,8 @@ pub fn get_filtered_items_by_price<'a>(
 /// actually null: `HandbookHelper.GetTemplatePrice` (`Helpers/Profile/HandbookHelper.cs:106-125`)
 /// answers 0 for a template with no handbook entry, so a priceless item clears a floor of 0 rather
 /// than failing the comparison.
-fn static_price(static_prices: &HashMap<String, f64>, tpl: &str) -> f64 {
-    static_prices.get(tpl).copied().unwrap_or(0.0)
+fn static_price(static_prices: StaticPrices<'_>, tpl: &str) -> f64 {
+    static_prices.get(tpl).unwrap_or(0.0)
 }
 
 /// `PickRandomRewards` (`:209-243`) — the rewards for one rarity, money and ammo mixed in by chance.
@@ -248,8 +284,8 @@ fn static_price(static_prices: &HashMap<String, f64>, tpl: &str) -> f64 {
 ///
 /// Where the C# throws: an empty `items` pool (`:238`, `InvalidOperationException` out of
 /// `RandomUtil.GetRandomElement`), or the empty ammo pool of [`get_random_ammo`].
-pub fn pick_random_rewards<'a>(
-    req: &'a ScavCaseRequest,
+pub(crate) fn pick_random_rewards<'a>(
+    req: &ScavCaseRefs<'a>,
     items: &[(&'a str, &'a ItemView)],
     item_filters: &RewardCountAndPriceDetails,
     rarity: &str,
@@ -289,14 +325,14 @@ pub fn pick_random_rewards<'a>(
 }
 
 /// `RewardShouldBeMoney` (`:249-252`).
-fn reward_should_be_money(req: &ScavCaseRequest) -> bool {
+fn reward_should_be_money(req: &ScavCaseRefs<'_>) -> bool {
     get_chance_100(f64::from(
         req.config.money_rewards.money_reward_chance_percent,
     ))
 }
 
 /// `RewardShouldBeAmmo` (`:258-261`).
-fn reward_should_be_ammo(req: &ScavCaseRequest) -> bool {
+fn reward_should_be_ammo(req: &ScavCaseRefs<'_>) -> bool {
     get_chance_100(f64::from(
         req.config.ammo_rewards.ammo_reward_chance_percent,
     ))
@@ -312,8 +348,8 @@ fn reward_should_be_ammo(req: &ScavCaseRequest) -> bool {
 ///
 /// If a money template is missing from the items view, where the C# `templateTable.Items[...]`
 /// index throws `KeyNotFoundException`.
-fn get_random_money(req: &ScavCaseRequest) -> (&str, &ItemView) {
-    let items = &req.items_view;
+fn get_random_money<'a>(req: &ScavCaseRefs<'a>) -> (&'a str, &'a ItemView) {
+    let items = req.items_view;
     let money = [
         (ROUBLES, &items[ROUBLES]),
         (EUROS, &items[EUROS]),
@@ -335,7 +371,7 @@ fn get_random_money(req: &ScavCaseRequest) -> (&str, &ItemView) {
 ///
 /// Where the C# throws: no ammo inside the rarity's price band.
 fn get_random_ammo<'a>(
-    req: &'a ScavCaseRequest,
+    req: &ScavCaseRefs<'a>,
     rarity: &str,
     diagnostics: &mut DiagSink,
 ) -> Result<(&'a str, &'a ItemView), ScavCaseError> {
@@ -349,7 +385,7 @@ fn get_random_ammo<'a>(
         .filter(|(tpl, _)| {
             // Is ammo handbook price between desired range (`:288-296`). A rarity the config does
             // not list misses the `TryGetValue` and fails every ammo, rather than throwing.
-            let handbook_price = static_price(&req.static_prices, tpl);
+            let handbook_price = static_price(req.static_prices, tpl);
 
             ammo_reward_value_range_rub
                 .get(rarity)
@@ -390,7 +426,7 @@ fn get_random_ammo<'a>(
 /// Where the C# throws: `AddCartridgesToAmmoBox` on a box naming no cartridge or a cartridge with no
 /// stack size (`ItemHelper.cs:1245,1266`).
 fn randomise_container_item_rewards(
-    req: &ScavCaseRequest,
+    req: &ScavCaseRefs<'_>,
     reward_items: &[(&str, &ItemView)],
     rarity: &str,
     diagnostics: &mut DiagSink,
@@ -406,10 +442,10 @@ fn randomise_container_item_rewards(
             ..Default::default()
         }];
 
-        if item_helper::is_of_baseclass(&req.items_view, reward_item_tpl, AMMO_BOX) {
+        if item_helper::is_of_baseclass(req.items_view, reward_item_tpl, AMMO_BOX) {
             // `:335-337`
             item_helper::add_cartridges_to_ammo_box(
-                &req.items_view,
+                req.items_view,
                 &mut result_item,
                 reward_item_tpl,
             )
@@ -417,9 +453,9 @@ fn randomise_container_item_rewards(
         }
         // Armor or weapon = use default preset from globals.json (`:340-342`)
         else if item_helper::armor_item_has_removable_or_soft_insert_slots(
-            &req.items_view,
+            req.items_view,
             reward_item_tpl,
-        ) || item_helper::is_of_baseclass(&req.items_view, reward_item_tpl, WEAPON)
+        ) || item_helper::is_of_baseclass(req.items_view, reward_item_tpl, WEAPON)
         {
             // Quirk 5 (`:345-351`): a tpl with no default preset is warned about — in interpolated
             // text, not a locale key — and skipped, so the reward is dropped outright.
@@ -450,7 +486,7 @@ fn randomise_container_item_rewards(
             item_helper::remap_root_item_id(&mut preset_and_mods);
 
             result_item = preset_and_mods;
-        } else if item_helper::is_of_baseclasses(&req.items_view, reward_item_tpl, &[AMMO, MONEY]) {
+        } else if item_helper::is_of_baseclasses(req.items_view, reward_item_tpl, &[AMMO, MONEY]) {
             // `:359-362`. The gate is an ancestor walk but the draw below keys on the direct
             // parent (quirk 4), so an item that only passes here through a grandparent still gets
             // an `Upd` — carrying the else branch's 1.
@@ -476,7 +512,7 @@ fn randomise_container_item_rewards(
 /// Quirk 4: this keys on the item's **direct parent** (`:433`) where its `:359` gate walks the whole
 /// ancestor chain, so a grandchild of `AMMO` reaches neither branch and takes the else's 1.
 fn get_random_amount_reward_for_scav_case(
-    req: &ScavCaseRequest,
+    req: &ScavCaseRefs<'_>,
     tpl: &str,
     item_to_calculate: &ItemView,
     rarity: &str,
@@ -498,7 +534,7 @@ fn get_random_amount_reward_for_scav_case(
 /// which is below the floor — `GetInt` returns the floor without drawing at all
 /// (`RandomUtil.cs:48`).
 fn get_randomised_ammo_reward_stack_size(
-    req: &ScavCaseRequest,
+    req: &ScavCaseRefs<'_>,
     item_to_calculate: &ItemView,
 ) -> i32 {
     get_int(
@@ -509,7 +545,7 @@ fn get_randomised_ammo_reward_stack_size(
 
 /// `GetRandomisedMoneyRewardStackSize` (`:465-501`) — each currency reads its own count map, and
 /// `EUROS` reads `EurCount` while `DOLLARS` reads `UsdCount`.
-fn get_randomised_money_reward_stack_size(req: &ScavCaseRequest, tpl: &str, rarity: &str) -> i32 {
+fn get_randomised_money_reward_stack_size(req: &ScavCaseRefs<'_>, tpl: &str, rarity: &str) -> i32 {
     let money_rewards = &req.config.money_rewards;
 
     let count = if tpl == ROUBLES {
@@ -559,9 +595,11 @@ fn money_level<'a>(money_levels: &'a MoneyLevelsView, rarity: &str) -> &'a MinMa
 /// `:403` throws dereferencing `EndProducts`. Plus whatever [`pick_random_rewards`] and
 /// [`randomise_container_item_rewards`] report.
 pub(crate) fn generate(
-    req: &ScavCaseRequest,
+    varying: &ScavCaseVarying,
+    views: &ScavCaseViews,
     diagnostics: &mut DiagSink,
 ) -> Result<ScavCaseResponse, ScavCaseError> {
+    let req = &ScavCaseRefs::new(varying, views);
     // `CacheDbItems()` (`:51`); see [`build_reward_pool`] for why it is not cached.
     let db_items_cache = build_reward_pool(req);
 
@@ -577,15 +615,15 @@ pub(crate) fn generate(
             ))
         })?;
     let (common_counts, rare_counts, superrare_counts) =
-        get_reward_counts_and_prices(scav_case_details, &req.config);
+        get_reward_counts_and_prices(scav_case_details, req.config);
 
     // Get items that fit the price criteria as set by the scavCase config (`:58-60`)
     let common_priced_items =
-        get_filtered_items_by_price(&db_items_cache, &common_counts, &req.static_prices);
+        get_filtered_items_by_price(&db_items_cache, &common_counts, req.static_prices);
     let rare_priced_items =
-        get_filtered_items_by_price(&db_items_cache, &rare_counts, &req.static_prices);
+        get_filtered_items_by_price(&db_items_cache, &rare_counts, req.static_prices);
     let super_rare_priced_items =
-        get_filtered_items_by_price(&db_items_cache, &superrare_counts, &req.static_prices);
+        get_filtered_items_by_price(&db_items_cache, &superrare_counts, req.static_prices);
 
     // Get randomly picked items from each item collection, the count range of which is defined in
     // hideout/scavcase.json (`:63-67`)
@@ -638,11 +676,58 @@ pub mod tests {
     use crate::loot::models::{Item, ItemView, WARNING};
     use crate::loot::random_util::{TestSeedGuard, get_chance_100, get_int};
     use crate::scav_case::generator::{
-        COMMON, DOLLARS, EUROS, GP, ROUBLES, RewardCountAndPriceDetails, SUPERRARE,
+        COMMON, DOLLARS, EUROS, GP, ROUBLES, RewardCountAndPriceDetails, SUPERRARE, ScavCaseRefs,
         build_ammo_pool, build_reward_pool, generate, get_filtered_items_by_price,
         get_reward_counts_and_prices, pick_random_rewards, randomise_container_item_rewards,
     };
-    use crate::scav_case::models::ScavCaseRequest;
+    use crate::scav_case::models::{ScavCaseRewardsRequest, ScavCaseVarying};
+    use crate::scav_case::{ScavCaseError, ScavCaseViews, resolve_scav_case_views};
+
+    /// Splits a flat fixture into the envelope halves: the four view members into `viewsOverride`,
+    /// everything else (config, sets, seed) into `varying` — so the tests keep mutating one flat
+    /// object, as the loot family's `split_envelope` lets them.
+    pub fn envelope(flat: Value) -> Value {
+        let Value::Object(mut varying) = flat else {
+            panic!("fixture envelope is not an object");
+        };
+        let mut views = serde_json::Map::new();
+        for key in [
+            "scavRecipes",
+            "itemsView",
+            "staticPrices",
+            "defaultPresetsByTpl",
+        ] {
+            if let Some(value) = varying.remove(key) {
+                views.insert(key.to_owned(), value);
+            }
+        }
+
+        json!({ "epoch": 0, "viewsOverride": views, "varying": varying })
+    }
+
+    /// A parsed override fixture: the varying half plus its resolved views, held together so
+    /// [`Self::refs`] can lend the generator both.
+    struct Fixture {
+        varying: ScavCaseVarying,
+        views: ScavCaseViews,
+    }
+
+    impl Fixture {
+        fn refs(&self) -> ScavCaseRefs<'_> {
+            ScavCaseRefs::new(&self.varying, &self.views)
+        }
+    }
+
+    fn fixture(flat: Value) -> Fixture {
+        let request: ScavCaseRewardsRequest = serde_json::from_value(envelope(flat)).unwrap();
+        let views = resolve_scav_case_views(request.epoch, request.views_override)
+            .expect("an override request resolves without the store");
+
+        Fixture {
+            varying: request.varying,
+            views,
+        }
+    }
 
     /// The base `Item` node — `_parent` is the empty `MongoId`, which the projection writes as null.
     const ITEM_NODE: &str = "54009119af1c881c07000029";
@@ -721,8 +806,8 @@ pub mod tests {
         })
     }
 
-    fn request() -> ScavCaseRequest {
-        serde_json::from_value(request_json()).unwrap()
+    fn request() -> Fixture {
+        fixture(request_json())
     }
 
     fn tpls(pool: &[(&str, &ItemView)]) -> Vec<String> {
@@ -732,7 +817,7 @@ pub mod tests {
     #[test]
     fn reward_pool_keeps_survivors_in_items_view_order() {
         assert_eq!(
-            tpls(&build_reward_pool(&request())),
+            tpls(&build_reward_pool(&request().refs())),
             vec![
                 GOOD_ITEM_TPL,
                 AMMO_GOOD_TPL,
@@ -745,7 +830,7 @@ pub mod tests {
     #[test]
     fn reward_pool_drops_one_template_per_rule() {
         let req = request();
-        let pool = tpls(&build_reward_pool(&req));
+        let pool = tpls(&build_reward_pool(&req.refs()));
 
         for (tpl, rule) in [
             (ITEM_NODE, "parent is the empty MongoId (:93)"),
@@ -769,7 +854,7 @@ pub mod tests {
     #[test]
     fn ammo_pool_keeps_survivors_in_items_view_order() {
         assert_eq!(
-            tpls(&build_ammo_pool(&request())),
+            tpls(&build_ammo_pool(&request().refs())),
             vec![
                 QUEST_AMMO_TPL,
                 PARENT_BLACKLISTED_TPL,
@@ -782,7 +867,7 @@ pub mod tests {
     #[test]
     fn ammo_pool_drops_one_template_per_rule() {
         let req = request();
-        let pool = tpls(&build_ammo_pool(&req));
+        let pool = tpls(&build_ammo_pool(&req.refs()));
 
         for (tpl, rule) in [
             (ITEM_NODE, "parent is the empty MongoId (:151)"),
@@ -805,6 +890,7 @@ pub mod tests {
     #[test]
     fn ammo_pool_keeps_ammo_with_null_stack_max_size() {
         let req = request();
+        let req = req.refs();
 
         assert!(req.items_view[AMMO_NULL_STACK_TPL].stack_max_size.is_none());
         assert!(tpls(&build_ammo_pool(&req)).contains(&AMMO_NULL_STACK_TPL.to_owned()));
@@ -816,6 +902,7 @@ pub mod tests {
     #[test]
     fn ammo_pool_skips_the_quest_item_and_parent_blacklist_checks() {
         let req = request();
+        let req = req.refs();
         let reward_pool = tpls(&build_reward_pool(&req));
         let ammo_pool = tpls(&build_ammo_pool(&req));
 
@@ -829,7 +916,8 @@ pub mod tests {
     fn both_pools_keep_boss_items_when_the_config_allows_them() {
         let mut json = request_json();
         json["config"]["allowBossItemsAsRewards"] = json!(true);
-        let req: ScavCaseRequest = serde_json::from_value(json).unwrap();
+        let req = fixture(json);
+        let req = req.refs();
 
         assert_eq!(
             tpls(&build_reward_pool(&req)),
@@ -932,25 +1020,25 @@ pub mod tests {
         })
     }
 
-    fn pick_request(money_chance: i32, ammo_chance: i32) -> ScavCaseRequest {
-        serde_json::from_value(pick_request_json(money_chance, ammo_chance)).unwrap()
+    fn pick_request(money_chance: i32, ammo_chance: i32) -> Fixture {
+        fixture(pick_request_json(money_chance, ammo_chance))
     }
 
     /// [`pick_request`] with both caps lifted. `allowMultipleAmmoRewardsPerRarity` ships **true**
     /// (`SPT_Data/configs/scavcase.json:111`), so this is the production path for ammo.
-    fn pick_request_allowing_multiple(money_chance: i32, ammo_chance: i32) -> ScavCaseRequest {
+    fn pick_request_allowing_multiple(money_chance: i32, ammo_chance: i32) -> Fixture {
         let mut json = pick_request_json(money_chance, ammo_chance);
         json["config"]["allowMultipleMoneyRewardsPerRarity"] = json!(true);
         json["config"]["allowMultipleAmmoRewardsPerRarity"] = json!(true);
 
-        serde_json::from_value(json).unwrap()
+        fixture(json)
     }
 
     /// The common-rarity pool the C# hands `PickRandomRewards`: the reward cache, price-filtered.
-    fn common_pool(req: &ScavCaseRequest) -> Vec<(&str, &ItemView)> {
-        let (common, _, _) = get_reward_counts_and_prices(&req.scav_recipes[0], &req.config);
+    fn common_pool<'a>(req: &ScavCaseRefs<'a>) -> Vec<(&'a str, &'a ItemView)> {
+        let (common, _, _) = get_reward_counts_and_prices(&req.scav_recipes[0], req.config);
 
-        get_filtered_items_by_price(&build_reward_pool(req), &common, &req.static_prices)
+        get_filtered_items_by_price(&build_reward_pool(req), &common, req.static_prices)
     }
 
     /// A fixed reward count, over a pool the test hands in ready-filtered — `GetInt(n, n)` returns
@@ -977,8 +1065,9 @@ pub mod tests {
     #[test]
     fn reward_counts_and_prices_pair_the_end_products_with_the_config_ranges() {
         let req = pick_request(0, 0);
+        let req = req.refs();
         let (common, rare, superrare) =
-            get_reward_counts_and_prices(&req.scav_recipes[0], &req.config);
+            get_reward_counts_and_prices(&req.scav_recipes[0], req.config);
 
         assert_eq!((common.min_count, common.max_count), (3.0, 3.0));
         assert_eq!(
@@ -999,12 +1088,13 @@ pub mod tests {
     #[test]
     fn filtered_items_by_price_is_inclusive_at_both_ends() {
         let req = pick_request(0, 0);
+        let req = req.refs();
         let pool = build_reward_pool(&req);
 
         let inclusive =
-            get_filtered_items_by_price(&pool, &price_band(100.0, 1000.0), &req.static_prices);
+            get_filtered_items_by_price(&pool, &price_band(100.0, 1000.0), req.static_prices);
         let exclusive =
-            get_filtered_items_by_price(&pool, &price_band(101.0, 999.0), &req.static_prices);
+            get_filtered_items_by_price(&pool, &price_band(101.0, 999.0), req.static_prices);
 
         // Insertion order, not sorted order — the pool is filtered out of `itemsView`.
         assert_eq!(tpls(&inclusive), vec![PICK_D, PICK_B, PICK_A, PICK_C]);
@@ -1016,13 +1106,14 @@ pub mod tests {
     #[test]
     fn filtered_items_by_price_treats_a_missing_price_as_zero() {
         let req = pick_request(0, 0);
+        let req = req.refs();
         let free = get_filtered_items_by_price(
             &build_reward_pool(&req),
             &price_band(0.0, 0.0),
-            &req.static_prices,
+            req.static_prices,
         );
 
-        assert!(!req.static_prices.contains_key(ROUBLES));
+        assert!(req.static_prices.get(ROUBLES).is_none());
         assert_eq!(tpls(&free), vec![ROUBLES, EUROS, DOLLARS, GP]);
     }
 
@@ -1034,8 +1125,9 @@ pub mod tests {
     #[test]
     fn a_capped_money_reward_still_costs_the_stream_its_chance_draw() {
         let req = pick_request(100, 0);
+        let req = req.refs();
         let pool = common_pool(&req);
-        let (common, _, _) = get_reward_counts_and_prices(&req.scav_recipes[0], &req.config);
+        let (common, _, _) = get_reward_counts_and_prices(&req.scav_recipes[0], req.config);
         let mut diagnostics = DiagSink::capture();
 
         let picked = {
@@ -1072,6 +1164,7 @@ pub mod tests {
     #[test]
     fn the_money_pool_is_roubles_euros_dollars_gp() {
         let req = pick_request(100, 0);
+        let req = req.refs();
         let pool = common_pool(&req);
         let mut diagnostics = DiagSink::capture();
 
@@ -1087,6 +1180,7 @@ pub mod tests {
     #[test]
     fn the_ammo_branch_draws_from_the_price_filtered_ammo_cache() {
         let req = pick_request(0, 100);
+        let req = req.refs();
         let mut diagnostics = DiagSink::capture();
 
         let _guard = TestSeedGuard::install(SEED);
@@ -1106,6 +1200,7 @@ pub mod tests {
     #[test]
     fn an_ammo_rarity_without_a_price_range_warns_and_then_fails() {
         let req = pick_request(0, 100);
+        let req = req.refs();
         let mut diagnostics = DiagSink::capture();
 
         let _guard = TestSeedGuard::install(SEED);
@@ -1133,6 +1228,7 @@ pub mod tests {
     #[test]
     fn multiple_ammo_rewards_land_in_one_rarity_when_the_config_allows_them() {
         let req = pick_request_allowing_multiple(0, 100);
+        let req = req.refs();
         let pool = common_pool(&req);
         let mut diagnostics = DiagSink::capture();
 
@@ -1149,6 +1245,7 @@ pub mod tests {
     #[test]
     fn multiple_money_rewards_land_in_one_rarity_when_the_config_allows_them() {
         let req = pick_request_allowing_multiple(100, 0);
+        let req = req.refs();
         let pool = common_pool(&req);
         let mut diagnostics = DiagSink::capture();
 
@@ -1165,6 +1262,7 @@ pub mod tests {
     #[test]
     fn an_empty_reward_pool_fails_the_pick() {
         let req = pick_request(0, 0);
+        let req = req.refs();
         let mut diagnostics = DiagSink::capture();
 
         let _guard = TestSeedGuard::install(SEED);
@@ -1296,12 +1394,12 @@ pub mod tests {
         })
     }
 
-    fn container_request() -> ScavCaseRequest {
-        serde_json::from_value(container_request_json()).unwrap()
+    fn container_request() -> Fixture {
+        fixture(container_request_json())
     }
 
     /// The picks `PickRandomRewards` would have handed on, spelled as tpls.
-    fn picks<'a>(req: &'a ScavCaseRequest, tpls: &[&str]) -> Vec<(&'a str, &'a ItemView)> {
+    fn picks<'a>(req: &ScavCaseRefs<'a>, tpls: &[&str]) -> Vec<(&'a str, &'a ItemView)> {
         tpls.iter()
             .map(|tpl| {
                 let (tpl, item) = req.items_view.get_key_value(*tpl).unwrap();
@@ -1333,6 +1431,7 @@ pub mod tests {
     #[test]
     fn an_ammo_box_reward_is_filled_with_cartridges() {
         let req = container_request();
+        let req = req.refs();
         let mut diagnostics = DiagSink::capture();
 
         let rewards = randomise_container_item_rewards(
@@ -1359,6 +1458,7 @@ pub mod tests {
     #[test]
     fn an_armor_reward_becomes_a_freshly_idded_clone_of_its_preset() {
         let req = container_request();
+        let req = req.refs();
         let mut diagnostics = DiagSink::capture();
 
         let rewards = randomise_container_item_rewards(
@@ -1385,6 +1485,7 @@ pub mod tests {
     #[test]
     fn a_weapon_without_a_preset_is_dropped_with_a_warning() {
         let req = container_request();
+        let req = req.refs();
         let mut diagnostics = DiagSink::capture();
 
         let rewards = randomise_container_item_rewards(
@@ -1416,6 +1517,7 @@ pub mod tests {
     #[test]
     fn a_grandchild_of_ammo_passes_the_gate_and_stacks_to_one() {
         let req = container_request();
+        let req = req.refs();
         let mut diagnostics = DiagSink::capture();
 
         let rewards = randomise_container_item_rewards(
@@ -1427,7 +1529,7 @@ pub mod tests {
         .unwrap();
 
         assert!(item_helper::is_of_baseclasses(
-            &req.items_view,
+            req.items_view,
             GRANDCHILD_AMMO_TPL,
             &[AMMO, MONEY]
         ));
@@ -1446,6 +1548,7 @@ pub mod tests {
     #[test]
     fn a_plain_reward_keeps_its_null_upd() {
         let req = container_request();
+        let req = req.refs();
         let mut diagnostics = DiagSink::capture();
 
         let rewards = randomise_container_item_rewards(
@@ -1463,6 +1566,7 @@ pub mod tests {
     #[test]
     fn an_ammo_reward_stacks_between_the_config_floor_and_the_template_ceiling() {
         let req = container_request();
+        let req = req.refs();
         let mut diagnostics = DiagSink::capture();
 
         let rewards = {
@@ -1494,6 +1598,7 @@ pub mod tests {
     #[test]
     fn ammo_without_a_stack_max_size_takes_the_floor_without_drawing() {
         let req = container_request();
+        let req = req.refs();
         let mut diagnostics = DiagSink::capture();
 
         let _guard = TestSeedGuard::install(SEED);
@@ -1527,6 +1632,7 @@ pub mod tests {
     #[test]
     fn money_stacks_come_from_the_currencys_own_rarity_range() {
         let req = container_request();
+        let req = req.refs();
         let mut diagnostics = DiagSink::capture();
         let money = picks(&req, &[ROUBLES, EUROS, DOLLARS, GP]);
 
@@ -1561,16 +1667,15 @@ pub mod tests {
     fn an_unknown_recipe_id_fails_naming_the_recipe() {
         let mut json = container_request_json();
         json["recipeId"] = json!("ffffffffffffffffffffffff");
-        let req: ScavCaseRequest = serde_json::from_value(json).unwrap();
+        let req = fixture(json);
         let mut diagnostics = DiagSink::capture();
 
-        let error = generate(&req, &mut diagnostics).unwrap_err();
+        let error = generate(&req.varying, &req.views, &mut diagnostics).unwrap_err();
 
-        assert!(
-            error.message.contains("ffffffffffffffffffffffff"),
-            "{}",
-            error.message
-        );
+        let ScavCaseError::Failed(message) = error else {
+            panic!("expected the throw's message, got {error:?}");
+        };
+        assert!(message.contains("ffffffffffffffffffffffff"), "{message}");
     }
 
     /// The end-to-end KAT: one seeded `Generate` (`:49-77`) over the synthetic table, pinned reward
@@ -1587,7 +1692,7 @@ pub mod tests {
 
         let response = {
             let _guard = TestSeedGuard::install(SEED);
-            generate(&req, &mut diagnostics).unwrap()
+            generate(&req.varying, &req.views, &mut diagnostics).unwrap()
         };
 
         assert_eq!(
