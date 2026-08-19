@@ -353,13 +353,16 @@ Almost all tests are inline `#[cfg(test)]` modules (~750 of them). Three kinds:
   failure, generation failure and null arguments. `spt_generate_bot_inventory_batch` is the one export with no
   transport test of its own.
 
-Five `tests/` targets: `completion_whitelist_baseclass.rs`, a timing-and-equivalence guard for the
+Seven `tests/` targets: `completion_whitelist_baseclass.rs`, a timing-and-equivalence guard for the
 Completion whitelist filter's base-class lookups (runs against the real shipped `items.json`, so it needs
 `scripts/decompress-assets.sh` to have run); `phase0_publish_spike.rs` (`#[ignore]`d, the Phase 0 publish
-measurements); and `phase1_ragfair_views.rs` / `phase1_quest_views.rs` / `flip3_oneshot_views.rs`
+measurements); `phase1_ragfair_views.rs` / `phase1_quest_views.rs` / `flip3_oneshot_views.rs`
 (`#[ignore]`d), the Rust halves of the
 three views-equivalence harness pairs — each parses an envelope its C# twin (`RagfairViewsEquivalenceTests` /
 `QuestViewsEquivalenceTests` / `OneShotViewsEquivalenceTests`) wrote to `$TMPDIR` and asserts the
-Rust-derived views (for flip #3, the resident-derived walk inputs) equivalent to the C#-built ones.
+Rust-derived views (for flip #3, the resident-derived walk inputs) equivalent to the C#-built ones; and
+`flip4_loot_resident.rs` / `flip5_scavcase_resident.rs`, self-contained resident-arm integration tests —
+each publishes a minimal DB and proves an `{epoch}` send generates identically to the same data sent as
+`viewsOverride`.
 
 Run with `cd rust && cargo test && cargo fmt --check && cargo clippy --all-targets -- -D warnings`.

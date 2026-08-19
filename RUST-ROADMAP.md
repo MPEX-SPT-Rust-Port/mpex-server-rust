@@ -87,8 +87,10 @@ entry and the inherited `ValueType.ToString()`. Scope is `Color` only — mods t
   currency go through the unrounded arm.
 - **The native ragfair and scav case paths are fresher than legacy for runtime-added items** — C#
   caches `AllowedFleaPriceItemsForBarter` (ragfair) and `DbItemsCache`/`DbAmmoItemsCache` (scav
-  case) per generator instance and effectively never invalidates; Rust re-derives per call.
-- **An un-stamped table mutation is invisible to ragfair and the repeatable quests** — the two
+  case) per generator instance and effectively never invalidates; Rust re-derives per call
+  (override sends only since flips #1/#5 — the eligible path is fresh-per-publish; see the flip
+  ledgers).
+- **An un-stamped table mutation is invisible to ragfair and the repeatable quests** — the
   resident-DB families read roots republished only when `DatabaseMutationStamp` moves, and the
   stamp is bumped from five sites only (`SeasonalEventService.UpdateGlobalEvents`,
   `ItemFilterService`'s two blacklist `Add*` methods, `CustomItemService`'s two `Create*`
