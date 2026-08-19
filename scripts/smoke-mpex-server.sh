@@ -5,6 +5,12 @@
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
+
+# Preflight: an already-running server on :6969 would answer the poll below and false-pass.
+if curl -ksf https://127.0.0.1:6969/health > /dev/null 2>&1; then
+    echo "SMOKE ABORT: :6969 already answers /health — stop that server first" >&2
+    exit 1
+fi
 out="$(mktemp -d)"
 server_pid=""
 trap '{ kill "$server_pid" && wait "$server_pid"; } 2>/dev/null || true; rm -rf "$out"' EXIT
