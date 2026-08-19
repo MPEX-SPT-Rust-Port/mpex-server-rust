@@ -25,7 +25,14 @@ public class ScavCaseWireContractTests
         var builder = di.GetService<ScavCaseNativeRequestBuilder>();
         var recipeId = di.GetService<HideoutTable>().Production.ScavRecipes!.First().Id;
 
-        var response = SptNative.GenerateScavCaseRewards(builder.Build(recipeId, 42));
+        var response = SptNative.GenerateScavCaseRewards(
+            new ScavCaseRewardsRequest
+            {
+                Epoch = 0,
+                ViewsOverride = builder.BuildViewsOverride(),
+                Varying = builder.BuildVarying(recipeId, 42),
+            }
+        );
 
         Assert.That(response.Result, Is.Not.Empty);
         Assert.That(response.Result[0], Is.Not.Empty);

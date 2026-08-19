@@ -56,7 +56,7 @@ internal enum LootExport
 
 public static class SptNative
 {
-    private const uint ExpectedAbiVersion = 25;
+    private const uint ExpectedAbiVersion = 26;
 
     // ffi.rs
     private const int StatusOk = 0;
@@ -175,6 +175,7 @@ public static class SptNative
     /// Rolls the rewards of one completed scav case craft.
     /// </summary>
     /// <exception cref="InvalidOperationException">Generation failed, or the native side misbehaved.</exception>
+    /// <exception cref="NativeStaleEpochException">An override-less request named an epoch the resident DB does not hold.</exception>
     public static ScavCaseRewardsResponse GenerateScavCaseRewards(ScavCaseRewardsRequest request)
     {
         return Generate<ScavCaseRewardsResponse>(LootExport.ScavCaseRewards, JsonSerializer.SerializeToUtf8Bytes(request, LootJsonOptions));
