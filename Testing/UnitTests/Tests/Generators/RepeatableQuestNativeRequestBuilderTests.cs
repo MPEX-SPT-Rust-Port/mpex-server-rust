@@ -8,6 +8,7 @@ using SPTarkov.Server.Core.Models.Spt.Config;
 using SPTarkov.Server.Core.Models.Spt.Mod;
 using SPTarkov.Server.Core.Models.Spt.Repeatable;
 using SPTarkov.Server.Core.Native;
+using SPTarkov.Server.Core.Native.Db;
 using SPTarkov.Server.Core.Native.RepeatableQuests;
 
 namespace UnitTests.Tests.Generators;
@@ -37,7 +38,7 @@ public class RepeatableQuestNativeRequestBuilderTests
     [TearDown]
     public void TearDown()
     {
-        _questConfig.TrustNativeRequestCacheWithMods = false;
+        _questConfig.TrustNativeRequestCacheWithMods = true;
         _questConfig.DisableNativeRequestCache = false;
     }
 
@@ -313,6 +314,13 @@ public class RepeatableQuestNativeRequestBuilderTests
     [TestCase(1, true, true, false)]
     public void ResidentDbEligibilityFollowsTheModStateAndTheTwoFlags(int modCount, bool trust, bool disable, bool expected)
     {
+        // Trusting a mod also requires the Ceciler-injected write barriers, which a Debug build
+        // never has - the one mods-loaded row expecting eligibility is the trust-flag one
+        if (modCount > 0 && expected)
+        {
+            expected = WriteBarrier.Installed;
+        }
+
         _questConfig.TrustNativeRequestCacheWithMods = trust;
         _questConfig.DisableNativeRequestCache = disable;
 

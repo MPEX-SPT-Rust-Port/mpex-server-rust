@@ -82,7 +82,7 @@ public class RepeatableQuestPathDispatchTests
     {
         _questConfig.ForceLegacyRepeatableQuestGeneration = false;
         _questConfig.DisableNativeRequestCache = false;
-        _questConfig.TrustNativeRequestCacheWithMods = false;
+        _questConfig.TrustNativeRequestCacheWithMods = true;
         _explorationQuestGenerator.NativeTestSeed = null;
     }
 
@@ -192,6 +192,7 @@ public class RepeatableQuestPathDispatchTests
     {
         var modded = BuildBuilderWithMods();
         var generator = BuildGenerator(modded);
+        _questConfig.TrustNativeRequestCacheWithMods = false;
 
         Generate(generator);
         Generate(generator);
@@ -203,6 +204,11 @@ public class RepeatableQuestPathDispatchTests
     [Test]
     public void TheTrustFlagKeepsTheResidentPathLiveWithModsLoaded()
     {
+        if (!WriteBarrier.Installed)
+        {
+            Assert.Ignore("write barriers are Ceciler-injected in Release builds only");
+        }
+
         var modded = BuildBuilderWithMods();
         var generator = BuildGenerator(modded);
         _questConfig.TrustNativeRequestCacheWithMods = true;

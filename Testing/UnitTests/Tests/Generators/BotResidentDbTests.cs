@@ -95,7 +95,7 @@ public class BotResidentDbTests
     public void OneTimeTearDown()
     {
         _botConfig.DisableNativeRequestCache = false;
-        _botConfig.TrustNativeRequestCacheWithMods = false;
+        _botConfig.TrustNativeRequestCacheWithMods = true;
         // leave the shared container fresher than we found it for whatever fixture runs next
         _stamp.Bump();
     }
@@ -196,14 +196,27 @@ public class BotResidentDbTests
         // The gate only reads Count, so a placeholder element stands in for a real mod
         var modded = BuildBatcherWithMods(DI.GetInstance(), new SptMod[] { null! });
 
-        GenerateWave(modded);
+        _botConfig.TrustNativeRequestCacheWithMods = false;
+        try
+        {
+            GenerateWave(modded);
 
-        Assert.That(modded.LastSendIncludedViewsOverride, Is.True, "a loaded mod without the trust flag disables residency");
+            Assert.That(modded.LastSendIncludedViewsOverride, Is.True, "a loaded mod without the trust flag disables residency");
+        }
+        finally
+        {
+            _botConfig.TrustNativeRequestCacheWithMods = true;
+        }
     }
 
     [Test]
     public void TheTrustFlagKeepsTheResidentPathLiveWithModsLoaded()
     {
+        if (!WriteBarrier.Installed)
+        {
+            Assert.Ignore("write barriers are Ceciler-injected in Release builds only");
+        }
+
         var modded = BuildBatcherWithMods(DI.GetInstance(), new SptMod[] { null! });
 
         _botConfig.TrustNativeRequestCacheWithMods = true;
@@ -219,7 +232,7 @@ public class BotResidentDbTests
         }
         finally
         {
-            _botConfig.TrustNativeRequestCacheWithMods = false;
+            _botConfig.TrustNativeRequestCacheWithMods = true;
         }
     }
 

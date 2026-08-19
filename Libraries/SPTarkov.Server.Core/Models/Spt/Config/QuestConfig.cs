@@ -80,15 +80,15 @@ public record QuestConfig : BaseConfig
     public bool ForceLegacyRepeatableQuestGeneration { get; set; }
 
     /// <summary>
-    ///     Keep the native repeatable-quest resident-DB fast path live even with mods loaded. Off,
-    ///     any loaded mod forces the views override onto every send. On, the instrumented mutation
-    ///     paths (CustomItemService, the item blacklist caches, seasonal events) still trigger a
-    ///     republish, but a mod writing the quest templates, the location table's extracts and boss
-    ///     spawns, or this config's maps directly goes unseen - only enable when your mods don't do
-    ///     that.
+    ///     Keep the native resident-DB fast path live with mods loaded. On by default since the
+    ///     Phase 2 write barriers: the Ceciler-injected barriers on the model setters reachable
+    ///     from the published roots make a mod's scalar writes visible to the mutation stamp
+    ///     without any hand-written bump. Still invisible: container mutations - a mod calling
+    ///     Add/Remove/indexer-set on a table collection - and reflection-driven writes. Turn this
+    ///     off if a mod of yours does that and you see stale game data.
     /// </summary>
     [JsonPropertyName("trustNativeRequestCacheWithMods")]
-    public bool TrustNativeRequestCacheWithMods { get; set; }
+    public bool TrustNativeRequestCacheWithMods { get; set; } = true;
 
     /// <summary>
     ///     Always send the C#-built views override: disables the resident-DB fast path without

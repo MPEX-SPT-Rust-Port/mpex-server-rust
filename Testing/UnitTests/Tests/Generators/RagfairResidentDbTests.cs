@@ -257,16 +257,29 @@ public class RagfairResidentDbTests
         var modded = BuildWithOverloadConstructor(di, new SptMod[] { null! });
         modded.NativeTestSeed = 424242;
 
-        modded.GenerateDynamicOffers();
-        ClearOffers();
-        modded.GenerateDynamicOffers();
+        _ragfairConfig.TrustNativeRequestCacheWithMods = false;
+        try
+        {
+            modded.GenerateDynamicOffers();
+            ClearOffers();
+            modded.GenerateDynamicOffers();
 
-        Assert.That(modded.LastSendIncludedViewsOverride, Is.True, "a loaded mod without the trust flag disables residency");
+            Assert.That(modded.LastSendIncludedViewsOverride, Is.True, "a loaded mod without the trust flag disables residency");
+        }
+        finally
+        {
+            _ragfairConfig.TrustNativeRequestCacheWithMods = true;
+        }
     }
 
     [Test]
     public void TheTrustFlagKeepsTheResidentPathLiveWithModsLoaded()
     {
+        if (!WriteBarrier.Installed)
+        {
+            Assert.Ignore("write barriers are Ceciler-injected in Release builds only");
+        }
+
         var di = DI.GetInstance();
         var modded = BuildWithOverloadConstructor(di, new SptMod[] { null! });
         modded.NativeTestSeed = 424242;
@@ -286,7 +299,7 @@ public class RagfairResidentDbTests
         }
         finally
         {
-            _ragfairConfig.TrustNativeRequestCacheWithMods = false;
+            _ragfairConfig.TrustNativeRequestCacheWithMods = true;
         }
     }
 

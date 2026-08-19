@@ -56,22 +56,36 @@ public class RagfairLinkedItemResidentDbTests
     public void ModsLoadedWithoutTheTrustFlagForceTheViewsOverride()
     {
         var di = DI.GetInstance();
+        var ragfairConfig = di.GetService<RagfairConfig>();
         // The gate only reads Count, so a placeholder element stands in for a real mod
         var modded = new RagfairLinkedItemNativeRequestBuilder(
             di.GetService<TemplateTable>(),
-            di.GetService<RagfairConfig>(),
+            ragfairConfig,
             new SptMod[] { null! },
             di.GetService<DbPublisher>()
         );
 
-        modded.Send();
+        ragfairConfig.TrustNativeRequestCacheWithMods = false;
+        try
+        {
+            modded.Send();
 
-        Assert.That(modded.LastSendIncludedViewsOverride, Is.True, "a loaded mod without the trust flag disables residency");
+            Assert.That(modded.LastSendIncludedViewsOverride, Is.True, "a loaded mod without the trust flag disables residency");
+        }
+        finally
+        {
+            ragfairConfig.TrustNativeRequestCacheWithMods = true;
+        }
     }
 
     [Test]
     public void TheTrustFlagKeepsTheResidentPathLiveWithModsLoaded()
     {
+        if (!WriteBarrier.Installed)
+        {
+            Assert.Ignore("write barriers are Ceciler-injected in Release builds only");
+        }
+
         var di = DI.GetInstance();
         var ragfairConfig = di.GetService<RagfairConfig>();
         var modded = new RagfairLinkedItemNativeRequestBuilder(
@@ -94,7 +108,7 @@ public class RagfairLinkedItemResidentDbTests
         }
         finally
         {
-            ragfairConfig.TrustNativeRequestCacheWithMods = false;
+            ragfairConfig.TrustNativeRequestCacheWithMods = true;
         }
     }
 
