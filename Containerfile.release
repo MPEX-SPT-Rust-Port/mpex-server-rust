@@ -64,4 +64,6 @@ USER spt
 WORKDIR /app
 EXPOSE 6969
 VOLUME /app/user
-ENTRYPOINT ["/app/SPT.Server.Linux"]
+# Phase 6a: the Rust launcher is the executable; it hosts the CLR and runs the server
+# (SPT.Server.Linux remains beside it as a direct-run fallback).
+ENTRYPOINT ["/app/mpex-server"]
