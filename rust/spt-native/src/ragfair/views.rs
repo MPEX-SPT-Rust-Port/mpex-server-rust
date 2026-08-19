@@ -666,6 +666,31 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_default_first_item_tpl_aborts_the_derive_naming_the_tpl() {
+        // Two weapon defaults whose first items share a tpl — C#'s ToDictionary throws at
+        // every forced-loot call (PresetHelper.cs:42-52); the derive aborts the publish
+        // loudly instead, naming the culprit tpl.
+        let globals: GlobalsRoot = serde_json::from_str(
+            r#"{
+            "ItemPresets": {
+                "preset1": {"_id":"preset1","_name":"ak-default",
+                    "_items":[{"_id":"root1","_tpl":"weapon1"}],"_encyclopedia":"weapon1"},
+                "presetDup": {"_id":"presetDup","_name":"ak-clone",
+                    "_items":[{"_id":"rootD","_tpl":"weapon1"}],"_encyclopedia":"weapon1"}
+            }
+        }"#,
+        )
+        .expect("globals fixture parses");
+
+        let error = derive(&templates(), &TradersRoot::default(), &globals)
+            .expect_err("duplicate first-item tpl must abort the derive");
+        assert!(
+            error.contains("'weapon1'"),
+            "error names the culprit tpl: {error}"
+        );
+    }
+
+    #[test]
     fn handbook_and_trader_prices_cover_the_whole_items_table_in_order() {
         let views = views();
 
