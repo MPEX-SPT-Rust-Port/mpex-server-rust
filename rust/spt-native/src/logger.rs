@@ -376,7 +376,9 @@ type ConsoleWriter = Box<dyn Write + Send>;
 /// newline, and a full queue drops it — same policy as before). `Raw` is a verbatim byte
 /// passthrough from `spt_console_write` — no newline synthesis, and senders block rather than
 /// drop, because a prompt must reach the terminal. `Flush` is a drain barrier: the writer thread
-/// flushes and acks, so a stdin read can wait until everything queued before it is visible.
+/// flushes and acks, so a stdin read can wait until everything queued before it is visible. Its ack
+/// channel must have capacity >= 1, never a rendezvous channel: on capacity 0 a requester that gave
+/// up while still holding its `Receiver` alive would park the writer thread inside `ack.send`.
 // `Raw` and `Flush` are constructed by the FFI console entry points, which land in a later commit;
 // until then only tests build them.
 #[allow(dead_code)]
@@ -557,6 +559,11 @@ impl Logger {
 
     /// A clone of the first console sink's channel, for `spt_console_write`'s raw passthrough.
     /// None when no console logger is configured (or every one failed to open).
+    ///
+    /// A caller that stores this clone must drop it before `Logger::close`: a live sender keeps the
+    /// channel connected, so the sink's `worker.join()` waits on a `recv` that never disconnects and
+    /// wedges shutdown and reconfigure. A clone that outlives its `Logger` is also useless — every
+    /// `send` fails once the writer is gone, so raw writes would silently vanish.
     // The FFI caller lands in a later commit; until then this is reachable only from tests.
     #[allow(dead_code)]
     pub(crate) fn console_sender(&self) -> Option<SyncSender<ConsoleMessage>> {
@@ -1148,12 +1155,30 @@ mod tests {
     #[test]
     fn enabled_is_the_level_only_gate_across_entries() {
         let dir = tempfile::TempDir::new().unwrap();
-        let config = file_config(dir.path(), "Warning", "");
+        // Two targets at different levels, each with an exclude filter that suppresses every
+        // category — so both halves of the contract have something to fail against.
+        let config = format!(
+            r#"{{ "loggers": [
+                {{ "type": "File", "logLevel": "Warning", "format": "%message%",
+                   "filePath": {path:?}, "filePattern": "warning.log",
+                   "filters": [{{ "type": "Exclude", "name": ".*", "matchingType": "Regex" }}] }},
+                {{ "type": "File", "logLevel": "Error", "format": "%message%",
+                   "filePath": {path:?}, "filePattern": "error.log",
+                   "filters": [{{ "type": "Exclude", "name": ".*", "matchingType": "Regex" }}] }}
+            ] }}"#,
+            path = dir.path().display().to_string(),
+        );
         let logger = Logger::from_json(config.as_bytes()).unwrap();
+        // Both targets must have opened, or the assertions below go vacuous.
+        assert_eq!(logger.entries.len(), 2);
+
+        // `any`, not `all`: the Warning target admits Warning even though the Error one does not.
         assert!(logger.enabled(LogLevel::Warning));
         assert!(logger.enabled(LogLevel::Critical));
+        // Below every target's level, so no entry admits it.
         assert!(!logger.enabled(LogLevel::Information));
-        // Filters deliberately do not participate: this mirrors the C# IsLogEnabled contract.
+        // Filters deliberately do not participate: exclude-everything would drop these categories
+        // in `emit`, yet `enabled` still says yes. This mirrors the C# IsLogEnabled contract.
         logger.close();
     }
 }
