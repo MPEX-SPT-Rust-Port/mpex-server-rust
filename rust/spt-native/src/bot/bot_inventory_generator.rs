@@ -72,7 +72,6 @@
 use indexmap::{IndexMap, IndexSet};
 use rayon::prelude::*;
 
-use crate::bot::BotContext;
 use crate::bot::bot_equipment_mod_generator::{
     generate_mods_for_equipment, get_bot_randomization_details,
 };
@@ -89,10 +88,11 @@ use crate::bot::models::{
     BotLootCacheWire, BotResultEnvelope, BotSliceWire, BotTemplateWire, BotTypeInventoryWire,
     ChancesWire, EquipmentFilterDetails, GenerateBotInventoryBatchRequest,
     GenerateBotInventoryRequest, GenerateEquipmentPropertiesWire, GenerationWire, PmcConfigWire,
-    RandomisationDetails, SharedBotViewsWire,
+    RandomisationDetails, SharedBotVaryingWire,
 };
+use crate::bot::{BotContext, BotViews, resolve_bot_views};
 use crate::diag::DiagSink;
-use crate::loot::item_helper::{LootError, get_item};
+use crate::loot::item_helper::{LootEpochError, LootError, get_item};
 use crate::loot::models::{DEBUG, Diagnostic, ERROR, Item, ItemView, WARNING};
 use crate::loot::mongo_id;
 use crate::loot::random_util::{TestSeedGuard, get_chance_100, get_weighted_value};
@@ -164,81 +164,48 @@ pub struct DesiredWeapons {
 ///
 /// # Errors
 ///
-/// Everything the four phases raise; see the module docs for the quirks that reach a `throw`.
+/// [`LootEpochError::StaleEpoch`] when an override-less request names an epoch the resident DB
+/// does not hold, otherwise everything the four phases raise; see the module docs for the quirks
+/// that reach a `throw`.
 pub fn generate_inventory(
     request: GenerateBotInventoryRequest,
-) -> Result<BotInventoryResult, LootError> {
+) -> Result<BotInventoryResult, LootEpochError> {
     let GenerateBotInventoryRequest {
+        epoch,
+        views_override,
+        shared,
+        bot,
+        template,
+        loot_pools,
+    } = request;
+
+    // Resolved before the seed guard (scav-case precedent): a stale epoch answers cleanly,
+    // without touching the RNG stream.
+    let views = resolve_bot_views(epoch, views_override)?;
+
+    let BotSliceWire {
         bot_id: _,
         test_seed,
         details,
-        template,
-        loot_pools,
-        handbook_prices,
-        generating_player_level,
-        is_night_time,
-        equipment,
-        bosses,
-        durability,
-        item_spawn_limits,
-        wallet_loot,
-        currency_stack_size,
-        secure_container_ammo_stack_count,
-        disable_loot_on_bot_types,
-        low_profile_gas_block_tpls,
-        loot_item_resource_randomization,
-        pmc_config,
-        repair_kit_weapon,
-        equipment_blacklist,
-        weapon_mod_equipment_blacklist,
-        item_presets,
-        default_presets_by_tpl,
-        config_blacklist,
-        items,
-        mod_pool_slot_order,
-    } = request;
-
+    } = bot;
     let _seed_guard = test_seed.map(TestSeedGuard::install);
 
-    generate_prepared(
-        &SharedBotViewsWire {
-            generating_player_level,
-            is_night_time,
-            equipment,
-            bosses,
-            durability,
-            item_spawn_limits,
-            wallet_loot,
-            currency_stack_size,
-            secure_container_ammo_stack_count,
-            disable_loot_on_bot_types,
-            low_profile_gas_block_tpls,
-            loot_item_resource_randomization,
-            pmc_config,
-            repair_kit_weapon,
-            equipment_blacklist,
-            weapon_mod_equipment_blacklist,
-            item_presets,
-            default_presets_by_tpl,
-            config_blacklist,
-            items,
-            mod_pool_slot_order,
-            // The single-bot path keeps C# level generation and C# filtering: no draw, no variant
-            // pick, and the template arrives pre-filtered exactly as it does today.
-            level_generation: None,
-            template_variants: Vec::new(),
-        },
+    // The single-bot path keeps C# level generation and C# filtering: no draw, no variant pick,
+    // and the template arrives pre-filtered exactly as it does today.
+    Ok(generate_prepared(
+        &shared,
+        &views,
         PreparedBot {
             details,
             template,
             loot_pools,
-            handbook_prices,
         },
-    )
+    )?)
 }
 
-/// One wave in one call: the shared views are parsed once, then every bot is generated against
-/// them, in parallel. Envelope order matches request order.
+/// One wave in one call: the database views are resolved once (resident or override) and the
+/// shared varying block is parsed once, then every bot is generated against them, in parallel.
+/// Envelope order matches request order.
 ///
 /// The clamp feedback loop (`randomisation_clamps`, see the module docs) is NOT applied between
 /// bots here — the C# dispatcher routes any wave that could write nighttime clamps to the per-bot
@@ -261,8 +228,17 @@ pub fn generate_inventory(
 /// A bot that fails comes back as an error envelope; the rest of the wave still generates.
 pub fn generate_inventory_batch(
     request: GenerateBotInventoryBatchRequest,
-) -> Result<BotInventoryBatchResult, LootError> {
-    let GenerateBotInventoryBatchRequest { shared, bots } = request;
+) -> Result<BotInventoryBatchResult, LootEpochError> {
+    let GenerateBotInventoryBatchRequest {
+        epoch,
+        views_override,
+        shared,
+        bots,
+    } = request;
+
+    // Resolved once for the wave, before any bot's seed guard (scav-case precedent): a stale
+    // epoch answers cleanly, without touching any RNG stream.
+    let views = resolve_bot_views(epoch, views_override)?;
 
     let bots = bots
         .into_par_iter()
@@ -289,7 +265,7 @@ pub fn generate_inventory_batch(
                 level_generator::generate_bot_level(
                     level_generation.level_min,
                     level_generation.level_max,
-                    &level_generation.exp_table,
+                    views.exp_table(),
                 )
             } else {
                 (1, 0)
@@ -320,10 +296,9 @@ pub fn generate_inventory_batch(
                 details,
                 template,
                 loot_pools: variant.loot_pools.clone(),
-                handbook_prices: variant.handbook_prices.clone(),
             };
 
-            match generate_prepared(&shared, prepared) {
+            match generate_prepared(&shared, &views, prepared) {
                 Ok(mut result) => {
                     result.level = Some(level);
                     result.exp = Some(exp);
@@ -363,24 +338,23 @@ struct PreparedBot {
     details: BotGenerationDetailsWire,
     template: BotTemplateWire,
     loot_pools: BotLootCacheWire,
-    handbook_prices: IndexMap<String, f64>,
 }
 
 /// `BotInventoryGenerator.GenerateInventory` (`:80-120`) proper - one bot against views the caller
-/// already owns. The seed guard belongs to the caller: on the batch path it has to cover the level
-/// draw, which happens before this.
+/// already resolved. The seed guard belongs to the caller: on the batch path it has to cover the
+/// level draw, which happens before this.
 fn generate_prepared(
-    shared: &SharedBotViewsWire,
+    shared: &SharedBotVaryingWire,
+    views: &BotViews,
     prepared: PreparedBot,
 ) -> Result<BotInventoryResult, LootError> {
     let PreparedBot {
         details,
         template,
         loot_pools,
-        handbook_prices,
     } = prepared;
 
-    let SharedBotViewsWire {
+    let SharedBotVaryingWire {
         is_night_time,
         equipment,
         bosses,
@@ -396,11 +370,7 @@ fn generate_prepared(
         repair_kit_weapon,
         equipment_blacklist,
         weapon_mod_equipment_blacklist,
-        item_presets,
-        default_presets_by_tpl,
         config_blacklist,
-        items,
-        mod_pool_slot_order,
         ..
     } = shared;
 
@@ -412,16 +382,16 @@ fn generate_prepared(
     } = template;
 
     let mut ctx = BotContext {
-        items,
-        mod_pool_slot_order,
+        items: views.items(),
+        mod_pool_slot_order: views.mod_pool_slot_order(),
         bosses,
         durability,
         equipment,
         loot_item_resource_randomization,
         is_night_time: *is_night_time,
         item_blacklist: config_blacklist,
-        default_presets_by_tpl,
-        item_presets,
+        default_presets_by_tpl: views.default_preset_ids(),
+        item_presets: views.item_presets(),
         equipment_blacklist,
         weapon_mod_equipment_blacklist,
         low_profile_gas_block_tpls,
@@ -467,7 +437,7 @@ fn generate_prepared(
         wallet_loot,
         currency_stack_size,
         pmc: pmc_config,
-        handbook_prices: &handbook_prices,
+        handbook_prices: views.handbook_prices(),
         loot_pools: &loot_pools,
     };
     generate_loot(
@@ -1333,12 +1303,20 @@ mod tests {
 
     fn base_request() -> Value {
         json!({
-            "botId": "bbbbbbbbbbbbbbbbbbbbbbbb",
-            "testSeed": SEED,
-            "details": {"role": "assault", "roleLowercase": "assault", "side": "Savage",
-                "botLevel": 15, "isPmc": false, "isPlayerScav": false, "gameVersion": "standard",
-                "location": "bigmap", "botDifficulty": "normal",
-                "clearBotContainerCacheAfterGeneration": false},
+            "epoch": 0,
+            "viewsOverride": {
+                "items": items(),
+                "itemPresets": {},
+                "defaultPresetsByTpl": {},
+            },
+            "bot": {
+                "botId": "bbbbbbbbbbbbbbbbbbbbbbbb",
+                "testSeed": SEED,
+                "details": {"role": "assault", "roleLowercase": "assault", "side": "Savage",
+                    "botLevel": 15, "isPmc": false, "isPlayerScav": false, "gameVersion": "standard",
+                    "location": "bigmap", "botDifficulty": "normal",
+                    "clearBotContainerCacheAfterGeneration": false},
+            },
             "template": {
                 "inventory": {
                     // Insertion order is the `:234` loop order.
@@ -1370,44 +1348,46 @@ mod tests {
                 },
                 "generation": {"items": zero_loot_counts()},
             },
-            "generatingPlayerLevel": 20,
-            "isNightTime": false,
-            "equipment": {"assault": {}},
-            "bosses": [],
-            "durability": {
-                "default": {"armor": {"maxDelta": 10, "minDelta": 0, "minLimitPercent": 15},
-                    "weapon": {"lowestMax": 60, "highestMax": 100, "maxDelta": 10, "minDelta": 0,
-                               "minLimitPercent": 15}},
-                "botDurabilities": {},
-                "pmc": {"armor": {"lowestMaxPercent": 90, "highestMaxPercent": 100, "maxDelta": 10,
-                                  "minDelta": 0, "minLimitPercent": 15},
-                    "weapon": {"lowestMax": 95, "highestMax": 100, "maxDelta": 5, "minDelta": 0,
-                               "minLimitPercent": 15}}},
-            "itemSpawnLimits": {"assault": {}, "pmc": {}},
-            "walletLoot": {"chancePercent": 0, "itemCount": {"min": 0, "max": 0},
-                "stackSizeWeight": {}, "currencyWeight": {}, "walletTplPool": []},
-            "currencyStackSize": {},
-            "secureContainerAmmoStackCount": 0,
-            "disableLootOnBotTypes": [],
-            "lowProfileGasBlockTpls": [],
-            "lootItemResourceRandomization": {},
-            "pmcConfig": {},
-            "repairKitWeapon": {"rarityWeight": {}, "bonusTypeWeight": {}, "Common": {},
-                "Rare": {}},
-            "equipmentBlacklist": {},
-            "weaponModEquipmentBlacklist": {},
             "lootPools": {},
-            "itemPresets": {},
-            "defaultPresetsByTpl": {},
-            "presetsById": {},
-            "configBlacklist": [],
-            "handbookPrices": {},
-            "items": items(),
+            "shared": {
+                "generatingPlayerLevel": 20,
+                "isNightTime": false,
+                "equipment": {"assault": {}},
+                "bosses": [],
+                "durability": {
+                    "default": {"armor": {"maxDelta": 10, "minDelta": 0, "minLimitPercent": 15},
+                        "weapon": {"lowestMax": 60, "highestMax": 100, "maxDelta": 10, "minDelta": 0,
+                                   "minLimitPercent": 15}},
+                    "botDurabilities": {},
+                    "pmc": {"armor": {"lowestMaxPercent": 90, "highestMaxPercent": 100, "maxDelta": 10,
+                                      "minDelta": 0, "minLimitPercent": 15},
+                        "weapon": {"lowestMax": 95, "highestMax": 100, "maxDelta": 5, "minDelta": 0,
+                                   "minLimitPercent": 15}}},
+                "itemSpawnLimits": {"assault": {}, "pmc": {}},
+                "walletLoot": {"chancePercent": 0, "itemCount": {"min": 0, "max": 0},
+                    "stackSizeWeight": {}, "currencyWeight": {}, "walletTplPool": []},
+                "currencyStackSize": {},
+                "secureContainerAmmoStackCount": 0,
+                "disableLootOnBotTypes": [],
+                "lowProfileGasBlockTpls": [],
+                "lootItemResourceRandomization": {},
+                "pmcConfig": {},
+                "repairKitWeapon": {"rarityWeight": {}, "bonusTypeWeight": {}, "Common": {},
+                    "Rare": {}},
+                "equipmentBlacklist": {},
+                "weaponModEquipmentBlacklist": {},
+                "configBlacklist": [],
+            },
         })
     }
 
+    /// Every failure these tests provoke is the family's fatal error (the C# throw path) — a
+    /// stale epoch cannot happen on an override send.
     fn generate(request: Value) -> Result<BotInventoryResult, LootError> {
-        generate_inventory(serde_json::from_value(request).unwrap())
+        generate_inventory(serde_json::from_value(request).unwrap()).map_err(|error| match error {
+            LootEpochError::Loot(error) => error,
+            LootEpochError::StaleEpoch => panic!("unexpected stale epoch"),
+        })
     }
 
     /// `slotId` → tpl, in generation order, with the six inventory roots stripped.
@@ -1519,7 +1499,7 @@ mod tests {
         assert_eq!(rolled(base_request()), rolled(base_request()));
 
         let mut other = base_request();
-        other["testSeed"] = json!(SEED + 1);
+        other["bot"]["testSeed"] = json!(SEED + 1);
         // Same equipment (every chance is 100%), different durability and ammo-stack rolls.
         assert_ne!(rolled(base_request()), rolled(other));
     }
@@ -1527,8 +1507,8 @@ mod tests {
     #[test]
     fn nighttime_clamps_are_recorded_but_change_nothing_this_call() {
         let mut request = base_request();
-        request["isNightTime"] = json!(true);
-        request["equipment"]["assault"] = json!({
+        request["shared"]["isNightTime"] = json!(true);
+        request["shared"]["equipment"]["assault"] = json!({
             "randomisation": [{
                 "levelRange": {"min": 1, "max": 99},
                 "equipmentMods": {"front_plate": 40, "mod_nvg": 95, "mod_absent_modifier": 10},
@@ -1555,51 +1535,44 @@ mod tests {
         // mod chances still come from the bot template's `equipmentMods` (100), unchanged.
         let baseline = worn(&generate(base_request()).unwrap());
         let mut night = base_request();
-        night["isNightTime"] = json!(true);
+        night["shared"]["isNightTime"] = json!(true);
         assert_eq!(worn(&generate(night).unwrap()), baseline);
     }
 
-    /// The flat single-bot request is shared views + slice merged; split it back apart. The three
+    /// The single-bot request reshaped into a batch envelope with one slice pulled out. The two
     /// level-banded members become one variant covering every level a fixture can draw, which is
     /// the shape a non-PMC wave sends (`[1..1]`, widened here so PMC fixtures can reuse it).
     fn split_batch(request: Value) -> (Value, Value) {
-        const SLICE_KEYS: [&str; 3] = ["botId", "testSeed", "details"];
-
-        let mut shared = request;
-        let object = shared.as_object_mut().unwrap();
-        let mut slice = serde_json::Map::new();
-        for key in SLICE_KEYS {
-            if let Some(value) = object.remove(key) {
-                slice.insert(key.to_string(), value);
-            }
-        }
+        let mut envelope = request;
+        let object = envelope.as_object_mut().unwrap();
+        let slice = object.remove("bot").unwrap();
 
         let variant = json!({
             "levelMin": 1,
             "levelMax": 99,
             "template": object.remove("template").unwrap(),
             "lootPools": object.remove("lootPools").unwrap(),
-            "handbookPrices": object.remove("handbookPrices").unwrap(),
         });
-        object.insert("templateVariants".to_owned(), json!([variant]));
+        object.get_mut("shared").unwrap()["templateVariants"] = json!([variant]);
 
-        (shared, Value::Object(slice))
+        (envelope, slice)
     }
 
-    fn batch(shared: Value, bots: Vec<Value>) -> Vec<BotResultEnvelope> {
-        let request = serde_json::from_value(json!({"shared": shared, "bots": bots})).unwrap();
+    fn batch(mut envelope: Value, bots: Vec<Value>) -> Vec<BotResultEnvelope> {
+        envelope["bots"] = json!(bots);
+        let request = serde_json::from_value(envelope).unwrap();
 
         generate_inventory_batch(request).unwrap().bots
     }
 
     #[test]
     fn batch_isolates_a_failing_bot() {
-        let (mut shared, good) = split_batch(base_request());
+        let (mut envelope, good) = split_batch(base_request());
 
         // Poison a role the good bot does not use: night + nighttimeChanges configured but no
         // equipmentMods is the error return at the top of equipment generation.
-        shared["isNightTime"] = json!(true);
-        shared["equipment"]["poisoned"] = json!({
+        envelope["shared"]["isNightTime"] = json!(true);
+        envelope["shared"]["equipment"]["poisoned"] = json!({
             "randomisation": [{
                 "levelRange": {"min": 1, "max": 99},
                 "nighttimeChanges": {"equipmentModsModifiers": {"front_plate": 30}},
@@ -1608,7 +1581,7 @@ mod tests {
         let mut bad = good.clone();
         bad["details"]["roleLowercase"] = json!("poisoned");
 
-        let bots = batch(shared, vec![good, bad]);
+        let bots = batch(envelope, vec![good, bad]);
 
         assert_eq!(bots.len(), 2);
         assert!(bots[0].result.is_some());
@@ -1626,11 +1599,11 @@ mod tests {
     #[test]
     fn a_non_pmc_bot_reports_level_one_and_no_exp() {
         let mut single = base_request();
-        single["details"]["botLevel"] = json!(1);
+        single["bot"]["details"]["botLevel"] = json!(1);
         let expected = worn(&generate(single).unwrap());
 
-        let (shared, slice) = split_batch(base_request());
-        let bots = batch(shared, vec![slice]);
+        let (envelope, slice) = split_batch(base_request());
+        let bots = batch(envelope, vec![slice]);
 
         let result = bots[0].result.as_ref().unwrap();
         assert_eq!((result.level, result.exp), (Some(1), Some(0)));
@@ -1640,14 +1613,14 @@ mod tests {
     /// A PMC slice with no `levelGeneration` on shared fails alone, like any per-bot error.
     #[test]
     fn a_pmc_wave_without_level_inputs_errors_per_bot() {
-        let (shared, mut pmc) = split_batch(base_request());
+        let (envelope, mut pmc) = split_batch(base_request());
         pmc["details"]["isPmc"] = json!(true);
         let good = {
             let (_, slice) = split_batch(base_request());
             slice
         };
 
-        let bots = batch(shared, vec![pmc, good]);
+        let bots = batch(envelope, vec![pmc, good]);
 
         assert!(bots[0].result.is_none());
         assert!(
@@ -1664,11 +1637,11 @@ mod tests {
     /// A drawn level outside every variant is an error envelope, not a panic.
     #[test]
     fn a_level_outside_variant_coverage_is_an_error_envelope() {
-        let (mut shared, slice) = split_batch(base_request());
-        shared["templateVariants"][0]["levelMin"] = json!(5);
-        shared["templateVariants"][0]["levelMax"] = json!(9);
+        let (mut envelope, slice) = split_batch(base_request());
+        envelope["shared"]["templateVariants"][0]["levelMin"] = json!(5);
+        envelope["shared"]["templateVariants"][0]["levelMax"] = json!(9);
 
-        let bots = batch(shared, vec![slice]);
+        let bots = batch(envelope, vec![slice]);
 
         assert!(bots[0].result.is_none());
         assert_eq!(
@@ -1682,19 +1655,19 @@ mod tests {
     #[test]
     fn a_seeded_pmc_batch_is_reproducible_including_its_level() {
         let pmc_wave = || {
-            let (mut shared, mut slice) = split_batch(base_request());
+            let (mut envelope, mut slice) = split_batch(base_request());
             slice["details"]["isPmc"] = json!(true);
-            // 79 levels of 1000 exp: a real biased draw plus a fractional-exp draw.
-            shared["levelGeneration"] = json!({
-                "levelMin": 5, "levelMax": 30, "expTable": vec![1000; 79],
-            });
-            (shared, slice)
+            // 79 levels of 1000 exp: a real biased draw plus a fractional-exp draw. The exp table
+            // rides on the views now; the band stays on the shared block.
+            envelope["shared"]["levelGeneration"] = json!({"levelMin": 5, "levelMax": 30});
+            envelope["viewsOverride"]["expTable"] = json!(vec![1000; 79]);
+            (envelope, slice)
         };
         // `MongoId`s come from process entropy, not the seeded stream, so the comparable part of a
         // run is every field except the ids.
         let rolled = || {
-            let (shared, slice) = pmc_wave();
-            let bots = batch(shared, vec![slice]);
+            let (envelope, slice) = pmc_wave();
+            let bots = batch(envelope, vec![slice]);
             let result = bots[0].result.as_ref().unwrap();
             let items: Vec<_> = result
                 .inventory
@@ -1730,25 +1703,25 @@ mod tests {
 
         let wave = |game_version: &str| {
             let mut request = base_request();
-            request["items"][POCKETS_1X4_TUE] = json!({"name": "tue pockets",
+            request["viewsOverride"]["items"][POCKETS_1X4_TUE] = json!({"name": "tue pockets",
                 "grids": [{"name": "main", "cellsH": 4, "cellsV": 1}]});
-            request["items"][POCKET_LOOT_TPL] = json!({"name": "bandage", "width": 1, "height": 1});
+            request["viewsOverride"]["items"][POCKET_LOOT_TPL] =
+                json!({"name": "bandage", "width": 1, "height": 1});
             request["lootPools"] = json!({"pocketLoot": {POCKET_LOOT_TPL: 1}});
             // A lone zero-weight entry short-circuits `GetWeightedValue` without drawing, so the
             // pocket count is 0 unless the unheard insertion adds the 5/6 entries.
             request["template"]["generation"]["items"]["pocketLoot"] = json!({"weights": {"0": 0}});
 
-            let (mut shared, mut slice) = split_batch(request);
+            let (mut envelope, mut slice) = split_batch(request);
             slice["details"]["isPmc"] = json!(true);
             slice["details"]["gameVersion"] = json!(game_version);
-            shared["levelGeneration"] = json!({
-                "levelMin": 1, "levelMax": 1, "expTable": [1000],
-            });
-            (shared, slice)
+            envelope["shared"]["levelGeneration"] = json!({"levelMin": 1, "levelMax": 1});
+            envelope["viewsOverride"]["expTable"] = json!([1000]);
+            (envelope, slice)
         };
         let pocket_loot_count = |game_version: &str| {
-            let (shared, slice) = wave(game_version);
-            let bots = batch(shared, vec![slice]);
+            let (envelope, slice) = wave(game_version);
+            let bots = batch(envelope, vec![slice]);
 
             worn(bots[0].result.as_ref().unwrap())
                 .iter()
@@ -1837,7 +1810,7 @@ mod tests {
         );
 
         let mut cleared = base_request();
-        cleared["details"]["clearBotContainerCacheAfterGeneration"] = json!(true);
+        cleared["bot"]["details"]["clearBotContainerCacheAfterGeneration"] = json!(true);
         assert!(generate(cleared).unwrap().container_grids.is_empty());
     }
 
@@ -1874,9 +1847,9 @@ mod tests {
     #[test]
     fn an_unheard_pmc_gets_the_tue_pockets() {
         let mut request = base_request();
-        request["details"]["isPmc"] = json!(true);
-        request["details"]["gameVersion"] = json!(UNHEARD);
-        request["items"][POCKETS_1X4_TUE] =
+        request["bot"]["details"]["isPmc"] = json!(true);
+        request["bot"]["details"]["gameVersion"] = json!(UNHEARD);
+        request["viewsOverride"]["items"][POCKETS_1X4_TUE] =
             json!({"name": "tue pockets", "grids": [{"name": "main", "cellsH": 4, "cellsV": 1}]});
 
         let result = generate(request).unwrap();
@@ -1887,10 +1860,10 @@ mod tests {
     #[test]
     fn armband_forcing_narrows_the_pool_but_writes_the_chance_to_a_dead_key() {
         let mut request = base_request();
-        request["details"]["isPmc"] = json!(true);
-        request["details"]["roleLowercase"] = json!("pmcbear");
-        request["equipment"] = json!({"pmc": {}});
-        request["pmcConfig"] = json!({
+        request["bot"]["details"]["isPmc"] = json!(true);
+        request["bot"]["details"]["roleLowercase"] = json!("pmcbear");
+        request["shared"]["equipment"] = json!({"pmc": {}});
+        request["shared"]["pmcConfig"] = json!({
             "forceArmband": {"enabled": true, "usec": "armband_usec", "bear": FORCED_ARMBAND_TPL},
         });
         // The real chance key stays untouched, so dropping it to 0 still loses the slot even though
@@ -1903,10 +1876,10 @@ mod tests {
 
         // With the real key restored, the pool is the single forced tpl.
         let mut request = base_request();
-        request["details"]["isPmc"] = json!(true);
-        request["details"]["roleLowercase"] = json!("pmcbear");
-        request["equipment"] = json!({"pmc": {}});
-        request["pmcConfig"] = json!({
+        request["bot"]["details"]["isPmc"] = json!(true);
+        request["bot"]["details"]["roleLowercase"] = json!("pmcbear");
+        request["shared"]["equipment"] = json!({"pmc": {}});
+        request["shared"]["pmcConfig"] = json!({
             "forceArmband": {"enabled": true, "usec": "armband_usec", "bear": FORCED_ARMBAND_TPL},
         });
 
@@ -1917,7 +1890,7 @@ mod tests {
     #[test]
     fn an_unknown_equipment_role_stops_the_equipment_phase_without_failing() {
         let mut request = base_request();
-        request["equipment"] = json!({"pmc": {}});
+        request["shared"]["equipment"] = json!({"pmc": {}});
         // The weapon path indexes `BotConfig.Equipment[botRole]` too, and would throw right after;
         // rolling no primary keeps this test on the equipment phase.
         request["template"]["chances"]["equipment"]["FirstPrimaryWeapon"] = json!(0);
@@ -1946,7 +1919,7 @@ mod tests {
     #[test]
     fn forcing_a_rig_when_there_is_no_armour_overrides_the_slot_chance() {
         let mut request = base_request();
-        request["equipment"]["assault"] = json!({"forceRigWhenNoVest": true});
+        request["shared"]["equipment"]["assault"] = json!({"forceRigWhenNoVest": true});
         request["template"]["chances"]["equipment"]["ArmorVest"] = json!(0);
         request["template"]["chances"]["equipment"]["TacticalVest"] = json!(0);
 

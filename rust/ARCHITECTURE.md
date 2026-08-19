@@ -321,24 +321,27 @@ These are what keep the port correct; break one and output silently diverges fro
   stream onto a pooled thread.
 - **Caches become per-call derivation.** C# DI singletons keyed by bot id or built over the whole database
   (`BotEquipmentModPoolService`, `BotInventoryContainerService`) are recomputed per call or handed across the
-  boundary by the caller. The unit is one bot, not one raid: the batch export hoists the views every bot in
-  the wave shares (`SharedBotViewsWire`) and still derives the rest per bot, each with its own seed guard.
-- **The bot batch request is `{shared, bots[]}`, and the slice is down to three members.** `BotSliceWire` is
-  `botId` + `testSeed` + `details`; the template and the two loot views it used to carry moved onto
-  `SharedBotViewsWire.templateVariants`, one entry per *level band* rather than per bot (`levelMin`,
-  `levelMax`, `template`, `lootPools`, `handbookPrices` — ascending, contiguous, covering the wave's range).
-  Alongside them rides `levelGeneration` (`levelMin`/`levelMax`/`expTable`), present iff the wave is PMC.
-  Each bot's rayon task opens with its seed guard, then `level_generator::generate_bot_level` — the *first*
-  seeded draw, matching where the C# prelude does it — writes the drawn level over `details.bot_level` (the
-  caller sends 0), picks the first variant covering it, and clones that variant's three members. Non-PMC
-  draws nothing and takes the constant `(1, 0)`, so non-PMC seeded streams are unchanged. The drawn `level`
-  and `exp` ride back on `BotInventoryResult`; both are omitted from the single-bot response, whose request
-  and reply shapes are untouched (it keeps C# level generation and C# filtering).
+  boundary by the caller. The unit is one bot, not one raid: the batch export hoists the config every bot in
+  the wave shares (`SharedBotVaryingWire`), resolves the database views once per call (`resolve_bot_views` —
+  the resident `BotDbViews` or a `viewsOverride` block), and still derives the rest per bot, each with its
+  own seed guard.
+- **Both bot requests ride the `{epoch, viewsOverride?, …}` envelope; the batch is `{…, shared, bots[]}` and
+  the slice is down to three members.** `BotSliceWire` is `botId` + `testSeed` + `details`; the template and
+  loot pools it used to carry moved onto `SharedBotVaryingWire.templateVariants`, one entry per *level band*
+  rather than per bot (`levelMin`, `levelMax`, `template`, `lootPools` — ascending, contiguous, covering the
+  wave's range). Alongside them rides `levelGeneration` (`levelMin`/`levelMax`), present iff the wave is PMC;
+  the exp table the draw sums out of lives on the views. Each bot's rayon task opens with its seed guard,
+  then `level_generator::generate_bot_level` — the *first* seeded draw, matching where the C# prelude does
+  it — writes the drawn level over `details.bot_level` (the caller sends 0), picks the first variant covering
+  it, and clones that variant's members. Non-PMC draws nothing and takes the constant `(1, 0)`, so non-PMC
+  seeded streams are unchanged. The drawn `level` and `exp` ride back on `BotInventoryResult`; both are
+  omitted from the single-bot response, whose reply bytes are unchanged (it keeps C# level generation and
+  C# filtering, sending its pre-filtered `template`/`lootPools` at the top level).
   **The batch reply is `{bots: [{result?|error?}]}`**, one envelope per slice in request order with exactly
   one member set. A bot that fails carries its message there instead of failing the export — the wave
   survives it, the way `BotController.TryGenerateSingleBot` skips a failed bot with one Critical log. The
-  export itself never returns `STATUS_ERROR`: only a malformed request or a panic (rayon re-raises a
-  worker's) reaches the status codes above.
+  export itself never returns `STATUS_ERROR`: only a malformed request, a stale epoch
+  (`STATUS_STALE_EPOCH`) or a panic (rayon re-raises a worker's) reaches the status codes above.
 
 ## Tests
 
