@@ -9,10 +9,11 @@ namespace SPTarkov.Server.Core.Native.Db;
 
 /// <summary>
 /// The full-table publish envelope of <c>spt_db_publish</c> — the roots the resident DB holds
-/// (templates, traders, globals, and a locations root of Base + AllExtracts + the three statics
-/// the loot flip reads; looseLoot and staticAmmo never serialize). Serialized with the server's
-/// shared options so the models' <c>JsonPropertyName</c>s stay the wire authority, exactly like
-/// the per-family payloads before it.
+/// (templates, traders, globals, a locations root of Base + AllExtracts + the three statics
+/// the loot flip reads — looseLoot and staticAmmo never serialize — and a hideout root of
+/// production.scavRecipes only). Serialized with the server's shared options so the models'
+/// <c>JsonPropertyName</c>s stay the wire authority, exactly like the per-family payloads
+/// before it.
 /// </summary>
 internal static class DbPayloadProjection
 {
@@ -30,7 +31,8 @@ internal static class DbPayloadProjection
         TemplateTable templateTable,
         TradersTable tradersTable,
         GlobalTable globalTable,
-        LocationTable locationTable
+        LocationTable locationTable,
+        HideoutTable hideoutTable
     )
     {
         var options = JsonUtil.JsonSerializerOptionsNoIndent ?? throw new InvalidOperationException("JsonUtil has not been built yet.");
@@ -77,6 +79,20 @@ internal static class DbPayloadProjection
                 writer.WriteRawValue(JsonSerializer.SerializeToUtf8Bytes(location?.Statics, options), skipInputValidation: true);
                 writer.WriteEndObject();
             }
+            writer.WriteEndObject();
+            // Flip #5: production.scavRecipes only — the scav case family's whole read set. The
+            // full recipe objects serialize (the Rust side flattens unknown keys), so the models'
+            // JsonPropertyNames (_id, endProducts, Common/Rare/Superrare) stay the wire authority.
+            writer.WritePropertyName("hideout");
+            writer.WriteStartObject();
+            writer.WritePropertyName("production");
+            writer.WriteStartObject();
+            writer.WritePropertyName("scavRecipes");
+            writer.WriteRawValue(
+                JsonSerializer.SerializeToUtf8Bytes(hideoutTable.Production.ScavRecipes ?? [], options),
+                skipInputValidation: true
+            );
+            writer.WriteEndObject();
             writer.WriteEndObject();
             writer.WriteEndObject();
             writer.WriteEndObject();

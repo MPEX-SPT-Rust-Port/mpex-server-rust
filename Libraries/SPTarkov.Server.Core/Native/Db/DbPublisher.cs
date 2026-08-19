@@ -22,7 +22,8 @@ public class DbPublisher(
     TemplateTable templateTable,
     TradersTable tradersTable,
     GlobalTable globalTable,
-    LocationTable locationTable
+    LocationTable locationTable,
+    HideoutTable hideoutTable
 )
 {
     private readonly Lock _gate = new();
@@ -63,7 +64,7 @@ public class DbPublisher(
         handbookHelper.IsCategory(Money.ROUBLES);
 
         _currentEpoch = SptNative.DbPublish(
-            DbPayloadProjection.BuildPublishEnvelope(templateTable, tradersTable, globalTable, locationTable)
+            DbPayloadProjection.BuildPublishEnvelope(templateTable, tradersTable, globalTable, locationTable, hideoutTable)
         );
         _lastPublishedStamp = stamp;
     }
