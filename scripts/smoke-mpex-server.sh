@@ -7,7 +7,7 @@ set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 out="$(mktemp -d)"
 server_pid=""
-trap '[ -n "$server_pid" ] && kill "$server_pid" 2>/dev/null; rm -rf "$out"' EXIT
+trap '{ kill "$server_pid" && wait "$server_pid"; } 2>/dev/null || true; rm -rf "$out"' EXIT
 
 # BuildSptNative runs `cargo build --locked` at the workspace root during publish, so this
 # also produces rust/target/debug/mpex-server — no separate cargo invocation needed.
