@@ -156,6 +156,50 @@ Separate invocations per path, two of each.
 The `.so` is unstripped — `rust/Cargo.toml` sets `debug = "line-tables-only"` on the release profile
 and nothing strips it. Stripped it is a fraction of that; the size does not affect any timing here.
 
+`f6c40fa` — 2026-08-19, post resident-DB flip (phase 1 flip #4, ABI 25). Same fixture shape and
+workload. The native arm now rides the resident DB: `DbPublisher.EnsureCurrent` publishes the
+four roots once (absorbed in warmup — the locations root gained the three statics lifts for this
+flip, ~19 MB serialized from each `LazyLoad.Value` so registered transformers apply) and every
+timed pass sends `{epoch, varying}` only — the ~22 MB per-call items-view projection is gone
+from eligible sends. `BuildVarying`/`BuildViewsOverride` replace the old whole-projection
+`BuildCommonPayload`: the override is the ineligible caller's per-call cost at the pre-flip
+shape, no part of the eligible pass (this fixture times no projection arm; it never did).
+looseLoot still crosses per call, as the raw splice inside the varying block.
+
+| Path | median | median (2nd run) | mean | min | max | alloc/run | GC gen0/1/2 |
+|---|---|---|---|---|---|---|---|
+| native (rust, resident db) | **327.82 ms** | 318.38 ms | 326.84 ms | 260.88 ms | 382.39 ms | 83.9 MB | 12/7/4 |
+| legacy (C# 4.1.2) | 995.85 ms | 1009.40 ms | 988.39 ms | 850.17 ms | 1142.31 ms | 315.2 MB | 805/681/15 |
+
+Speedup: **3.04x** (3.17x on the second invocation) against the pre-flip 2.21x — the win
+widened, all of it on the native arm (461.92 → 327.82 ms; the legacy arm is code-identical and
+its 1019.11 → 995.85 ms move is inside the noise bar). Managed allocation: native 104.8 →
+83.9 MB/run, **3.76x** less than legacy (pre-flip 2.97x).
+
+The statics made the publish dearer — the accepted per-*mutation* price of this flip. The forced
+publish (the ragfair fixture's `publish (4 roots, forced)` arm, n=5 after 1 warmup, measured in
+the same sitting) reads **730.08 ms** median (749.33 ms on the second invocation) against
+flip #2's 471.64 ms: a ~+260 ms delta that is the statics' own serialize + copy + parse share —
+~19 MB of `LazyLoad.Value` reads, in line with Phase 0's per-root rates (22.4 MiB of templates
+cost 391.7 ms warm projection alone), not an anomaly. Every family's republish now pays it;
+per-root dirty tracking is the named upgrade path if the per-mutation cost ever matters. Nothing
+per-call moved for it: ragfair's own arms held (full pass native 520.95 ms against flip #1's
+520.25 ms; regeneration 12.56 against 12.06 ms), while ragfair's publish-cold arm now reads
+752.75 ms for republishing the statics-bearing envelope every run.
+
+Peak working set, separate invocations per path, two of each:
+
+| Path | process peak RSS | settled RSS | managed heap | alloc/run |
+|---|---|---|---|---|
+| native (rust, resident db) | 2183 / 2107 MB | 2141 / 2030 MB | 400 MB | 84.0 / 84.1 MB |
+| legacy (C# 4.1.2) | 1689 / 1723 MB | 1464 / 1445 MB | 399 MB | 312.8 / 314.4 MB |
+
+The accepted price is resident memory: the native process now peaks ~380–490 MB above legacy
+(pre-flip: ~190–360 MB above), carrying the four published roots plus the statics lifts —
+the shape Phase 0 priced (405.2 MiB `Value`-bound RSS delta, before the statics joined). Read
+the gap, not the absolutes: legacy's own peak moved 1415/1356 → 1689/1723 MB on unchanged code,
+so the sitting drifted too. The `.so` is 21.85 MB this sitting (was 20.29 MB), still unstripped.
+
 ## Airdrop loot
 
 `06825b3` — 2026-08-17. One `LootGenerator.CreateRandomLoot` call, n=20 after 2 warmups.
@@ -166,6 +210,24 @@ and nothing strips it. Stripped it is a fraction of that; the size does not affe
 | **legacy (C# 4.1.2)** | **15.05 ms** | 14.37 ms | 14.55 ms | 4.53 ms | 28.12 ms |
 
 Speedup: **0.20x** (0.18x on the second invocation) — ~5x slower.
+
+`f6c40fa` — 2026-08-19, post resident-DB flip (phase 1 flip #4, ABI 25). Same fixture shape and
+workload. The native arm now rides the resident DB: an eligible send is `{epoch, varying}` —
+the whole-items-view serialisation that was the cost of this path per call is gone from
+eligible sends, surviving only as the ineligible `viewsOverride` arm. The reward
+exports read the resident preset views (`defaultPresets` here; sealed's resident arm builds no
+`presetsByTpl` at all any more); the six service-backed blacklists/sets ride the varying block.
+
+| Path | median | median (2nd run) | mean | min | max |
+|---|---|---|---|---|---|
+| **native (rust, resident db)** | **1.57 ms** | 1.62 ms | 1.73 ms | 1.41 ms | 2.54 ms |
+| **legacy (C# 4.1.2)** | **19.69 ms** | 20.93 ms | 19.92 ms | 6.42 ms | 30.81 ms |
+
+Speedup: **12.52x** (12.96x on the second invocation), against the pre-flip **0.20x** —
+residency did not just close the ~5x deficit, it inverted it: the pre-flip native median
+(75.55 ms) was almost entirely the per-call items-view projection and serialisation, and what
+remains is a ~1.6 ms generation pass. The legacy arm is code-identical to pre-flip; its
+15.05 → 19.69 ms move (min 6.42) is the sitting.
 
 ## Bot generation
 

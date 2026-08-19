@@ -35,7 +35,7 @@ the mold linker on Linux. Both profiles use one codegen unit; release adds fat L
 
 | Path | Role |
 |---|---|
-| `src/lib.rs` | Module roots and `ABI_VERSION` (currently 24; must equal `SptNative.ExpectedAbiVersion`) |
+| `src/lib.rs` | Module roots and `ABI_VERSION` (currently 25; must equal `SptNative.ExpectedAbiVersion`) |
 | `src/ffi.rs` | The C-ABI surface. The **only** module containing `unsafe` |
 | `src/runtime.rs` | Process-wide multi-thread tokio runtime, `OnceLock`-built. Used only by `verify` |
 | `src/verify.rs` | Hashes `SPT_Data` with XXH3-128 and diffs it against `checks.dat` |
@@ -76,21 +76,31 @@ C# SptNative → spt_generate_* (JSON in)
   `spt_verify_database` is separate because it blocks on the tokio runtime.
 - Status codes: `STATUS_OK` 0, `STATUS_BAD_ARGS` 1 (null pointer, bad UTF-8, unparseable JSON), `STATUS_PANIC`
   2 (message in the out-buffer since ABI 18), `STATUS_ERROR` 3, `STATUS_STALE_EPOCH` 4 (the resident-DB
-  riders only: ragfair, quest, base-class, linked-items). **Quest and scav case never return 2**: they catch the generator's panic themselves and report it as
+  riders only: ragfair, quest, base-class, linked-items, and the six loot exports). **Quest and scav case never return 2**: they catch the generator's panic themselves and report it as
   3 carrying the message, because those families port a C#-sanctioned throw as a panic — a generation failure,
   not a library bug. The cost is that a real port bug in those two also arrives as 3, indistinguishable from a
   sanctioned failure. Deliberate.
-- **Four families ride the resident DB: ragfair, the repeatable quest, and the two startup one-shots
-  (base-class cache, linked-item table).** `spt_db_publish` (called by C#'s
+- **Six families ride the resident DB: ragfair, the repeatable quest, the two startup one-shots
+  (base-class cache, linked-item table), and the loot pair — location loot and reward loot.** `spt_db_publish` (called by C#'s
   `DbPublisher` whenever `DatabaseMutationStamp` has moved) makes the templates, traders, globals and
   locations roots resident in `db.rs` — every root optional, an absent one keeping the resident copy, and
   the epoch bumping on full and partial publishes alike; a bad schema or a failed view derivation aborts
   before the swap, leaving the previous resident DB intact. It derives ragfair's and quest's views at publish
   time — the quest views
   share `items`/`handbookPrices`/`fleaPrices` with ragfair's through one `Arc`; the quest-own views
-  (`quest/views.rs`) derive off the same publish. The locations root is `Base` + `AllExtracts` only, keyed
-  by the locations' `JsonPropertyName` strings (a null `AllExtracts` ships as `[]`). Ragfair and quest
-  requests arrive as `{epoch, viewsOverride?, varying}` and borrow those views. The one-shot requests
+  (`quest/views.rs`) derive off the same publish. The locations root carries `Base` + `AllExtracts` plus
+  (flip #4) the three statics lifts — `staticLoot`, `staticContainers`, `statics`, serialized from each
+  `LazyLoad.Value` so registered transformers are applied; `looseLoot` and `staticAmmo` never serialize —
+  keyed by the locations' `JsonPropertyName` strings (a null `AllExtracts` ships as `[]`). Ragfair, quest
+  and the six loot requests (`spt_generate_static_containers`, `spt_generate_dynamic_loot`,
+  `spt_create_random_loot`, `spt_create_forced_loot`, `spt_get_sealed_weapon_case_loot`,
+  `spt_get_random_loot_container_loot` — flip #4, ABI 25) arrive as `{epoch, viewsOverride?, varying}`
+  and borrow those views: location loot borrows the ragfair `items` view and `defaultPresetsByTpl` plus
+  its map's statics off the locations root, and the reward exports map per export onto `defaultPresets`
+  (random), `defaultPresetsByTplKey` (forced — the one view derivation flip #4 added), and
+  `defaultPresetsByTpl` + `presetsByTpl`/its key domain (sealed / container). Loose loot and
+  `staticAmmoDist` deliberately ride each call's varying block instead (RUST-ROADMAP.md flip #4 ledger:
+  the 549 MiB decision; the frozen public-signature parameter). The one-shot requests
   (`spt_build_item_base_class_cache`, `spt_build_ragfair_linked_item_table` — flip #3, ABI 24) arrive as
   `{epoch, viewsOverride?}` — no varying block, the whole pre-flip payload was invariant — and derive
   their walk input from the resident templates root at request time, deliberately **not** from the ragfair
@@ -99,7 +109,7 @@ C# SptNative → spt_generate_* (JSON in)
   returns `STATUS_STALE_EPOCH` and the C# caller force-publishes and retries once. An ineligible caller
   (mods loaded without trust, or the kill switch) sends `viewsOverride` with `epoch: 0` instead — a
   documented wire contract, not runtime-enforced — used for that call only, never made resident. The
-  resident roots are the only request data held across calls (ABI 24).
+  resident roots are the only request data held across calls (ABI 25).
 - **A buffer is written on failure too** — the parse error, the `LootError` message, or the panic text.
   Ownership is decided by the out-pointer being non-null, never by the status code. `spt_verify_database`'s
   free-on-success-only shape must not be copied into the generators.
@@ -163,6 +173,12 @@ the raw `sptLogger.json` bytes once per process; `SPTLoggerDispatcher.Log` then 
 | `mongo_id.rs` | `Models/Common/MongoId.cs` | 12-byte ObjectId generation, byte-for-byte identical layout |
 | `math_util.rs` | `Utils/MathUtil.cs` | Linear interpolation and range mapping |
 | `models.rs` | `Models/…` | Wire types (see *Conventions*) |
+
+Since flip #4 both generators resolve their DB-derived views off the resident DB (or the request's
+`viewsOverride` — see *FFI boundary*); the family has no `views.rs` of its own — it borrows
+`ragfair/views.rs`'s `RagfairDbViews` and the locations root's statics lifts. The service/config-backed
+fields — `config`, `seasonal`, `lootableItemBlacklist`, `moneyTpls`, the reward blacklists/sets, sealed's
+`linkedItems` — plus `looseLoot` and `staticAmmoDist` ride each request's varying block.
 
 ## `src/bot/`
 
