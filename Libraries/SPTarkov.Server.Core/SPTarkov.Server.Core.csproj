@@ -31,6 +31,10 @@
   </ItemGroup>
   <ItemGroup>
     <InternalsVisibleTo Include="UnitTests" />
+    <!-- DatabaseImporter calls the internal SptNative.DbLoad. Both names: SPTarkov.Server renames
+         its assembly to SPT.Server, and to SPT.Server.Linux for a linux-x64 publish. -->
+    <InternalsVisibleTo Include="SPT.Server" />
+    <InternalsVisibleTo Include="SPT.Server.Linux" />
   </ItemGroup>
   <ItemGroup>
     <!-- Facade emitted by BuildSpectreFacade in SPTarkov.Common; see the note in Build.props. -->

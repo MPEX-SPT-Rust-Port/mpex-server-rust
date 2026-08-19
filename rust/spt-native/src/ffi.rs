@@ -145,6 +145,24 @@ impl FfiFailure for crate::db::PublishError {
     }
 }
 
+impl FfiFailure for crate::db::load::LoadError {
+    fn status(&self) -> i32 {
+        match self {
+            crate::db::load::LoadError::BadArgs(_) => STATUS_BAD_ARGS,
+            _ => STATUS_ERROR,
+        }
+    }
+
+    fn into_message(self) -> String {
+        match self {
+            // Both already name their culprit: the schema number, or the path that would not read.
+            crate::db::load::LoadError::BadArgs(message)
+            | crate::db::load::LoadError::Io(message) => message,
+            crate::db::load::LoadError::Publish(error) => error.into_message(),
+        }
+    }
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn spt_native_abi_version() -> u32 {
     crate::ABI_VERSION
@@ -665,6 +683,80 @@ pub unsafe extern "C" fn spt_db_publish(
     }
 }
 
+/// The framed load response: `[u32-LE header length][header JSON][blob 0][blob 1]…`, the blobs in
+/// `files[]` order. Framed rather than one JSON document so the file bytes cross as bytes — the
+/// eager tree is tens of megabytes of JSON that C# re-parses itself.
+fn encode_load_response(response: crate::db::load::LoadResponse) -> Vec<u8> {
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Header<'a> {
+        epoch: Option<u64>,
+        verify: &'a Option<crate::verify::VerifyReport>,
+        files: Vec<FileEntry<'a>>,
+    }
+
+    #[derive(Serialize)]
+    struct FileEntry<'a> {
+        path: &'a str,
+        len: usize,
+    }
+
+    let header = serde_json::to_vec(&Header {
+        epoch: response.epoch,
+        verify: &response.verify,
+        files: response
+            .files
+            .iter()
+            .map(|(path, bytes)| FileEntry {
+                path,
+                len: bytes.len(),
+            })
+            .collect(),
+    })
+    .expect("load header serialization cannot fail");
+
+    let blob_bytes: usize = response.files.iter().map(|(_, bytes)| bytes.len()).sum();
+    let mut out = Vec::with_capacity(4 + header.len() + blob_bytes);
+    out.extend_from_slice(&(header.len() as u32).to_le_bytes());
+    out.extend_from_slice(&header);
+    for (_, bytes) in &response.files {
+        out.extend_from_slice(bytes);
+    }
+
+    out
+}
+
+/// `db::load::load` is async and CLR-free; the export is the only place a runtime is needed.
+fn db_load_blocking(
+    request: crate::db::load::LoadRequest,
+) -> Result<crate::db::load::LoadResponse, crate::db::load::LoadError> {
+    runtime().block_on(crate::db::load::load(request))
+}
+
+/// Fused SPT_Data load (state-ownership Phase 3): one walk hashes, reads, installs the resident
+/// roots and hands the eager file bytes back. Request/response contract in `db/load.rs`.
+///
+/// # Safety
+/// See `spt_generate_static_containers`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn spt_db_load(
+    req_ptr: *const u8,
+    req_len: usize,
+    out_ptr: *mut *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    unsafe {
+        run_generator_with(
+            req_ptr,
+            req_len,
+            out_ptr,
+            out_len,
+            db_load_blocking,
+            encode_load_response,
+        )
+    }
+}
+
 /// The process-wide log pipeline and its init ref-count. A plain `Mutex<Option>` rather than a
 /// `OnceLock` so `spt_logger_close` can take it down (and tests can re-initialise afterwards); the
 /// count lives inside the same lock so init and close cannot race each other.
@@ -1065,7 +1157,7 @@ mod tests {
         assert_eq!(spt_native_abi_version(), crate::ABI_VERSION);
         assert_eq!(
             crate::ABI_VERSION,
-            27,
+            28,
             "bump SptNative.ExpectedAbiVersion too"
         );
     }
@@ -2298,6 +2390,68 @@ mod tests {
             String::from_utf8(out).unwrap(),
             "unsupported publish schema 2"
         );
+    }
+
+    #[test]
+    fn spt_db_load_round_trips_a_mini_tree() {
+        let _guard = db_lock();
+        crate::db::clear();
+
+        let dir = crate::db::load::tests::mini_tree();
+        let request = format!(
+            r#"{{"schema":1,"dir":{},"verify":false}}"#,
+            serde_json::to_string(dir.path().to_str().unwrap()).unwrap()
+        );
+
+        let (status, out) = call_generate(spt_db_load, request.as_bytes());
+
+        assert_eq!(status, STATUS_OK);
+        let header_len = u32::from_le_bytes(out[..4].try_into().unwrap()) as usize;
+        let header: serde_json::Value = serde_json::from_slice(&out[4..4 + header_len]).unwrap();
+        assert_eq!(header["epoch"], 1);
+        assert_eq!(header["verify"], serde_json::Value::Null);
+
+        // The index really addresses the blobs: walk them in files order and land on the end.
+        let mut blobs = std::collections::BTreeMap::new();
+        let mut at = 4 + header_len;
+        for entry in header["files"].as_array().unwrap() {
+            let len = entry["len"].as_u64().unwrap() as usize;
+            blobs.insert(
+                entry["path"].as_str().unwrap().to_owned(),
+                &out[at..at + len],
+            );
+            at += len;
+        }
+        assert_eq!(at, out.len(), "the blobs fill the frame exactly");
+
+        assert_eq!(blobs.len(), 11, "the mini tree's eager set");
+        assert_eq!(
+            blobs["database/templates/items.json"],
+            fs::read(dir.path().join("database/templates/items.json"))
+                .unwrap()
+                .as_slice()
+        );
+        assert!(!blobs.contains_key("database/locations/bigmap/looseLoot.json"));
+    }
+
+    #[test]
+    fn spt_db_load_rejects_a_bad_schema_with_bad_args() {
+        // Rejected before any walk, so it needs no tree and never reaches the store.
+        let (status, out) = call_generate(spt_db_load, br#"{"schema":2,"dir":".","verify":false}"#);
+
+        assert_eq!(status, STATUS_BAD_ARGS);
+        assert_eq!(String::from_utf8(out).unwrap(), "unsupported load schema 2");
+    }
+
+    #[test]
+    fn spt_db_load_null_args_is_bad_args_without_a_buffer() {
+        let mut out_len: usize = 0;
+
+        let status =
+            unsafe { spt_db_load(std::ptr::null(), 0, std::ptr::null_mut(), &mut out_len) };
+
+        assert_eq!(status, STATUS_BAD_ARGS);
+        assert_eq!(out_len, 0, "nothing may be written when out_ptr is null");
     }
 
     #[test]

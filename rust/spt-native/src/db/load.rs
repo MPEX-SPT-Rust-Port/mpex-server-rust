@@ -313,7 +313,7 @@ fn write_location(out: &mut Vec<u8>, raw: &BTreeMap<String, Vec<u8>>, dir: &str)
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::*;
     use crate::loot::item_helper::{MONEY, WEAPON};
     use std::fs;
@@ -391,7 +391,8 @@ mod tests {
 
     /// Every file class in one tree: eager roots, the assembly-only statics, the lazy
     /// never-read pair, and one file from each of the importer's two skip rules.
-    fn mini_tree() -> TempDir {
+    /// `pub` for `ffi.rs`'s transport tests, which need a tree that really installs.
+    pub fn mini_tree() -> TempDir {
         let dir = TempDir::new().unwrap();
         let files: Vec<(String, String)> = vec![
             ("database/templates/items.json".into(), items_json()),

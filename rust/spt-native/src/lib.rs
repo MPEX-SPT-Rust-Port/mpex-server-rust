@@ -13,4 +13,4 @@ pub mod runtime;
 pub mod scav_case;
 pub mod verify;
 
-pub const ABI_VERSION: u32 = 27;
+pub const ABI_VERSION: u32 = 28;
