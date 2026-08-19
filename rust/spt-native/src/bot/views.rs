@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use indexmap::IndexMap;
 
-use crate::db::models::{GlobalsRoot, TemplatesRoot};
+use crate::db::models::GlobalsRoot;
 use crate::ragfair::views::RagfairDbViews;
 
 /// The bot-family database views derived at publish — only what the resident roots determine
@@ -33,18 +33,14 @@ pub struct BotDbViews {
     pub exp_table: Vec<i32>,
 }
 
-/// Derived at publish once templates + globals + ragfair views are resident.
+/// Derived at publish once globals + ragfair views are resident.
 /// - default_preset_ids_by_tpl: re-key of ragfair.default_presets_by_tpl to each
 ///   view's preset id (C# ToDefaultPresetIds, BotPayloadProjection.cs:392-395).
 /// - exp_table: globals.config.exp.level.exp_table[].exp (BotWaveBatcher.cs:179-186).
 ///
 /// Total over empty roots; kept `Result`-shaped so a future hard failure aborts the publish the
 /// way ragfair's does.
-pub fn derive(
-    _templates: &TemplatesRoot,
-    globals: &GlobalsRoot,
-    ragfair: &Arc<RagfairDbViews>,
-) -> Result<BotDbViews, String> {
+pub fn derive(globals: &GlobalsRoot, ragfair: &Arc<RagfairDbViews>) -> Result<BotDbViews, String> {
     // ToDefaultPresetIds (BotPayloadProjection.cs:392-395) over GetDefaultPresetByTpl — whose
     // port ragfair.default_presets_by_tpl is. `Preset.Id` is a non-nullable MongoId in C#, so
     // the view's `id` is always present (ragfair::views::to_preset_view).
@@ -76,7 +72,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::db::models::TradersRoot;
+    use crate::db::models::{TemplatesRoot, TradersRoot};
     use crate::loot::item_helper::{MOD, WEAPON};
 
     const WEAPON_TPL: &str = "aaaaaaaaaaaaaaaaaaaaaaaa";
@@ -84,15 +80,14 @@ mod tests {
     const MAGAZINE_TPL: &str = "dddddddddddddddddddddddd";
     const PRESET_ID: &str = "111111111111111111111111";
 
-    /// A weapon whose slots exercise every branch of `BuildModPoolSlotOrder`'s inner loop, plus
-    /// slotless mods (their pools are empty, so `pool.Count < 2` skips them).
+    /// The items table this module's `derive` needs, which is only whatever
+    /// [`crate::ragfair::views::derive`] wants: a weapon a default preset can point at, plus the
+    /// mods and base-class nodes that keep it resolvable. The slots are incidental shape.
     fn fixture_templates() -> TemplatesRoot {
         serde_json::from_value(json!({
             "items": {
                 WEAPON: {"_type": "Node", "_props": {}},
                 MOD: {"_type": "Node", "_props": {}},
-                // Slot 0 has an empty filter (never pooled), 1 and 2 are pooled, 3 repeats
-                // slot 1's name (GetOrAdd merges it into the first occurrence).
                 WEAPON_TPL: {"_parent": WEAPON, "_type": "Item", "_props": {"Slots": [
                     {"_name": "mod_stock", "_props": {"filters": [{"Filter": []}]}},
                     {"_name": "mod_magazine", "_props": {"filters": [{"Filter": [MAGAZINE_TPL]}]}},
@@ -130,7 +125,7 @@ mod tests {
                 .expect("ragfair views derive"),
         );
 
-        let views = derive(&templates, &globals, &ragfair).expect("bot views derive");
+        let views = derive(&globals, &ragfair).expect("bot views derive");
 
         // ToDefaultPresetIds: the tpl keeps its key, the value becomes the preset's own id.
         let expected_ids: IndexMap<String, String> =
@@ -150,7 +145,7 @@ mod tests {
                 .expect("ragfair views derive"),
         );
 
-        let views = derive(&templates, &globals, &ragfair).expect("bot views derive");
+        let views = derive(&globals, &ragfair).expect("bot views derive");
 
         assert!(views.default_preset_ids_by_tpl.is_empty());
         assert!(views.exp_table.is_empty());

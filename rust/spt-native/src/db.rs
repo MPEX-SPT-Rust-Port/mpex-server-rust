@@ -133,14 +133,16 @@ pub fn publish(request: PublishRequest) -> Result<u64, PublishError> {
     };
 
     // Same containment as the ragfair derive above: caught panic, abort before the swap.
-    let bot_views = match (&templates, &globals, &ragfair_views) {
-        (Some(templates), Some(globals), Some(ragfair_views)) => {
+    // `ragfair_views` is `Some` only when templates+traders+globals all are, so it subsumes the
+    // templates half of the gate; `globals` stays because the derive reads it.
+    let bot_views = match (&globals, &ragfair_views) {
+        (Some(globals), Some(ragfair_views)) => {
             let derived = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 #[cfg(test)]
                 if tests::PANIC_ON_BOT_DERIVE.load(std::sync::atomic::Ordering::Relaxed) {
                     panic!("injected bot derive panic");
                 }
-                crate::bot::views::derive(templates, globals, ragfair_views)
+                crate::bot::views::derive(globals, ragfair_views)
             }))
             .unwrap_or_else(|_| Err("bot view derivation panicked".to_string()));
             Some(Arc::new(derived.map_err(PublishError::Views)?))

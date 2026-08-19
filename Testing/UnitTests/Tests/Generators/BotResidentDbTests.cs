@@ -123,12 +123,55 @@ public class BotResidentDbTests
         Assert.That(wave!, Has.Count.EqualTo(3), "the batch generated an incomplete wave");
     }
 
+    /// <summary>
+    /// The batch path's twin for the single-bot dispatch site. Same fail-fast contract as
+    /// <see cref="GenerateWave" />: a decline to the legacy path or an empty inventory fails here,
+    /// before the caller asserts anything about the send.
+    /// </summary>
+    private void GenerateSingleBot(BotInventoryGenerator generator)
+    {
+        var details = new BotGenerationDetails
+        {
+            Role = "assault",
+            RoleLowercase = "assault",
+            Side = "Savage",
+            BotDifficulty = "normal",
+            GameVersion = "standard",
+            BotLevel = 1,
+        };
+        var template = _cloner.Clone(_botTable.Types["assault"])!;
+        _botEquipmentFilterService.FilterBotEquipment(_sessionId, template, details);
+
+        var inventory = generator.GenerateInventory(new MongoId(), _sessionId, template, details);
+
+        Assert.That(generator.LastPathTaken, Is.EqualTo(LootGenerationPath.Native), "generation did not take the native path");
+        Assert.That(inventory.Items, Is.Not.Empty, "the native path generated no inventory");
+    }
+
     [Test]
     public void EligibleGenerationBuildsOffTheResidentDb()
     {
         GenerateWave(_batcher);
 
         Assert.That(_batcher.LastSendIncludedViewsOverride, Is.False, "an eligible wave must not send the override");
+    }
+
+    /// <summary>
+    /// The single-bot dispatch site's eligible arm, on the container-resolved generator — the path
+    /// every wave that declines batching lands on. Pins that DI selects the epoch-protocol
+    /// constructor overload (the frozen one has no publisher, so it could only override) and that a
+    /// generation stamped with the resident epoch comes back whole.
+    /// </summary>
+    [Test]
+    public void EligibleSingleBotGenerationBuildsOffTheResidentDb()
+    {
+        GenerateSingleBot(_botInventoryGenerator);
+
+        Assert.That(
+            _botInventoryGenerator.LastSendIncludedViewsOverride,
+            Is.False,
+            "an eligible single-bot generation must not send the override"
+        );
     }
 
     [Test]
@@ -188,22 +231,9 @@ public class BotResidentDbTests
     public void AGeneratorBuiltOnTheFrozenConstructorAlwaysSendsTheOverride()
     {
         var frozen = BuildGeneratorWithFrozenConstructor(DI.GetInstance());
-        var details = new BotGenerationDetails
-        {
-            Role = "assault",
-            RoleLowercase = "assault",
-            Side = "Savage",
-            BotDifficulty = "normal",
-            GameVersion = "standard",
-            BotLevel = 1,
-        };
-        var template = _cloner.Clone(_botTable.Types["assault"])!;
-        _botEquipmentFilterService.FilterBotEquipment(_sessionId, template, details);
 
-        var inventory = frozen.GenerateInventory(new MongoId(), _sessionId, template, details);
+        GenerateSingleBot(frozen);
 
-        Assert.That(frozen.LastPathTaken, Is.EqualTo(LootGenerationPath.Native), "generation did not take the native path");
-        Assert.That(inventory.Items, Is.Not.Empty, "the native path generated no inventory");
         Assert.That(frozen.LastSendIncludedViewsOverride, Is.True, "no publisher means no residency eligibility");
     }
 
@@ -224,9 +254,11 @@ public class BotResidentDbTests
 
     /// <summary>
     /// The flip's core promise, and the gate on every resident/override mapping choice — the
-    /// handbook price values, the default-preset re-key, the mod-pool slot order and the exp
-    /// table: the same seeded wave sent once off the resident DB and once with the C#-built views
-    /// override must generate identical bots, compared as normalized JSON down to every field.
+    /// handbook price values, the default-preset re-key and the exp table (the mod-pool slot order
+    /// is out of scope — both arms take it from the one <c>BuildSharedVarying</c> call below, so no
+    /// divergence is constructible there): the same seeded wave sent once off the resident DB and
+    /// once with the C#-built views override must generate identical bots, compared as normalized
+    /// JSON down to every field.
     /// PMC and non-PMC waves both run — only the PMC wave draws levels from the exp table.
     /// </summary>
     [Test]
@@ -256,7 +288,6 @@ public class BotResidentDbTests
                 request.Shared.TemplateVariants!.Select(variant => variant.LootPools)
             );
             var overrideResult = SptNative.GenerateBotInventoryBatch(request);
-            request.ViewsOverride = null;
 
             LootJsonAssert.AssertEqual(Serialize(residentResult), Serialize(overrideResult), label, Seed);
         }

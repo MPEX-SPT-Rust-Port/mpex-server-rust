@@ -535,7 +535,18 @@ handbook, which is collision-safe because a tpl in two pools resolves to the sam
 at all. **5, one envelope for both exports.** Single-bot and batch now share
 `{epoch, viewsOverride?, …}` and one `resolve_bot_views` resolver returning `LootEpochError`, so
 `STATUS_STALE_EPOCH` and the one-shot self-heal behave identically on both; `SharedBotViewsWire`
-was renamed `SharedBotVaryingWire` to stop the name claiming it carries views. (c) Net `Native/`
+was renamed `SharedBotVaryingWire` to stop the name claiming it carries views. **6, the two-arm
+dispatch block stays copied — evaluated and declined.** The eligible/ineligible `if/else` that
+follows `ResidentDbDispatch.Eligible` is now at its 5th/6th copy, so the fifth-copy rule was applied
+and the answer is no: that rule targets *identical* blocks, and across the 11 sites the block takes
+~6 distinct shapes — per-export `ViewsOverride` expressions, a `bool viewsOverride` parameter, a
+`.Result` unwrap, early-return one-shots with no varying block at all, and bots' mutate-the-request
+form. A shared helper would have to be generic over the request type, take two builder closures, and
+take a delegate to set each site's private-set `LastSendIncludedViewsOverride` — a 5-parameter
+abstraction replacing a 12-line `if/else` whose only genuinely duplicated line is the flag
+assignment. Commit 1 already extracted the part that *was* identical (the eligibility rule and the
+stale-epoch retry) into `ResidentDbDispatch`; what is left is shape, not duplication. Revisit only if
+a future flip makes the arms converge. (c) Net `Native/`
 delta for the flip (`git diff --stat 3dc37e1..9011794 -- Libraries/SPTarkov.Server.Core/Native/`):
 **+227/−285 lines across 7 files** — the program's **first genuine shrink**. Flips #3-#5 grew
 because their whole pre-flip payload survived as the `viewsOverride` arm; bots shrank anyway
@@ -591,3 +602,12 @@ written against, not the current file.
 3. Convert `is_valid_reward_item`'s trader whitelist (`quest/reward_generator.rs:869`, a `Vec<&str>`
    of up to 14 candidates) to `ItemBaseClassCache::is_of_baseclasses_set` and measure whether 14 is
    long enough for the set form to pay. Narrow and unmeasured.
+4. **Phase 2 scope: `BotPayloadProjection.BuildModPoolSlotOrder`.** With the bot database half
+   resident (flip #6), this is the dominant irreducible per-call C# cost left on the single-bot
+   resident path — a full items-table walk with two `BotEquipmentModPoolService` lookups per tpl,
+   ~6 ms of the measured 6.06 ms `BuildRequest` (BENCHMARK.md, assault) — and the one remaining
+   member that structurally *cannot* go resident under the current service design: the flip #6
+   ledger's decision 2 shows the order is the live service's `ConcurrentDictionary` enumeration
+   order, process-local and not a function of the database. Phase 2's write barriers are what make
+   the alternative safe: own the pools rather than observe them, so the order is Rust's own and the
+   member leaves the wire entirely. Until then it rides both arms at 26,428 bytes per send.

@@ -25,11 +25,11 @@ namespace UnitTests.Tests.Generators;
 
 /// <summary>
 /// Head-to-head wall clock of the two bot generation paths on the same live database in one process,
-/// on one bot per call - the unit the server actually pays. The native path projects the whole items
-/// table and every global preset into the request on every call, so BuildRequest is timed on its own
-/// as well: that number is the floor under the native path, and the share it takes of it bounds what
-/// any projection-side fix could buy. Run in Release; the cargo dev profile makes Debug numbers
-/// meaningless.
+/// on one bot per call - the unit the server actually pays. The native path still projects a per-call
+/// varying block into the request on every call (the database half is resident since flip #6), so
+/// BuildRequest is timed on its own as well: that number is the floor under the native path, and the
+/// share it takes of it bounds what any projection-side fix could buy. Run in Release; the cargo dev
+/// profile makes Debug numbers meaningless.
 /// </summary>
 [TestFixture]
 [Explicit("benchmark, run on demand in Release")]
@@ -153,8 +153,8 @@ public class BotBenchmarkTests
     }
 
     /// <summary>
-    /// The projection half of the native path on its own - the whole items table as views plus every
-    /// global preset, rebuilt per bot.
+    /// The projection half of the native path on its own - the resident arm's per-call varying block
+    /// (config, blacklists, equipment filters, the mod-pool slot order), rebuilt per bot.
     /// </summary>
     private List<double> MeasureProjection(string role)
     {

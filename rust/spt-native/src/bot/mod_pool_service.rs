@@ -46,25 +46,15 @@ pub fn get_mods_for_gear_slot(
     ctx: &BotContext,
     item_tpl: &str,
 ) -> IndexMap<String, IndexSet<String>> {
-    gear_slot_pool(ctx.items, item_tpl, ctx.mod_pool_slot_order.get(item_tpl))
-}
-
-/// [`get_mods_for_gear_slot`] against bare views, for callers with no [`BotContext`] or no
-/// projected order (`None` = database order).
-pub(crate) fn gear_slot_pool(
-    items: &IndexMap<String, ItemView>,
-    item_tpl: &str,
-    slot_order: Option<&Vec<usize>>,
-) -> IndexMap<String, IndexSet<String>> {
     if !is_in_pool(
-        items,
+        ctx.items,
         item_tpl,
         &[ARMORED_EQUIPMENT, VEST, ARMOR, HEADWEAR, MOD],
     ) {
         return IndexMap::new();
     }
 
-    derive_pool(items, item_tpl, slot_order)
+    derive_pool(ctx.items, item_tpl, ctx.mod_pool_slot_order.get(item_tpl))
 }
 
 /// `BotEquipmentModPoolService.GetModsForWeaponSlot` (`:164-167`), against the pool
@@ -73,20 +63,11 @@ pub fn get_mods_for_weapon_slot(
     ctx: &BotContext,
     item_tpl: &str,
 ) -> IndexMap<String, IndexSet<String>> {
-    weapon_slot_pool(ctx.items, item_tpl, ctx.mod_pool_slot_order.get(item_tpl))
-}
-
-/// [`gear_slot_pool`]'s weapon twin.
-pub(crate) fn weapon_slot_pool(
-    items: &IndexMap<String, ItemView>,
-    item_tpl: &str,
-    slot_order: Option<&Vec<usize>>,
-) -> IndexMap<String, IndexSet<String>> {
-    if !is_in_pool(items, item_tpl, &[WEAPON, MOD]) {
+    if !is_in_pool(ctx.items, item_tpl, &[WEAPON, MOD]) {
         return IndexMap::new();
     }
 
-    derive_pool(items, item_tpl, slot_order)
+    derive_pool(ctx.items, item_tpl, ctx.mod_pool_slot_order.get(item_tpl))
 }
 
 /// `BotEquipmentModPoolService.GetCompatibleModsForWeaponSlot` (`:135-147`) — the warning fires on

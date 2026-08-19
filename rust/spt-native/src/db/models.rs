@@ -188,7 +188,8 @@ pub struct TraderLoyaltyLevel {
     pub extra: IndexMap<String, Value>,
 }
 
-/// `Models/Spt/Tables/GlobalTable.cs:10-26` — only `ItemPresets` is typed.
+/// `Models/Spt/Tables/GlobalTable.cs:10-26` — only `ItemPresets` and the `config` lift are typed;
+/// everything else rides [`Self::extra`].
 #[derive(Debug, Default, Deserialize)]
 pub struct GlobalsRoot {
     /// `GlobalTable.ItemPresets` (`GlobalTable.cs:24-25`), keyed by preset id — that key domain
