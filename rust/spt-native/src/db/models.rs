@@ -15,6 +15,7 @@ use indexmap::{IndexMap, IndexSet};
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::bot::repair_service::MinMax;
 use crate::loot::models::{
     Item, SpawnpointTemplate, StaticContainer, StaticContainerData, StaticForced, StaticLootDetails,
 };
@@ -37,6 +38,48 @@ pub struct PublishRoots {
     pub traders: Option<TradersRoot>,
     pub globals: Option<GlobalsRoot>,
     pub locations: Option<LocationsRoot>,
+    pub hideout: Option<HideoutRoot>,
+}
+
+/// Hideout root: `production.scavRecipes` only (flip #5) — locations-root
+/// partial-projection precedent. Wire names pin to the C# `JsonPropertyName`s
+/// (HideoutTable.cs / HideoutProduction.cs): note capitalized Common/Rare/Superrare.
+#[derive(Debug, Default, Deserialize)]
+pub struct HideoutRoot {
+    #[serde(default)]
+    pub production: HideoutProductionRoot,
+    #[serde(flatten)]
+    pub extra: IndexMap<String, Value>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct HideoutProductionRoot {
+    #[serde(default, rename = "scavRecipes")]
+    pub scav_recipes: Vec<DbScavRecipe>,
+    #[serde(flatten)]
+    pub extra: IndexMap<String, Value>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct DbScavRecipe {
+    #[serde(default, rename = "_id")]
+    pub id: String,
+    #[serde(default, rename = "endProducts")]
+    pub end_products: Option<DbEndProducts>,
+    #[serde(flatten)]
+    pub extra: IndexMap<String, Value>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct DbEndProducts {
+    #[serde(default, rename = "Common")]
+    pub common: Option<MinMax<i32>>,
+    #[serde(default, rename = "Rare")]
+    pub rare: Option<MinMax<i32>>,
+    #[serde(default, rename = "Superrare")]
+    pub superrare: Option<MinMax<i32>>,
+    #[serde(flatten)]
+    pub extra: IndexMap<String, Value>,
 }
 
 /// `Models/Spt/Tables/TemplateTable.cs` — only the members the ragfair view derivation and the
