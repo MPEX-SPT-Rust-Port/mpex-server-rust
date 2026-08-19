@@ -18,7 +18,7 @@
 # http.json.
 FROM quay.io/fedora/fedora-minimal:44-x86_64 AS build
 
-RUN dnf5 -y install dotnet-sdk-10.0 gcc mold git 7zip \
+RUN dnf5 -y install dotnet-sdk-10.0 gcc gcc-c++ mold git 7zip \
     && dnf5 clean all \
     && { command -v 7z >/dev/null 2>&1 || ln -s "$(command -v 7zz)" /usr/local/bin/7z; }
 
