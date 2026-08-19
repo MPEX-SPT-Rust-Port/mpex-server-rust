@@ -60,7 +60,9 @@ public class DbPublisher(
         // to serialize - HandbookHelper's lazy hydration below, and DbPayloadProjection's
         // LazyLoad.Value materialisation - so the barriers stay silent for the duration. Those
         // writes are in this payload by construction; letting them bump would make every publish
-        // dirty the stamp it just read.
+        // dirty the stamp it just read. The exception is any mod-registered LazyLoad transformer
+        // that runs during projection - a transformer writing outside the value it transforms is
+        // invisible for the same reason a decode callback's writes are.
         using (WriteBarrier.Suppress())
         {
             // HandbookHelper's first use lazily writes ItemConfig.HandbookPriceOverride entries INTO

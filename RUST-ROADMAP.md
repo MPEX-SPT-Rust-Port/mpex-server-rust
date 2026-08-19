@@ -106,7 +106,11 @@ entry and the inherited `ValueType.ToString()`. Scope is `Color` only — mods t
   native-response decode callback's extent — `SptNative.DecodeResult` holds a
   `WriteBarrier.Suppress()` scope across the decode, because deserializing a response into
   DB-shaped model types (a repeatable quest's condition subgraph, `SpawnpointTemplate`) was the real
-  churn source. Nothing does that today and `WriteBarrierChurnTests` pins the invariant by name.
+  churn source. Nothing does that today and `WriteBarrierChurnTests` pins the invariant by name. The
+  publish's own suppression scope has the same shape and one mod-reachable edge: it spans
+  `DbPayloadProjection`'s `LazyLoad.Value` reads, so a mod-registered transformer that writes into a
+  published root *other* than the value it transforms is suppressed too (both shipped `StaticLoot`
+  transformers write only inside the transformed graph).
   Root-level tracking collections were evaluated and declined — they would have caught 4 of ~90
   mutation sites in the tree and none of the post-startup ones on a published root, against 17+
   apicompat suppressions and a public `ProfileFixerService` signature break. Two mod-reachable
