@@ -11,6 +11,7 @@ dotnet build                                        # solution is server-csharp.
 dotnet test                                         # all tests (Testing/UnitTests, NUnit)
 dotnet test --filter "FullyQualifiedName~MongoIdTests"   # single fixture
 dotnet test --filter "Name=EveryRegisteredServiceCanBeResolved"   # single test
+dotnet build && dotnet test --no-build --filter "..."    # iterating on one filter: build once, rerun tests without rebuilding
 csharpier format .                                  # run before opening a PR
 cd rust && cargo test && cargo fmt --check && cargo clippy --all-targets -- -D warnings   # Rust checks
 scripts/smoke-mpex-server.sh                         # e2e: Rust mpex-server launcher boots the CLR, asserts /health

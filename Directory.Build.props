@@ -1,0 +1,7 @@
+<Project>
+  <!-- Analyzer diagnostics still show live in the IDE; this only skips the extra CLI/CI build pass
+       outside Release, where warnings-as-errors and packaging don't need it. -->
+  <PropertyGroup Condition="'$(Configuration)' != 'Release'">
+    <RunAnalyzersDuringBuild>false</RunAnalyzersDuringBuild>
+  </PropertyGroup>
+</Project>
