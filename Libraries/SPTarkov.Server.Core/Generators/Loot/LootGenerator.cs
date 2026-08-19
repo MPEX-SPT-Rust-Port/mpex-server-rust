@@ -124,12 +124,13 @@ public class LootGenerator(
     /// </summary>
     internal bool ResidentDbEligible()
     {
-        if (_locationConfig is null || _loadedMods is null || _dbPublisher is null || _locationConfig.DisableNativeRequestCache)
-        {
-            return false;
-        }
-
-        return _loadedMods.Count == 0 || _locationConfig.TrustNativeRequestCacheWithMods;
+        return _locationConfig is not null
+            && ResidentDbDispatch.Eligible(
+                _dbPublisher,
+                _loadedMods?.Count,
+                _locationConfig.DisableNativeRequestCache,
+                _locationConfig.TrustNativeRequestCacheWithMods
+            );
     }
 
     /// <summary>
@@ -246,18 +247,10 @@ public class LootGenerator(
         }
         else
         {
-            var epoch = _dbPublisher!.EnsureCurrent();
-            try
-            {
-                result = SptNative.CreateRandomLoot(new CreateRandomLootRequest { Epoch = epoch, Varying = varying });
-            }
-            catch (NativeStaleEpochException)
-            {
-                // The resident DB does not hold this epoch - republish everything and retry once
-                epoch = _dbPublisher.ForcePublish();
-                result = SptNative.CreateRandomLoot(new CreateRandomLootRequest { Epoch = epoch, Varying = varying });
-            }
-
+            result = ResidentDbDispatch.Send(
+                _dbPublisher!,
+                epoch => SptNative.CreateRandomLoot(new CreateRandomLootRequest { Epoch = epoch, Varying = varying })
+            );
             LastSendIncludedViewsOverride = false;
         }
 
@@ -406,18 +399,10 @@ public class LootGenerator(
         }
         else
         {
-            var epoch = _dbPublisher!.EnsureCurrent();
-            try
-            {
-                result = SptNative.CreateForcedLoot(new CreateForcedLootRequest { Epoch = epoch, Varying = varying });
-            }
-            catch (NativeStaleEpochException)
-            {
-                // The resident DB does not hold this epoch - republish everything and retry once
-                epoch = _dbPublisher.ForcePublish();
-                result = SptNative.CreateForcedLoot(new CreateForcedLootRequest { Epoch = epoch, Varying = varying });
-            }
-
+            result = ResidentDbDispatch.Send(
+                _dbPublisher!,
+                epoch => SptNative.CreateForcedLoot(new CreateForcedLootRequest { Epoch = epoch, Varying = varying })
+            );
             LastSendIncludedViewsOverride = false;
         }
 
@@ -793,18 +778,10 @@ public class LootGenerator(
         }
         else
         {
-            var epoch = _dbPublisher!.EnsureCurrent();
-            try
-            {
-                result = SptNative.GetSealedWeaponCaseLoot(new SealedWeaponCaseRequest { Epoch = epoch, Varying = varying });
-            }
-            catch (NativeStaleEpochException)
-            {
-                // The resident DB does not hold this epoch - republish everything and retry once
-                epoch = _dbPublisher.ForcePublish();
-                result = SptNative.GetSealedWeaponCaseLoot(new SealedWeaponCaseRequest { Epoch = epoch, Varying = varying });
-            }
-
+            result = ResidentDbDispatch.Send(
+                _dbPublisher!,
+                epoch => SptNative.GetSealedWeaponCaseLoot(new SealedWeaponCaseRequest { Epoch = epoch, Varying = varying })
+            );
             LastSendIncludedViewsOverride = false;
         }
 
@@ -1051,18 +1028,10 @@ public class LootGenerator(
         }
         else
         {
-            var epoch = _dbPublisher!.EnsureCurrent();
-            try
-            {
-                result = SptNative.GetRandomLootContainerLoot(new RandomLootContainerRequest { Epoch = epoch, Varying = varying });
-            }
-            catch (NativeStaleEpochException)
-            {
-                // The resident DB does not hold this epoch - republish everything and retry once
-                epoch = _dbPublisher.ForcePublish();
-                result = SptNative.GetRandomLootContainerLoot(new RandomLootContainerRequest { Epoch = epoch, Varying = varying });
-            }
-
+            result = ResidentDbDispatch.Send(
+                _dbPublisher!,
+                epoch => SptNative.GetRandomLootContainerLoot(new RandomLootContainerRequest { Epoch = epoch, Varying = varying })
+            );
             LastSendIncludedViewsOverride = false;
         }
 

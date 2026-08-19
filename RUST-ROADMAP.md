@@ -15,7 +15,7 @@ too, and has no legacy path: `SPTLoggerDispatcher` hands every line to the crate
 
 Twenty-three C-ABI exports (`src/ffi.rs`) carry all of it, JSON in and JSON out — except the ragfair
 response, which is a framed MessagePack envelope, and `spt_log_emit`, which passes the fields of one
-line directly (current ABI 26).
+line directly (current ABI 27).
 
 Native is not uniformly faster. Loot and repeatable quests win; bots, reward loot, ragfair, scav
 case, the base-class hydrate and the linked-item table are slower than the C# they replace, and
@@ -41,7 +41,7 @@ gap without closing it, and every lever short of the remaining state-ownership p
 | Scav case rewards | `ScavCaseRewardGenerator.Generate` | `spt_generate_scav_case_rewards` |
 | Item base-class cache hydrate | `ItemBaseClassService.HydrateItemBaseClassCache` | `spt_build_item_base_class_cache` |
 | Ragfair linked-item table | `RagfairLinkedItemService.BuildLinkedItemTable` | `spt_build_ragfair_linked_item_table` |
-| Resident DB publish — the templates, traders, globals and locations roots, plus the ragfair and quest views derived from them | `DbPublisher.EnsureCurrent` / `ForcePublish` | `spt_db_publish` |
+| Resident DB publish — the templates, traders, globals, locations and hideout roots, plus the ragfair, quest and bot views derived from them | `DbPublisher.EnsureCurrent` / `ForcePublish` | `spt_db_publish` |
 | The whole log pipeline — filters, level gates, per-target formatting, console + file sinks | `SPTLoggerDispatcher.Log` | `spt_logger_init`, `spt_logger_reinit`, `spt_log_emit`, `spt_logger_close`, `spt_log_set_tap` |
 | Generator diagnostics, localised and logged natively as they happen | `DatabaseImporter` → `SptNative.SetServerLocales` | `spt_locales_set` |
 
@@ -111,7 +111,12 @@ entry and the inherited `ValueType.ToString()`. Scope is `Color` only — mods t
   (`RagfairViewsEquivalenceTests`, `QuestViewsEquivalenceTests`), then an `#[ignore]`d Rust
   integration test compares them (`rust/spt-native/tests/phase1_{ragfair,quest}_views.rs`).
   Neither half runs in the gate loop; a flip that silently changes a derivation is caught by the
-  parity goldens, not by this.
+  parity goldens, not by this. **Flip #6 took the other route** and it is the one to copy:
+  `BotResidentDbTests.AResidentSendAndAnOverrideSendProduceIdenticalBotsFieldForField` sends the
+  same seeded wave twice — once off the resident DB, once with the C#-built `viewsOverride` — and
+  compares the generated bots as normalised JSON. It is a plain `[Test]`, so it *does* run in
+  `dotnet test`, and it caught a real derivation divergence (the flip #6 ledger's decision 2)
+  that the view-by-view harness would have had to be told to look for.
 - **A failure crosses as a message for C# to throw with** — never as a log line, so it carries no
   category. Since ABI 18 a panic crosses with its message too.
 - **Hangs are mostly undiagnosable** — ported retry loops can spin exactly as 4.1.2 does, inside an
@@ -170,6 +175,11 @@ silently drops camora ammo on the fifth); and the native `_type` test being
 1. **Frozen surface.** Preserve the ported class's entire 4.1.2 public *and protected* surface —
    constructor including parameter names, methods, DTOs. Keep the C# implementation verbatim as the
    legacy path; never delete it. Enforced by `dotnet apicompat` in the sibling `mpex-api-compat` repo.
+   **Why the `Native/` payload reshapes never flag it:** the whole tree post-dates the 4.1.2
+   baseline, so its members are *additions*, which apicompat does not report — not because they are
+   hidden — plenty of them are public (`Native/Loot/LootPayloads.cs`,
+   `Native/BaseClass/ItemBaseClassPayloads.cs`, `DbPublisher`). A future flip reshaping one of those
+   should expect a clean run for that reason, not from a visibility rule that does not hold.
 2. **Override contract.** Detect Harmony patches on the frozen members (`Harmony.GetPatchInfo`) and
    route to legacy so hooks fire with baseline semantics. Add a `forceLegacy...` config flag as the
    escape hatch for hooks detection can't see.
@@ -183,8 +193,13 @@ silently drops camora ammo on the fifth); and the native `_type` test being
    docs/superpowers/specs/2026-08-17-rust-state-ownership-design.md. Ragfair (flip #1), the
    repeatable quests (flip #2), the two startup one-shots — the base-class hydrate and the
    ragfair linked-item table (flip #3) — the loot family — location and reward loot
-   (flip #4) — and the scav case (flip #5) ride it today; only the bot family still projects
-   per call — see *Exceptions in force*.
+   (flip #4) — the scav case (flip #5) and the bot family — both exports (flip #6) — ride it
+   today. That is **Phase 1 of the state-ownership program complete**: all thirteen generation
+   exports read the resident DB, both slice caches are gone, and every family's per-call payload is
+   its varying block plus whatever the frozen C# signature forces (a `staticAmmoDist` parameter,
+   the caller's filtered bot template). The eligibility rule and the stale-epoch self-heal live once, in
+   `Native/Db/ResidentDbDispatch`; a family's own `ResidentDbEligible()` is a one-line wrapper that
+   sources the flag pair from its config record.
 4. **RNG parity.** Both sides draw through the shared xoshiro256\*\* source behind test-only seams
    (`Utils/RandomSource.cs` / `random_util.rs`), pinned by twin known-answer tests. Production C#
    randomness stays bit-for-bit unchanged.
@@ -211,10 +226,15 @@ same pair), the four quest generators add `QuestConfig` +
 (and, since flip #5, a further overload adding the loaded-mod list + `DbPublisher` — the pair loot
 took, chained through the earlier one),
 `ItemBaseClassService` adds `ItemBaseClassNativeRequestBuilder` + `ItemConfig`,
-`RagfairLinkedItemService` adds `RagfairLinkedItemNativeRequestBuilder` + `RagfairConfig`. The
+`RagfairLinkedItemService` adds `RagfairLinkedItemNativeRequestBuilder` + `RagfairConfig`, and
+(flip #6) `BotInventoryGenerator` adds the loaded-mod list + `DbPublisher`, chaining its frozen
+4.1.2 primary constructor. The
 container selects the overload; anything built through the frozen 4.1.2 constructor gets a null
-builder and runs legacy unconditionally. Ragfair offer generation, `RepeatableQuestRewardGenerator`
-and `RepeatableQuestHelper` needed no change at all.
+builder — or, on the resident-DB families, a null `DbPublisher`, which `ResidentDbDispatch.Eligible`
+answers `false` to — and runs legacy or the override arm unconditionally. `BotWaveBatcher` needed
+no overload: it post-dates the baseline, so its primary constructor simply took the pair. Ragfair
+offer generation, `RepeatableQuestRewardGenerator` and `RepeatableQuestHelper` needed no change at
+all.
 
 **Config flags.** `LocationConfig.ForceLegacyLootGeneration` covers *both* loot generators — there
 is no per-generator flag. Elsewhere: `BotConfig.ForceLegacyBotGeneration` and `ForcePerBotGeneration`,
@@ -223,8 +243,8 @@ is no per-generator flag. Elsewhere: `BotConfig.ForceLegacyBotGeneration` and `F
 `ScavCaseConfig.ForceLegacyScavCaseGeneration`, `ItemConfig.ForceLegacyItemBaseClassHydration`, plus
 `TrustNativeRequestCacheWithMods` / `DisableNativeRequestCache`, which carry the resident-DB
 eligibility gate and exist on `RagfairConfig`, `QuestConfig`, (since flip #3) `ItemConfig`,
-(since flip #4) `LocationConfig`, whose pair covers both loot generators, and (since flip #5)
-`ScavCaseConfig`;
+(since flip #4) `LocationConfig`, whose pair covers both loot generators, (since flip #5)
+`ScavCaseConfig` and (since flip #6) `BotConfig`, whose pair covers both bot exports;
 the linked-item table reads `RagfairConfig`'s pair rather than gaining its own. Only
 `forceLegacyLootGeneration` is serialised into a shipped `.json` (`location.json`); the rest exist
 as C# defaults and a user who wants one adds it to the file.
@@ -259,7 +279,7 @@ generates.
 draw, exactly where the C# prelude does it, and the drawn `level`/`exp` ride back on the envelope
 for the caller to write into `details.BotLevel`/`Info.Level`/`Info.Experience` before `CacheBot`
 reads them. `GetRelativePmcBotLevelRange` stays C#-side: its inputs are wave-constant, so the
-batcher calls it once and ships the range plus the exp table as `levelGeneration` (PMC waves only —
+batcher calls it once and ships the range as `levelGeneration` — PMC waves only;
 non-PMC takes the constant level 1 and draws nothing, which is what keeps non-PMC seeded pins
 byte-identical). Because every level-dependent *pre-call* step is a *pure band lookup* that draws
 nothing — `FilterBotEquipment` (whose `Clothing` weighting adjustment is also what reshapes the
@@ -268,7 +288,11 @@ bands — the batcher splits the range at those bands' edges and runs the **unch
 seasonal strip, blacklist strip and pool hydration once per band — shipping one `templateVariants`
 entry per band instead of one filtered template per bot. Segments are typically 1-3 (up to ~8 for a
 full 1..79 range on shipped config), and always exactly one `[1..1]` for a non-PMC or playerscav
-wave. The per-bot slice collapses to `botId` + `testSeed` + `details`. The voice and appearance
+wave. The per-bot slice collapses to `botId` + `testSeed` + `details`. Since flip #6 the whole
+request is `{epoch, viewsOverride?, shared, bots[]}` (single-bot: `{epoch, viewsOverride?, shared,
+bot, template, lootPools}`): the database half is resident and only the varying `shared` block, the
+slices and the caller's filtered templates cross per call — 13,341 bytes per bot at wave 45 against
+the override arm's 93,758 (BENCHMARK.md). The voice and appearance
 *draws* move **after** the call, onto the band the drawn level lands in. The decline set grows two
 member-scoped entries for the seasonal strip (`SeasonalEventService.ChristmasEventEnabled` and
 `RemoveChristmasItemsFromBotInventory`, which now run per band) — member-scoped rather than
@@ -316,8 +340,8 @@ frame per offer behind a header frame (since ABI 10, encoding tag 1), deserialis
 `Parallel.For` straight out of the native buffer. Ragfair is the only export that uses it. Its batch
 also takes **one timestamp** where legacy calls `TimeUtil.GetTimeStamp()` per offer.
 
-**Ragfair, the repeatable quests, the two startup one-shots, the loot family and the scav case
-read the resident DB — the departures from per-call projection (guideline 3).** All key freshness on the same `DatabaseMutationStamp`, a
+**Every ported generation family reads the resident DB — the departures from per-call projection
+(guideline 3).** All key freshness on the same `DatabaseMutationStamp`, a
 monotonic counter bumped from `SeasonalEventService.UpdateGlobalEvents`, `ItemFilterService`'s
 blacklist `Add*` methods, `CustomItemService`'s `Create*` methods and a guarded replay bump when
 `CanSellOnRagfair` flips true→false. **Ragfair (flip #1, ABI 22) and quests (flip #2, ABI 23)
@@ -346,13 +370,24 @@ varying block per call until Phases 2/4 — the same carve-out ragfair's config-
 took, and loot's carve-out set (`config`, `seasonal`, `lootableItemBlacklist`, `moneyTpls`, the
 six reward blacklists/sets, sealed's mod-extendable `linkedItems`) rides the same way, as does
 scav case's (`recipeId`, `config`, `inactiveSeasonalItems`, `globalBlacklist`,
-`rewardItemBlacklist`, `bossItems`).
+`rewardItemBlacklist`, `bossItems`). **Flip #6 (ABI 27) put both bot exports — the single bot and
+the batched wave — on the same envelope**, closing Phase 1: no new root, `BotDbViews` deriving at
+publish from the templates and globals roots once the ragfair views are resident (it embeds
+`RagfairDbViews` by `Arc`, the quest views' precedent, and adds only `defaultPresetIdsByTpl` and
+`expTable`). The pre-flip `SharedBotViewsWire` split in two — the database half became
+`viewsOverride` on the ineligible arm, the rest was renamed `SharedBotVarying` — and the bot
+family's varying carve-out is `modPoolSlotOrder` plus the config and service-backed blocks
+(`equipment`, `bosses`, `durability`, the two equipment blacklists, `configBlacklist`, the
+`pmcConfig`/`repairKitWeapon` lifts). Each bot's `template` and `lootPools` stay caller-supplied
+on both arms — the batch ships them per level band — because the filtered template is the caller's
+own product, not a database view.
 **A mod writing an injected table's dictionaries directly is invisible to the stamp by design** —
 the eligibility gate carries that weight instead: resident state is trusted only when no mods are
 loaded, with `TrustNativeRequestCacheWithMods` as the opt-in and `DisableNativeRequestCache` as the
 kill switch; ineligible callers send a per-call `viewsOverride` with `epoch: 0` instead — a
-documented wire contract, not runtime-enforced (guideline 3).
-Only the bot payloads are still projected per call.
+documented wire contract, not runtime-enforced (guideline 3). The rule itself and the one
+stale-epoch retry are `Native/Db/ResidentDbDispatch`'s two methods, which flip #6 extracted from
+the seven copies that had accumulated; every family calls them now, across nine sites.
 
 **Flip #1 ledger.** (a) Helper-cache freshness: legacy's hydrate-once caches — `TraderHelper`'s
 trader prices, `HandbookHelper`'s handbook price lookup, `PresetHelper`'s preset store and
@@ -362,7 +397,10 @@ staler, after runtime mutations — favours correctness, recorded here rather th
 practical edge: a resident send and a `viewsOverride` send can diverge after a runtime mutation,
 because the override is still built through those hydrate-once caches. (b) pmc name lists stay
 C#-projected in the varying block; flip #6 (bots
-root resident) is the named revisit point. (c) Runtime *config* edits still bypass the stamp — the
+root resident) is the named revisit point — **closed by flip #6's decision 1: no bots root**, the
+lists stay varying until Phase 4, because the filter reads a config value and the root's ~94.6 ms
+of per-publish projection would serve nothing else. (c) Runtime *config* edits still bypass the
+stamp — the
 pre-flip ceiling, unchanged, and Phase 4 closes it — but ragfair's config-derived fields now flow
 through the varying block on every call, which narrows the ceiling for ragfair. (d) An
 `_items: []` preset added at runtime by a trusted mod (stamp bumped) now aborts the publish loudly
@@ -454,6 +492,74 @@ per-call projection, which survives intact: `BuildViewsOverride()` is the inelig
 benchmark seam; what was added is the `{epoch, viewsOverride?, varying}` split and the hideout
 projection in `DbPayloadProjection`.
 
+**Flip #6 ledger.** (a) Freshness delta: pre-flip every bot send projected the live tables, so an
+eligible bot read every mutation up to that moment; post-flip its database half — the items view,
+`itemPresets`, `defaultPresetIdsByTpl` and the exp table — is last-published state, so an
+un-stamped table mutation is invisible to it until the next stamped publish. The flip #4/#5 class
+exactly; the kill switches (`DisableNativeRequestCache`, mods loaded without trust,
+`ForceLegacyBotGeneration`) restore per-call freshness. Handbook prices moved the same way and
+carry one reachable-only-by-a-mod edge: the eligible arm reads `RagfairDbViews.handbookPrices`,
+which is keyed off the **items table**, where the override arm calls
+`HandbookHelper.GetTemplatePrice` per drawn tpl — so a tpl priced in the handbook but absent from
+the items table prices at its handbook value on the override arm and at 0 on the resident one.
+Unreachable for generatable loot: a tpl that is not in the items table cannot be in a
+`BotLootCache` pool to begin with. **The slot-order freshness question the plan expected here does
+not arise** — see decision 2: it never became a view. (b) Decisions. **1, no bots root** —
+flip #1's ledger (b) named this flip as the revisit point for the pmc name lists, and the answer is
+no. They are the only consumer a `bots` root would have: the bot family reads no bot templates
+resident (the wave's filtered `template` is the C# caller's own product, shipped per level band),
+so the root would carry 5.7 MiB and ~94.6 ms of warm projection on *every* publish — ~13% on the
+measured ~735 ms — to serve two name lists on ragfair's varying block. And it would not finish the
+job either way: `GatherPmcNamesOfLength` filters on `botConfig.BotNameLengthLimit`, a config value,
+so the derivation cannot go resident before Phase 4. Deferred there, with flip #1's revisit note
+closed as answered. **2, `modPoolSlotOrder` is not a view.** The plan had it deriving
+into `BotDbViews` at publish; Task 5's field-for-field resident-vs-override identity test caught
+the divergence the plan itself ranked first, and the root cause is not port drift: the C# order is
+the enumeration order of the live `BotEquipmentModPoolService`'s `ConcurrentDictionary`, which is
+process-local (bucket layout, `ProcessorCount`-dependent growth) and not a function of the database
+at all. The Rust derivation was deleted and the field moved into `SharedBotVarying`/
+`SharedBotVaryingWire`, riding the per-call varying block on **both** arms at 26,428 bytes
+(BENCHMARK.md) under the spec's standing service-backed carve-out — the same class as ragfair's
+config-derived fields and quest's six service-backed sets, and the same Phases 2/4 exit. It is now
+the largest single member still crossing per bot. **3, `BotDbViews` as built**:
+`{ragfair: Arc<RagfairDbViews>, defaultPresetIdsByTpl, expTable}` — the items and preset views ride
+in through the shared `Arc` rather than a second derivation (the `QuestDbViews` embedding), and the
+two bot-own members are a re-key of `defaultPresetsByTpl` to each preset's own id
+(`ToDefaultPresetIds`) and `globals.config.exp.level.expTable[].exp`, lifted out of `BotWaveBatcher`
+where the batch used to project it per wave. The derivation is total and `Result`-shaped so a
+future hard failure aborts the publish the way ragfair's does. **4, the handbook-price union
+stays the override arm's shape.** `BuildViewsOverride` prices the union of every loot pool the
+send can draw from (one cache single-bot, one per level band batched) rather than the whole
+handbook, which is collision-safe because a tpl in two pools resolves to the same
+`GetTemplatePrice`; the eligible arm reads the resident items-keyed map instead and needs no union
+at all. **5, one envelope for both exports.** Single-bot and batch now share
+`{epoch, viewsOverride?, …}` and one `resolve_bot_views` resolver returning `LootEpochError`, so
+`STATUS_STALE_EPOCH` and the one-shot self-heal behave identically on both; `SharedBotViewsWire`
+was renamed `SharedBotVaryingWire` to stop the name claiming it carries views. **6, the two-arm
+dispatch block stays copied — evaluated and declined.** The eligible/ineligible `if/else` that
+follows `ResidentDbDispatch.Eligible` is now at its 5th/6th copy, so the fifth-copy rule was applied
+and the answer is no: that rule targets *identical* blocks, and across the 11 sites the block takes
+~6 distinct shapes — per-export `ViewsOverride` expressions, a `bool viewsOverride` parameter, a
+`.Result` unwrap, early-return one-shots with no varying block at all, and bots' mutate-the-request
+form. A shared helper would have to be generic over the request type, take two builder closures, and
+take a delegate to set each site's private-set `LastSendIncludedViewsOverride` — a 5-parameter
+abstraction replacing a 12-line `if/else` whose only genuinely duplicated line is the flag
+assignment. Commit 1 already extracted the part that *was* identical (the eligibility rule and the
+stale-epoch retry) into `ResidentDbDispatch`; what is left is shape, not duplication. Revisit only if
+a future flip makes the arms converge. (c) Net `Native/`
+delta for the flip (`git diff --stat 3dc37e1..9011794 -- Libraries/SPTarkov.Server.Core/Native/`):
+**+227/−285 lines across 7 files** — the program's **first genuine shrink**. Flips #3-#5 grew
+because their whole pre-flip payload survived as the `viewsOverride` arm; bots shrank anyway
+because two things landed at once. `BotPayloads.cs` alone is +88/−151 — the wire types collapsed
+onto the shared envelope — and the seven copied eligibility/dispatch blocks became
+`Native/Db/ResidentDbDispatch` (38 lines, +38/−0), of which the three inside `Native/` gave back
++11/−18, +11/−18 and +10/−18 (`ItemBaseClassNativeRequestBuilder`,
+`RagfairLinkedItemNativeRequestBuilder`, `RepeatableQuestNativeRequestBuilder`); the other four
+copies live in `Generators/` and shrank outside this path. Both flip-#5 review carryovers are
+discharged there: the dispatch-block extraction was the fifth copy triggering it, and the
+stale-epoch retry that had never been exercised end to end now has a scav case self-heal test
+(`ScavCaseResidentDbTests`).
+
 **The ported 4.1.2 quirks are documented at their call sites**, as numbered `Quirk N` comments in
 `rust/spt-native/src/quest/*.rs`, `src/scav_case/generator.rs`, `src/base_class.rs`,
 `src/linked_items.rs` and `src/loot/container_extensions.rs`; grep case-insensitively for `quirk`,
@@ -467,16 +573,19 @@ written against, not the current file.
 
 ## Roadmap
 
-1. **The resident-DB flips are the active front.** Phase 1 of
-   `docs/superpowers/specs/2026-08-17-rust-state-ownership-design.md` moves every generation
+1. **Phase 1 of the state-ownership program is complete; Phase 2 is the active front.** Phase 1 of
+   `docs/superpowers/specs/2026-08-17-rust-state-ownership-design.md` moved every generation
    export onto the epoch protocol, one family per flip — each its own plan, own ABI bump,
-   goldens passing *unchanged*, BENCHMARK.md re-measured before the next starts. Landed: #1
+   goldens passing *unchanged*, BENCHMARK.md re-measured before the next started. Landed: #1
    ragfair, #2 repeatable quests, #3 base-class hydrate + linked-item table, #4 loot (statics
    resident on the locations root; looseLoot deliberately stays a per-call splice — the flip #4
    ledger has the 549 MiB number, Phase 3 the residency point), #5 scav case (2026-08-19,
-   ABI 26; recipes resident on a new `hideout` root). Remaining: #6 bots (biggest expected win;
-   `SharedBotViewsWire` dissolves into resident views).
-   Then Phase 2 (Ceciler write barriers, which retires the mods-off eligibility gate and flips
+   ABI 26; recipes resident on a new `hideout` root), #6 bots (2026-08-19, ABI 27; no new root,
+   `SharedBotViewsWire` split into `viewsOverride` + `SharedBotVarying`). All thirteen generation
+   exports read the resident DB, both slice caches are gone and all six slower-than-C# families
+   have been re-measured; bots was the biggest win, as predicted — 90.32 → 13.19 ms per assault
+   bot and a 7.1x smaller wire (BENCHMARK.md).
+   Next is Phase 2 (Ceciler write barriers, which retires the mods-off eligibility gate and flips
    `TrustNativeRequestCacheWithMods` default-on), Phase 3 (Rust loads `SPT_Data`), Phase 4
    (configs join the resident set, closing the runtime-config ceiling flip #1's ledger records),
    Phase 5 (profile persistence) and Phase 6 (process inversion: an `mpex-server` bin crate hosts
@@ -486,10 +595,19 @@ written against, not the current file.
    been executed on Windows); 6b (the delegate-loader shim flip, where the resident DB's
    statics move into the exe and `SptNative.cs`'s `DllImport` layer dissolves into a vtable of
    the existing exports) waits on Phases 3 and 5.
-2. Port candidates and their costing live in [todo/TODO.md](todo/TODO.md); with #1-#5
-   landed, the unstarted front is #6 and tier 2. The two axes
+2. Port candidates and their costing live in [todo/TODO.md](todo/TODO.md); with #1-#6
+   landed, the unstarted front is tier 2. The two axes
    are independent — a flip re-homes data for something already ported, a TODO item ports
    something new.
 3. Convert `is_valid_reward_item`'s trader whitelist (`quest/reward_generator.rs:869`, a `Vec<&str>`
    of up to 14 candidates) to `ItemBaseClassCache::is_of_baseclasses_set` and measure whether 14 is
    long enough for the set form to pay. Narrow and unmeasured.
+4. **Phase 2 scope: `BotPayloadProjection.BuildModPoolSlotOrder`.** With the bot database half
+   resident (flip #6), this is the dominant irreducible per-call C# cost left on the single-bot
+   resident path — a full items-table walk with two `BotEquipmentModPoolService` lookups per tpl,
+   ~6 ms of the measured 6.06 ms `BuildRequest` (BENCHMARK.md, assault) — and the one remaining
+   member that structurally *cannot* go resident under the current service design: the flip #6
+   ledger's decision 2 shows the order is the live service's `ConcurrentDictionary` enumeration
+   order, process-local and not a function of the database. Phase 2's write barriers are what make
+   the alternative safe: own the pools rather than observe them, so the order is Rust's own and the
+   member leaves the wire entirely. Until then it rides both arms at 26,428 bytes per send.

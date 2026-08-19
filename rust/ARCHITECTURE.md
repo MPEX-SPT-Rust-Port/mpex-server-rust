@@ -49,7 +49,7 @@ The C# side of the `spt-native` boundary is `Libraries/SPTarkov.Server.Core/Nati
 
 | Path | Role |
 |---|---|
-| `src/lib.rs` | Module roots and `ABI_VERSION` (currently 26; must equal `SptNative.ExpectedAbiVersion`) |
+| `src/lib.rs` | Module roots and `ABI_VERSION` (currently 27; must equal `SptNative.ExpectedAbiVersion`) |
 | `src/ffi.rs` | The C-ABI surface. The **only** module containing `unsafe` |
 | `src/runtime.rs` | Process-wide multi-thread tokio runtime, `OnceLock`-built. Used only by `verify` |
 | `src/verify.rs` | Hashes `SPT_Data` with XXH3-128 and diffs it against `checks.dat` |
@@ -57,7 +57,7 @@ The C# side of the `spt-native` boundary is `Libraries/SPTarkov.Server.Core/Nati
 | `src/logger.rs` | The log pipeline: `sptLogger.json`, filters, level gates, per-target formatting — and the console sink |
 | `src/log_sink.rs` | The file sink alone: where a formatted line lands on disk, with its rotation and archiving |
 | `src/diag.rs` | The generator families' way into that pipeline: the locale table, the render, and `DiagSink` |
-| `src/db.rs` | The resident DB: the epoch-versioned store of published roots (templates, traders, globals, locations, hideout); a publish re-derives the ragfair and quest views |
+| `src/db.rs` | The resident DB: the epoch-versioned store of published roots (templates, traders, globals, locations, hideout); a publish re-derives the ragfair, quest and bot views |
 | `src/db/models.rs` | The publish envelope's wire types |
 | `src/loot/` | Location loot (static containers, loose loot) and reward loot (airdrops, cases, containers) |
 | `src/bot/` | One bot's entire inventory: equipment, mods, weapons, magazines, loot |
@@ -103,23 +103,26 @@ heap buffer on success, which the caller releases with `spt_buf_free`.
   encode — so a new export is a thin wrapper over it, generic in its error type and response encoding.
   `spt_verify_database` is the one that stands apart, because it blocks on the tokio runtime.
 - Status codes: `STATUS_OK` 0, `STATUS_BAD_ARGS` 1, `STATUS_PANIC` 2, `STATUS_ERROR` 3, `STATUS_STALE_EPOCH` 4
-  (the resident-DB riders only). **Quest and scav case never return 2**: they catch the generator's panic
-  themselves and report it as 3 carrying the message, because those families port a C#-sanctioned throw as a
-  panic — a generation failure, not a library bug. The cost is that a real port bug in those two also arrives
-  as 3, indistinguishable from a sanctioned failure. Deliberate.
-- **Seven families ride the resident DB: ragfair, the repeatable quest, the two startup one-shots
-  (base-class cache, linked-item table), the loot pair — location loot and reward loot — and the scav
-  case.** `spt_db_publish` (called by C#'s `DbPublisher` whenever `DatabaseMutationStamp` has moved) makes
-  the templates, traders, globals, locations and hideout roots resident in `db.rs` and derives the ragfair
-  and quest views off them. Every root is optional — an absent one keeps the resident copy — and the epoch
-  bumps on full and partial publishes alike; a bad schema or a failed derivation aborts before the swap, so
-  the previous resident DB survives. A rider's request then names an epoch and borrows those views instead
-  of carrying them; only what genuinely varies per call still crosses the boundary. The resident roots are
-  the only request data held across calls. Two traps: an epoch the store does not hold returns
-  `STATUS_STALE_EPOCH`, and the C# caller force-publishes and retries once; an ineligible caller (mods
-  loaded without trust, or the kill switch) instead sends the views inline with `epoch: 0`, a wire contract
-  that is documented, not runtime-enforced. Which views each family borrows, and why loose loot and
-  `staticAmmoDist` deliberately stayed per-call, is in RUST-ROADMAP.md's flip ledgers.
+  (every generation export since flip #6). **Quest and scav case never return 2**: they catch the generator's
+  panic themselves and report it as 3 carrying the message, because those families port a C#-sanctioned throw
+  as a panic — a generation failure, not a library bug. The cost is that a real port bug in those two also
+  arrives as 3, indistinguishable from a sanctioned failure. Deliberate.
+- **Every family rides the resident DB (Phase 1 complete at flip #6, ABI 27): ragfair, the repeatable
+  quest, the two startup one-shots (base-class cache, linked-item table), the loot pair — location loot and
+  reward loot — the scav case, and the bot family's two exports.** `spt_db_publish` (called by C#'s
+  `DbPublisher` whenever `DatabaseMutationStamp` has moved) makes the templates, traders, globals, locations
+  and hideout roots resident in `db.rs` and derives the ragfair, quest and bot views off them — in that
+  order, because each gates on the previous one's output. Every root is optional — an absent one keeps the
+  resident copy — and the epoch bumps on full and partial publishes alike; a bad schema or a failed
+  derivation aborts before the swap, so the previous resident DB survives, and an ungated view set is left
+  `None`, which the families reading it answer as a stale epoch. A rider's request then names an epoch and
+  borrows those views instead of carrying them; only what genuinely varies per call still crosses the
+  boundary. The resident roots are the only request data held across calls. Two traps: an epoch the store
+  does not hold returns `STATUS_STALE_EPOCH`, and the C# caller force-publishes and retries once; an
+  ineligible caller (mods loaded without trust, or the kill switch) instead sends the views inline with
+  `epoch: 0`, a wire contract that is documented, not runtime-enforced. Which views each family borrows, and
+  why loose loot, `staticAmmoDist` and the bot family's `modPoolSlotOrder` deliberately stayed per-call, is
+  in RUST-ROADMAP.md's flip ledgers.
 - **A buffer is written on failure too** — the parse error, the `LootError` message, or the panic text.
   Ownership is decided by the out-pointer being non-null, never by the status code. `spt_verify_database`'s
   free-on-success-only shape must not be copied into the generators.
@@ -189,7 +192,8 @@ fields still ride each request.
 ### `src/bot/`
 
 `mod.rs` defines `BotContext<'a>` — the read-only views one generation run borrows, plus its `DiagSink`. The
-bot family's analog of `LootContext`.
+bot family's analog of `LootContext`. It also owns `BotViews`, the two-arm enum every DB-derived read goes
+through, and `resolve_bot_views`, shared by both exports — see *FFI boundary*.
 
 | Module | Stands in for | What it does |
 |---|---|---|
@@ -202,9 +206,10 @@ bot family's analog of `LootContext`.
 | `bot_weapon_generator_helper.rs` | `Helpers/Bot/BotWeaponGeneratorHelper.cs` | Magazine and bullet counts, magazine+ammo item pairs |
 | `inventory_mag_gen.rs` | `Generators/Weapons/*` | The four `IInventoryMagGen` strategies, collapsed into one enum with a fixed dispatch order |
 | `durability_limits_helper.rs` | `Helpers/Bot/DurabilityLimitsHelper.cs` | Weapon/armor durability rolls |
-| `mod_pool_service.rs` | `Services/Bot/BotEquipmentModPoolService.cs` | Slot mod pools, derived per call instead of cached, drawn in the projected C# enumeration order (`modPoolSlotOrder`) |
+| `mod_pool_service.rs` | `Services/Bot/BotEquipmentModPoolService.cs` | Slot mod pools, derived per call instead of cached, drawn in the projected C# enumeration order (`modPoolSlotOrder`, on the varying block — see `views.rs`) |
 | `repair_service.rs` | `Services/Commerce/RepairService.cs` | Only `AddBuff`, the one slice bot generation reaches |
 | `exhaustable_array.rs` | `Utils/Collections/ExhaustableArray.cs` | Draw-without-replacement |
+| `views.rs` | — | Publish-time derivation of `BotDbViews` from the resident roots in `src/db.rs`, embedding `RagfairDbViews` by `Arc` (see *FFI boundary*) |
 | `models.rs` | `Models/…` | Wire types |
 
 ### `src/ragfair/`
@@ -305,16 +310,18 @@ These are what keep the port correct; break one and output silently diverges fro
   stream onto a pooled thread.
 - **Caches become per-call derivation.** C# DI singletons keyed by bot id or built over the whole database
   (`BotEquipmentModPoolService`, `BotInventoryContainerService`) are recomputed per call or handed across the
-  boundary by the caller. The unit is one bot, not one raid: the batch export hoists the views every bot in
-  the wave shares and still derives the rest per bot, each with its own seed guard.
+  boundary by the caller. The unit is one bot, not one raid: the batch export resolves the database views
+  once per call, hoists the config every bot in the wave shares, and still derives the rest per bot, each
+  with its own seed guard.
 - **The batch export is one wave per call, and the shared half is keyed by level band.** Everything the
-  wave's bots have in common — templates, loot pools, handbook prices — rides once, one entry per level
-  band rather than per bot; each bot's rayon task draws its own level *first* (matching where the C#
-  prelude does it), then picks the band covering it. Non-PMC waves draw nothing there, so their seeded
-  streams are unchanged. The single-bot export is untouched by all this: it keeps C# level generation and
-  C# filtering. A failed bot carries its message in its own reply slot rather than failing the export —
-  the wave survives it, the way `BotController.TryGenerateSingleBot` skips a bot with one Critical log — so
-  the batch export never returns `STATUS_ERROR`, only bad-args or a panic.
+  wave's bots have in common — templates and loot pools — rides once, one entry per level band rather than
+  per bot; each bot's rayon task draws its own level *first* (matching where the C# prelude does it), then
+  picks the band covering it. Non-PMC waves draw nothing there, so their seeded streams are unchanged. The
+  single-bot export shares the same envelope and shared block but is untouched by all this: it keeps C#
+  level generation and C# filtering, sending its pre-filtered template and loot pools at the top level. A
+  failed bot carries its message in its own reply slot rather than failing the export — the wave survives
+  it, the way `BotController.TryGenerateSingleBot` skips a bot with one Critical log — so the batch export
+  never returns `STATUS_ERROR`, only bad-args, a stale epoch or a panic.
 
 ### Tests
 

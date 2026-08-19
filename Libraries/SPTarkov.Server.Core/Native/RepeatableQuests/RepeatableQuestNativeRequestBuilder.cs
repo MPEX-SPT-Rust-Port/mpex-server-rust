@@ -90,12 +90,12 @@ public class RepeatableQuestNativeRequestBuilder(
     /// </summary>
     internal bool ResidentDbEligible()
     {
-        if (_dbPublisher is null || questConfig.DisableNativeRequestCache)
-        {
-            return false;
-        }
-
-        return loadedMods.Count == 0 || questConfig.TrustNativeRequestCacheWithMods;
+        return ResidentDbDispatch.Eligible(
+            _dbPublisher,
+            loadedMods.Count,
+            questConfig.DisableNativeRequestCache,
+            questConfig.TrustNativeRequestCacheWithMods
+        );
     }
 
     /// <summary>
@@ -123,18 +123,10 @@ public class RepeatableQuestNativeRequestBuilder(
         }
         else
         {
-            var epoch = _dbPublisher!.EnsureCurrent();
-            try
-            {
-                result = SptNative.GenerateRepeatableQuest(BuildRequest(viewsOverride: null, epoch, varying));
-            }
-            catch (NativeStaleEpochException)
-            {
-                // The resident DB does not hold this epoch - republish everything and retry once
-                epoch = _dbPublisher.ForcePublish();
-                result = SptNative.GenerateRepeatableQuest(BuildRequest(viewsOverride: null, epoch, varying));
-            }
-
+            result = ResidentDbDispatch.Send(
+                _dbPublisher!,
+                epoch => SptNative.GenerateRepeatableQuest(BuildRequest(viewsOverride: null, epoch, varying))
+            );
             LastSendIncludedViewsOverride = false;
         }
 

@@ -1,4 +1,5 @@
 using System.Reflection;
+using System.Text;
 using NUnit.Framework;
 using SPTarkov.Server.Core.Generators;
 using SPTarkov.Server.Core.Generators.Loot;
@@ -6,14 +7,17 @@ using SPTarkov.Server.Core.Models.Common;
 using SPTarkov.Server.Core.Models.Spt.Config;
 using SPTarkov.Server.Core.Models.Spt.Mod;
 using SPTarkov.Server.Core.Models.Spt.Tables;
+using SPTarkov.Server.Core.Native;
+using SPTarkov.Server.Core.Native.Db;
 using SPTarkov.Server.Core.Services.Server;
 
 namespace UnitTests.Tests.Generators;
 
 /// <summary>
 /// Pins the resident-DB epoch protocol on the scav case native path: an eligible generator names an
-/// epoch and never sends the views override, and the kill switch and untrusted mods fall back to the
-/// override. The resident-vs-override reward parity and the stale-epoch republish gate live on the
+/// epoch and never sends the views override, the kill switch and untrusted mods fall back to the
+/// override, and a native-side epoch desync self-heals through one republish plus retry. The
+/// resident-vs-override reward parity and the stale-epoch republish gate live on the
 /// Rust side (<c>rust/spt-native/tests/flip5_scavcase_resident.rs</c>). Epochs are process-global
 /// (other fixtures publish too), so every assertion is relative. Mutates the shared config
 /// singleton, so it restores it and never runs in parallel with other fixtures.
@@ -27,6 +31,7 @@ public class ScavCaseResidentDbTests
     private ScavCaseRewardGenerator _generator = default!;
     private ScavCaseConfig _scavCaseConfig = default!;
     private DatabaseMutationStamp _stamp = default!;
+    private DbPublisher _publisher = default!;
     private MongoId _recipeId;
 
     [OneTimeSetUp]
@@ -36,6 +41,7 @@ public class ScavCaseResidentDbTests
         _generator = di.GetService<ScavCaseRewardGenerator>();
         _scavCaseConfig = di.GetService<ScavCaseConfig>();
         _stamp = di.GetService<DatabaseMutationStamp>();
+        _publisher = di.GetService<DbPublisher>();
         _recipeId = di.GetService<HideoutTable>().Production.ScavRecipes!.First().Id;
     }
 
@@ -123,6 +129,21 @@ public class ScavCaseResidentDbTests
         {
             _scavCaseConfig.TrustNativeRequestCacheWithMods = false;
         }
+    }
+
+    [Test]
+    public void ANativeSideEpochDesyncSelfHealsThroughOneRetry()
+    {
+        // Settle the publisher's remembered epoch first, so the desync below is the only miss
+        _publisher.EnsureCurrent();
+
+        // Desync: a direct native publish the publisher never sees moves the resident epoch out
+        // from under the epoch it remembers
+        SptNative.DbPublish(Encoding.UTF8.GetBytes("{\"schema\":1,\"roots\":{}}"));
+
+        Generate(_generator);
+
+        Assert.That(_generator.LastSendIncludedViewsOverride, Is.False, "the stale-epoch miss should have republished and retried");
     }
 
     private static ScavCaseRewardGenerator BuildWithOverloadConstructor(DI di, IReadOnlyList<SptMod> mods)

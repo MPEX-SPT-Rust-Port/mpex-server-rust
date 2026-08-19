@@ -585,41 +585,103 @@ pub struct ContainerMapDetailsWire {
     pub grid_full: bool,
 }
 
+/// The database half of both bot requests — [`crate::bot::views::BotDbViews`] on the wire, for the
+/// override arm of [`crate::bot::resolve_bot_views`]. An override-less request reads the same six
+/// views off the resident DB instead.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BotViewsWire {
+    /// The `TemplateItem` slice, flattened by the C# caller exactly as the loot envelopes take it.
+    pub items: IndexMap<String, ItemView>,
+    /// `GlobalTable.ItemPresets`, keyed by preset id. Also the map `PresetHelper.GetPreset(id)`
+    /// reads, so it stands in for the `presetsById` the payload used to carry separately.
+    pub item_presets: IndexMap<String, PresetView>,
+    /// Keyed by tpl, valued by the default preset's own id - resolve through
+    /// [`Self::item_presets`], which is the map `PresetHelper` resolves every default out of.
+    pub default_presets_by_tpl: IndexMap<String, String>,
+    /// `HandbookHelper.GetTemplatePrice` per tpl (`BotPayloadProjection.BuildHandbookPrices`,
+    /// `:295-311`) — a tpl missing from the map prices at 0, which is what `GetTemplatePrice`
+    /// returns for a tpl the handbook does not know.
+    #[serde(default)]
+    pub handbook_prices: IndexMap<String, f64>,
+    /// `GlobalTable.ExperienceTable` projected to plain ints, in order — what the PMC level draw
+    /// sums out of (`BotLevelGenerator.cs:39`).
+    #[serde(default)]
+    pub exp_table: Vec<i32>,
+}
+
+/// The single-bot request: the `{epoch, viewsOverride?, …}` envelope around one varying block, one
+/// bot slice and that bot's pre-filtered template and loot pools. This path keeps C# level
+/// generation and C# filtering — no draw, no variant pick.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GenerateBotInventoryRequest {
-    pub bot_id: String,
-    /// Test-only: when present, every draw comes from a seeded xoshiro256** for the duration of
-    /// the call (see `loot::random_util::TestSeedGuard`). Never set on the production path.
+    /// The resident-DB epoch the caller last published. Checked only when
+    /// [`Self::views_override`] is absent; a mismatch is `STATUS_STALE_EPOCH`.
+    pub epoch: u64,
+    /// When present, the database views ride the wire and the resident store is never consulted.
     #[serde(default)]
-    pub test_seed: Option<u64>,
-    pub details: BotGenerationDetailsWire,
+    pub views_override: Option<Box<BotViewsWire>>,
+    pub shared: SharedBotVaryingWire,
+    pub bot: BotSliceWire,
     pub template: BotTemplateWire,
-    /// Hoisted live state — `PlayerProfile.Info.Level` (`BotInventoryGenerator.cs:228`). Read only
-    /// C#-side, to resolve [`Self::equipment_blacklist`] and
-    /// [`Self::weapon_mod_equipment_blacklist`]; see [`crate::bot::bot_inventory_generator`].
+    /// The 13 resolved `BotLootCacheService` pools.
+    pub loot_pools: BotLootCacheWire,
+}
+
+/// `BotLevelGenerator.GetRelativePmcBotLevelRange` (`BotLevelGenerator.cs:67-101`), resolved once
+/// per wave because its inputs are all wave-constant. The exp table the draw sums out of (`:39`)
+/// lives on the views ([`BotViewsWire::exp_table`] / the resident `BotDbViews::exp_table`). Only
+/// the draw itself varies per bot, and that is what
+/// [`crate::bot::level_generator::generate_bot_level`] does natively.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LevelGenerationWire {
+    pub level_min: i32,
+    pub level_max: i32,
+}
+
+/// The bot template and the loot pools resolved from the bot's level, for one band of levels.
+///
+/// Every level-dependent step the C# prelude runs before the native call is a band lookup —
+/// `FirstOrDefault(x => level >= x.LevelRange.Min && level <= x.LevelRange.Max)` at
+/// `BotEquipmentFilterService.cs:137-189` and `BotHelper.cs:83-90` — and none of them draws. So
+/// the caller runs the *unchanged* C# filter and pool hydration once per segment on which all of
+/// those lookups are constant and ships one variant per segment, instead of one filtered template
+/// per bot. A non-PMC or playerscav wave is always a single `[1..1]` variant, because non-PMC
+/// level is the constant 1 (`BotLevelGenerator.cs:23-26`).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TemplateVariantWire {
+    pub level_min: i32,
+    pub level_max: i32,
+    pub template: BotTemplateWire,
+    pub loot_pools: BotLootCacheWire,
+}
+
+/// The request members that do not vary between the bots of one wave and are not database views —
+/// every config slice, the blacklist the caller resolved from the wave's role and the player's
+/// level, and (as [`Self::template_variants`]) the templates and loot pools, which vary by level
+/// *band* rather than by bot. The database views live on [`BotViewsWire`] / the resident DB.
+///
+/// Deserialized as a nested object rather than `#[serde(flatten)]`: flatten routes the whole map
+/// through serde's buffering path, which would cost more than the duplication it removes.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SharedBotVaryingWire {
     pub generating_player_level: i32,
-    /// Hoisted live state — `RaidTime`/`WeatherHelper.IsNightTime`.
     pub is_night_time: bool,
-    /// `BotConfig.Equipment`, keyed by equipment role. The whole map, not one resolved entry: the
-    /// orchestrator does its own `GetBotEquipmentRole` lookup (`:180`) *and* a `ContainsKey` on the
-    /// bot data's role (`:590`), and `GenerateExtraPropertiesForItem` looks roles up per item.
     pub equipment: IndexMap<String, EquipmentFilters>,
-    /// `BotConfig.Bosses`.
     pub bosses: Vec<String>,
-    /// `BotConfig.Durability`.
     pub durability: crate::bot::durability_limits_helper::BotDurability,
     pub item_spawn_limits: IndexMap<String, IndexMap<String, f64>>,
     pub wallet_loot: WalletLootSettingsWire,
-    /// `BotConfig.CurrencyStackSize` — bot role → money tpl → stack size → weight.
     pub currency_stack_size: IndexMap<String, IndexMap<String, IndexMap<String, f64>>>,
-    /// `BotConfig.SecureContainerAmmoStackCount`.
     pub secure_container_ammo_stack_count: i32,
     pub disable_loot_on_bot_types: std::collections::HashSet<String>,
     pub low_profile_gas_block_tpls: std::collections::HashSet<String>,
     pub loot_item_resource_randomization: IndexMap<String, RandomisedResourceDetails>,
     pub pmc_config: PmcConfigWire,
-    /// `RepairConfig.RepairKit.Weapon`.
     pub repair_kit_weapon: crate::bot::repair_service::BonusSettings,
     /// `GetBotEquipmentBlacklist(role, level)` result, as the equipment path resolves it
     /// (`BotInventoryGenerator.cs:583`, level defaulted to 1).
@@ -629,94 +691,12 @@ pub struct GenerateBotInventoryRequest {
     /// inconsistent about that default and level 0 matches no `levelRange`, so the two blacklists
     /// differ and each path has to use its own.
     pub weapon_mod_equipment_blacklist: EquipmentFilterDetails,
-    /// The 13 resolved `BotLootCacheService` pools.
-    pub loot_pools: BotLootCacheWire,
-    /// `GlobalTable.ItemPresets`, keyed by preset id. Also the map `PresetHelper.GetPreset(id)`
-    /// reads, so it stands in for the `presetsById` the payload used to carry separately.
-    pub item_presets: IndexMap<String, PresetView>,
-    /// Which preset is the default for a tpl, as its id — resolve it through [`Self::item_presets`].
-    pub default_presets_by_tpl: IndexMap<String, String>,
-    /// `ItemFilterService.GetBlacklistedItems()`.
     pub config_blacklist: std::collections::HashSet<String>,
-    pub handbook_prices: IndexMap<String, f64>,
-    /// The `TemplateItem` slice, flattened by the C# caller exactly as the loot envelopes take it.
-    pub items: IndexMap<String, ItemView>,
     /// The C# `BotEquipmentModPoolService` pools' slot-name enumeration order per template, as
-    /// indices into that template's projected `slots` array. `#[serde(default)]` so an absent
-    /// field means database order — today's behavior.
-    #[serde(default)]
-    pub mod_pool_slot_order: IndexMap<String, Vec<usize>>,
-}
-
-/// `BotLevelGenerator.GetRelativePmcBotLevelRange` (`BotLevelGenerator.cs:67-101`), resolved once
-/// per wave because its inputs are all wave-constant, plus the exp table the draw sums out of
-/// (`:39`). Only the draw itself varies per bot, and that is what
-/// [`crate::bot::level_generator::generate_bot_level`] does natively.
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LevelGenerationWire {
-    pub level_min: i32,
-    pub level_max: i32,
-    /// `GlobalTable.ExperienceTable` projected to plain ints, in order.
-    pub exp_table: Vec<i32>,
-}
-
-/// The bot template and the two views resolved from the bot's level, for one band of levels.
-///
-/// Every level-dependent step the C# prelude runs before the native call is a band lookup —
-/// `FirstOrDefault(x => level >= x.LevelRange.Min && level <= x.LevelRange.Max)` at
-/// `BotEquipmentFilterService.cs:137-189`, `BotHelper.cs:83-90` and
-/// `BotPayloadProjection.cs:290-298` — and none of them draws. So the caller runs the *unchanged*
-/// C# filter and pool hydration once per segment on which all of those lookups are constant and
-/// ships one variant per segment, instead of one filtered template per bot. A non-PMC or
-/// playerscav wave is always a single `[1..1]` variant, because non-PMC level is the constant 1
-/// (`BotLevelGenerator.cs:23-26`).
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TemplateVariantWire {
-    pub level_min: i32,
-    pub level_max: i32,
-    pub template: BotTemplateWire,
-    pub loot_pools: BotLootCacheWire,
-    pub handbook_prices: IndexMap<String, f64>,
-}
-
-/// The request members that do not vary between the bots of one wave — every database view, every
-/// config slice, the blacklist the caller resolved from the wave's role and the player's level, and
-/// (as [`Self::template_variants`]) the templates and loot pools, which vary by level *band* rather
-/// than by bot.
-///
-/// Deserialized as a nested object rather than `#[serde(flatten)]`: flatten routes the whole map
-/// through serde's buffering path, which would cost more than the duplication it removes.
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SharedBotViewsWire {
-    pub generating_player_level: i32,
-    pub is_night_time: bool,
-    pub equipment: IndexMap<String, EquipmentFilters>,
-    pub bosses: Vec<String>,
-    pub durability: crate::bot::durability_limits_helper::BotDurability,
-    pub item_spawn_limits: IndexMap<String, IndexMap<String, f64>>,
-    pub wallet_loot: WalletLootSettingsWire,
-    pub currency_stack_size: IndexMap<String, IndexMap<String, IndexMap<String, f64>>>,
-    pub secure_container_ammo_stack_count: i32,
-    pub disable_loot_on_bot_types: std::collections::HashSet<String>,
-    pub low_profile_gas_block_tpls: std::collections::HashSet<String>,
-    pub loot_item_resource_randomization: IndexMap<String, RandomisedResourceDetails>,
-    pub pmc_config: PmcConfigWire,
-    pub repair_kit_weapon: crate::bot::repair_service::BonusSettings,
-    pub equipment_blacklist: EquipmentFilterDetails,
-    /// See [`GenerateBotInventoryRequest::weapon_mod_equipment_blacklist`].
-    pub weapon_mod_equipment_blacklist: EquipmentFilterDetails,
-    pub item_presets: IndexMap<String, PresetView>,
-    /// Keyed by tpl, valued by the default preset's own id - resolve through
-    /// [`Self::item_presets`], which is the map `PresetHelper` resolves every default out of.
-    pub default_presets_by_tpl: IndexMap<String, String>,
-    pub config_blacklist: std::collections::HashSet<String>,
-    pub items: IndexMap<String, ItemView>,
-    /// The C# `BotEquipmentModPoolService` pools' slot-name enumeration order per template, as
-    /// indices into that template's projected `slots` array. `#[serde(default)]` so an absent
-    /// field means database order — today's behavior.
+    /// indices into that template's projected `slots` array. On the *varying* block rather than
+    /// the views: the order is an emergent artifact of the live C# service's
+    /// `ConcurrentDictionary` (process-local bucket layout, not derivable from the database), so
+    /// it rides every send. `#[serde(default)]` so an absent field means database order.
     #[serde(default)]
     pub mod_pool_slot_order: IndexMap<String, Vec<usize>>,
     /// The wave's level-draw inputs. Present iff the wave is PMC: every other bot takes the
@@ -725,15 +705,18 @@ pub struct SharedBotViewsWire {
     #[serde(default)]
     pub level_generation: Option<LevelGenerationWire>,
     /// Ascending, contiguous, covering `[level_min..level_max]`; exactly one `[1..1]` entry for a
-    /// non-PMC or playerscav wave.
+    /// non-PMC or playerscav wave. `#[serde(default)]` because the single-bot request carries its
+    /// template and loot pools at the top level instead.
+    #[serde(default)]
     pub template_variants: Vec<TemplateVariantWire>,
 }
 
 /// The three request members that do vary per bot: identity, the test seed and the generation
-/// details. The template and the two views hydrated from the bot's level live on the shared block
-/// as [`SharedBotViewsWire::template_variants`] — the batch path draws the level natively and picks
-/// the variant whose band covers it, so a wave ships one template per level segment (typically one
-/// to three, up to ~8 for a full 1..79 range on shipped config) rather than one per bot.
+/// details. The template and loot pools hydrated from the bot's level live on the shared block
+/// as [`SharedBotVaryingWire::template_variants`] — the batch path draws the level natively and
+/// picks the variant whose band covers it, so a wave ships one template per level segment
+/// (typically one to three, up to ~8 for a full 1..79 range on shipped config) rather than one
+/// per bot.
 ///
 /// `details.bot_level` still rides the wire because the single-bot request reuses this view; the
 /// batch projection sends 0 and the drawn level overwrites it before any consumer reads it.
@@ -746,11 +729,17 @@ pub struct BotSliceWire {
     pub details: BotGenerationDetailsWire,
 }
 
-/// One wave: the shared views once, then a slice per bot.
+/// One wave: the `{epoch, viewsOverride?, …}` envelope around the shared varying block once, then
+/// a slice per bot.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GenerateBotInventoryBatchRequest {
-    pub shared: SharedBotViewsWire,
+    /// See [`GenerateBotInventoryRequest::epoch`].
+    pub epoch: u64,
+    /// See [`GenerateBotInventoryRequest::views_override`].
+    #[serde(default)]
+    pub views_override: Option<Box<BotViewsWire>>,
+    pub shared: SharedBotVaryingWire,
     pub bots: Vec<BotSliceWire>,
 }
 
@@ -841,13 +830,20 @@ pub struct BotInventoryResult {
 mod tests {
     use super::*;
 
-    /// Every required [`GenerateBotInventoryRequest`] member. `testSeed` is deliberately absent —
-    /// its omission is what exercises the missing-field → `None` path.
+    /// Every required [`GenerateBotInventoryRequest`] member, as an override send. `testSeed` is
+    /// deliberately absent — its omission is what exercises the missing-field → `None` path.
     const REQUEST_JSON: &str = r#"{
-        "botId":"bbbbbbbbbbbbbbbbbbbbbbbb",
+        "epoch":0,
+        "viewsOverride":{
+            "items":{"aaaaaaaaaaaaaaaaaaaaaab5":{"parent":"aaaaaaaaaaaaaaaaaaaaaab6","width":2,"height":1}},
+            "itemPresets":{"p1":{"id":"p1","items":[]},"p2":{"id":"p2","items":[]}},
+            "defaultPresetsByTpl":{"aaaaaaaaaaaaaaaaaaaaaab2":"p2"},
+            "handbookPrices":{"aaaaaaaaaaaaaaaaaaaaaab4":12500.5},
+            "expTable":[10]},
+        "bot":{"botId":"bbbbbbbbbbbbbbbbbbbbbbbb",
         "details":{"role":"assault","roleLowercase":"assault","side":"Savage","botLevel":12,
             "isPmc":false,"isPlayerScav":false,"gameVersion":"standard","location":"bigmap",
-            "botDifficulty":"normal","clearBotContainerCacheAfterGeneration":true},
+            "botDifficulty":"normal","clearBotContainerCacheAfterGeneration":true}},
         "template":{
             "inventory":{
                 "equipment":{"Headwear":{"aaaaaaaaaaaaaaaaaaaaaaa1":3.5,"aaaaaaaaaaaaaaaaaaaaaaa2":1}},
@@ -861,6 +857,7 @@ mod tests {
             "generation":{"items":{"backpackLoot":{"weights":{"1":1}},
                 "magazines":{"weights":{"2":1}}}},
             "modAddedTemplateField":7},
+        "shared":{
         "generatingPlayerLevel":30,
         "isNightTime":true,
         "equipment":{"assault":{"weaponModLimits":{"scopeLimit":2},
@@ -890,32 +887,35 @@ mod tests {
         "repairKitWeapon":{"rarityWeight":{},"bonusTypeWeight":{},"Common":{},"Rare":{}},
         "equipmentBlacklist":{"equipment":{"Headwear":["aaaaaaaaaaaaaaaaaaaaaaa9"]}},
         "weaponModEquipmentBlacklist":{},
-        "lootPools":{"backpackLoot":{"aaaaaaaaaaaaaaaaaaaaaab1":4}},
-        "itemPresets":{"p1":{"id":"p1","items":[]},"p2":{"id":"p2","items":[]}},
-        "defaultPresetsByTpl":{"aaaaaaaaaaaaaaaaaaaaaab2":"p2"},
         "configBlacklist":["aaaaaaaaaaaaaaaaaaaaaab3"],
-        "handbookPrices":{"aaaaaaaaaaaaaaaaaaaaaab4":12500.5},
-        "items":{"aaaaaaaaaaaaaaaaaaaaaab5":{"parent":"aaaaaaaaaaaaaaaaaaaaaab6","width":2,"height":1}}
+        "modPoolSlotOrder":{"aaaaaaaaaaaaaaaaaaaaaaa5":[1,0]}},
+        "lootPools":{"backpackLoot":{"aaaaaaaaaaaaaaaaaaaaaab1":4}}
     }"#;
 
     #[test]
     fn generate_bot_inventory_request_deserializes() {
         let parsed: GenerateBotInventoryRequest = serde_json::from_str(REQUEST_JSON).unwrap();
 
-        assert_eq!(parsed.bot_id, "bbbbbbbbbbbbbbbbbbbbbbbb");
+        assert_eq!(parsed.epoch, 0);
+        assert_eq!(parsed.bot.bot_id, "bbbbbbbbbbbbbbbbbbbbbbbb");
         // Absent `testSeed` is the production path.
-        assert_eq!(parsed.test_seed, None);
+        assert_eq!(parsed.bot.test_seed, None);
 
-        assert_eq!(parsed.details.role, "assault");
-        assert_eq!(parsed.details.role_lowercase, "assault");
-        assert_eq!(parsed.details.side, "Savage");
-        assert_eq!(parsed.details.bot_level, 12);
-        assert!(!parsed.details.is_pmc);
-        assert!(!parsed.details.is_player_scav);
-        assert_eq!(parsed.details.game_version, "standard");
-        assert_eq!(parsed.details.location.as_deref(), Some("bigmap"));
-        assert_eq!(parsed.details.bot_difficulty, "normal");
-        assert!(parsed.details.clear_bot_container_cache_after_generation);
+        assert_eq!(parsed.bot.details.role, "assault");
+        assert_eq!(parsed.bot.details.role_lowercase, "assault");
+        assert_eq!(parsed.bot.details.side, "Savage");
+        assert_eq!(parsed.bot.details.bot_level, 12);
+        assert!(!parsed.bot.details.is_pmc);
+        assert!(!parsed.bot.details.is_player_scav);
+        assert_eq!(parsed.bot.details.game_version, "standard");
+        assert_eq!(parsed.bot.details.location.as_deref(), Some("bigmap"));
+        assert_eq!(parsed.bot.details.bot_difficulty, "normal");
+        assert!(
+            parsed
+                .bot
+                .details
+                .clear_bot_container_cache_after_generation
+        );
 
         let inventory = &parsed.template.inventory;
         assert_eq!(
@@ -951,9 +951,9 @@ mod tests {
             1.0
         );
 
-        assert_eq!(parsed.generating_player_level, 30);
-        assert!(parsed.is_night_time);
-        let assault_equipment = &parsed.equipment["assault"];
+        assert_eq!(parsed.shared.generating_player_level, 30);
+        assert!(parsed.shared.is_night_time);
+        let assault_equipment = &parsed.shared.equipment["assault"];
         assert_eq!(
             assault_equipment
                 .weapon_mod_limits
@@ -987,22 +987,26 @@ mod tests {
                 .equipment_mods_modifiers["mod_nvg"],
             90.0
         );
-        assert_eq!(parsed.bosses, vec!["bossknight"]);
-        assert_eq!(parsed.durability.default.weapon.lowest_max, 60);
+        assert_eq!(parsed.shared.bosses, vec!["bossknight"]);
+        assert_eq!(parsed.shared.durability.default.weapon.lowest_max, 60);
         assert_eq!(
-            parsed.item_spawn_limits["assault"]["aaaaaaaaaaaaaaaaaaaaaaa7"],
+            parsed.shared.item_spawn_limits["assault"]["aaaaaaaaaaaaaaaaaaaaaaa7"],
             1.0
         );
-        assert_eq!(parsed.wallet_loot.chance_percent, 10.0);
-        assert_eq!(parsed.currency_stack_size["default"]["RUB"]["1000"], 1.0);
-        assert_eq!(parsed.secure_container_ammo_stack_count, 3);
-        assert!(parsed.disable_loot_on_bot_types.contains("bosstest"));
+        assert_eq!(parsed.shared.wallet_loot.chance_percent, 10.0);
+        assert_eq!(
+            parsed.shared.currency_stack_size["default"]["RUB"]["1000"],
+            1.0
+        );
+        assert_eq!(parsed.shared.secure_container_ammo_stack_count, 3);
+        assert!(parsed.shared.disable_loot_on_bot_types.contains("bosstest"));
         assert!(
             parsed
+                .shared
                 .low_profile_gas_block_tpls
                 .contains("aaaaaaaaaaaaaaaaaaaaaaa8")
         );
-        let food = parsed.loot_item_resource_randomization["assault"]
+        let food = parsed.shared.loot_item_resource_randomization["assault"]
             .food
             .as_ref()
             .unwrap();
@@ -1010,21 +1014,29 @@ mod tests {
         // Absent in the payload; C#'s non-nullable float lands on 0, not on "no randomisation".
         assert_eq!(food.resource_percent, 0.0);
         assert!(
-            parsed.loot_item_resource_randomization["assault"]
+            parsed.shared.loot_item_resource_randomization["assault"]
                 .meds
                 .is_none()
         );
-        assert!(parsed.pmc_config.force_healing_items_into_secure);
-        assert!(parsed.pmc_config.force_armband.enabled);
-        assert_eq!(parsed.pmc_config.force_armband.usec, "armband_usec");
-        assert_eq!(parsed.pmc_config.force_armband.bear, "armband_bear");
+        assert!(parsed.shared.pmc_config.force_healing_items_into_secure);
+        assert!(parsed.shared.pmc_config.force_armband.enabled);
+        assert_eq!(parsed.shared.pmc_config.force_armband.usec, "armband_usec");
+        assert_eq!(parsed.shared.pmc_config.force_armband.bear, "armband_bear");
         assert_eq!(
-            parsed.pmc_config.weapon_has_enhancement_chance_percent,
+            parsed
+                .shared
+                .pmc_config
+                .weapon_has_enhancement_chance_percent,
             25.0
         );
-        assert!(parsed.repair_kit_weapon.rarity_weight.is_empty());
+        assert!(parsed.shared.repair_kit_weapon.rarity_weight.is_empty());
         assert!(
-            parsed.equipment_blacklist.equipment.as_ref().unwrap()["Headwear"]
+            parsed
+                .shared
+                .equipment_blacklist
+                .equipment
+                .as_ref()
+                .unwrap()["Headwear"]
                 .contains("aaaaaaaaaaaaaaaaaaaaaaa9")
         );
         assert_eq!(
@@ -1033,16 +1045,29 @@ mod tests {
         );
         // Pools the payload omits deserialize empty, not missing.
         assert!(parsed.loot_pools.combined_pool_loot.is_empty());
-        assert_eq!(parsed.item_presets["p1"].id.as_deref(), Some("p1"));
+        assert!(
+            parsed
+                .shared
+                .config_blacklist
+                .contains("aaaaaaaaaaaaaaaaaaaaaab3")
+        );
+        // The mod-pool slot order rides the varying block, not the views.
+        assert_eq!(
+            parsed.shared.mod_pool_slot_order["aaaaaaaaaaaaaaaaaaaaaaa5"],
+            vec![1, 0]
+        );
+
+        let views = parsed.views_override.as_ref().unwrap();
+        assert_eq!(views.item_presets["p1"].id.as_deref(), Some("p1"));
         // The default rides as an id and is resolved against `item_presets`, not inlined
         assert_eq!(
-            parsed.default_presets_by_tpl["aaaaaaaaaaaaaaaaaaaaaab2"],
+            views.default_presets_by_tpl["aaaaaaaaaaaaaaaaaaaaaab2"],
             "p2"
         );
-        assert_eq!(parsed.item_presets["p2"].id.as_deref(), Some("p2"));
-        assert!(parsed.config_blacklist.contains("aaaaaaaaaaaaaaaaaaaaaab3"));
-        assert_eq!(parsed.handbook_prices["aaaaaaaaaaaaaaaaaaaaaab4"], 12500.5);
-        assert_eq!(parsed.items["aaaaaaaaaaaaaaaaaaaaaab5"].width, Some(2));
+        assert_eq!(views.item_presets["p2"].id.as_deref(), Some("p2"));
+        assert_eq!(views.handbook_prices["aaaaaaaaaaaaaaaaaaaaaab4"], 12500.5);
+        assert_eq!(views.items["aaaaaaaaaaaaaaaaaaaaaab5"].width, Some(2));
+        assert_eq!(views.exp_table, vec![10]);
     }
 
     #[test]
@@ -1052,7 +1077,7 @@ mod tests {
             r#""botId":"bbbbbbbbbbbbbbbbbbbbbbbb","testSeed":42,"#,
         );
         let parsed: GenerateBotInventoryRequest = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.test_seed, Some(42));
+        assert_eq!(parsed.bot.test_seed, Some(42));
 
         // Explicit null is the same as absent.
         let json = REQUEST_JSON.replace(
@@ -1060,50 +1085,44 @@ mod tests {
             r#""botId":"bbbbbbbbbbbbbbbbbbbbbbbb","testSeed":null,"#,
         );
         let parsed: GenerateBotInventoryRequest = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.test_seed, None);
+        assert_eq!(parsed.bot.test_seed, None);
     }
 
-    /// The flat single-bot fixture reshaped into a batch request: the slice keeps identity, seed
-    /// and details, and the three level-dependent members move into one full-coverage variant.
+    /// The single-bot fixture reshaped into a batch request: the slice rides in `bots`, and the
+    /// template and loot pools move into one full-coverage variant on the shared block.
     fn batch_request_json(level_generation: Option<serde_json::Value>) -> serde_json::Value {
-        let mut shared: serde_json::Value = serde_json::from_str(REQUEST_JSON).unwrap();
-        let object = shared.as_object_mut().unwrap();
+        let mut request: serde_json::Value = serde_json::from_str(REQUEST_JSON).unwrap();
+        let object = request.as_object_mut().unwrap();
 
-        let mut slice = serde_json::Map::new();
-        for key in ["botId", "testSeed", "details"] {
-            if let Some(value) = object.remove(key) {
-                slice.insert(key.to_owned(), value);
-            }
-        }
-
+        let slice = object.remove("bot").unwrap();
         let variant = serde_json::json!({
             "levelMin": 1,
             "levelMax": 99,
             "template": object.remove("template").unwrap(),
             "lootPools": object.remove("lootPools").unwrap(),
-            "handbookPrices": object.remove("handbookPrices").unwrap(),
         });
-        object.insert("templateVariants".to_owned(), serde_json::json!([variant]));
+        let shared = object.get_mut("shared").unwrap().as_object_mut().unwrap();
+        shared.insert("templateVariants".to_owned(), serde_json::json!([variant]));
         if let Some(level_generation) = level_generation {
-            object.insert("levelGeneration".to_owned(), level_generation);
+            shared.insert("levelGeneration".to_owned(), level_generation);
         }
+        object.insert("bots".to_owned(), serde_json::json!([slice]));
 
-        serde_json::json!({"shared": shared, "bots": [serde_json::Value::Object(slice)]})
+        request
     }
 
     #[test]
     fn batch_request_deserializes_with_level_inputs() {
         let json = batch_request_json(Some(serde_json::json!({
-            "levelMin": 5, "levelMax": 30, "expTable": [10, 20],
+            "levelMin": 5, "levelMax": 30,
         })));
         let parsed: GenerateBotInventoryBatchRequest = serde_json::from_value(json).unwrap();
 
         let level_generation = parsed.shared.level_generation.as_ref().unwrap();
         assert_eq!(level_generation.level_min, 5);
         assert_eq!(level_generation.level_max, 30);
-        assert_eq!(level_generation.exp_table, vec![10, 20]);
 
-        // The template and its two level-banded companions ride once per band, not once per bot.
+        // The template and its loot pools ride once per band, not once per bot.
         let variant = &parsed.shared.template_variants[0];
         assert_eq!((variant.level_min, variant.level_max), (1, 99));
         assert_eq!(variant.template.chances.equipment["Headwear"], 75.0);
@@ -1111,13 +1130,79 @@ mod tests {
             variant.loot_pools.backpack_loot["aaaaaaaaaaaaaaaaaaaaaab1"],
             4.0
         );
-        assert_eq!(variant.handbook_prices["aaaaaaaaaaaaaaaaaaaaaab4"], 12500.5);
 
         // The slice is down to identity + seed + details.
         let slice = &parsed.bots[0];
         assert_eq!(slice.bot_id, "bbbbbbbbbbbbbbbbbbbbbbbb");
         assert_eq!(slice.test_seed, None);
         assert_eq!(slice.details.bot_level, 12);
+    }
+
+    #[test]
+    fn a_resident_batch_request_with_epoch_and_varying_only_deserializes() {
+        let mut json = batch_request_json(None);
+        json["epoch"] = serde_json::json!(3);
+        json.as_object_mut().unwrap().remove("viewsOverride");
+
+        let parsed: GenerateBotInventoryBatchRequest = serde_json::from_value(json).unwrap();
+
+        assert_eq!(parsed.epoch, 3);
+        assert!(parsed.views_override.is_none());
+        assert_eq!(parsed.bots.len(), 1);
+        assert_eq!(parsed.bots[0].bot_id, "bbbbbbbbbbbbbbbbbbbbbbbb");
+    }
+
+    #[test]
+    fn an_override_request_with_epoch_zero_deserializes() {
+        let parsed: GenerateBotInventoryBatchRequest =
+            serde_json::from_value(batch_request_json(None)).unwrap();
+
+        assert_eq!(parsed.epoch, 0);
+        let views = parsed.views_override.as_ref().unwrap();
+        assert_eq!(views.items["aaaaaaaaaaaaaaaaaaaaaab5"].width, Some(2));
+        assert_eq!(views.item_presets["p1"].id.as_deref(), Some("p1"));
+        assert_eq!(
+            views.default_presets_by_tpl["aaaaaaaaaaaaaaaaaaaaaab2"],
+            "p2"
+        );
+        assert_eq!(views.handbook_prices["aaaaaaaaaaaaaaaaaaaaaab4"], 12500.5);
+        assert_eq!(views.exp_table, vec![10]);
+
+        // The view members a C# override send may omit parse to their empty defaults, and so
+        // does the varying block's slot order.
+        let mut json = batch_request_json(None);
+        let views = json["viewsOverride"].as_object_mut().unwrap();
+        for key in ["handbookPrices", "expTable"] {
+            views.remove(key);
+        }
+        json["shared"]
+            .as_object_mut()
+            .unwrap()
+            .remove("modPoolSlotOrder");
+        let parsed: GenerateBotInventoryBatchRequest = serde_json::from_value(json).unwrap();
+        let views = parsed.views_override.as_ref().unwrap();
+        assert!(views.handbook_prices.is_empty());
+        assert!(views.exp_table.is_empty());
+        assert!(parsed.shared.mod_pool_slot_order.is_empty());
+    }
+
+    #[test]
+    fn a_single_bot_resident_request_deserializes() {
+        let mut json: serde_json::Value = serde_json::from_str(REQUEST_JSON).unwrap();
+        json["epoch"] = serde_json::json!(3);
+        json.as_object_mut().unwrap().remove("viewsOverride");
+
+        let parsed: GenerateBotInventoryRequest = serde_json::from_value(json).unwrap();
+
+        assert_eq!(parsed.epoch, 3);
+        assert!(parsed.views_override.is_none());
+        assert_eq!(parsed.bot.bot_id, "bbbbbbbbbbbbbbbbbbbbbbbb");
+        assert_eq!(parsed.shared.generating_player_level, 30);
+        assert_eq!(parsed.template.chances.equipment["Headwear"], 75.0);
+        assert_eq!(
+            parsed.loot_pools.backpack_loot["aaaaaaaaaaaaaaaaaaaaaab1"],
+            4.0
+        );
     }
 
     #[test]

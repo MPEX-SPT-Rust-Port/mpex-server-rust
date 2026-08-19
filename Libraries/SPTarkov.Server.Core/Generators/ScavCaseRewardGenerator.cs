@@ -166,12 +166,12 @@ public class ScavCaseRewardGenerator(
     /// </summary>
     private bool ResidentDbEligible()
     {
-        if (_loadedMods is null || _dbPublisher is null || scavCaseConfig.DisableNativeRequestCache)
-        {
-            return false;
-        }
-
-        return _loadedMods.Count == 0 || scavCaseConfig.TrustNativeRequestCacheWithMods;
+        return ResidentDbDispatch.Eligible(
+            _dbPublisher,
+            _loadedMods?.Count,
+            scavCaseConfig.DisableNativeRequestCache,
+            scavCaseConfig.TrustNativeRequestCacheWithMods
+        );
     }
 
     /// <summary>
@@ -260,18 +260,10 @@ public class ScavCaseRewardGenerator(
         }
         else
         {
-            var epoch = _dbPublisher!.EnsureCurrent();
-            try
-            {
-                result = SptNative.GenerateScavCaseRewards(new ScavCaseRewardsRequest { Epoch = epoch, Varying = varying }).Result;
-            }
-            catch (NativeStaleEpochException)
-            {
-                // The resident DB does not hold this epoch - republish everything and retry once
-                epoch = _dbPublisher.ForcePublish();
-                result = SptNative.GenerateScavCaseRewards(new ScavCaseRewardsRequest { Epoch = epoch, Varying = varying }).Result;
-            }
-
+            result = ResidentDbDispatch.Send(
+                _dbPublisher!,
+                epoch => SptNative.GenerateScavCaseRewards(new ScavCaseRewardsRequest { Epoch = epoch, Varying = varying }).Result
+            );
             LastSendIncludedViewsOverride = false;
         }
 

@@ -83,7 +83,7 @@ public class BotPayloadSizeTests
         using var request = JsonDocument.Parse(SerializeRequest());
 
         Assert.That(
-            request.RootElement.TryGetProperty("presetsById", out _),
+            request.RootElement.GetProperty("viewsOverride").TryGetProperty("presetsById", out _),
             Is.False,
             "presetsById duplicates itemPresets verbatim; the native side should read one map"
         );
@@ -98,7 +98,7 @@ public class BotPayloadSizeTests
     {
         using var request = JsonDocument.Parse(SerializeRequest());
 
-        var defaults = request.RootElement.GetProperty("defaultPresetsByTpl");
+        var defaults = request.RootElement.GetProperty("viewsOverride").GetProperty("defaultPresetsByTpl");
         Assert.That(defaults.EnumerateObject().Any(), Is.True, "fixture needs a database with default presets");
 
         foreach (var entry in defaults.EnumerateObject())
@@ -121,7 +121,7 @@ public class BotPayloadSizeTests
     public void OmitsDefaultsTheNativeSideUnwraps()
     {
         using var request = JsonDocument.Parse(SerializeRequest());
-        var items = request.RootElement.GetProperty("items");
+        var items = request.RootElement.GetProperty("viewsOverride").GetProperty("items");
 
         string[] omitted =
         [
@@ -255,7 +255,11 @@ public class BotPayloadSizeTests
 
         return new GenerateBotInventoryBatchRequest
         {
-            Shared = BotPayloadProjection.BuildSharedViews(
+            // The override send: the wire whose per-bot byte cost this fixture pins - the
+            // resident send is a fraction of it by construction
+            Epoch = 0,
+            ViewsOverride = BuildViewsOverride([lootPools]),
+            Shared = BotPayloadProjection.BuildSharedVarying(
                 _sessionId,
                 details.RoleLowercase,
                 _profileHelper,
@@ -264,20 +268,13 @@ public class BotPayloadSizeTests
                 _botGeneratorHelper,
                 _botEquipmentFilterService,
                 _botEquipmentModPoolService,
-                _botEquipmentModGenerator.PresetHelper,
                 _botEquipmentModGenerator.ItemFilterService,
                 _itemHelper,
-                _botWeaponGenerator.GlobalTable,
                 _botConfig,
                 _pmcConfig,
                 _botWeaponGenerator.RepairConfig,
                 // A PMC wave draws its levels natively, so it carries the draw's inputs once
-                new LevelGenerationView
-                {
-                    LevelMin = 1,
-                    LevelMax = expTable.Length,
-                    ExpTable = [.. expTable.Select(entry => entry.Experience)],
-                },
+                new LevelGenerationView { LevelMin = 1, LevelMax = expTable.Length },
                 [
                     new BotTemplateVariantView
                     {
@@ -285,12 +282,22 @@ public class BotPayloadSizeTests
                         LevelMax = expTable.Length,
                         Template = BotPayloadProjection.BuildTemplateView(template),
                         LootPools = lootPools,
-                        HandbookPrices = BotPayloadProjection.BuildHandbookPrices(lootPools, _botLootGenerator.HandbookHelper),
                     },
                 ]
             ),
             Bots = [.. Enumerable.Range(0, waveSize).Select(_ => BotPayloadProjection.BuildBotSlice(new MongoId(), details, null))],
         };
+    }
+
+    private BotViewsOverride BuildViewsOverride(IEnumerable<BotLootCache> lootPools)
+    {
+        return BotPayloadProjection.BuildViewsOverride(
+            _botEquipmentModGenerator.PresetHelper,
+            _botLootGenerator.HandbookHelper,
+            _itemHelper,
+            _botWeaponGenerator.GlobalTable,
+            lootPools
+        );
     }
 
     private byte[] SerializeRequest()
@@ -322,15 +329,13 @@ public class BotPayloadSizeTests
             _botEquipmentFilterService,
             _botEquipmentModPoolService,
             _botLootGenerator.BotLootCacheService,
-            _botEquipmentModGenerator.PresetHelper,
             _botEquipmentModGenerator.ItemFilterService,
-            _botLootGenerator.HandbookHelper,
             _itemHelper,
-            _botWeaponGenerator.GlobalTable,
             _botConfig,
             _pmcConfig,
             _botWeaponGenerator.RepairConfig
         );
+        request.ViewsOverride = BuildViewsOverride([request.LootPools]);
 
         return JsonSerializer.SerializeToUtf8Bytes(request, JsonUtil.JsonSerializerOptionsNoIndent!);
     }

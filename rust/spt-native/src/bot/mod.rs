@@ -11,16 +11,93 @@ pub mod level_generator;
 pub(crate) mod mod_pool_service;
 pub mod models;
 pub(crate) mod repair_service;
+pub mod views;
 
 use indexmap::IndexMap;
 
 use crate::bot::durability_limits_helper::BotDurability;
-use crate::bot::models::{EquipmentFilterDetails, EquipmentFilters, RandomisedResourceDetails};
+use crate::bot::models::{
+    BotViewsWire, EquipmentFilterDetails, EquipmentFilters, RandomisedResourceDetails,
+};
 use crate::bot::repair_service::BonusSettings;
+use crate::bot::views::BotDbViews;
 use crate::diag::DiagSink;
+use crate::loot::item_helper::LootEpochError;
 use crate::loot::models::{ItemView, PresetView};
 
 use std::collections::HashSet;
+use std::sync::Arc;
+
+/// The database half of a bot request. The resident arm is the published [`BotDbViews`] — the
+/// items and preset views it shares with ragfair plus the bot-only derivations; the
+/// override arm is the same views on the wire. The mod-pool slot order is not a view — it is
+/// process-local C# service state, so it rides the shared varying block on every send.
+pub enum BotViews {
+    Override(Box<BotViewsWire>),
+    Resident(Arc<BotDbViews>),
+}
+
+impl BotViews {
+    pub(crate) fn items(&self) -> &IndexMap<String, ItemView> {
+        match self {
+            Self::Override(wire) => &wire.items,
+            Self::Resident(views) => &views.ragfair.items,
+        }
+    }
+
+    pub(crate) fn item_presets(&self) -> &IndexMap<String, PresetView> {
+        match self {
+            Self::Override(wire) => &wire.item_presets,
+            Self::Resident(views) => &views.ragfair.item_presets,
+        }
+    }
+
+    /// Keyed by the tpl the preset is the default for, valued by the preset's own id.
+    pub(crate) fn default_preset_ids(&self) -> &IndexMap<String, String> {
+        match self {
+            Self::Override(wire) => &wire.default_presets_by_tpl,
+            Self::Resident(views) => &views.default_preset_ids_by_tpl,
+        }
+    }
+
+    /// A tpl missing from either arm prices at 0 at the consumer, which is what
+    /// `HandbookHelper.GetTemplatePrice` returns for a tpl the handbook does not know.
+    pub(crate) fn handbook_prices(&self) -> &IndexMap<String, f64> {
+        match self {
+            Self::Override(wire) => &wire.handbook_prices,
+            Self::Resident(views) => &views.ragfair.handbook_prices,
+        }
+    }
+
+    pub(crate) fn exp_table(&self) -> &[i32] {
+        match self {
+            Self::Override(wire) => &wire.exp_table,
+            Self::Resident(views) => &views.exp_table,
+        }
+    }
+}
+
+/// The override arm resolves without consulting the process-global store; the resident arm needs
+/// the named epoch resident with the bot views derived — the same shape as
+/// [`crate::scav_case::resolve_scav_case_views`], with the loot flip's error type.
+pub fn resolve_bot_views(
+    epoch: u64,
+    views_override: Option<Box<BotViewsWire>>,
+) -> Result<BotViews, LootEpochError> {
+    if let Some(views) = views_override {
+        return Ok(BotViews::Override(views)); // never touches the store
+    }
+
+    let db = crate::db::current().ok_or(LootEpochError::StaleEpoch)?;
+    if db.epoch != epoch {
+        return Err(LootEpochError::StaleEpoch);
+    }
+
+    db.bot_views
+        .clone()
+        .map(BotViews::Resident)
+        .ok_or(LootEpochError::StaleEpoch)
+}
 
 /// The read-only views one bot generation run consults, plus the [`DiagSink`] its diagnostics
 /// emit through — the bot family's analog of [`crate::loot::item_helper::LootContext`].
@@ -28,8 +105,8 @@ use std::collections::HashSet;
 /// Every view is borrowed for `'a`, so copying one out (`let items = ctx.items;`) releases the
 /// `&mut ctx` and leaves the diagnostics writable.
 pub struct BotContext<'a> {
-    /// The `TemplateItem` slice, flattened by the C# caller. There is no `ItemsView` type; the map
-    /// itself is the view, matching `loot::item_helper`'s helpers.
+    /// The `TemplateItem` slice, borrowed from [`BotViews::items`] (resident or override). There
+    /// is no `ItemsView` type; the map itself is the view, matching `loot::item_helper`'s helpers.
     pub items: &'a IndexMap<String, ItemView>,
     /// `BotConfig.Bosses` — `BotHelper.IsBotBoss` scans it, so
     /// `durability_limits_helper::get_durability_role` needs it on every durability roll.
@@ -78,8 +155,9 @@ pub struct BotContext<'a> {
     pub secure_container_ammo_stack_count: i32,
     /// `modPoolSlotOrder` — the C# `BotEquipmentModPoolService` pools' slot-name enumeration
     /// order per template, as indices into that template's `slots`. Only order crosses the wire;
-    /// membership is still derived by [`crate::bot::mod_pool_service`]. Missing entry = database
-    /// order.
+    /// membership is still derived by [`crate::bot::mod_pool_service`]. Rides the shared varying
+    /// block on every send (it is live C# service state, not database data). Missing entry =
+    /// database order.
     pub mod_pool_slot_order: &'a IndexMap<String, Vec<usize>>,
     pub diagnostics: DiagSink,
 }
@@ -107,3 +185,66 @@ pub(crate) static NO_BUFFS: std::sync::LazyLock<BonusSettings> = std::sync::Lazy
     }))
     .expect("empty bonus settings parse")
 });
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::tests::DB_TEST_LOCK;
+
+    fn empty_override() -> Box<BotViewsWire> {
+        Box::new(
+            serde_json::from_value(serde_json::json!({
+                "items": {}, "itemPresets": {}, "defaultPresetsByTpl": {}
+            }))
+            .expect("empty views override parses"),
+        )
+    }
+
+    #[test]
+    fn an_empty_store_is_a_stale_epoch() {
+        let _guard = DB_TEST_LOCK.lock().unwrap();
+        crate::db::clear();
+
+        assert!(matches!(
+            resolve_bot_views(1, None),
+            Err(LootEpochError::StaleEpoch)
+        ));
+    }
+
+    #[test]
+    fn a_published_store_resolves_only_its_own_epoch() {
+        let _guard = DB_TEST_LOCK.lock().unwrap();
+        crate::db::clear();
+        // Templates + traders + globals: the smallest publish that derives the bot views.
+        let epoch = crate::db::publish(
+            serde_json::from_str(
+                r#"{"schema":1,"roots":{"templates":{},"traders":{},
+                "globals":{"config":{"exp":{"level":{"exp_table":[{"exp":10},{"exp":20}]}}}}}}"#,
+            )
+            .expect("publish request parses"),
+        )
+        .expect("publish succeeds");
+
+        assert!(matches!(
+            resolve_bot_views(epoch + 1, None),
+            Err(LootEpochError::StaleEpoch)
+        ));
+
+        // The matching epoch resolves the resident arm, accessors dispatching to the derived views.
+        let views = resolve_bot_views(epoch, None).expect("matching epoch resolves");
+        assert!(matches!(views, BotViews::Resident(_)));
+        assert_eq!(views.exp_table(), [10, 20]);
+    }
+
+    #[test]
+    fn an_override_resolves_without_any_publish() {
+        let _guard = DB_TEST_LOCK.lock().unwrap();
+        crate::db::clear();
+
+        let views = resolve_bot_views(0, Some(empty_override())).expect("override resolves");
+
+        assert!(matches!(views, BotViews::Override(_)));
+        assert!(views.items().is_empty());
+        assert!(views.exp_table().is_empty());
+    }
+}

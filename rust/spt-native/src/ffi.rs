@@ -223,8 +223,10 @@ pub(crate) fn panic_message(payload: Box<dyn Any + Send>) -> String {
         .unwrap_or_else(|| "native call panicked with a non-string payload".to_owned())
 }
 
-/// The shared body of the generation exports: JSON request in, status plus either the JSON
-/// result or an error message out. Runs on the calling thread.
+/// The shared body of the bot generation exports: JSON request in, status plus either the JSON
+/// result or an error message out. Runs on the calling thread. Generator errors arrive wrapped as
+/// [`LootEpochError::Loot`]; an override-less request naming a non-resident epoch is
+/// [`LootEpochError::StaleEpoch`] → `STATUS_STALE_EPOCH`.
 ///
 /// # Safety
 /// As documented on the exports below.
@@ -233,7 +235,7 @@ unsafe fn run_generator<Request, Response>(
     req_len: usize,
     out_ptr: *mut *mut u8,
     out_len: *mut usize,
-    generate: fn(Request) -> Result<Response, LootError>,
+    generate: fn(Request) -> Result<Response, LootEpochError>,
 ) -> i32
 where
     Request: DeserializeOwned,
@@ -1063,7 +1065,7 @@ mod tests {
         assert_eq!(spt_native_abi_version(), crate::ABI_VERSION);
         assert_eq!(
             crate::ABI_VERSION,
-            26,
+            27,
             "bump SptNative.ExpectedAbiVersion too"
         );
     }
@@ -1262,7 +1264,7 @@ mod tests {
                 2,
                 &mut out_ptr,
                 &mut out_len,
-                |_: serde_json::Value| -> Result<serde_json::Value, LootError> {
+                |_: serde_json::Value| -> Result<serde_json::Value, LootEpochError> {
                     panic!("kaboom: it went sideways")
                 },
             )
@@ -1289,7 +1291,7 @@ mod tests {
                 2,
                 &mut out_ptr,
                 &mut out_len,
-                |_: serde_json::Value| -> Result<serde_json::Value, LootError> {
+                |_: serde_json::Value| -> Result<serde_json::Value, LootEpochError> {
                     std::panic::panic_any(42)
                 },
             )
@@ -1415,16 +1417,20 @@ mod tests {
     }
 
     /// Every required `GenerateBotInventoryRequest` member, pared down from the orchestrator's own
-    /// fixture: no items view, an empty `Pockets` pool (present, or `:516` derefs a null), and zero
-    /// loot counts, so the bot generates nothing but the six inventory roots. `equipmentChances` is
-    /// left open because the failure case below is the missing `FirstPrimaryWeapon` key.
+    /// fixture: an empty items view (as an override, so the resident store is never consulted), an
+    /// empty `Pockets` pool (present, or `:516` derefs a null), and zero loot counts, so the bot
+    /// generates nothing but the six inventory roots. `equipmentChances` is left open because the
+    /// failure case below is the missing `FirstPrimaryWeapon` key.
     fn bot_request(equipment_chances: &str) -> String {
         format!(
             r#"{{
-            "botId":"bbbbbbbbbbbbbbbbbbbbbbbb",
-            "details":{{"role":"assault","roleLowercase":"assault","side":"Savage","botLevel":15,
-                "isPmc":false,"isPlayerScav":false,"gameVersion":"standard","location":"bigmap",
-                "botDifficulty":"normal","clearBotContainerCacheAfterGeneration":false}},
+            "epoch":0,
+            "viewsOverride":{{"items":{{}},"itemPresets":{{}},"defaultPresetsByTpl":{{}}}},
+            "bot":{{
+                "botId":"bbbbbbbbbbbbbbbbbbbbbbbb",
+                "details":{{"role":"assault","roleLowercase":"assault","side":"Savage","botLevel":15,
+                    "isPmc":false,"isPlayerScav":false,"gameVersion":"standard","location":"bigmap",
+                    "botDifficulty":"normal","clearBotContainerCacheAfterGeneration":false}}}},
             "template":{{
                 "inventory":{{"equipment":{{"Pockets":{{}},"Holster":{{}}}},"Ammo":{{}},
                     "items":{{"Backpack":{{}},"Pockets":{{}},"SecuredContainer":{{}},
@@ -1439,6 +1445,8 @@ mod tests {
                     "backpackLoot":{{"weights":{{"0":1}}}},"pocketLoot":{{"weights":{{"0":1}}}},
                     "vestLoot":{{"weights":{{"0":1}}}},"specialItems":{{"weights":{{"0":1}}}},
                     "magazines":{{"weights":{{"0":1}}}}}}}}}},
+            "lootPools":{{}},
+            "shared":{{
             "generatingPlayerLevel":20,
             "isNightTime":false,
             "equipment":{{}},
@@ -1464,12 +1472,8 @@ mod tests {
                 "Rare":{{}}}},
             "equipmentBlacklist":{{}},
             "weaponModEquipmentBlacklist":{{}},
-            "lootPools":{{}},
-            "itemPresets":{{}},
-            "defaultPresetsByTpl":{{}},
-            "configBlacklist":[],
-            "handbookPrices":{{}},
-            "items":{{}}
+            "configBlacklist":[]
+            }}
         }}"#
         )
     }
@@ -1515,6 +1519,28 @@ mod tests {
         assert_eq!(
             String::from_utf8(out).unwrap(),
             "The given key 'FirstPrimaryWeapon' was not present in the dictionary."
+        );
+    }
+
+    #[test]
+    fn a_stale_bot_epoch_returns_status_4() {
+        // No viewsOverride and an epoch the store can never hold (u64::MAX is unreachable —
+        // epochs count up from 1). The rest of the request is the fixture's, so the JSON fully
+        // parses and the epoch check in resolve_bot_views is what answers.
+        let mut request: serde_json::Value =
+            serde_json::from_str(&bot_request(r#"{"FirstPrimaryWeapon":0}"#)).unwrap();
+        request["epoch"] = serde_json::json!(u64::MAX);
+        request.as_object_mut().unwrap().remove("viewsOverride");
+
+        let (status, out) = call_generate(
+            spt_generate_bot_inventory,
+            &serde_json::to_vec(&request).unwrap(),
+        );
+
+        assert_eq!(status, STATUS_STALE_EPOCH);
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "resident DB epoch mismatch; republish and retry"
         );
     }
 

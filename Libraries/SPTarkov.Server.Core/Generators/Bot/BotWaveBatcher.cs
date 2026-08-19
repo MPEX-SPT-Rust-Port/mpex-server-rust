@@ -13,9 +13,11 @@ using SPTarkov.Server.Core.Models.Eft.Common.Tables;
 using SPTarkov.Server.Core.Models.Enums;
 using SPTarkov.Server.Core.Models.Spt.Bots;
 using SPTarkov.Server.Core.Models.Spt.Config;
+using SPTarkov.Server.Core.Models.Spt.Mod;
 using SPTarkov.Server.Core.Models.Spt.Tables;
 using SPTarkov.Server.Core.Native;
 using SPTarkov.Server.Core.Native.Bot;
+using SPTarkov.Server.Core.Native.Db;
 using SPTarkov.Server.Core.Services.Bot;
 using SPTarkov.Server.Core.Services.Items;
 using SPTarkov.Server.Core.Services.Profile;
@@ -33,10 +35,11 @@ namespace SPTarkov.Server.Core.Generators.Bot;
 ///     matching BotController.TryGenerateSingleBot.
 ///
 ///     One carve-out from "whenever a mod could observe the difference": pool and price hydration.
-///     BotLootCacheService.GetLootFromCache (12 calls) and HandbookHelper.GetTemplatePrice run once
-///     per level band here, not once per bot, and neither is in the decline set. Both are patched
-///     constantly by economy mods, so declining on them would de-batch most modded servers - and
-///     their per-bot results are identical anyway for bots sharing a band.
+///     BotLootCacheService.GetLootFromCache (12 calls) runs once per level band here, not once per
+///     bot, and HandbookHelper.GetTemplatePrice once per wave on the views-override arm (never on
+///     the resident arm, whose prices were derived at publish); neither is in the decline set.
+///     Both are patched constantly by economy mods, so declining on them would de-batch most
+///     modded servers - and their per-bot results are identical anyway for bots sharing a band.
 /// </summary>
 [Injectable]
 public class BotWaveBatcher(
@@ -61,7 +64,9 @@ public class BotWaveBatcher(
     BotConfig botConfig,
     PmcConfig pmcConfig,
     RepairConfig repairConfig,
-    ICloner cloner
+    ICloner cloner,
+    IReadOnlyList<SptMod> loadedMods,
+    DbPublisher dbPublisher
 )
 {
     /// <summary>
@@ -102,17 +107,32 @@ public class BotWaveBatcher(
     private sealed record PreparedWaveBot(BotBase Bot, BotType Template, BotGenerationDetails Details);
 
     /// <summary>
-    ///     One level band's filtered template and the two views hydrated from it. The C#-side
+    ///     One level band's filtered template and the loot pools hydrated from it. The C#-side
     ///     BotType is kept alongside the wire members because the post-call voice and appearance
     ///     draws read the band's filtered BotAppearance.
     /// </summary>
-    private sealed record TemplateVariant(
-        int LevelMin,
-        int LevelMax,
-        BotType Template,
-        BotLootCache LootPools,
-        Dictionary<MongoId, double> HandbookPrices
-    );
+    private sealed record TemplateVariant(int LevelMin, int LevelMax, BotType Template, BotLootCache LootPools);
+
+    /// <summary>
+    ///     Whether the most recent native send carried the C#-built views override rather than
+    ///     naming a resident-DB epoch. Test seam.
+    /// </summary>
+    internal bool LastSendIncludedViewsOverride { get; private set; }
+
+    /// <summary>
+    ///     Whether an override-less send off the resident DB is ever allowed: the kill switch is
+    ///     off, and either no mods are loaded or the user vouched their mods don't write tables
+    ///     directly.
+    /// </summary>
+    private bool ResidentDbEligible()
+    {
+        return ResidentDbDispatch.Eligible(
+            dbPublisher,
+            loadedMods.Count,
+            botConfig.DisableNativeRequestCache,
+            botConfig.TrustNativeRequestCacheWithMods
+        );
+    }
 
     /// <summary>
     ///     Generate the whole wave through the batch path, or return null when the wave must run
@@ -176,14 +196,11 @@ public class BotWaveBatcher(
             var range = new MinMax<int>(1, 1);
             if (waveDetails.IsPmc)
             {
+                // The exp table the drawn level is summed out of rides the views (override bundle
+                // or the resident DB); only the range is wave-varying
                 var expTable = globalTable.Configuration.Exp.Level.ExperienceTable;
                 range = botLevelGenerator.GetRelativePmcBotLevelRange(waveDetails, waveTemplate.BotExperience.Level, expTable.Length);
-                levelGeneration = new LevelGenerationView
-                {
-                    LevelMin = range.Min,
-                    LevelMax = range.Max,
-                    ExpTable = [.. expTable.Select(entry => entry.Experience)],
-                };
+                levelGeneration = new LevelGenerationView { LevelMin = range.Min, LevelMax = range.Max };
             }
 
             var segments = EnumerateLevelSegments(
@@ -202,20 +219,34 @@ public class BotWaveBatcher(
                 var variantTemplate = cloner.Clone(waveTemplate)!;
                 botGenerator.ApplyBatchTemplateMutations(sessionId, variantTemplate, variantDetails);
                 var lootPools = BotPayloadProjection.BuildLootPools(botLootCacheService, variantTemplate, variantDetails, pmcConfig);
-                variants.Add(
-                    new TemplateVariant(
-                        segment.Min,
-                        segment.Max,
-                        variantTemplate,
-                        lootPools,
-                        BotPayloadProjection.BuildHandbookPrices(lootPools, handbookHelper)
-                    )
-                );
+                variants.Add(new TemplateVariant(segment.Min, segment.Max, variantTemplate, lootPools));
             }
 
-            batchResult = SptNative.GenerateBotInventoryBatch(
-                BuildBatchRequest(sessionId, waveDetails, survivors, levelGeneration, variants)
-            );
+            var request = BuildBatchRequest(sessionId, waveDetails, survivors, levelGeneration, variants);
+            if (!ResidentDbEligible())
+            {
+                LastSendIncludedViewsOverride = true;
+                request.ViewsOverride = BotPayloadProjection.BuildViewsOverride(
+                    presetHelper,
+                    handbookHelper,
+                    itemHelper,
+                    globalTable,
+                    variants.Select(variant => variant.LootPools)
+                );
+                batchResult = SptNative.GenerateBotInventoryBatch(request);
+            }
+            else
+            {
+                batchResult = ResidentDbDispatch.Send(
+                    dbPublisher,
+                    epoch =>
+                    {
+                        request.Epoch = epoch;
+                        return SptNative.GenerateBotInventoryBatch(request);
+                    }
+                );
+                LastSendIncludedViewsOverride = false;
+            }
         }
         catch (Exception e)
         {
@@ -420,7 +451,10 @@ public class BotWaveBatcher(
     {
         return new GenerateBotInventoryBatchRequest
         {
-            Shared = BotPayloadProjection.BuildSharedViews(
+            // The dispatch site stamps the resident epoch on an eligible send; 0 rides with the
+            // views override
+            Epoch = 0,
+            Shared = BotPayloadProjection.BuildSharedVarying(
                 sessionId,
                 waveDetails.Role.ToLowerInvariant(),
                 profileHelper,
@@ -429,10 +463,8 @@ public class BotWaveBatcher(
                 botGeneratorHelper,
                 botEquipmentFilterService,
                 botEquipmentModPoolService,
-                presetHelper,
                 itemFilterService,
                 itemHelper,
-                globalTable,
                 botConfig,
                 pmcConfig,
                 repairConfig,
@@ -444,7 +476,6 @@ public class BotWaveBatcher(
                         LevelMax = variant.LevelMax,
                         Template = BotPayloadProjection.BuildTemplateView(variant.Template),
                         LootPools = variant.LootPools,
-                        HandbookPrices = variant.HandbookPrices,
                     }),
                 ]
             ),

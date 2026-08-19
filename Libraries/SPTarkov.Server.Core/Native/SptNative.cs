@@ -56,7 +56,7 @@ internal enum LootExport
 
 public static class SptNative
 {
-    private const uint ExpectedAbiVersion = 26;
+    private const uint ExpectedAbiVersion = 27;
 
     // ffi.rs
     private const int StatusOk = 0;
@@ -241,8 +241,8 @@ public static class SptNative
     }
 
     /// <summary>
-    /// Generates a whole wave of bots in one call, with the shared database and config views on the
-    /// wire once instead of once per bot.
+    /// Generates a whole wave of bots in one call, with the shared config views - and, on the
+    /// ineligible arm, the database views override - on the wire once instead of once per bot.
     /// </summary>
     /// <exception cref="InvalidOperationException">Generation failed, or the native side misbehaved.</exception>
     internal static BotInventoryBatchResult GenerateBotInventoryBatch(GenerateBotInventoryBatchRequest request)
