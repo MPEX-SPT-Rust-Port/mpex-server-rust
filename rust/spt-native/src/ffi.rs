@@ -346,9 +346,14 @@ pub unsafe extern "C" fn spt_create_random_loot(
     out_len: *mut usize,
 ) -> i32 {
     unsafe {
-        run_generator(req_ptr, req_len, out_ptr, out_len, |request| {
-            create_random_loot(request, &mut DiagSink::Pipeline)
-        })
+        run_generator_with(
+            req_ptr,
+            req_len,
+            out_ptr,
+            out_len,
+            |request| create_random_loot(request, &mut DiagSink::Pipeline),
+            |response| serde_json::to_vec(&response).expect("result serialization cannot fail"),
+        )
     }
 }
 
@@ -361,7 +366,16 @@ pub unsafe extern "C" fn spt_create_forced_loot(
     out_ptr: *mut *mut u8,
     out_len: *mut usize,
 ) -> i32 {
-    unsafe { run_generator(req_ptr, req_len, out_ptr, out_len, create_forced_loot) }
+    unsafe {
+        run_generator_with(
+            req_ptr,
+            req_len,
+            out_ptr,
+            out_len,
+            create_forced_loot,
+            |response| serde_json::to_vec(&response).expect("result serialization cannot fail"),
+        )
+    }
 }
 
 /// # Safety
@@ -374,9 +388,14 @@ pub unsafe extern "C" fn spt_get_sealed_weapon_case_loot(
     out_len: *mut usize,
 ) -> i32 {
     unsafe {
-        run_generator(req_ptr, req_len, out_ptr, out_len, |request| {
-            get_sealed_weapon_case_loot(request, &mut DiagSink::Pipeline)
-        })
+        run_generator_with(
+            req_ptr,
+            req_len,
+            out_ptr,
+            out_len,
+            |request| get_sealed_weapon_case_loot(request, &mut DiagSink::Pipeline),
+            |response| serde_json::to_vec(&response).expect("result serialization cannot fail"),
+        )
     }
 }
 
@@ -390,12 +409,13 @@ pub unsafe extern "C" fn spt_get_random_loot_container_loot(
     out_len: *mut usize,
 ) -> i32 {
     unsafe {
-        run_generator(
+        run_generator_with(
             req_ptr,
             req_len,
             out_ptr,
             out_len,
             get_random_loot_container_loot,
+            |response| serde_json::to_vec(&response).expect("result serialization cannot fail"),
         )
     }
 }
@@ -1277,10 +1297,14 @@ mod tests {
         );
     }
 
-    /// Every required `RewardLootDb` member, spliced into the reward-loot request literals below.
-    /// The weapon tpl in `weaponRewardWeight` below is deliberately absent from `itemsView`.
-    const REWARD_DB_JSON: &str = r#"
-        "itemsView":{},"defaultPresets":[],"defaultPresetsByTpl":{},
+    /// The `RewardViewsWire` members every override reward send carries; sealed adds
+    /// `presetsByTpl` and container adds `presetTpls` beside these.
+    const REWARD_VIEWS_JSON: &str =
+        r#""itemsView":{},"defaultPresets":[],"defaultPresetsByTpl":{}"#;
+
+    /// Every required `RewardLootVarying` member, spliced beside each request's per-export
+    /// varying members below.
+    const REWARD_VARYING_JSON: &str = r#"
         "globalBlacklist":[],"configBlacklist":[],
         "rewardItemBlacklist":[],"rewardBaseTypeBlacklist":[],
         "bossItems":[],"inactiveSeasonalItems":[]
@@ -1290,10 +1314,12 @@ mod tests {
     fn random_loot_roundtrips_result_json() {
         // Every count zero and an empty type whitelist: nothing to draw, so no fixture is needed.
         let request = format!(
-            r#"{{{REWARD_DB_JSON},"lootRequest":{{"weaponPresetCount":{{"min":0,"max":0}},
+            r#"{{"epoch":0,"viewsOverride":{{{REWARD_VIEWS_JSON}}},
+            "varying":{{{REWARD_VARYING_JSON},
+            "lootRequest":{{"weaponPresetCount":{{"min":0,"max":0}},
             "armorPresetCount":{{"min":0,"max":0}},"itemCount":{{"min":0,"max":0}},
             "weaponCrateCount":{{"min":0,"max":0}},"itemBlacklist":[],"itemTypeWhitelist":[],
-            "itemLimits":{{}},"itemStackLimits":{{}},"armorLevelWhitelist":[]}}}}"#
+            "itemLimits":{{}},"itemStackLimits":{{}},"armorLevelWhitelist":[]}}}}}}"#
         );
 
         let (status, out) = call_generate(spt_create_random_loot, request.as_bytes());
@@ -1305,7 +1331,10 @@ mod tests {
 
     #[test]
     fn forced_loot_roundtrips_result_json() {
-        let request = format!(r#"{{{REWARD_DB_JSON},"forcedLoot":{{}}}}"#);
+        let request = format!(
+            r#"{{"epoch":0,"viewsOverride":{{{REWARD_VIEWS_JSON}}},
+            "varying":{{{REWARD_VARYING_JSON},"forcedLoot":{{}}}}}}"#
+        );
 
         let (status, out) = call_generate(spt_create_forced_loot, request.as_bytes());
 
@@ -1319,10 +1348,11 @@ mod tests {
         // The drawn weapon is not in `itemsView`, so the generator takes its diagnostic early-out —
         // a result, not an error, which is what the transport has to carry.
         let request = format!(
-            r#"{{{REWARD_DB_JSON},"containerSettings":{{
+            r#"{{"epoch":0,"viewsOverride":{{{REWARD_VIEWS_JSON},"presetsByTpl":{{}}}},
+            "varying":{{{REWARD_VARYING_JSON},"containerSettings":{{
             "weaponRewardWeight":{{"888888888888888888888888":1}},"defaultPresetsOnly":false,
             "weaponModRewardLimits":{{}},"rewardTypeLimits":{{}},"ammoBoxWhitelist":[],
-            "allowBossItems":false}},"presetsByTpl":{{}},"linkedItems":{{}}}}"#
+            "allowBossItems":false}},"linkedItems":{{}}}}}}"#
         );
 
         let (status, out) = call_generate(spt_get_sealed_weapon_case_loot, request.as_bytes());
@@ -1334,8 +1364,10 @@ mod tests {
 
     #[test]
     fn random_loot_container_roundtrips_result_json() {
-        let request =
-            format!(r#"{{{REWARD_DB_JSON},"rewardDetails":{{"rewardCount":0}},"presetTpls":[]}}"#);
+        let request = format!(
+            r#"{{"epoch":0,"viewsOverride":{{{REWARD_VIEWS_JSON},"presetTpls":[]}},
+            "varying":{{{REWARD_VARYING_JSON},"rewardDetails":{{"rewardCount":0}}}}}}"#
+        );
 
         let (status, out) = call_generate(spt_get_random_loot_container_loot, request.as_bytes());
 
@@ -1360,7 +1392,10 @@ mod tests {
     fn a_reward_loot_failure_returns_status_error_and_the_message() {
         // An empty `lootRequest` parses — every member is optional — and then fails on the first
         // null the C# would have thrown on.
-        let request = format!(r#"{{{REWARD_DB_JSON},"lootRequest":{{}}}}"#);
+        let request = format!(
+            r#"{{"epoch":0,"viewsOverride":{{{REWARD_VIEWS_JSON}}},
+            "varying":{{{REWARD_VARYING_JSON},"lootRequest":{{}}}}}}"#
+        );
 
         let (status, out) = call_generate(spt_create_random_loot, request.as_bytes());
 

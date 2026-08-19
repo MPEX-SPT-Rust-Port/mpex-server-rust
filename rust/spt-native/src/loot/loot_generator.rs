@@ -7,19 +7,21 @@
 //! [`LootError`] rather than panicking behind the FFI boundary, naming the C# line it stands in for.
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use indexmap::IndexMap;
 use serde_json::json;
 
-use super::item_helper::{self, LootError};
+use super::item_helper::{self, LootEpochError, LootError};
 use super::models::{
     CreateForcedLootRequest, CreateRandomLootRequest, DEBUG, Diagnostic, ERROR, Item, ItemView,
     LootRequestView, MinMaxI32, PresetView, RandomLootContainerRequest, RewardDetailsView,
-    RewardLootDb, RewardLootResult, SealedContainerSettingsView, SealedWeaponCaseRequest, Upd,
-    WARNING,
+    RewardLootResult, RewardLootVarying, RewardViewsWire, SealedContainerSettingsView,
+    SealedWeaponCaseRequest, Upd, WARNING,
 };
 use super::{mongo_id, random_util};
 use crate::diag::DiagSink;
+use crate::ragfair::views::RagfairDbViews;
 
 /// The `typeof(T).FullName` this file's diagnostics log under.
 const CATEGORY: &str = "SPTarkov.Server.Core.Generators.Loot.LootGenerator";
@@ -36,6 +38,69 @@ struct ItemLimit {
 struct ItemRewardPoolResults<'a> {
     item_pool: Vec<(&'a str, &'a ItemView)>,
     blacklist: HashSet<String>,
+}
+
+/// The database half of a reward request. The resident arm is the shared ragfair views — loot's
+/// C# projections are the same helpers ragfair's derive ports (items view, preset maps).
+pub enum RewardViews {
+    Resident(Arc<RagfairDbViews>),
+    Override(Box<RewardViewsWire>),
+}
+
+pub fn resolve_reward_views(
+    epoch: u64,
+    views_override: Option<Box<RewardViewsWire>>,
+) -> Result<RewardViews, LootEpochError> {
+    match views_override {
+        Some(wire) => Ok(RewardViews::Override(wire)),
+        None => {
+            let db = crate::db::current().ok_or(LootEpochError::StaleEpoch)?;
+            if db.epoch != epoch {
+                return Err(LootEpochError::StaleEpoch);
+            }
+
+            Ok(RewardViews::Resident(
+                db.ragfair_views.clone().ok_or(LootEpochError::StaleEpoch)?,
+            ))
+        }
+    }
+}
+
+/// What used to be the request's flattened `RewardLootDb`, resolved to borrows: the per-export
+/// view mapping out of [`RewardViews`] plus the request's service-backed sets — so the ported
+/// bodies below keep reading `db.*` verbatim.
+struct RewardDbRefs<'a> {
+    items_view: &'a IndexMap<String, ItemView>,
+    default_presets: &'a [PresetView],
+    default_presets_by_tpl: &'a IndexMap<String, PresetView>,
+    global_blacklist: &'a HashSet<String>,
+    config_blacklist: &'a HashSet<String>,
+    reward_item_blacklist: &'a HashSet<String>,
+    reward_base_type_blacklist: &'a HashSet<String>,
+    boss_items: &'a HashSet<String>,
+    inactive_seasonal_items: &'a HashSet<String>,
+}
+
+impl<'a> RewardDbRefs<'a> {
+    /// Binds an entry fn's per-export view mapping to the varying block's service-backed sets.
+    fn new(
+        common: &'a RewardLootVarying,
+        items_view: &'a IndexMap<String, ItemView>,
+        default_presets: &'a [PresetView],
+        default_presets_by_tpl: &'a IndexMap<String, PresetView>,
+    ) -> Self {
+        Self {
+            items_view,
+            default_presets,
+            default_presets_by_tpl,
+            global_blacklist: &common.global_blacklist,
+            config_blacklist: &common.config_blacklist,
+            reward_item_blacklist: &common.reward_item_blacklist,
+            reward_base_type_blacklist: &common.reward_base_type_blacklist,
+            boss_items: &common.boss_items,
+            inactive_seasonal_items: &common.inactive_seasonal_items,
+        }
+    }
 }
 
 /// A plain interpolated log line.
@@ -103,14 +168,35 @@ fn new_loot_item(tpl: &str, stack_objects_count: f64) -> Item {
 pub fn create_random_loot(
     request: CreateRandomLootRequest,
     diagnostics: &mut DiagSink,
-) -> Result<RewardLootResult, LootError> {
-    let _seed_guard = request
-        .db
+) -> Result<RewardLootResult, LootEpochError> {
+    let views = resolve_reward_views(request.epoch, request.views_override)?;
+    let varying = request.varying;
+    let _seed_guard = varying
+        .common
         .test_seed
         .map(random_util::TestSeedGuard::install);
 
-    let db = &request.db;
-    let options = &request.loot_request;
+    // The by-tpl map is unread by this export — C# sends `{}` today, the resident arm lends this.
+    let empty_by_tpl = IndexMap::new();
+    let (items_view, default_presets, default_presets_by_tpl) = match &views {
+        RewardViews::Resident(ragfair) => (
+            &ragfair.items,
+            ragfair.default_presets.as_slice(),
+            &empty_by_tpl,
+        ),
+        RewardViews::Override(wire) => (
+            &wire.items_view,
+            wire.default_presets.as_slice(),
+            &wire.default_presets_by_tpl,
+        ),
+    };
+    let db = &RewardDbRefs::new(
+        &varying.common,
+        items_view,
+        default_presets,
+        default_presets_by_tpl,
+    );
+    let options = &varying.loot_request;
     let mut result: Vec<Vec<Item>> = Vec::new();
 
     // `InitItemLimitCounter(options.ItemLimits)` (`:49`) enumerates the dictionary, so a null one
@@ -127,7 +213,7 @@ pub fn create_random_loot(
     if sealed_weapon_crate_count > 0 {
         // Get list of all sealed containers from db - they're all the same, just for flavor.
         let mut sealed_weapon_container_pool: Vec<&str> = Vec::new();
-        for (tpl, item) in &db.items_view {
+        for (tpl, item) in db.items_view {
             // `item.Name.Contains(...)` (`:57`) dereferences a null `_name` and throws.
             let name = item.name.as_deref().ok_or_else(|| {
                 LootError::new(format!(
@@ -145,9 +231,7 @@ pub fn create_random_loot(
             // (`RandomUtil.cs:172-173`), draws `GetInt(0, -1)` — which short-circuits to 0 without
             // consuming any randomness — and indexes the empty list:
             // `ArgumentOutOfRangeException` (`:62`).
-            return Err(LootError::new(
-                "No sealed weapon containers found in the item db",
-            ));
+            return Err(LootError::new("No sealed weapon containers found in the item db").into());
         }
 
         for _ in 0..sealed_weapon_crate_count {
@@ -204,7 +288,7 @@ pub fn create_random_loot(
     if randomised_weapon_preset_count > 0 {
         let weapon_default_presets = filter_presets(global_default_presets, |encyclopedia| {
             Ok(item_helper::is_of_baseclass(
-                &db.items_view,
+                db.items_view,
                 encyclopedia,
                 item_helper::WEAPON,
             ))
@@ -234,7 +318,7 @@ pub fn create_random_loot(
     if randomised_armor_preset_count > 0 {
         let armor_default_presets = filter_presets(global_default_presets, |encyclopedia| {
             Ok(item_helper::armor_item_can_hold_mods(
-                &db.items_view,
+                db.items_view,
                 encyclopedia,
             ))
         })?;
@@ -305,16 +389,25 @@ fn filter_presets(
 
 /// `LootGenerator.CreateForcedLoot` (`:150-196`) — a count per entry, presets cloned whole and
 /// everything else split into stacks.
-pub fn create_forced_loot(request: CreateForcedLootRequest) -> Result<RewardLootResult, LootError> {
-    let _seed_guard = request
-        .db
+pub fn create_forced_loot(
+    request: CreateForcedLootRequest,
+) -> Result<RewardLootResult, LootEpochError> {
+    let views = resolve_reward_views(request.epoch, request.views_override)?;
+    let varying = request.varying;
+    let _seed_guard = varying
+        .common
         .test_seed
         .map(random_util::TestSeedGuard::install);
 
-    let db = &request.db;
+    // Forced loot's map is `GetDefaultPresetsByTplKey()` — the resident derivation built for it.
+    let (items_view, default_presets_by_tpl) = match &views {
+        RewardViews::Resident(ragfair) => (&ragfair.items, &ragfair.default_presets_by_tpl_key),
+        RewardViews::Override(wire) => (&wire.items_view, &wire.default_presets_by_tpl),
+    };
+    let db = &RewardDbRefs::new(&varying.common, items_view, &[], default_presets_by_tpl);
     let mut result: Vec<Vec<Item>> = Vec::new();
 
-    for (item_tpl, details) in &request.forced_loot {
+    for (item_tpl, details) in &varying.forced_loot {
         // How many of this item we want. The dictionary value is a non-nullable `MinMax<int>`, so
         // only its members can be absent, and those default to 0.
         let randomised_item_count =
@@ -338,7 +431,7 @@ pub fn create_forced_loot(request: CreateForcedLootRequest) -> Result<RewardLoot
 
         // Non-preset item to be added
         let new_loot_item = new_loot_item(item_tpl, f64::from(randomised_item_count));
-        for split_item in item_helper::split_stack(&db.items_view, &new_loot_item)? {
+        for split_item in item_helper::split_stack(db.items_view, &new_loot_item)? {
             // Add as separate lists
             result.push(vec![split_item]);
         }
@@ -350,7 +443,7 @@ pub fn create_forced_loot(request: CreateForcedLootRequest) -> Result<RewardLoot
 /// `LootGenerator.GetItemRewardPool` (`:207-251`) — the blacklist union, then the pool that survives
 /// it.
 fn get_item_reward_pool<'a>(
-    db: &'a RewardLootDb,
+    db: &RewardDbRefs<'a>,
     item_tpl_blacklist: &HashSet<String>,
     item_type_whitelist: &HashSet<String>,
     use_reward_item_blacklist: bool,
@@ -378,7 +471,7 @@ fn get_item_reward_pool<'a>(
                 // Ignore items without parents
                 let parent = template_item.parent.as_deref().filter(|p| !p.is_empty())?;
 
-                item_helper::is_of_baseclasses(&db.items_view, parent, &item_type_blacklist)
+                item_helper::is_of_baseclasses(db.items_view, parent, &item_type_blacklist)
                     .then(|| tpl.clone())
             })
             .collect();
@@ -426,7 +519,7 @@ fn get_item_reward_pool<'a>(
 /// **`Err` is the C# throw path**: `GetItem(...).Value.Properties` on an item missing from the db,
 /// and `ArmorClass.Value` on a null armor class, both crash there.
 fn is_armor_of_desired_protection_level(
-    db: &RewardLootDb,
+    db: &RewardDbRefs<'_>,
     armor: &PresetView,
     options: &LootRequestView,
 ) -> Result<bool, LootError> {
@@ -441,8 +534,8 @@ fn is_armor_of_desired_protection_level(
             continue;
         };
 
-        let armor_details = item_helper::get_item(&db.items_view, &armor_item.template)
-            .ok_or_else(|| {
+        let armor_details =
+            item_helper::get_item(db.items_view, &armor_item.template).ok_or_else(|| {
                 LootError::new(format!(
                     "Preset armor item: {} is missing from the item db",
                     armor_item.template
@@ -483,7 +576,7 @@ fn init_item_limit_counter(limits: &IndexMap<String, i32>) -> IndexMap<String, I
 
 /// `LootGenerator.FindAndAddRandomItemToLoot` (`:303-348`).
 fn find_and_add_random_item_to_loot(
-    db: &RewardLootDb,
+    db: &RewardDbRefs<'_>,
     items: &[(&str, &ItemView)],
     item_type_counts: &mut IndexMap<String, ItemLimit>,
     options: &LootRequestView,
@@ -510,7 +603,7 @@ fn find_and_add_random_item_to_loot(
     }
 
     // Skip armors as they need to come from presets
-    if item_helper::armor_item_can_hold_mods(&db.items_view, random_item_tpl) {
+    if item_helper::armor_item_can_hold_mods(db.items_view, random_item_tpl) {
         return Ok(false);
     }
 
@@ -563,7 +656,7 @@ fn get_randomised_stack_count(
 
 /// `LootGenerator.FindAndAddRandomPresetToLoot` (`:378-455`).
 fn find_and_add_random_preset_to_loot(
-    db: &RewardLootDb,
+    db: &RewardDbRefs<'_>,
     preset_pool: &[&PresetView],
     item_type_counts: &mut IndexMap<String, ItemLimit>,
     item_blacklist: &HashSet<String>,
@@ -595,7 +688,7 @@ fn find_and_add_random_preset_to_loot(
     };
 
     // Get preset root item db details via its `_encyclopedia` property
-    let Some(item_db_details) = item_helper::get_item(&db.items_view, encyclopedia) else {
+    let Some(item_db_details) = item_helper::get_item(db.items_view, encyclopedia) else {
         // Deviation: debug-gated in C# (`:412-415`), see above. The stray `$` is C#'s, not a typo.
         diagnostics.push(diagnostic(
             DEBUG,
@@ -650,7 +743,7 @@ fn find_and_add_random_preset_to_loot(
     item_helper::replace_ids(&mut preset_and_mods_clone);
     item_helper::remap_root_item_id(&mut preset_and_mods_clone);
 
-    item_helper::set_found_in_raid(&db.items_view, &mut preset_and_mods_clone);
+    item_helper::set_found_in_raid(db.items_view, &mut preset_and_mods_clone);
 
     // Add chosen preset tpl to result array
     result.push(preset_and_mods_clone);
@@ -700,21 +793,40 @@ fn new_reward_item(tpl: &str) -> Item {
 pub fn get_sealed_weapon_case_loot(
     request: SealedWeaponCaseRequest,
     diagnostics: &mut DiagSink,
-) -> Result<RewardLootResult, LootError> {
-    let _seed_guard = request
-        .db
+) -> Result<RewardLootResult, LootEpochError> {
+    let views = resolve_reward_views(request.epoch, request.views_override)?;
+    let varying = request.varying;
+    let _seed_guard = varying
+        .common
         .test_seed
         .map(random_util::TestSeedGuard::install);
 
-    let db = &request.db;
-    let settings = &request.container_settings;
+    // The sealed case's by-tpl map is `GetDefaultPresetByTpl()`; its per-weapon pool is
+    // `GetPresets(tpl)` — the resident map is a superset keyed identically (every tpl with
+    // presets, inner order identical), and the body only ever looks weapon tpls up by key.
+    let (items_view, default_presets_by_tpl, presets_by_tpl) = match &views {
+        RewardViews::Resident(ragfair) => (
+            &ragfair.items,
+            &ragfair.default_presets_by_tpl,
+            &ragfair.presets_by_tpl,
+        ),
+        RewardViews::Override(wire) => (
+            &wire.items_view,
+            &wire.default_presets_by_tpl,
+            wire.presets_by_tpl.as_ref().ok_or_else(|| {
+                LootError::new("presetsByTpl missing from the sealed-case views override")
+            })?,
+        ),
+    };
+    let db = &RewardDbRefs::new(&varying.common, items_view, &[], default_presets_by_tpl);
+    let settings = &varying.container_settings;
     let mut items_to_return: Vec<Vec<Item>> = Vec::new();
 
     // Choose a weapon to give to the player (weighted)
     let chosen_weapon_tpl = random_util::get_weighted_value(&settings.weapon_reward_weight)?;
 
     // Get itemDb details of weapon
-    let Some(weapon_details_db) = item_helper::get_item(&db.items_view, &chosen_weapon_tpl) else {
+    let Some(weapon_details_db) = item_helper::get_item(db.items_view, &chosen_weapon_tpl) else {
         diagnostics.push(localised(
             ERROR,
             "loot-non_item_picked_as_sealed_weapon_crate_reward",
@@ -728,8 +840,7 @@ pub fn get_sealed_weapon_case_loot(
 
     // `presetHelper.GetPresets(tpl)` returns an empty list for a tpl with no presets
     // (`PresetHelper.cs:182-186`), which is what an absent key is here.
-    let presets_for_weapon: &[PresetView] = request
-        .presets_by_tpl
+    let presets_for_weapon: &[PresetView] = presets_by_tpl
         .get(&chosen_weapon_tpl)
         .map_or(&[], Vec::as_slice);
 
@@ -772,7 +883,7 @@ pub fn get_sealed_weapon_case_loot(
     // Get a random collection of weapon mods related to chosen weapon and add them to result array.
     // An absent key is the empty list `GetLinkedDbItems` returns for an unlinked tpl, which lands on
     // the same skip branch the C# null check does.
-    let linked_items_to_weapon: &[String] = request
+    let linked_items_to_weapon: &[String] = varying
         .linked_items
         .get(&chosen_weapon_tpl)
         .map_or(&[], Vec::as_slice);
@@ -799,7 +910,7 @@ pub fn get_sealed_weapon_case_loot(
 
 /// `LootGenerator.GetSealedContainerNonWeaponModRewards` (`:513-598`).
 fn get_sealed_container_non_weapon_mod_rewards(
-    db: &RewardLootDb,
+    db: &RewardDbRefs<'_>,
     settings: &SealedContainerSettingsView,
     weapon_details_db: &ItemView,
     diagnostics: &mut DiagSink,
@@ -824,7 +935,7 @@ fn get_sealed_container_non_weapon_mod_rewards(
                 // the whitelist can defer the crash to the `GetArrayValue` that follows — and a
                 // negative reward count would skip it entirely. Filtering eagerly here reports it up
                 // front; no draw separates the two points, so nothing else shifts.
-                let details = item_helper::get_item(&db.items_view, tpl).ok_or_else(|| {
+                let details = item_helper::get_item(db.items_view, tpl).ok_or_else(|| {
                     LootError::new(format!(
                         "Whitelisted ammo box: {tpl} is missing from the item db"
                     ))
@@ -854,7 +965,7 @@ fn get_sealed_container_non_weapon_mod_rewards(
                 // dereferences `cartridgeTpl!`, an empty box list indexes `ammoBox[0]`, a cartridge
                 // without a stack size loops forever), so they end the call rather than log.
                 item_helper::add_cartridges_to_ammo_box(
-                    &db.items_view,
+                    db.items_view,
                     &mut ammo_box_reward,
                     chosen_ammo_box,
                 )
@@ -879,8 +990,9 @@ fn get_sealed_container_non_weapon_mod_rewards(
         // `QuestItem is null` (`:571`) rejects an explicit `false` as well as a `true`. With real
         // configs the three together leave this pool empty and the branch just logs the skip.
         //
-        // The blacklist is [`RewardLootDb::global_blacklist`] - the cache `IsItemBlacklisted` reads,
-        // not the config list [`RewardLootDb::config_blacklist`] the reward pool unions in.
+        // The blacklist is [`RewardLootVarying::global_blacklist`] - the cache `IsItemBlacklisted`
+        // reads, not the config list [`RewardLootVarying::config_blacklist`] the reward pool
+        // unions in.
         let reward_item_pool: Vec<&str> = db
             .items_view
             .iter()
@@ -921,7 +1033,7 @@ fn get_sealed_container_non_weapon_mod_rewards(
 
 /// `LootGenerator.GetSealedContainerWeaponModRewards` (`:607-653`).
 fn get_sealed_container_weapon_mod_rewards(
-    db: &RewardLootDb,
+    db: &RewardDbRefs<'_>,
     settings: &SealedContainerSettingsView,
     linked_items_to_weapon: &[String],
     chosen_weapon_preset: &PresetView,
@@ -943,7 +1055,7 @@ fn get_sealed_container_weapon_mod_rewards(
         let related_items: Vec<&str> = linked_items_to_weapon
             .iter()
             .filter(|tpl| {
-                item_helper::get_item(&db.items_view, tpl)
+                item_helper::get_item(db.items_view, tpl)
                     .is_some_and(|item| item.parent.as_deref().unwrap_or_default() == reward_key)
                     && !db.global_blacklist.contains(tpl.as_str())
             })
@@ -976,14 +1088,38 @@ fn get_sealed_container_weapon_mod_rewards(
 /// `LootGenerator.GetRandomLootContainerLoot` (`:660-688`) — the halloween pumpkins and friends.
 pub fn get_random_loot_container_loot(
     request: RandomLootContainerRequest,
-) -> Result<RewardLootResult, LootError> {
-    let _seed_guard = request
-        .db
+) -> Result<RewardLootResult, LootEpochError> {
+    let views = resolve_reward_views(request.epoch, request.views_override)?;
+    let varying = request.varying;
+    let _seed_guard = varying
+        .common
         .test_seed
         .map(random_util::TestSeedGuard::install);
 
-    let db = &request.db;
-    let reward_container_details = &request.reward_details;
+    // `presetTpls` is `HasPreset`'s domain, and the resident `presets_by_tpl` map's key domain
+    // **is** that (every tpl with any preset at all — `PresetHelper.cs:155-158`). Container opens
+    // are user-driven and rare, so building the borrowed set per call is fine.
+    let (items_view, default_presets_by_tpl, preset_tpls): (_, _, HashSet<&str>) = match &views {
+        RewardViews::Resident(ragfair) => (
+            &ragfair.items,
+            &ragfair.default_presets_by_tpl,
+            ragfair.presets_by_tpl.keys().map(String::as_str).collect(),
+        ),
+        RewardViews::Override(wire) => (
+            &wire.items_view,
+            &wire.default_presets_by_tpl,
+            wire.preset_tpls
+                .as_ref()
+                .ok_or_else(|| {
+                    LootError::new("presetTpls missing from the reward-container views override")
+                })?
+                .iter()
+                .map(String::as_str)
+                .collect(),
+        ),
+    };
+    let db = &RewardDbRefs::new(&varying.common, items_view, &[], default_presets_by_tpl);
+    let reward_container_details = &varying.reward_details;
     let mut items_to_return: Vec<Vec<Item>> = Vec::new();
 
     // Get random items and add to newItemRequest
@@ -991,7 +1127,7 @@ pub fn get_random_loot_container_loot(
         // Pick random reward from pool, add to request object
         let chosen_reward_item_tpl = pick_reward_item(db, reward_container_details)?;
 
-        if request.preset_tpls.contains(&chosen_reward_item_tpl) {
+        if preset_tpls.contains(chosen_reward_item_tpl.as_str()) {
             // `HasPreset` is true for every tpl with a preset, `GetDefaultPreset` only returns one
             // for those with a default, and `:675` dereferences the difference.
             let preset = db
@@ -1025,7 +1161,7 @@ pub fn get_random_loot_container_loot(
 
 /// `LootGenerator.PickRewardItem` (`:695-705`).
 fn pick_reward_item(
-    db: &RewardLootDb,
+    db: &RewardDbRefs<'_>,
     reward_container_details: &RewardDetailsView,
 ) -> Result<String, LootError> {
     if let Some(reward_tpl_pool) = &reward_container_details.reward_tpl_pool
@@ -1212,16 +1348,42 @@ mod tests {
         request_from(db_json(), seed, options)
     }
 
-    /// `RewardLootDb` is flattened into the request, so its members are spliced in one level up
-    /// rather than nested.
-    fn request_from(mut envelope: Value, seed: u64, options: Value) -> CreateRandomLootRequest {
-        envelope["testSeed"] = json!(seed);
-        envelope
-            .as_object_mut()
-            .unwrap()
-            .insert("lootRequest".to_owned(), options);
+    /// Splits the flat fixture into the envelope halves: the three view members into
+    /// `viewsOverride`, everything else (the service-backed sets, plus the seed) into `varying` —
+    /// so the tests keep mutating one flat object.
+    fn split_envelope(
+        envelope: Value,
+        seed: u64,
+    ) -> (
+        serde_json::Map<String, Value>,
+        serde_json::Map<String, Value>,
+    ) {
+        let Value::Object(mut varying) = envelope else {
+            panic!("fixture envelope is not an object");
+        };
+        let mut views = serde_json::Map::new();
+        for key in ["itemsView", "defaultPresets", "defaultPresetsByTpl"] {
+            if let Some(value) = varying.remove(key) {
+                views.insert(key.to_owned(), value);
+            }
+        }
+        varying.insert("testSeed".to_owned(), json!(seed));
 
-        serde_json::from_value(envelope).unwrap()
+        (views, varying)
+    }
+
+    fn request_json(
+        views: serde_json::Map<String, Value>,
+        varying: serde_json::Map<String, Value>,
+    ) -> Value {
+        json!({ "epoch": 0, "viewsOverride": views, "varying": varying })
+    }
+
+    fn request_from(envelope: Value, seed: u64, options: Value) -> CreateRandomLootRequest {
+        let (views, mut varying) = split_envelope(envelope, seed);
+        varying.insert("lootRequest".to_owned(), options);
+
+        serde_json::from_value(request_json(views, varying)).unwrap()
     }
 
     /// Only the sealed-crate phase runs.
@@ -1235,14 +1397,19 @@ mod tests {
     }
 
     fn forced_request(seed: u64, forced_loot: Value) -> CreateForcedLootRequest {
-        let mut envelope = db_json();
-        envelope["testSeed"] = json!(seed);
-        envelope
-            .as_object_mut()
-            .unwrap()
-            .insert("forcedLoot".to_owned(), forced_loot);
+        let (views, mut varying) = split_envelope(db_json(), seed);
+        varying.insert("forcedLoot".to_owned(), forced_loot);
 
-        serde_json::from_value(envelope).unwrap()
+        serde_json::from_value(request_json(views, varying)).unwrap()
+    }
+
+    /// Every failure these tests provoke is the family's fatal error (the C# throw path) — a
+    /// stale epoch cannot happen on an override send.
+    fn loot_error(error: LootEpochError) -> LootError {
+        match error {
+            LootEpochError::Loot(error) => error,
+            LootEpochError::StaleEpoch => panic!("unexpected stale epoch"),
+        }
     }
 
     /// The generated ids vary run to run (they are not seeded), so parity is compared on the shape:
@@ -1272,6 +1439,15 @@ mod tests {
             .flatten()
             .map(|item| item.template.as_str())
             .collect()
+    }
+
+    /// An override send resolves without consulting the process-global store — no publish, no
+    /// epoch check. One export suffices; all four route through `resolve_reward_views`.
+    #[test]
+    fn an_override_reward_send_needs_no_resident_db() {
+        let request = random_request(1, options_json());
+        assert!(request.views_override.is_some());
+        assert!(create_random_loot(request, &mut DiagSink::capture()).is_ok());
     }
 
     #[test]
@@ -1522,8 +1698,9 @@ mod tests {
         let mut options = options_json();
         options["weaponCrateCount"] = Value::Null;
 
-        let error =
-            create_random_loot(random_request(1, options), &mut DiagSink::capture()).unwrap_err();
+        let error = loot_error(
+            create_random_loot(random_request(1, options), &mut DiagSink::capture()).unwrap_err(),
+        );
 
         assert!(error.message.contains("WeaponCrateCount"), "{error:?}");
     }
@@ -1534,11 +1711,13 @@ mod tests {
         let mut envelope = db_json();
         envelope["itemsView"][PLAIN_ITEM_TPL]["name"] = Value::Null;
 
-        let error = create_random_loot(
-            request_from(envelope, 1, crates_only_options()),
-            &mut DiagSink::capture(),
-        )
-        .unwrap_err();
+        let error = loot_error(
+            create_random_loot(
+                request_from(envelope, 1, crates_only_options()),
+                &mut DiagSink::capture(),
+            )
+            .unwrap_err(),
+        );
 
         assert!(error.message.contains("has no name"), "{error:?}");
     }
@@ -1557,9 +1736,10 @@ mod tests {
         options["weaponCrateCount"] = json!({ "min": 0, "max": 0 });
         options["weaponPresetCount"] = json!({ "min": 1, "max": 1 });
 
-        let error =
+        let error = loot_error(
             create_random_loot(request_from(envelope, 1, options), &mut DiagSink::capture())
-                .unwrap_err();
+                .unwrap_err(),
+        );
 
         assert!(error.message.contains("has no items"), "{error:?}");
     }
@@ -1616,7 +1796,7 @@ mod tests {
     fn forced_loot_propagates_a_split_that_cannot_terminate() {
         let request = forced_request(1, json!({ PLAIN_ITEM_TPL: { "min": 5, "max": 5 } }));
 
-        let error = create_forced_loot(request).unwrap_err();
+        let error = loot_error(create_forced_loot(request).unwrap_err());
 
         assert!(error.message.contains("StackMaxSize"), "{error:?}");
     }
@@ -1642,25 +1822,20 @@ mod tests {
         sealed_request_from(db_json(), seed, settings)
     }
 
-    fn sealed_request_from(
-        mut envelope: Value,
-        seed: u64,
-        settings: Value,
-    ) -> SealedWeaponCaseRequest {
-        envelope["testSeed"] = json!(seed);
-        let object = envelope.as_object_mut().unwrap();
-        object.insert("containerSettings".to_owned(), settings);
-        object.insert(
+    fn sealed_request_from(envelope: Value, seed: u64, settings: Value) -> SealedWeaponCaseRequest {
+        let (mut views, mut varying) = split_envelope(envelope, seed);
+        views.insert(
             "presetsByTpl".to_owned(),
             json!({ WEAPON_TPL: [weapon_preset_json(), weapon_preset_b_json()] }),
         );
-        object.insert(
+        varying.insert("containerSettings".to_owned(), settings);
+        varying.insert(
             "linkedItems".to_owned(),
             // Two mods parented under the reward key, plus one item that is not.
             json!({ WEAPON_TPL: [WEAPON_MOD_TPL, WEAPON_MOD_B_TPL, AMMO_ITEM_TPL] }),
         );
 
-        serde_json::from_value(envelope).unwrap()
+        serde_json::from_value(request_json(views, varying)).unwrap()
     }
 
     /// Only the mod-reward phase runs.
@@ -1821,11 +1996,13 @@ mod tests {
         let mut settings = mods_only_settings();
         settings["weaponRewardWeight"] = json!({ VEST_TPL: 1 });
 
-        let error = get_sealed_weapon_case_loot(
-            sealed_request_from(envelope, 1, settings),
-            &mut DiagSink::capture(),
-        )
-        .unwrap_err();
+        let error = loot_error(
+            get_sealed_weapon_case_loot(
+                sealed_request_from(envelope, 1, settings),
+                &mut DiagSink::capture(),
+            )
+            .unwrap_err(),
+        );
 
         assert!(error.message.contains("Preset pool"), "{error:?}");
     }
@@ -1975,9 +2152,10 @@ mod tests {
         settings["rewardTypeLimits"] = json!({ AMMO_BOX: { "min": 1, "max": 1 } });
         settings["ammoBoxWhitelist"] = json!(["aaaaaaaaaaaaaaaaaaaaaaa9"]);
 
-        let error =
+        let error = loot_error(
             get_sealed_weapon_case_loot(sealed_request(1, settings), &mut DiagSink::capture())
-                .unwrap_err();
+                .unwrap_err(),
+        );
 
         assert!(
             error.message.contains("aaaaaaaaaaaaaaaaaaaaaaa9"),
@@ -2053,13 +2231,11 @@ mod tests {
         reward_details: Value,
         preset_tpls: Value,
     ) -> RandomLootContainerRequest {
-        let mut envelope = db_json();
-        envelope["testSeed"] = json!(seed);
-        let object = envelope.as_object_mut().unwrap();
-        object.insert("rewardDetails".to_owned(), reward_details);
-        object.insert("presetTpls".to_owned(), preset_tpls);
+        let (mut views, mut varying) = split_envelope(db_json(), seed);
+        views.insert("presetTpls".to_owned(), preset_tpls);
+        varying.insert("rewardDetails".to_owned(), reward_details);
 
-        serde_json::from_value(envelope).unwrap()
+        serde_json::from_value(request_json(views, varying)).unwrap()
     }
 
     /// The weighted pool path (`:697-700`), and the preset expansion at `:670-681`.
@@ -2148,9 +2324,10 @@ mod tests {
     fn a_preset_tpl_without_a_default_is_the_c_sharp_null_dereference() {
         let details = json!({ "rewardCount": 1, "rewardTplPool": { PLAIN_ITEM_TPL: 1 } });
 
-        let error =
+        let error = loot_error(
             get_random_loot_container_loot(container_request(1, details, json!([PLAIN_ITEM_TPL])))
-                .unwrap_err();
+                .unwrap_err(),
+        );
 
         assert!(error.message.contains(PLAIN_ITEM_TPL), "{error:?}");
     }
@@ -2158,12 +2335,14 @@ mod tests {
     /// Neither pool set: the type pool is null and `GetItemRewardPool` probes it with `Contains`.
     #[test]
     fn a_container_without_any_pool_is_the_c_sharp_null_dereference() {
-        let error = get_random_loot_container_loot(container_request(
-            1,
-            json!({ "rewardCount": 1 }),
-            json!([]),
-        ))
-        .unwrap_err();
+        let error = loot_error(
+            get_random_loot_container_loot(container_request(
+                1,
+                json!({ "rewardCount": 1 }),
+                json!([]),
+            ))
+            .unwrap_err(),
+        );
 
         assert!(error.message.contains("RewardTypePool"), "{error:?}");
     }

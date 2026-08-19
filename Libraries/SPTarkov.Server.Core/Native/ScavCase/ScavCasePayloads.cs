@@ -9,7 +9,7 @@ namespace SPTarkov.Server.Core.Native.ScavCase;
 /// <summary>
 /// The request/response envelopes of <c>spt_generate_scav_case_rewards</c>, mirroring
 /// <c>rust/spt-native/src/scav_case/models.rs</c> member for member. Conventions are
-/// <see cref="RewardLootDb"/>'s: an explicit <see cref="JsonPropertyNameAttribute"/> on every
+/// <see cref="RewardLootVarying"/>'s: an explicit <see cref="JsonPropertyNameAttribute"/> on every
 /// member, members Rust declares as <c>Option&lt;T&gt;</c> nullable and everything else
 /// <c>required</c>.
 ///
@@ -88,7 +88,7 @@ public record ScavCaseRewardsRequest
     [JsonPropertyName("bossItems")]
     public required HashSet<MongoId> BossItems { get; set; }
 
-    /// <inheritdoc cref="RewardLootDb.TestSeed"/>
+    /// <inheritdoc cref="RewardLootVarying.TestSeed"/>
     [JsonPropertyName("testSeed")]
     public ulong? TestSeed { get; set; }
 }

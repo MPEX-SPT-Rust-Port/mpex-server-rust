@@ -11,9 +11,11 @@ using SPTarkov.Server.Core.Models.Common;
 using SPTarkov.Server.Core.Models.Eft.Common.Tables;
 using SPTarkov.Server.Core.Models.Enums;
 using SPTarkov.Server.Core.Models.Spt.Config;
+using SPTarkov.Server.Core.Models.Spt.Mod;
 using SPTarkov.Server.Core.Models.Spt.Services;
 using SPTarkov.Server.Core.Models.Spt.Tables;
 using SPTarkov.Server.Core.Native;
+using SPTarkov.Server.Core.Native.Db;
 using SPTarkov.Server.Core.Native.Loot;
 using SPTarkov.Server.Core.Services;
 using SPTarkov.Server.Core.Services.Commerce;
@@ -54,11 +56,13 @@ public class LootGenerator(
 )
 {
     private readonly LocationConfig? _locationConfig;
+    private readonly IReadOnlyList<SptMod>? _loadedMods;
+    private readonly DbPublisher? _dbPublisher;
 
     /// <summary>
     ///     The constructor the container uses: the frozen 4.1.2 one plus the config that carries the
-    ///     legacy path flag. Additive and apicompat-verified: the gate passed on all six contract
-    ///     assemblies for this change.
+    ///     legacy path flag and the epoch-protocol services. Additive and apicompat-verified: the
+    ///     gate passed on all six contract assemblies for this change.
     /// </summary>
     public LootGenerator(
         ISptLogger<LootGenerator> logger,
@@ -72,7 +76,9 @@ public class LootGenerator(
         RagfairLinkedItemService ragfairLinkedItemService,
         SeasonalEventService seasonalEventService,
         ICloner cloner,
-        LocationConfig locationConfig
+        LocationConfig locationConfig,
+        IReadOnlyList<SptMod> loadedMods,
+        DbPublisher dbPublisher
     )
         : this(
             logger,
@@ -89,6 +95,8 @@ public class LootGenerator(
         )
     {
         _locationConfig = locationConfig;
+        _loadedMods = loadedMods;
+        _dbPublisher = dbPublisher;
     }
 
     /// <summary>
@@ -98,9 +106,31 @@ public class LootGenerator(
     internal LootGenerationPath LastPathTaken { get; private set; }
 
     /// <summary>
-    ///     Test-only seed forwarded as <see cref="RewardLootDb.TestSeed"/> on every native request.
+    ///     Test-only seed forwarded as <see cref="RewardLootVarying.TestSeed"/> on every native request.
     /// </summary>
     internal ulong? NativeTestSeed { get; set; }
+
+    /// <summary>
+    ///     Whether the most recent native send carried the C#-built views override rather than
+    ///     naming a resident-DB epoch. Test seam.
+    /// </summary>
+    internal bool LastSendIncludedViewsOverride { get; private set; }
+
+    /// <summary>
+    ///     Whether an override-less send off the resident DB is ever allowed: the services exist,
+    ///     the kill switch is off, and either no mods are loaded or the user vouched their mods
+    ///     don't write tables directly. A generator built on the frozen constructor has neither
+    ///     service and always sends the override.
+    /// </summary>
+    internal bool ResidentDbEligible()
+    {
+        if (_locationConfig is null || _loadedMods is null || _dbPublisher is null || _locationConfig.DisableNativeRequestCache)
+        {
+            return false;
+        }
+
+        return _loadedMods.Count == 0 || _locationConfig.TrustNativeRequestCacheWithMods;
+    }
 
     /// <summary>
     ///     The 4.1.2 members a mod can Harmony-patch. Protected and declared on this class - exactly
@@ -133,8 +163,8 @@ public class LootGenerator(
     }
 
     /// <summary>
-    ///     Everything all four native entry points read from the live database and services, built
-    ///     fresh per call so a mod that swaps an item or blacklists one at runtime is picked up.
+    ///     The database views an override send carries, built fresh per call so a mod that swaps an
+    ///     item or blacklists one at runtime is picked up.
     /// </summary>
     /// <param name="defaultPresets">
     ///     <c>PresetHelper.GetDefaultPresets().Values</c>, order preserved - only random loot draws
@@ -145,23 +175,16 @@ public class LootGenerator(
     ///     <c>GetDefaultPresetsByTplKey()</c> for forced loot, <c>GetDefaultPresetByTpl()</c> for the
     ///     sealed case and the reward container, and unread by random loot
     /// </param>
-    private RewardLootDb BuildRewardLootDb(List<PresetView> defaultPresets, Dictionary<MongoId, PresetView> defaultPresetsByTpl)
+    private RewardViewsOverride BuildRewardViewsOverride(
+        List<PresetView> defaultPresets,
+        Dictionary<MongoId, PresetView> defaultPresetsByTpl
+    )
     {
-        return new RewardLootDb
+        return new RewardViewsOverride
         {
             ItemsView = PayloadProjection.BuildItemsView(templateTable.Items),
             DefaultPresets = defaultPresets,
             DefaultPresetsByTpl = defaultPresetsByTpl,
-            // Two different collections, mirroring the two C# call sites: the sealed container
-            // filters read the cache a mod can add to at runtime, the reward pool reads the config
-            // list. Equal until a mod calls AddItemToBlacklistCache
-            GlobalBlacklist = itemFilterService.GetItemBlacklistCache(),
-            ConfigBlacklist = itemFilterService.GetBlacklistedItems(),
-            RewardItemBlacklist = itemFilterService.GetItemRewardBlacklist(),
-            RewardBaseTypeBlacklist = itemFilterService.GetItemRewardBaseTypeBlacklist(),
-            BossItems = itemFilterService.GetBossItems(),
-            InactiveSeasonalItems = seasonalEventService.GetInactiveSeasonalEventItems(),
-            TestSeed = NativeTestSeed,
         };
     }
 
@@ -196,25 +219,47 @@ public class LootGenerator(
 
         LastPathTaken = LootGenerationPath.Native;
 
-        // The tpl keyed preset map is not read by this export, so it is not built
-        var db = BuildRewardLootDb([.. presetHelper.GetDefaultPresets().Values.Select(ToPresetView)], []);
-
-        var result = SptNative.CreateRandomLoot(
-            new CreateRandomLootRequest
+        var varying = new CreateRandomLootVarying
+        {
+            GlobalBlacklist = itemFilterService.GetItemBlacklistCache(),
+            ConfigBlacklist = itemFilterService.GetBlacklistedItems(),
+            RewardItemBlacklist = itemFilterService.GetItemRewardBlacklist(),
+            RewardBaseTypeBlacklist = itemFilterService.GetItemRewardBaseTypeBlacklist(),
+            BossItems = itemFilterService.GetBossItems(),
+            InactiveSeasonalItems = seasonalEventService.GetInactiveSeasonalEventItems(),
+            TestSeed = NativeTestSeed,
+            LootRequest = options,
+        };
+        RewardLootResult result;
+        if (!ResidentDbEligible())
+        {
+            LastSendIncludedViewsOverride = true;
+            result = SptNative.CreateRandomLoot(
+                new CreateRandomLootRequest
+                {
+                    Epoch = 0,
+                    // The tpl keyed preset map is not read by this export, so it is not built
+                    ViewsOverride = BuildRewardViewsOverride([.. presetHelper.GetDefaultPresets().Values.Select(ToPresetView)], []),
+                    Varying = varying,
+                }
+            );
+        }
+        else
+        {
+            var epoch = _dbPublisher!.EnsureCurrent();
+            try
             {
-                ItemsView = db.ItemsView,
-                DefaultPresets = db.DefaultPresets,
-                DefaultPresetsByTpl = db.DefaultPresetsByTpl,
-                GlobalBlacklist = db.GlobalBlacklist,
-                ConfigBlacklist = db.ConfigBlacklist,
-                RewardItemBlacklist = db.RewardItemBlacklist,
-                RewardBaseTypeBlacklist = db.RewardBaseTypeBlacklist,
-                BossItems = db.BossItems,
-                InactiveSeasonalItems = db.InactiveSeasonalItems,
-                TestSeed = db.TestSeed,
-                LootRequest = options,
+                result = SptNative.CreateRandomLoot(new CreateRandomLootRequest { Epoch = epoch, Varying = varying });
             }
-        );
+            catch (NativeStaleEpochException)
+            {
+                // The resident DB does not hold this epoch - republish everything and retry once
+                epoch = _dbPublisher.ForcePublish();
+                result = SptNative.CreateRandomLoot(new CreateRandomLootRequest { Epoch = epoch, Varying = varying });
+            }
+
+            LastSendIncludedViewsOverride = false;
+        }
 
         return result.Items;
     }
@@ -334,25 +379,47 @@ public class LootGenerator(
 
         LastPathTaken = LootGenerationPath.Native;
 
-        // The preset list is not read by this export, so it is not built
-        var db = BuildRewardLootDb([], ToPresetViews(presetHelper.GetDefaultPresetsByTplKey()));
-
-        var result = SptNative.CreateForcedLoot(
-            new CreateForcedLootRequest
+        var varying = new CreateForcedLootVarying
+        {
+            GlobalBlacklist = itemFilterService.GetItemBlacklistCache(),
+            ConfigBlacklist = itemFilterService.GetBlacklistedItems(),
+            RewardItemBlacklist = itemFilterService.GetItemRewardBlacklist(),
+            RewardBaseTypeBlacklist = itemFilterService.GetItemRewardBaseTypeBlacklist(),
+            BossItems = itemFilterService.GetBossItems(),
+            InactiveSeasonalItems = seasonalEventService.GetInactiveSeasonalEventItems(),
+            TestSeed = NativeTestSeed,
+            ForcedLoot = forcedLootToAdd,
+        };
+        RewardLootResult result;
+        if (!ResidentDbEligible())
+        {
+            LastSendIncludedViewsOverride = true;
+            result = SptNative.CreateForcedLoot(
+                new CreateForcedLootRequest
+                {
+                    Epoch = 0,
+                    // The preset list is not read by this export, so it is not built
+                    ViewsOverride = BuildRewardViewsOverride([], ToPresetViews(presetHelper.GetDefaultPresetsByTplKey())),
+                    Varying = varying,
+                }
+            );
+        }
+        else
+        {
+            var epoch = _dbPublisher!.EnsureCurrent();
+            try
             {
-                ItemsView = db.ItemsView,
-                DefaultPresets = db.DefaultPresets,
-                DefaultPresetsByTpl = db.DefaultPresetsByTpl,
-                GlobalBlacklist = db.GlobalBlacklist,
-                ConfigBlacklist = db.ConfigBlacklist,
-                RewardItemBlacklist = db.RewardItemBlacklist,
-                RewardBaseTypeBlacklist = db.RewardBaseTypeBlacklist,
-                BossItems = db.BossItems,
-                InactiveSeasonalItems = db.InactiveSeasonalItems,
-                TestSeed = db.TestSeed,
-                ForcedLoot = forcedLootToAdd,
+                result = SptNative.CreateForcedLoot(new CreateForcedLootRequest { Epoch = epoch, Varying = varying });
             }
-        );
+            catch (NativeStaleEpochException)
+            {
+                // The resident DB does not hold this epoch - republish everything and retry once
+                epoch = _dbPublisher.ForcePublish();
+                result = SptNative.CreateForcedLoot(new CreateForcedLootRequest { Epoch = epoch, Varying = varying });
+            }
+
+            LastSendIncludedViewsOverride = false;
+        }
 
         return result.Items;
     }
@@ -679,36 +746,67 @@ public class LootGenerator(
 
         LastPathTaken = LootGenerationPath.Native;
 
-        // Any of the weighted weapons can be drawn, so every one of them brings its presets and the
-        // items that fit it. The preset list is not read by this export, so it is not built
-        var db = BuildRewardLootDb([], ToPresetViews(presetHelper.GetDefaultPresetByTpl()));
-        var presetsByTpl = new Dictionary<MongoId, List<PresetView>>(containerSettings.WeaponRewardWeight.Count);
+        // Any of the weighted weapons can be drawn, so every one of them brings the items that fit
+        // it. The linked-item cache is service-backed (mods extend it at runtime), so it rides the
+        // varying block on both arms
         var linkedItems = new Dictionary<MongoId, List<MongoId>>(containerSettings.WeaponRewardWeight.Count);
-
         foreach (var weaponTpl in containerSettings.WeaponRewardWeight.Keys)
         {
-            presetsByTpl[weaponTpl] = [.. (presetHelper.GetPresets(weaponTpl) ?? []).Select(ToPresetView)];
             linkedItems[weaponTpl] = [.. ragfairLinkedItemService.GetLinkedDbItems(weaponTpl).Select(item => item.Id)];
         }
 
-        var result = SptNative.GetSealedWeaponCaseLoot(
-            new SealedWeaponCaseRequest
+        var varying = new SealedWeaponCaseVarying
+        {
+            GlobalBlacklist = itemFilterService.GetItemBlacklistCache(),
+            ConfigBlacklist = itemFilterService.GetBlacklistedItems(),
+            RewardItemBlacklist = itemFilterService.GetItemRewardBlacklist(),
+            RewardBaseTypeBlacklist = itemFilterService.GetItemRewardBaseTypeBlacklist(),
+            BossItems = itemFilterService.GetBossItems(),
+            InactiveSeasonalItems = seasonalEventService.GetInactiveSeasonalEventItems(),
+            TestSeed = NativeTestSeed,
+            ContainerSettings = containerSettings,
+            LinkedItems = linkedItems,
+        };
+        RewardLootResult result;
+        if (!ResidentDbEligible())
+        {
+            LastSendIncludedViewsOverride = true;
+
+            // Every weighted weapon brings its presets. The preset list is not read by this
+            // export, so it is not built
+            var presetsByTpl = new Dictionary<MongoId, List<PresetView>>(containerSettings.WeaponRewardWeight.Count);
+            foreach (var weaponTpl in containerSettings.WeaponRewardWeight.Keys)
             {
-                ItemsView = db.ItemsView,
-                DefaultPresets = db.DefaultPresets,
-                DefaultPresetsByTpl = db.DefaultPresetsByTpl,
-                GlobalBlacklist = db.GlobalBlacklist,
-                ConfigBlacklist = db.ConfigBlacklist,
-                RewardItemBlacklist = db.RewardItemBlacklist,
-                RewardBaseTypeBlacklist = db.RewardBaseTypeBlacklist,
-                BossItems = db.BossItems,
-                InactiveSeasonalItems = db.InactiveSeasonalItems,
-                TestSeed = db.TestSeed,
-                ContainerSettings = containerSettings,
-                PresetsByTpl = presetsByTpl,
-                LinkedItems = linkedItems,
+                presetsByTpl[weaponTpl] = [.. (presetHelper.GetPresets(weaponTpl) ?? []).Select(ToPresetView)];
             }
-        );
+
+            var views = BuildRewardViewsOverride([], ToPresetViews(presetHelper.GetDefaultPresetByTpl()));
+            views.PresetsByTpl = presetsByTpl;
+            result = SptNative.GetSealedWeaponCaseLoot(
+                new SealedWeaponCaseRequest
+                {
+                    Epoch = 0,
+                    ViewsOverride = views,
+                    Varying = varying,
+                }
+            );
+        }
+        else
+        {
+            var epoch = _dbPublisher!.EnsureCurrent();
+            try
+            {
+                result = SptNative.GetSealedWeaponCaseLoot(new SealedWeaponCaseRequest { Epoch = epoch, Varying = varying });
+            }
+            catch (NativeStaleEpochException)
+            {
+                // The resident DB does not hold this epoch - republish everything and retry once
+                epoch = _dbPublisher.ForcePublish();
+                result = SptNative.GetSealedWeaponCaseLoot(new SealedWeaponCaseRequest { Epoch = epoch, Varying = varying });
+            }
+
+            LastSendIncludedViewsOverride = false;
+        }
 
         return result.Items;
     }
@@ -921,28 +1019,52 @@ public class LootGenerator(
 
         LastPathTaken = LootGenerationPath.Native;
 
-        // The preset list is not read by this export, so it is not built
-        var db = BuildRewardLootDb([], ToPresetViews(presetHelper.GetDefaultPresetByTpl()));
+        var varying = new RandomLootContainerVarying
+        {
+            GlobalBlacklist = itemFilterService.GetItemBlacklistCache(),
+            ConfigBlacklist = itemFilterService.GetBlacklistedItems(),
+            RewardItemBlacklist = itemFilterService.GetItemRewardBlacklist(),
+            RewardBaseTypeBlacklist = itemFilterService.GetItemRewardBaseTypeBlacklist(),
+            BossItems = itemFilterService.GetBossItems(),
+            InactiveSeasonalItems = seasonalEventService.GetInactiveSeasonalEventItems(),
+            TestSeed = NativeTestSeed,
+            RewardDetails = rewardContainerDetails,
+        };
+        RewardLootResult result;
+        if (!ResidentDbEligible())
+        {
+            LastSendIncludedViewsOverride = true;
 
-        var result = SptNative.GetRandomLootContainerLoot(
-            new RandomLootContainerRequest
+            // The preset list is not read by this export, so it is not built
+            var views = BuildRewardViewsOverride([], ToPresetViews(presetHelper.GetDefaultPresetByTpl()));
+            // Every tpl PresetHelper.HasPreset answers true for, which the native side probes per
+            // chosen reward
+            views.PresetTpls = [.. presetHelper.GetTplsWithPresets()];
+            result = SptNative.GetRandomLootContainerLoot(
+                new RandomLootContainerRequest
+                {
+                    Epoch = 0,
+                    ViewsOverride = views,
+                    Varying = varying,
+                }
+            );
+        }
+        else
+        {
+            var epoch = _dbPublisher!.EnsureCurrent();
+            try
             {
-                ItemsView = db.ItemsView,
-                DefaultPresets = db.DefaultPresets,
-                DefaultPresetsByTpl = db.DefaultPresetsByTpl,
-                GlobalBlacklist = db.GlobalBlacklist,
-                ConfigBlacklist = db.ConfigBlacklist,
-                RewardItemBlacklist = db.RewardItemBlacklist,
-                RewardBaseTypeBlacklist = db.RewardBaseTypeBlacklist,
-                BossItems = db.BossItems,
-                InactiveSeasonalItems = db.InactiveSeasonalItems,
-                TestSeed = db.TestSeed,
-                RewardDetails = rewardContainerDetails,
-                // Every tpl PresetHelper.HasPreset answers true for, which the native side probes per
-                // chosen reward
-                PresetTpls = [.. presetHelper.GetTplsWithPresets()],
+                result = SptNative.GetRandomLootContainerLoot(new RandomLootContainerRequest { Epoch = epoch, Varying = varying });
             }
-        );
+            catch (NativeStaleEpochException)
+            {
+                // The resident DB does not hold this epoch - republish everything and retry once
+                epoch = _dbPublisher.ForcePublish();
+                result = SptNative.GetRandomLootContainerLoot(new RandomLootContainerRequest { Epoch = epoch, Varying = varying });
+            }
+
+            LastSendIncludedViewsOverride = false;
+        }
 
         return result.Items;
     }

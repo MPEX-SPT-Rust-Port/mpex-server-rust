@@ -13,13 +13,13 @@ namespace SPTarkov.Server.Core.Native.Loot;
 /// member, members Rust declares as <c>Option&lt;T&gt;</c> nullable and everything else
 /// <c>required</c>.
 ///
-/// The database slice every entry point needs, flattened into each request the way
-/// <see cref="LootCommon"/> is. All five blacklists are membership tests on the native side, so
-/// their order never reaches the RNG; <see cref="ItemsView"/> and
-/// <see cref="DefaultPresetsByTpl"/> are drawn from in iteration order and must be built in the
-/// order the C# generator would have walked them.
+/// The distrust fallback for the four reward exports: the C#-built database half, present iff the
+/// caller is ineligible for residency. <see cref="PresetsByTpl"/> rides only on sealed-case sends
+/// and <see cref="PresetTpls"/> only on reward-container sends, mirroring the old per-envelope
+/// members. <see cref="ItemsView"/> and <see cref="DefaultPresetsByTpl"/> are drawn from in
+/// iteration order and must be built in the order the C# generator would have walked them.
 /// </summary>
-public record RewardLootDb
+public record RewardViewsOverride
 {
     /// <summary>
     /// The slice of every <c>TemplateItem</c> the generator reads, keyed by tpl.
@@ -28,7 +28,8 @@ public record RewardLootDb
     public required Dictionary<MongoId, ItemView> ItemsView { get; set; }
 
     /// <summary>
-    /// <c>PresetHelper.GetDefaultPresets().Values</c>, order preserved.
+    /// <c>PresetHelper.GetDefaultPresets().Values</c>, order preserved. Only random loot reads it;
+    /// the other envelopes send an empty list.
     /// </summary>
     [JsonPropertyName("defaultPresets")]
     public required List<PresetView> DefaultPresets { get; set; }
@@ -41,6 +42,27 @@ public record RewardLootDb
     [JsonPropertyName("defaultPresetsByTpl")]
     public required Dictionary<MongoId, PresetView> DefaultPresetsByTpl { get; set; }
 
+    /// <summary>
+    /// Sealed only: <c>PresetHelper.GetPresets(tpl)</c> per weapon tpl; the inner list is drawn
+    /// from, so its order matters.
+    /// </summary>
+    [JsonPropertyName("presetsByTpl")]
+    public Dictionary<MongoId, List<PresetView>>? PresetsByTpl { get; set; }
+
+    /// <summary>
+    /// Container only: <c>PresetHelper.HasPreset(tpl)</c> as a set, which is a superset of
+    /// <see cref="DefaultPresetsByTpl"/>'s keys.
+    /// </summary>
+    [JsonPropertyName("presetTpls")]
+    public HashSet<MongoId>? PresetTpls { get; set; }
+}
+
+/// <summary>
+/// The per-call half every reward export carries: the service-backed blacklists/sets (a mod can
+/// extend them at runtime) and the test seed.
+/// </summary>
+public record RewardLootVarying
+{
     /// <summary>
     /// The blacklist the sealed container filters test: <c>ItemFilterService.IsItemBlacklisted</c>'s
     /// backing cache, which mods extend at runtime through <c>AddItemToBlacklistCache</c>.
@@ -80,12 +102,32 @@ public record RewardLootDb
     [JsonPropertyName("inactiveSeasonalItems")]
     public required HashSet<MongoId> InactiveSeasonalItems { get; set; }
 
-    /// <inheritdoc cref="LootCommon.TestSeed"/>
+    /// <inheritdoc cref="LootVarying.TestSeed"/>
     [JsonPropertyName("testSeed")]
     public ulong? TestSeed { get; set; }
 }
 
-public record CreateRandomLootRequest : RewardLootDb
+public record CreateRandomLootRequest
+{
+    /// <summary>
+    ///     Resident-DB epoch this request was built against; 0 with <see cref="ViewsOverride"/>
+    ///     present (spec § Exports).
+    /// </summary>
+    [JsonPropertyName("epoch")]
+    public required ulong Epoch { get; set; }
+
+    /// <summary>
+    ///     The distrust fallback (spec § Exports): the C#-built view bundle, used for this call
+    ///     only and never made resident. Present iff the caller is ineligible for residency.
+    /// </summary>
+    [JsonPropertyName("viewsOverride")]
+    public RewardViewsOverride? ViewsOverride { get; set; }
+
+    [JsonPropertyName("varying")]
+    public required CreateRandomLootVarying Varying { get; set; }
+}
+
+public record CreateRandomLootVarying : RewardLootVarying
 {
     /// <summary>
     /// <c>UseForcedLoot</c>/<c>ForcedLoot</c> are ignored by the native side - the caller branches on
@@ -95,7 +137,27 @@ public record CreateRandomLootRequest : RewardLootDb
     public required LootRequest LootRequest { get; set; }
 }
 
-public record CreateForcedLootRequest : RewardLootDb
+public record CreateForcedLootRequest
+{
+    /// <summary>
+    ///     Resident-DB epoch this request was built against; 0 with <see cref="ViewsOverride"/>
+    ///     present (spec § Exports).
+    /// </summary>
+    [JsonPropertyName("epoch")]
+    public required ulong Epoch { get; set; }
+
+    /// <summary>
+    ///     The distrust fallback (spec § Exports): the C#-built view bundle, used for this call
+    ///     only and never made resident. Present iff the caller is ineligible for residency.
+    /// </summary>
+    [JsonPropertyName("viewsOverride")]
+    public RewardViewsOverride? ViewsOverride { get; set; }
+
+    [JsonPropertyName("varying")]
+    public required CreateForcedLootVarying Varying { get; set; }
+}
+
+public record CreateForcedLootVarying : RewardLootVarying
 {
     /// <summary>
     /// Walked in order, drawing a count per entry.
@@ -104,7 +166,27 @@ public record CreateForcedLootRequest : RewardLootDb
     public required Dictionary<MongoId, MinMax<int>> ForcedLoot { get; set; }
 }
 
-public record SealedWeaponCaseRequest : RewardLootDb
+public record SealedWeaponCaseRequest
+{
+    /// <summary>
+    ///     Resident-DB epoch this request was built against; 0 with <see cref="ViewsOverride"/>
+    ///     present (spec § Exports).
+    /// </summary>
+    [JsonPropertyName("epoch")]
+    public required ulong Epoch { get; set; }
+
+    /// <summary>
+    ///     The distrust fallback (spec § Exports): the C#-built view bundle, used for this call
+    ///     only and never made resident. Present iff the caller is ineligible for residency.
+    /// </summary>
+    [JsonPropertyName("viewsOverride")]
+    public RewardViewsOverride? ViewsOverride { get; set; }
+
+    [JsonPropertyName("varying")]
+    public required SealedWeaponCaseVarying Varying { get; set; }
+}
+
+public record SealedWeaponCaseVarying : RewardLootVarying
 {
     /// <summary>
     /// <c>FoundInRaid</c> is ignored by the native side - the caller applies it to the result.
@@ -113,21 +195,35 @@ public record SealedWeaponCaseRequest : RewardLootDb
     public required SealedAirdropContainerSettings ContainerSettings { get; set; }
 
     /// <summary>
-    /// <c>PresetHelper.GetPresets(tpl)</c> per weapon tpl; the inner list is drawn from, so its order
-    /// matters.
-    /// </summary>
-    [JsonPropertyName("presetsByTpl")]
-    public required Dictionary<MongoId, List<PresetView>> PresetsByTpl { get; set; }
-
-    /// <summary>
     /// <c>RagfairLinkedItemService.GetLinkedDbItems(tpl)</c> per <c>WeaponRewardWeight</c> key; the
-    /// inner list is drawn from, so its order matters.
+    /// inner list is drawn from, so its order matters. Service-backed (the linked-item cache is
+    /// mod-extendable at runtime), so it rides every sealed send.
     /// </summary>
     [JsonPropertyName("linkedItems")]
     public required Dictionary<MongoId, List<MongoId>> LinkedItems { get; set; }
 }
 
-public record RandomLootContainerRequest : RewardLootDb
+public record RandomLootContainerRequest
+{
+    /// <summary>
+    ///     Resident-DB epoch this request was built against; 0 with <see cref="ViewsOverride"/>
+    ///     present (spec § Exports).
+    /// </summary>
+    [JsonPropertyName("epoch")]
+    public required ulong Epoch { get; set; }
+
+    /// <summary>
+    ///     The distrust fallback (spec § Exports): the C#-built view bundle, used for this call
+    ///     only and never made resident. Present iff the caller is ineligible for residency.
+    /// </summary>
+    [JsonPropertyName("viewsOverride")]
+    public RewardViewsOverride? ViewsOverride { get; set; }
+
+    [JsonPropertyName("varying")]
+    public required RandomLootContainerVarying Varying { get; set; }
+}
+
+public record RandomLootContainerVarying : RewardLootVarying
 {
     /// <summary>
     /// <c>_type</c>/<c>FoundInRaid</c> are ignored by the native side - the caller applies them to
@@ -135,13 +231,6 @@ public record RandomLootContainerRequest : RewardLootDb
     /// </summary>
     [JsonPropertyName("rewardDetails")]
     public required RewardDetails RewardDetails { get; set; }
-
-    /// <summary>
-    /// <c>PresetHelper.HasPreset(tpl)</c> as a set, which is a superset of
-    /// <see cref="RewardLootDb.DefaultPresetsByTpl"/>'s keys.
-    /// </summary>
-    [JsonPropertyName("presetTpls")]
-    public required HashSet<MongoId> PresetTpls { get; set; }
 }
 
 /// <summary>

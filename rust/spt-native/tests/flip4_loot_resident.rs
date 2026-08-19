@@ -1,5 +1,6 @@
-//! Resident-arm integration: publish a minimal four-root DB with per-map statics, then prove a
-//! `{epoch}` send generates identically to the same data sent as `viewsOverride`, and that a
+//! Resident-arm integration: publish a minimal four-root DB with per-map statics and weapon
+//! presets, then prove a `{epoch}` send generates identically to the same data sent as
+//! `viewsOverride` — for location loot and for the reward family's sealed case — and that a
 //! wrong epoch is a stale error, not a wrong answer.
 //!
 //! Its own process (integration tests build their own binary), so the process-global store races
@@ -7,13 +8,21 @@
 
 use spt_native::ffi::{
     STATUS_OK, STATUS_STALE_EPOCH, spt_buf_free, spt_db_publish, spt_generate_static_containers,
+    spt_get_sealed_weapon_case_loot,
 };
-use spt_native::loot::item_helper::MONEY;
+use spt_native::loot::item_helper::{MONEY, WEAPON};
 
 /// `BaseClasses.ITEM` — the root node the money chain hangs off.
 const ITEM_NODE: &str = "54009119af1c881c07000029";
 const CONTAINER_TPL: &str = "111111111111111111111111";
 const MONEY_TPL: &str = "333333333333333333333333";
+
+// The sealed-case tpls are deliberately non-hex so `strip_mongo_ids` leaves them visible — a
+// draw that diverged between the two arms would then fail the byte comparison.
+const MISC_NODE: &str = "misc_node";
+const WEAPON_TPL: &str = "weapon_tpl";
+const MOD_A_TPL: &str = "weapon_mod_a";
+const MOD_B_TPL: &str = "weapon_mod_b";
 
 type Export = unsafe extern "C" fn(*const u8, usize, *mut *mut u8, *mut usize) -> i32;
 
@@ -92,6 +101,47 @@ fn statics_json() -> &'static str {
         "containers":{"r1":{"groupId":"g1"},"r2":{"groupId":"g1"}}}"#
 }
 
+/// The two weapon presets' item lists, shared verbatim by the publish's `_items` and the
+/// override's `presetsByTpl` views so both arms draw from identical bytes. The default (p1, two
+/// items) and the alternative (p2, one item) differ in length, so which preset a draw picked is
+/// visible in the response shape.
+fn preset_p1_items() -> String {
+    format!(
+        r#"[{{"_id":"root_p1","_tpl":"{WEAPON_TPL}"}},
+        {{"_id":"mod_p1","_tpl":"{MOD_A_TPL}","parentId":"root_p1","slotId":"mod_stock"}}]"#
+    )
+}
+
+fn preset_p2_items() -> String {
+    format!(r#"[{{"_id":"root_p2","_tpl":"{WEAPON_TPL}"}}]"#)
+}
+
+/// The override's `presetsByTpl`: `GetPresets(tpl)` for the one weapon, in globals map order —
+/// the same order the resident derive keeps.
+fn preset_views_json() -> String {
+    format!(
+        r#"{{"{WEAPON_TPL}":[
+        {{"items":{p1},"id":"p1","name":"weapon_default","encyclopedia":"{WEAPON_TPL}"}},
+        {{"items":{p2},"id":"p2","name":"weapon_alt"}}]}}"#,
+        p1 = preset_p1_items(),
+        p2 = preset_p2_items(),
+    )
+}
+
+/// Every `SealedWeaponCaseVarying` member, shared verbatim by both sealed arms: a single-entry
+/// weapon weight (no draw), a mod reward count with a real range (draws), and a seed so both
+/// arms replay one stream.
+fn sealed_varying() -> String {
+    format!(
+        r#""globalBlacklist":[],"configBlacklist":[],"rewardItemBlacklist":[],
+        "rewardBaseTypeBlacklist":[],"bossItems":[],"inactiveSeasonalItems":[],"testSeed":7,
+        "containerSettings":{{"weaponRewardWeight":{{"{WEAPON_TPL}":1}},"defaultPresetsOnly":false,
+            "weaponModRewardLimits":{{"{MISC_NODE}":{{"min":1,"max":2}}}},"rewardTypeLimits":{{}},
+            "ammoBoxWhitelist":[],"allowBossItems":false}},
+        "linkedItems":{{"{WEAPON_TPL}":["{MOD_A_TPL}","{MOD_B_TPL}"]}}"#
+    )
+}
+
 /// Every `LootVarying` member of the sends below, `testSeed` included so both arms replay one
 /// draw stream.
 fn varying() -> String {
@@ -122,13 +172,22 @@ fn a_resident_send_matches_the_override_send_and_a_wrong_epoch_is_stale() {
             "templates":{{"items":{{
                 "{ITEM_NODE}":{{"_type":"Node","_parent":"","_props":{{}}}},
                 "{MONEY}":{{"_type":"Node","_parent":"{ITEM_NODE}","_props":{{}}}},
+                "{WEAPON}":{{"_type":"Node","_parent":"{ITEM_NODE}","_props":{{}}}},
+                "{MISC_NODE}":{{"_type":"Node","_parent":"{ITEM_NODE}","_props":{{}}}},
                 "{CONTAINER_TPL}":{{"_parent":"{ITEM_NODE}","_props":{{"Width":1,"Height":1,
                     "Grids":[{{"_props":{{"cellsH":2,"cellsV":2}}}}]}}}},
                 "{MONEY_TPL}":{{"_parent":"{MONEY}","_props":{{"Width":1,"Height":1,
-                    "StackMaxSize":500000,"StackMinRandom":100,"StackMaxRandom":200}}}}
+                    "StackMaxSize":500000,"StackMinRandom":100,"StackMaxRandom":200}}}},
+                "{WEAPON_TPL}":{{"_parent":"{WEAPON}","_props":{{}}}},
+                "{MOD_A_TPL}":{{"_parent":"{MISC_NODE}","_props":{{}}}},
+                "{MOD_B_TPL}":{{"_parent":"{MISC_NODE}","_props":{{}}}}
             }},"handbook":{{"Items":[]}},"prices":{{}}}},
             "traders":{{}},
-            "globals":{{}},
+            "globals":{{"ItemPresets":{{
+                "p1":{{"_id":"p1","_name":"weapon_default","_encyclopedia":"{WEAPON_TPL}",
+                    "_items":{p1_items}}},
+                "p2":{{"_id":"p2","_name":"weapon_alt","_items":{p2_items}}}
+            }}}},
             "locations":{{"bigmap":{{"base":{{"Id":"bigmap"}},"allExtracts":[],
                 "staticLoot":{loot},
                 "staticContainers":{{"staticWeapons":[],"staticContainers":{containers},
@@ -138,6 +197,8 @@ fn a_resident_send_matches_the_override_send_and_a_wrong_epoch_is_stale() {
         loot = loot_dist(),
         containers = containers_json(),
         statics = statics_json(),
+        p1_items = preset_p1_items(),
+        p2_items = preset_p2_items(),
     );
 
     // (2) Publish through the FFI and read back the epoch.
@@ -206,6 +267,72 @@ fn a_resident_send_matches_the_override_send_and_a_wrong_epoch_is_stale() {
         varying()
     );
     let (status, out) = call(spt_generate_static_containers, stale_request.as_bytes());
+    assert_eq!(status, STATUS_STALE_EPOCH);
+    assert!(String::from_utf8(out).unwrap().contains("epoch mismatch"));
+
+    // (6) The reward family off the same publish, on its most resident-mapped export (sealed):
+    // the resident arm reads the derived ragfair views, the override arm the same data as
+    // `viewsOverride` — one seed, byte-identical rewards.
+    let resident_sealed_request =
+        format!(r#"{{"epoch":{epoch},"varying":{{{}}}}}"#, sealed_varying());
+    let (status, resident_sealed) = call(
+        spt_get_sealed_weapon_case_loot,
+        resident_sealed_request.as_bytes(),
+    );
+    assert_eq!(
+        status,
+        STATUS_OK,
+        "resident sealed send failed: {}",
+        String::from_utf8_lossy(&resident_sealed)
+    );
+
+    let override_sealed_request = format!(
+        r#"{{"epoch":0,"viewsOverride":{{
+            "itemsView":{{
+                "{WEAPON_TPL}":{{"parent":"{WEAPON}"}},
+                "{MOD_A_TPL}":{{"parent":"{MISC_NODE}"}},
+                "{MOD_B_TPL}":{{"parent":"{MISC_NODE}"}}
+            }},
+            "defaultPresets":[],"defaultPresetsByTpl":{{}},
+            "presetsByTpl":{presets}
+        }},"varying":{{{varying}}}}}"#,
+        presets = preset_views_json(),
+        varying = sealed_varying(),
+    );
+    let (status, override_sealed) = call(
+        spt_get_sealed_weapon_case_loot,
+        override_sealed_request.as_bytes(),
+    );
+    assert_eq!(
+        status,
+        STATUS_OK,
+        "override sealed send failed: {}",
+        String::from_utf8_lossy(&override_sealed)
+    );
+
+    // Two empty results would compare equal vacuously — the weapon preset must be in there.
+    let resident_sealed = String::from_utf8(resident_sealed).unwrap();
+    assert!(
+        resident_sealed.contains(WEAPON_TPL),
+        "no weapon drawn: {resident_sealed}"
+    );
+
+    // The sealed tpls are non-hex, so a diverging draw survives the id strip and fails here.
+    assert_eq!(
+        strip_mongo_ids(&resident_sealed),
+        strip_mongo_ids(&String::from_utf8(override_sealed).unwrap())
+    );
+
+    // (7) A reward export answers a stale epoch with status 4 as well.
+    let stale_sealed_request = format!(
+        r#"{{"epoch":{},"varying":{{{}}}}}"#,
+        epoch + 1000,
+        sealed_varying()
+    );
+    let (status, out) = call(
+        spt_get_sealed_weapon_case_loot,
+        stale_sealed_request.as_bytes(),
+    );
     assert_eq!(status, STATUS_STALE_EPOCH);
     assert!(String::from_utf8(out).unwrap().contains("epoch mismatch"));
 }
