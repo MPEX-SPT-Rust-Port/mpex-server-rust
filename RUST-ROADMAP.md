@@ -175,6 +175,11 @@ silently drops camora ammo on the fifth); and the native `_type` test being
 1. **Frozen surface.** Preserve the ported class's entire 4.1.2 public *and protected* surface —
    constructor including parameter names, methods, DTOs. Keep the C# implementation verbatim as the
    legacy path; never delete it. Enforced by `dotnet apicompat` in the sibling `mpex-api-compat` repo.
+   **Why the `Native/` payload reshapes never flag it:** the whole tree post-dates the 4.1.2
+   baseline, so its members are *additions*, which apicompat does not report — not because they are
+   hidden — plenty of them are public (`Native/Loot/LootPayloads.cs`,
+   `Native/BaseClass/ItemBaseClassPayloads.cs`, `DbPublisher`). A future flip reshaping one of those
+   should expect a clean run for that reason, not from a visibility rule that does not hold.
 2. **Override contract.** Detect Harmony patches on the frozen members (`Harmony.GetPatchInfo`) and
    route to legacy so hooks fire with baseline semantics. Add a `forceLegacy...` config flag as the
    escape hatch for hooks detection can't see.

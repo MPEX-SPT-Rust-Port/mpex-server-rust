@@ -355,8 +355,17 @@ All figures ms per bot; request bytes per bot unchanged at 3.81 MiB single-bot a
 45), 0.19 (20), 0.38 (10), 0.76 (5) MiB batched — the override arm's wire did not move, because
 every member the flip touched was renamed or re-parented, not added or dropped: the database half
 became `viewsOverride`, the rest became `SharedBotVarying`, and `modPoolSlotOrder` went with it.
-Every column here is within `ae325d8`'s spread on unchanged code, which is what the flip predicts
-for this fixture.
+The timings are **not** flatly "within spread", and the direction is worth recording: against
+`ae325d8` the two unchanged-code arms fell in **10 of 10** cells each (serial to 46-47 ms from
+48-50, parallel to 13-14 from 15-16) while the batched arm — the only one this flip reshaped — rose
+in **9 of 10**, by +4-9% in seven of them. Most of that is inside the 9.5-31% drift the arms above
+show anyway, and the one cell that is not — wave 20's first invocation at 3.72 ms, +44-47% on the
+pre-flip pair — is contradicted by its own repeat (2.86 ms, +10.4%), so a single outlier against a
+30% intra-day spread is the likeliest reading. But a consistent small rise on the one arm that
+changed has a plausible mechanism: the override arm's payload gained a level of nesting (its
+database half moved from the request's top level down into `viewsOverride`, the rest into `shared`),
+which is native-side deserialization cost, not generation. Unresolved at this fixture's resolution;
+re-read it before the next reshape of this wire rather than treating it as settled noise.
 
 The eligible wave's wire is the number this table cannot show, measured off the same projection as
 the single-bot figure above (`pmcUSEC`, one level band):
