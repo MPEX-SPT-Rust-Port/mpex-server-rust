@@ -163,21 +163,16 @@ public static class Program
         Console.OutputEncoding = Encoding.UTF8;
 
         var configuration = await ConfigLoader.Initialize(_earlyLogger!, startupCancellation.Token);
-        var earlyServiceProvider = ProgramHelpers.CreateEarlySptProvider(loggerFactory, configuration, ProgramStatics.MODS());
+        var earlyServiceProvider = ProgramHelpers.CreateEarlySptProvider(loggerFactory, configuration, modsEnabled: true);
 
-        List<SptMod> loadedMods = [];
-
-        if (ProgramStatics.MODS())
+        var modLoader = earlyServiceProvider.GetRequiredService<ModLoader>();
+        var runResult = await modLoader.RunModLoader(args, startupCancellation.Token);
+        if (!runResult.ShouldStartServer)
         {
-            var modLoader = earlyServiceProvider.GetRequiredService<ModLoader>();
-            var runResult = await modLoader.RunModLoader(args, startupCancellation.Token);
-            if (!runResult.ShouldStartServer)
-            {
-                return;
-            }
-
-            loadedMods = runResult.ValidRuntimeMods;
+            return;
         }
+
+        var loadedMods = runResult.ValidRuntimeMods;
 
         await StartServerAfterModLoading(loggerFactory, configuration, earlyServiceProvider, loadedMods, startupCancellation);
     }
@@ -211,7 +206,7 @@ public static class Program
             options.ValidateOnBuild = true;
             options.ValidateScopes = true;
         });
-        await ProgramHelpers.RegisterSptServicesAsync(builder, loadedMods, ProgramStatics.MODS(), cancellationToken);
+        await ProgramHelpers.RegisterSptServicesAsync(builder, loadedMods, modsEnabled: true, cancellationToken);
 
         // Configure Kestrel options
         ConfigureKestrel(builder);

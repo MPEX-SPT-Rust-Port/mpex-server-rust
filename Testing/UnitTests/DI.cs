@@ -140,4 +140,12 @@ public class DI
     {
         return _serviceProvider.GetRequiredService<T>();
     }
+
+    /// <summary>
+    /// Resolve by <see cref="Type"/>, for fixtures that fill a constructor's parameters reflectively.
+    /// </summary>
+    public object GetService(Type serviceType)
+    {
+        return _serviceProvider.GetRequiredService(serviceType);
+    }
 }

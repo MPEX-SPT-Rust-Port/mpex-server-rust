@@ -14,8 +14,10 @@ using SPTarkov.Server.Core.Models.Eft.Common;
 using SPTarkov.Server.Core.Models.Eft.Common.Tables;
 using SPTarkov.Server.Core.Models.Enums;
 using SPTarkov.Server.Core.Models.Spt.Config;
+using SPTarkov.Server.Core.Models.Spt.Mod;
 using SPTarkov.Server.Core.Models.Spt.Tables;
 using SPTarkov.Server.Core.Native;
+using SPTarkov.Server.Core.Native.Db;
 using SPTarkov.Server.Core.Native.Loot;
 using SPTarkov.Server.Core.Services;
 using SPTarkov.Server.Core.Services.Items;
@@ -52,6 +54,48 @@ public class LocationLootGenerator(
     ICloner cloner
 )
 {
+    private readonly IReadOnlyList<SptMod>? _loadedMods;
+    private readonly DbPublisher? _dbPublisher;
+
+    /// <summary>
+    ///     The constructor the container uses: the frozen one plus the epoch-protocol services.
+    ///     Additive and apicompat-verified.
+    /// </summary>
+    public LocationLootGenerator(
+        ISptLogger<LocationLootGenerator> logger,
+        LocationTable locationTable,
+        RandomUtil randomUtil,
+        ItemHelper itemHelper,
+        PresetHelper presetHelper,
+        ServerLocalisationService serverLocalisationService,
+        SeasonalEventService seasonalEventService,
+        ItemFilterService itemFilterService,
+        LocationConfig locationConfig,
+        SeasonalEventConfig seasonalEventConfig,
+        CounterTrackerHelper counterTrackerHelper,
+        ICloner cloner,
+        IReadOnlyList<SptMod> loadedMods,
+        DbPublisher dbPublisher
+    )
+        : this(
+            logger,
+            locationTable,
+            randomUtil,
+            itemHelper,
+            presetHelper,
+            serverLocalisationService,
+            seasonalEventService,
+            itemFilterService,
+            locationConfig,
+            seasonalEventConfig,
+            counterTrackerHelper,
+            cloner
+        )
+    {
+        _loadedMods = loadedMods;
+        _dbPublisher = dbPublisher;
+    }
+
     /// <summary>
     ///     Which implementation the most recent generation call ran - the spt-native path or the
     ///     retained 4.1.2 C# path. Test seam; also handy in a debugger.
@@ -59,9 +103,31 @@ public class LocationLootGenerator(
     internal LootGenerationPath LastPathTaken { get; private set; }
 
     /// <summary>
-    ///     Test-only seed forwarded as <see cref="LootCommon.TestSeed"/> on both native requests.
+    ///     Test-only seed forwarded as <see cref="LootVarying.TestSeed"/> on both native requests.
     /// </summary>
     internal ulong? NativeTestSeed { get; set; }
+
+    /// <summary>
+    ///     Whether the most recent native send carried the C#-built views override rather than
+    ///     naming a resident-DB epoch. Test seam.
+    /// </summary>
+    internal bool LastSendIncludedViewsOverride { get; private set; }
+
+    /// <summary>
+    ///     Whether an override-less send off the resident DB is ever allowed: the services exist,
+    ///     the kill switch is off, and either no mods are loaded or the user vouched their mods
+    ///     don't write tables directly. A generator built on the frozen constructor has neither
+    ///     service and always sends the override.
+    /// </summary>
+    internal bool ResidentDbEligible()
+    {
+        if (_loadedMods is null || _dbPublisher is null || locationConfig.DisableNativeRequestCache)
+        {
+            return false;
+        }
+
+        return _loadedMods.Count == 0 || locationConfig.TrustNativeRequestCacheWithMods;
+    }
 
     /// <summary>
     ///     The 4.1.2 members a mod can Harmony-patch. Protected and declared on this class - exactly
@@ -170,36 +236,36 @@ public class LocationLootGenerator(
 
         LastPathTaken = LootGenerationPath.Native;
 
-        var mapData = locationTable.GetLocation(locationId);
-
-        // Every `.Value` re-runs the lazy load, so each file is read exactly once per call
-        var staticContainerDetails = mapData!.StaticContainers!.Value!;
-        var common = BuildCommonPayload(locationId, staticAmmoDist);
-
-        var result = SptNative.GenerateStaticContainers(
-            new StaticContainersRequest
+        var varying = BuildVarying(locationId, staticAmmoDist);
+        StaticContainersResult result;
+        if (!ResidentDbEligible())
+        {
+            LastSendIncludedViewsOverride = true;
+            result = SptNative.GenerateStaticContainers(
+                new StaticContainersRequest
+                {
+                    Epoch = 0,
+                    ViewsOverride = BuildViewsOverride(locationTable.GetLocation(locationId)),
+                    Varying = varying,
+                }
+            );
+        }
+        else
+        {
+            var epoch = _dbPublisher!.EnsureCurrent();
+            try
             {
-                LocationId = common.LocationId,
-                ItemsView = common.ItemsView,
-                DefaultPresets = common.DefaultPresets,
-                MoneyTpls = common.MoneyTpls,
-                StaticAmmoDist = common.StaticAmmoDist,
-                Config = common.Config,
-                Seasonal = common.Seasonal,
-                LootableItemBlacklist = common.LootableItemBlacklist,
-                Counter = common.Counter,
-                TestSeed = NativeTestSeed,
-                // Nulls are passed through, not replaced with empty lists - the native side logs a
-                // map-specific error for each missing list
-                StaticWeapons = staticContainerDetails.StaticWeapons,
-                StaticContainers = staticContainerDetails.StaticContainers,
-                StaticForced = staticContainerDetails.StaticForced,
-                StaticLootDist = mapData.StaticLoot!.Value!,
-                Statics = mapData.Statics,
+                result = SptNative.GenerateStaticContainers(new StaticContainersRequest { Epoch = epoch, Varying = varying });
             }
-        );
+            catch (NativeStaleEpochException)
+            {
+                // The resident DB does not hold this epoch - republish everything and retry once
+                epoch = _dbPublisher.ForcePublish();
+                result = SptNative.GenerateStaticContainers(new StaticContainersRequest { Epoch = epoch, Varying = varying });
+            }
 
-        ReplayDiagnostics(result.Diagnostics);
+            LastSendIncludedViewsOverride = false;
+        }
 
         // Carry the counts the native side reached into the dynamic phase
         counterTrackerHelper.SetTrackedCounts(result.TrackedCounts);
@@ -235,27 +301,42 @@ public class LocationLootGenerator(
 
         LastPathTaken = LootGenerationPath.Native;
 
-        var common = BuildCommonPayload(locationName, staticAmmoDist);
-
-        var result = SptNative.GenerateDynamicLoot(
-            new DynamicLootRequest
-            {
-                LocationId = common.LocationId,
-                ItemsView = common.ItemsView,
-                DefaultPresets = common.DefaultPresets,
-                MoneyTpls = common.MoneyTpls,
-                StaticAmmoDist = common.StaticAmmoDist,
-                Config = common.Config,
-                Seasonal = common.Seasonal,
-                LootableItemBlacklist = common.LootableItemBlacklist,
-                Counter = common.Counter,
-                TestSeed = NativeTestSeed,
-                // The caller's loot data, so any transformer or patch applied to it is honoured
-                LooseLoot = dynamicLootDist is null ? RawLooseLootJson(locationName) : dynamicLootDist,
-            }
+        // The caller's loot data, so any transformer or patch applied to it is honoured
+        var varying = BuildDynamicVarying(
+            locationName,
+            staticAmmoDist,
+            dynamicLootDist is null ? RawLooseLootJson(locationName) : dynamicLootDist
         );
+        DynamicLootResult result;
+        if (!ResidentDbEligible())
+        {
+            LastSendIncludedViewsOverride = true;
+            result = SptNative.GenerateDynamicLoot(
+                new DynamicLootRequest
+                {
+                    Epoch = 0,
+                    // No statics serialize on a dynamic send
+                    ViewsOverride = BuildViewsOverride(mapData: null),
+                    Varying = varying,
+                }
+            );
+        }
+        else
+        {
+            var epoch = _dbPublisher!.EnsureCurrent();
+            try
+            {
+                result = SptNative.GenerateDynamicLoot(new DynamicLootRequest { Epoch = epoch, Varying = varying });
+            }
+            catch (NativeStaleEpochException)
+            {
+                // The resident DB does not hold this epoch - republish everything and retry once
+                epoch = _dbPublisher.ForcePublish();
+                result = SptNative.GenerateDynamicLoot(new DynamicLootRequest { Epoch = epoch, Varying = varying });
+            }
 
-        ReplayDiagnostics(result.Diagnostics);
+            LastSendIncludedViewsOverride = false;
+        }
 
         // Keep the tracker in step with what the native side counted
         counterTrackerHelper.SetTrackedCounts(result.TrackedCounts);
@@ -287,19 +368,15 @@ public class LocationLootGenerator(
     }
 
     /// <summary>
-    /// Everything both generation calls need from the live database, services and config, resolved
-    /// for one location. Stateless: nothing here is cached between calls, so a mod that swaps an
-    /// item, a config value or a seasonal state is picked up on the next raid.
+    /// The per-call half of both requests: services, config and per-raid state, resolved for one
+    /// location. Stateless: nothing here is cached between calls, so a mod that swaps a config
+    /// value or a seasonal state is picked up on the next raid.
     /// </summary>
-    private LootCommon BuildCommonPayload(string locationId, Dictionary<string, IEnumerable<StaticAmmoDetails>> staticAmmoDist)
+    private LootVarying BuildVarying(string locationId, Dictionary<string, IEnumerable<StaticAmmoDetails>> staticAmmoDist)
     {
-        return new LootCommon
+        return new LootVarying
         {
             LocationId = locationId,
-            ItemsView = BuildItemsView(),
-            DefaultPresets = presetHelper
-                .GetDefaultPresetByTpl()
-                .ToDictionary(preset => preset.Key, preset => new PresetView { Items = preset.Value.Items }),
             MoneyTpls = itemHelper.GetMoneyTpls(),
             StaticAmmoDist = staticAmmoDist.ToDictionary(caliber => caliber.Key, caliber => caliber.Value.ToList()),
             Config = BuildConfigView(locationId),
@@ -317,73 +394,82 @@ public class LocationLootGenerator(
                 MaxCounts = counterTrackerHelper.GetMaxCounts(),
                 TrackedCounts = counterTrackerHelper.GetTrackedCounts(),
             },
+            TestSeed = NativeTestSeed,
         };
     }
 
     /// <summary>
-    /// Every projection the native generator reads off a <c>TemplateItem</c>, in one pass over the
-    /// live items table. Templates without props are dropped - their absence is how the native side
-    /// says "lacks _props".
+    /// <see cref="BuildVarying"/> plus the loose loot — records cannot object-copy across the
+    /// inheritance boundary, so the member list is built directly.
     /// </summary>
-    private Dictionary<MongoId, ItemView> BuildItemsView()
+    private DynamicLootVarying BuildDynamicVarying(
+        string locationId,
+        Dictionary<string, IEnumerable<StaticAmmoDetails>> staticAmmoDist,
+        LooseLootPayload looseLoot
+    )
     {
-        var itemsView = new Dictionary<MongoId, ItemView>(itemHelper.TemplateTable.Items.Count);
-
-        foreach (var (tpl, template) in itemHelper.TemplateTable.Items)
+        return new DynamicLootVarying
         {
-            var props = template.Properties;
-            if (props is null)
+            LocationId = locationId,
+            MoneyTpls = itemHelper.GetMoneyTpls(),
+            StaticAmmoDist = staticAmmoDist.ToDictionary(caliber => caliber.Key, caliber => caliber.Value.ToList()),
+            Config = BuildConfigView(locationId),
+            Seasonal = new SeasonalView
             {
-                continue;
-            }
-
-            var firstGrid = props.Grids?.FirstOrDefault();
-            var firstStackSlot = props.StackSlots?.FirstOrDefault();
-            var firstCartridgeSlot = props.Cartridges?.FirstOrDefault();
-            var firstChamber = props.Chambers?.FirstOrDefault();
-            var stackSlotFilter = firstStackSlot?.Properties?.Filters?.FirstOrDefault()?.Filter;
-
-            itemsView[tpl] = new ItemView
+                SeasonalEventActive = seasonalEventService.SeasonalEventEnabled(),
+                ChristmasEventEnabled = seasonalEventService.ChristmasEventEnabled(),
+                InactiveSeasonalItems = seasonalEventService.GetInactiveSeasonalEventItems(),
+                ChristmasContainerIds = seasonalEventConfig.ChristmasContainerIds,
+            },
+            // The cache, not the config list: it also holds anything a mod blacklisted at runtime
+            LootableItemBlacklist = itemFilterService.GetLootableItemBlacklistCache(),
+            Counter = new CounterState
             {
-                // Cast needed on both arms: MongoId's implicit string conversion otherwise turns the
-                // null arm into a default MongoId instead of leaving the member absent
-                Parent = template.Parent.IsEmpty ? null : (MongoId?)template.Parent,
-                Width = props.Width,
-                Height = props.Height,
-                StackMaxSize = props.StackMaxSize,
-                StackMinRandom = props.StackMinRandom,
-                StackMaxRandom = props.StackMaxRandom,
-                ExtraSizeUp = props.ExtraSizeUp,
-                ExtraSizeDown = props.ExtraSizeDown,
-                ExtraSizeLeft = props.ExtraSizeLeft,
-                ExtraSizeRight = props.ExtraSizeRight,
-                ExtraSizeForceAdd = props.ExtraSizeForceAdd,
-                GridCellsH = firstGrid?.Properties?.CellsH,
-                GridCellsV = firstGrid?.Properties?.CellsV,
-                StackSlotMaxCount = firstStackSlot?.MaxCount,
-                // Deliberate divergence: an empty filter set is sent as null rather than as the
-                // empty MongoId `Filter?.FirstOrDefault()` would have produced. Never fires on
-                // vanilla data - a stack slot with an empty filter has nothing to stack
-                StackSlotFirstFilterFirst = stackSlotFilter is { Count: > 0 } ? (MongoId?)stackSlotFilter.First() : null,
-                CartridgesMaxCount = firstCartridgeSlot?.MaxCount,
-                CartridgesFirstFilter = firstCartridgeSlot?.Properties?.Filters?.FirstOrDefault()?.Filter,
-                ChambersFirstFilter = firstChamber?.Properties?.Filters?.FirstOrDefault()?.Filter,
-                Slots = props
-                    .Slots?.Select(slot => new SlotView
-                    {
-                        Name = slot.Name,
-                        Required = slot.Required,
-                        Filter = slot.Properties?.Filters?.FirstOrDefault()?.Filter,
-                    })
-                    .ToList(),
-                ConflictingItems = props.ConflictingItems,
-                Caliber = props.Caliber,
-                AmmoCaliber = props.AmmoCaliber,
-                DefAmmo = props.DefAmmo,
-            };
+                MaxCounts = counterTrackerHelper.GetMaxCounts(),
+                TrackedCounts = counterTrackerHelper.GetTrackedCounts(),
+            },
+            TestSeed = NativeTestSeed,
+            LooseLoot = looseLoot,
+        };
+    }
+
+    /// <summary>
+    /// The database half, for ineligible sends only. With a map, the statics ride along (the
+    /// static-containers send); without one they are omitted (the dynamic send). The LazyLoad
+    /// reads keep a null StaticContainers/StaticLoot on a real map throwing here, as the old
+    /// request builder did; an unknown locationId (null map) used to NRE in C# and now surfaces
+    /// as a named native error instead.
+    /// </summary>
+    private LootViewsOverride BuildViewsOverride(Location? mapData)
+    {
+        var views = new LootViewsOverride
+        {
+            ItemsView = BuildItemsView(),
+            DefaultPresets = presetHelper
+                .GetDefaultPresetByTpl()
+                .ToDictionary(preset => preset.Key, preset => new PresetView { Items = preset.Value.Items }),
+        };
+
+        if (mapData is not null)
+        {
+            // Every `.Value` re-runs the lazy load, so each file is read exactly once per call
+            var staticContainerDetails = mapData.StaticContainers!.Value!;
+            // Nulls are passed through, not replaced with empty lists - the native side logs a
+            // map-specific error for each missing list
+            views.StaticWeapons = staticContainerDetails.StaticWeapons;
+            views.StaticContainers = staticContainerDetails.StaticContainers;
+            views.StaticForced = staticContainerDetails.StaticForced;
+            views.StaticLootDist = mapData.StaticLoot!.Value!;
+            views.Statics = mapData.Statics;
         }
 
-        return itemsView;
+        return views;
+    }
+
+    /// <inheritdoc cref="PayloadProjection.BuildItemsView"/>
+    private Dictionary<MongoId, ItemView> BuildItemsView()
+    {
+        return PayloadProjection.BuildItemsView(itemHelper.TemplateTable.Items);
     }
 
     private LootConfigView BuildConfigView(string locationId)
@@ -418,72 +504,6 @@ public class LocationLootGenerator(
     private static double MultiplierForLocation(Dictionary<string, double> multipliers, string locationId)
     {
         return multipliers.TryGetValue(locationId, out var multiplier) ? multiplier : multipliers["default"];
-    }
-
-    /// <summary>
-    /// Write out the log lines the native generator collected instead of logging itself, so the
-    /// server log reads as it did before the cutover
-    /// </summary>
-    private void ReplayDiagnostics(List<Diagnostic> diagnostics)
-    {
-        foreach (var diagnostic in diagnostics)
-        {
-            if (diagnostic.Level == "debug" && !logger.IsLogEnabled(LogLevel.Debug))
-            {
-                continue;
-            }
-
-            var message = LocaliseDiagnostic(diagnostic);
-            switch (diagnostic.Level)
-            {
-                case "debug":
-                    logger.Debug(message);
-                    break;
-                case "warning":
-                    logger.Warning(message);
-                    break;
-                case "error":
-                    logger.Error(message);
-                    break;
-                case "success":
-                    logger.Success(message);
-                    break;
-                default:
-                    // Never drop a line a future native version tags with a level we don't know
-                    logger.Warning($"[{diagnostic.Level}] {message}");
-                    break;
-            }
-        }
-    }
-
-    private string LocaliseDiagnostic(Diagnostic diagnostic)
-    {
-        if (diagnostic.LocaleKey is null)
-        {
-            return diagnostic.Message ?? string.Empty;
-        }
-
-        if (diagnostic.Args is not { } args)
-        {
-            return serverLocalisationService.GetText(diagnostic.LocaleKey);
-        }
-
-        // A scalar argument is the `%s` overload
-        if (args.ValueKind != JsonValueKind.Object)
-        {
-            return serverLocalisationService.GetText(diagnostic.LocaleKey, args.ToString());
-        }
-
-        // Named arguments are substituted here rather than by ServerLocalisationService: it reads its
-        // args object's *properties* by reflection, which only works for the anonymous types the C#
-        // call sites passed - a dictionary would leave every `{{placeholder}}` in place
-        var text = serverLocalisationService.GetText(diagnostic.LocaleKey);
-        foreach (var argument in args.EnumerateObject())
-        {
-            text = text.Replace($"{{{{{argument.Name}}}}}", argument.Value.ToString());
-        }
-
-        return text;
     }
 
     private List<SpawnpointTemplate> GenerateStaticContainersLegacy(

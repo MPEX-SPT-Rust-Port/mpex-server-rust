@@ -1,0 +1,177 @@
+using SPTarkov.Server.Core.Models.Common;
+using SPTarkov.Server.Core.Models.Eft.Common.Tables;
+using SPTarkov.Server.Core.Models.Spt.Tables;
+
+namespace SPTarkov.Server.Core.Native.Loot;
+
+/// <summary>
+/// The parts of building a native loot request that every generator does the same way: projecting
+/// the items table into <see cref="ItemView"/>s.
+/// </summary>
+internal static class PayloadProjection
+{
+    /// <summary>
+    /// Every projection a native generator reads off a <c>TemplateItem</c>, in one pass over the
+    /// live items table. Templates without props are dropped - their absence is how the native side
+    /// says "lacks _props".
+    /// </summary>
+    internal static Dictionary<MongoId, ItemView> BuildItemsView(Dictionary<MongoId, TemplateItem> items)
+    {
+        var itemsView = new Dictionary<MongoId, ItemView>(items.Count);
+
+        foreach (var (tpl, template) in items)
+        {
+            var props = template.Properties;
+            if (props is null)
+            {
+                continue;
+            }
+
+            var firstGrid = props.Grids?.FirstOrDefault();
+            var firstStackSlot = props.StackSlots?.FirstOrDefault();
+            var firstCartridgeSlot = props.Cartridges?.FirstOrDefault();
+            var firstChamber = props.Chambers?.FirstOrDefault();
+            var stackSlotFilter = firstStackSlot?.Properties?.Filters?.FirstOrDefault()?.Filter;
+
+            itemsView[tpl] = new ItemView
+            {
+                // Cast needed on both arms: MongoId's implicit string conversion otherwise turns the
+                // null arm into a default MongoId instead of leaving the member absent
+                Parent = template.Parent.IsEmpty ? null : (MongoId?)template.Parent,
+                Width = props.Width,
+                Height = props.Height,
+                StackMaxSize = props.StackMaxSize,
+                StackMinRandom = props.StackMinRandom,
+                StackMaxRandom = props.StackMaxRandom,
+                // The five extra-size members are read only through `unwrap_or(0)`/`unwrap_or(false)`
+                // on the native side, so an absent member and an explicit default are the same
+                // value there - and the default is what 4,400 of 4,673 templates carry. See
+                // OmitsDefaultsTheNativeSideUnwraps
+                ExtraSizeUp = NullIfZero(props.ExtraSizeUp),
+                ExtraSizeDown = NullIfZero(props.ExtraSizeDown),
+                ExtraSizeLeft = NullIfZero(props.ExtraSizeLeft),
+                ExtraSizeRight = NullIfZero(props.ExtraSizeRight),
+                ExtraSizeForceAdd = NullIfFalse(props.ExtraSizeForceAdd),
+                GridCellsH = firstGrid?.Properties?.CellsH,
+                GridCellsV = firstGrid?.Properties?.CellsV,
+                StackSlotMaxCount = firstStackSlot?.MaxCount,
+                // Deliberate divergence: an empty filter set is sent as null rather than as the
+                // empty MongoId `Filter?.FirstOrDefault()` would have produced. Never fires on
+                // vanilla data - a stack slot with an empty filter has nothing to stack
+                StackSlotFirstFilterFirst = stackSlotFilter is { Count: > 0 } ? (MongoId?)stackSlotFilter.First() : null,
+                CartridgesMaxCount = firstCartridgeSlot?.MaxCount,
+                CartridgesFirstFilter = firstCartridgeSlot?.Properties?.Filters?.FirstOrDefault()?.Filter,
+                ChambersFirstFilter = firstChamber?.Properties?.Filters?.FirstOrDefault()?.Filter,
+                Slots = ToSlotViews(props.Slots),
+                // Projected verbatim - an empty chamber list is not the same as no chamber list
+                Chambers = ToSlotViews(props.Chambers),
+                Cartridges = ToSlotViews(props.Cartridges),
+                ConflictingItems = props.ConflictingItems,
+                Caliber = props.Caliber,
+                AmmoCaliber = props.AmmoCaliber,
+                DefAmmo = props.DefAmmo,
+                Name = template.Name,
+                Type = template.Type,
+                ArmorClass = props.ArmorClass,
+                // Not coalesced: the reward pool filters on `false` and the sealed container pool on
+                // `null`, so the two have to stay distinguishable
+                QuestItem = props.QuestItem,
+                // Enum member names, not their numeric values - the native side string-compares them
+                ReloadMode = props.ReloadMode?.ToString(),
+                ReloadMagType = props.ReloadMagType?.ToString(),
+                IsChamberLoad = props.IsChamberLoad,
+                DefMagType = props.DefMagType,
+                LinkedWeapon = props.LinkedWeapon,
+                MaxDurability = props.MaxDurability,
+                WeapClass = props.WeapClass,
+                HasHinge = NullIfFalse(props.HasHinge),
+                Foldable = props.Foldable,
+                FoldedSlot = props.FoldedSlot,
+                SizeReduceRight = NullIfZero(props.SizeReduceRight),
+                WeapFireType = props.WeapFireType,
+                MaxHpResource = props.MaxHpResource,
+                MaxResource = props.MaxResource,
+                FoodUseTime = props.FoodUseTime,
+                // Same as the extra-size members: every read of the blocking family goes through
+                // `has_blocking_property` or a local `unwrap_or(false)`, so `false` and absent are
+                // indistinguishable natively
+                FaceShieldComponent = NullIfFalse(props.FaceShieldComponent),
+                BlocksEarpiece = NullIfFalse(props.BlocksEarpiece),
+                BlocksEyewear = NullIfFalse(props.BlocksEyewear),
+                BlocksFaceCover = NullIfFalse(props.BlocksFaceCover),
+                BlocksHeadwear = NullIfFalse(props.BlocksHeadwear),
+                BlocksFolding = NullIfFalse(props.BlocksFolding),
+                BlocksCollapsible = NullIfFalse(props.BlocksCollapsible),
+                BlockLeftStance = NullIfFalse(props.BlockLeftStance),
+                BlocksArmorVest = NullIfFalse(props.BlocksArmorVest),
+                Grids = props
+                    .Grids?.Select(grid => new GridView
+                    {
+                        Name = grid.Name,
+                        CellsH = grid.Properties?.CellsH,
+                        CellsV = grid.Properties?.CellsV,
+                        Filters = grid
+                            .Properties?.Filters?.Select(filter => new GridFilterView
+                            {
+                                Filter = filter.Filter,
+                                ExcludedFilter = filter.ExcludedFilter,
+                            })
+                            .ToList(),
+                    })
+                    .ToList(),
+                Durability = props.Durability,
+                MaximumNumberOfUsage = props.MaximumNumberOfUsage,
+                MaxRepairResource = props.MaxRepairResource,
+                CanSellOnRagfair = props.CanSellOnRagfair,
+            };
+        }
+
+        return itemsView;
+    }
+
+    /// <summary>
+    /// Drops a member the native side would have read as its default anyway. Only safe for members
+    /// whose every native read is an <c>unwrap_or</c> of that same default - <c>questItem</c> and
+    /// <c>canSellOnRagfair</c> are deliberately excluded: the first keeps <c>null</c> and
+    /// <c>false</c> distinct, and the second defaults to <c>true</c> in the database while the
+    /// native read unwraps to <c>false</c>.
+    /// </summary>
+    private static int? NullIfZero(int? value)
+    {
+        return value is 0 ? null : value;
+    }
+
+    /// <inheritdoc cref="NullIfZero"/>
+    private static bool? NullIfFalse(bool? value)
+    {
+        return value is false ? null : value;
+    }
+
+    private static List<SlotView>? ToSlotViews(IEnumerable<Slot>? slots)
+    {
+        return slots
+            ?.Select(slot => new SlotView
+            {
+                Name = slot.Name,
+                Required = NullIfFalse(slot.Required),
+                Filter = slot.Properties?.Filters?.FirstOrDefault()?.Filter,
+                Plate = slot.Properties?.Filters?.FirstOrDefault()?.Plate,
+            })
+            .ToList();
+    }
+
+    /// <summary>
+    /// The members of a <c>Preset</c> the native side reads. Shared: the ragfair and repeatable-quest
+    /// slices both carry preset pools, projected the same way.
+    /// </summary>
+    internal static PresetView ToPresetView(Preset preset)
+    {
+        return new PresetView
+        {
+            Items = preset.Items,
+            Id = preset.Id,
+            Name = preset.Name,
+            Encyclopedia = preset.Encyclopedia,
+        };
+    }
+}

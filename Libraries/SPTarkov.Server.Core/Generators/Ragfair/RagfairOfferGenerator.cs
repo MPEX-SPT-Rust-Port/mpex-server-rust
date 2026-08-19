@@ -1,9 +1,12 @@
 using System.Diagnostics;
+using System.Reflection;
+using HarmonyLib;
 using Microsoft.Extensions.Logging;
 using SPTarkov.Common.Extensions;
 using SPTarkov.Common.Models.Logging;
 using SPTarkov.DI.Annotations;
 using SPTarkov.Server.Core.Extensions;
+using SPTarkov.Server.Core.Generators.Loot;
 using SPTarkov.Server.Core.Helpers;
 using SPTarkov.Server.Core.Helpers.Bot;
 using SPTarkov.Server.Core.Helpers.Commerce;
@@ -15,13 +18,18 @@ using SPTarkov.Server.Core.Models.Eft.Common.Tables;
 using SPTarkov.Server.Core.Models.Eft.Ragfair;
 using SPTarkov.Server.Core.Models.Enums;
 using SPTarkov.Server.Core.Models.Spt.Config;
+using SPTarkov.Server.Core.Models.Spt.Mod;
 using SPTarkov.Server.Core.Models.Spt.Ragfair;
 using SPTarkov.Server.Core.Models.Spt.Tables;
+using SPTarkov.Server.Core.Native;
+using SPTarkov.Server.Core.Native.Db;
+using SPTarkov.Server.Core.Native.Ragfair;
 using SPTarkov.Server.Core.Servers;
 using SPTarkov.Server.Core.Services;
 using SPTarkov.Server.Core.Services.Commerce;
 using SPTarkov.Server.Core.Services.Locales;
 using SPTarkov.Server.Core.Services.Ragfair;
+using SPTarkov.Server.Core.Services.Server;
 using SPTarkov.Server.Core.Utils;
 using SPTarkov.Server.Core.Utils.Cloners;
 
@@ -55,8 +63,167 @@ public class RagfairOfferGenerator(
 {
     protected List<TplWithFleaPrice>? AllowedFleaPriceItemsForBarter;
 
+    private readonly DatabaseMutationStamp? _databaseMutationStamp;
+    private readonly IReadOnlyList<SptMod>? _loadedMods;
+    private readonly DbPublisher? _dbPublisher;
+
     /// Internal counter to ensure each offer created has a unique value for its intId property
     protected int OfferCounter;
+
+    /// <summary>
+    ///     Which implementation the most recent generation call ran - the spt-native path or the
+    ///     retained 4.1.2 C# path. Test seam; also handy in a debugger.
+    /// </summary>
+    internal LootGenerationPath LastPathTaken { get; private set; }
+
+    /// <summary>
+    ///     Test-only seed forwarded as <see cref="RagfairVaryingFields.TestSeed"/> on every
+    ///     native request.
+    /// </summary>
+    internal ulong? NativeTestSeed { get; set; }
+
+    /// <summary>
+    ///     Whether the most recent native send carried the C#-built views override rather than
+    ///     naming a resident-DB epoch. Test seam.
+    /// </summary>
+    internal bool LastSendIncludedViewsOverride { get; private set; }
+
+    /// <summary>
+    ///     The constructor the container uses: the frozen 4.1.2 one plus the mutation stamp, the
+    ///     loaded-mod list the residency eligibility gate reads, and the resident-DB publisher.
+    ///     Additive and apicompat-verified.
+    /// </summary>
+    public RagfairOfferGenerator(
+        ISptLogger<RagfairOfferGenerator> logger,
+        TemplateTable templateTable,
+        TradersTable traderTable,
+        GlobalTable globalTable,
+        HashUtil hashUtil,
+        RandomUtil randomUtil,
+        TimeUtil timeUtil,
+        RagfairServerHelper ragfairServerHelper,
+        ProfileHelper profileHelper,
+        HandbookHelper handbookHelper,
+        BotHelper botHelper,
+        SaveServer saveServer,
+        PresetHelper presetHelper,
+        RagfairAssortGenerator ragfairAssortGenerator,
+        RagfairOfferService ragfairOfferService,
+        RagfairPriceService ragfairPriceService,
+        ServerLocalisationService localisationService,
+        PaymentHelper paymentHelper,
+        ItemHelper itemHelper,
+        BotConfig botConfig,
+        RagfairConfig ragfairConfig,
+        ICloner cloner,
+        DatabaseMutationStamp databaseMutationStamp,
+        IReadOnlyList<SptMod> loadedMods,
+        DbPublisher dbPublisher
+    )
+        : this(
+            logger,
+            templateTable,
+            traderTable,
+            globalTable,
+            hashUtil,
+            randomUtil,
+            timeUtil,
+            ragfairServerHelper,
+            profileHelper,
+            handbookHelper,
+            botHelper,
+            saveServer,
+            presetHelper,
+            ragfairAssortGenerator,
+            ragfairOfferService,
+            ragfairPriceService,
+            localisationService,
+            paymentHelper,
+            itemHelper,
+            botConfig,
+            ragfairConfig,
+            cloner
+        )
+    {
+        _databaseMutationStamp = databaseMutationStamp;
+        _loadedMods = loadedMods;
+        _dbPublisher = dbPublisher;
+    }
+
+    /// <summary>
+    ///     Whether an override-less send off the resident DB is ever allowed: the stamp and
+    ///     publisher exist, the kill switch is off, and either no mods are loaded or the user
+    ///     vouched their mods don't write tables directly. A generator built on the frozen
+    ///     constructor has none of the three services and always sends the override.
+    /// </summary>
+    private bool ResidentDbEligible()
+    {
+        // All null together (the frozen constructor) - checking each keeps the trust flag from ever
+        // vouching for a mod list this instance was never handed
+        if (_databaseMutationStamp is null || _loadedMods is null || _dbPublisher is null || ragfairConfig.DisableNativeRequestCache)
+        {
+            return false;
+        }
+
+        return _loadedMods.Count == 0 || ragfairConfig.TrustNativeRequestCacheWithMods;
+    }
+
+    /// <summary>
+    ///     The 4.1.2 members a mod can Harmony-patch, across this class and the three collaborators
+    ///     the native path folds in. Public, protected and protected-internal methods declared on
+    ///     each - exactly the surface the apicompat gate freezes, statics included.
+    ///     <see cref="GenerateDynamicOffers"/> itself is excluded: a patch on the dispatcher wraps
+    ///     whichever path runs and does not need the legacy body. Everything else is never called
+    ///     natively, so a patch on one would silently do nothing - including the dead-but-frozen
+    ///     <c>GetRating</c> and <c>GetAvatarUrl</c>.
+    /// </summary>
+    private static readonly List<MethodBase> _hookableMembers =
+    [
+        .. new[] { typeof(RagfairOfferGenerator), typeof(RagfairPriceService), typeof(RagfairServerHelper), typeof(RagfairAssortGenerator) }
+            .SelectMany(type =>
+                type.GetMethods(
+                    BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly
+                )
+            )
+            // Property accessors and operators are IsSpecialName; constructors are not returned at all
+            .Where(method => !method.IsSpecialName && (method.IsPublic || method.IsFamily || method.IsFamilyOrAssembly))
+            .Where(method => method != typeof(RagfairOfferGenerator).GetMethod(nameof(GenerateDynamicOffers))),
+    ];
+
+    /// <summary>
+    ///     The legacy path runs when forced by config, when any of the frozen 4.1.2 members carries a
+    ///     live Harmony patch, or when a mod has substituted one of the collaborators the native path
+    ///     folded in - running the retained C# implementation is the only way those hooks and
+    ///     replacements can take effect with real baseline semantics.
+    /// </summary>
+    private bool UseLegacyPath()
+    {
+        if (ragfairConfig.ForceLegacyRagfairGeneration)
+        {
+            return true;
+        }
+
+        if (
+            _hookableMembers.Any(member =>
+                Harmony.GetPatchInfo(member) is { } patches
+                && (
+                    patches.Prefixes.Count > 0
+                    || patches.Postfixes.Count > 0
+                    || patches.Transpilers.Count > 0
+                    || patches.Finalizers.Count > 0
+                )
+            )
+        )
+        {
+            return true;
+        }
+
+        // A mod registered its own subclass with a higher TypePriority, so the container handed us
+        // an implementation the native side does not have
+        return ragfairPriceService.GetType() != typeof(RagfairPriceService)
+            || ragfairServerHelper.GetType() != typeof(RagfairServerHelper)
+            || ragfairAssortGenerator.GetType() != typeof(RagfairAssortGenerator);
+    }
 
     /// <summary>
     ///     Create a flea offer and store it in the Ragfair server offers array
@@ -291,6 +458,112 @@ public class RagfairOfferGenerator(
     /// </summary>
     /// <param name="expiredOffers"> Optional, expired offers to regenerate </param>
     public void GenerateDynamicOffers(IEnumerable<List<Item>>? expiredOffers = null)
+    {
+        if (UseLegacyPath())
+        {
+            LastPathTaken = LootGenerationPath.Legacy;
+
+            GenerateDynamicOffersLegacy(expiredOffers);
+
+            return;
+        }
+
+        LastPathTaken = LootGenerationPath.Native;
+
+        var eligible = ResidentDbEligible();
+
+        FramedOffersResult result;
+        if (!eligible)
+        {
+            result = SptNative.GenerateDynamicOffers(BuildNativeRequest(viewsOverride: true, epoch: 0, expiredOffers));
+            LastSendIncludedViewsOverride = true;
+        }
+        else
+        {
+            var epoch = _dbPublisher!.EnsureCurrent();
+            try
+            {
+                result = SptNative.GenerateDynamicOffers(BuildNativeRequest(viewsOverride: false, epoch, expiredOffers));
+            }
+            catch (NativeStaleEpochException)
+            {
+                // The resident DB does not hold this epoch - republish everything and retry once
+                epoch = _dbPublisher.ForcePublish();
+                result = SptNative.GenerateDynamicOffers(BuildNativeRequest(viewsOverride: false, epoch, expiredOffers));
+            }
+
+            LastSendIncludedViewsOverride = false;
+        }
+
+        // The native side decided these templates are unsellable and, unlike everything else it
+        // touched, that decision belongs to the live database (RagfairServerHelper.cs:61). A write
+        // that actually flips a value changes the projected slice, so it bumps the stamp - guarded,
+        // or re-reported already-false templates would invalidate the cache every pass
+        var flippedCanSell = false;
+        foreach (var tpl in result.RejectedCanSellTemplates)
+        {
+            if (
+                templateTable.Items.TryGetValue(tpl, out var template)
+                && template.Properties is not null
+                && template.Properties.CanSellOnRagfair != false
+            )
+            {
+                template.Properties.CanSellOnRagfair = false;
+                flippedCanSell = true;
+            }
+        }
+
+        if (flippedCanSell)
+        {
+            _databaseMutationStamp?.Bump();
+        }
+
+        // Legacy inserts each offer as it creates it; the holder's live per-template cap runs the
+        // same way either way, it just sees the whole batch at once here
+        foreach (var offer in result.Offers)
+        {
+            ragfairOfferService.AddOffer(offer);
+        }
+
+        // CreateOffer increments the counter per offer created, not per offer the holder accepted
+        OfferCounter += result.Offers.Count;
+    }
+
+    /// <summary>
+    ///     One native request for this pass, with the C#-built views override included only when
+    ///     the caller is ineligible to generate off the resident DB.
+    /// </summary>
+    private GenerateDynamicOffersRequest BuildNativeRequest(bool viewsOverride, ulong epoch, IEnumerable<List<Item>>? expiredOffers)
+    {
+        return RagfairPayloadProjection.BuildRequest(
+            viewsOverride
+                ? RagfairPayloadProjection.BuildViewsOverride(
+                    templateTable,
+                    handbookHelper,
+                    ragfairPriceService.TraderHelper,
+                    presetHelper,
+                    itemHelper
+                )
+                : null,
+            epoch,
+            expiredOffers,
+            timeUtil.GetTimeStamp(),
+            OfferCounter,
+            NativeTestSeed,
+            ragfairConfig,
+            ragfairAssortGenerator.ItemFilterService,
+            ragfairAssortGenerator.SeasonalEventService,
+            botHelper.BotTable,
+            botConfig
+        );
+    }
+
+    /// <summary>
+    ///     The retained 4.1.2 implementation of <see cref="GenerateDynamicOffers"/>, run when
+    ///     <see cref="UseLegacyPath"/> says a mod needs real baseline semantics.
+    /// </summary>
+    /// <param name="expiredOffers"> Optional, expired offers to regenerate </param>
+    private void GenerateDynamicOffersLegacy(IEnumerable<List<Item>>? expiredOffers = null)
     {
         var replacingExpiredOffers = expiredOffers is not null && expiredOffers.Any();
 

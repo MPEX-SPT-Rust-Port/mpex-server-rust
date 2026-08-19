@@ -40,6 +40,36 @@ public class BotInventoryContainerService(ItemHelper itemHelper)
     }
 
     /// <summary>
+    /// Put a container and its already-filled grid layout into a bots cache. The native bot
+    /// generation path fills the grids itself, so the state later callers add loot into - the player
+    /// scav pass, for one - has to be restored rather than rebuilt by replaying every add.
+    /// </summary>
+    /// <param name="botId">Unique identifier of bot</param>
+    /// <param name="containerName">name of container e.g. "Backpack"</param>
+    /// <param name="containerInventoryItem">Inventory item loot is linked to in bots inventory</param>
+    /// <param name="containerGridDetails">Grid layout of the container, one entry per db grid</param>
+    internal void RestoreContainerToBot(
+        MongoId botId,
+        EquipmentSlots containerName,
+        Item containerInventoryItem,
+        List<ContainerMapDetails> containerGridDetails
+    )
+    {
+        // Add bot to dict if it doesn't exist
+        _botContainers.TryAdd(botId, new());
+
+        var containers = GetOrCreateBotContainerDictionary(botId);
+        var containerDbItem = itemHelper.GetItem(containerInventoryItem.Template);
+        var containerDetails = new ContainerDetails(containerDbItem.Value, containerInventoryItem);
+
+        // Constructor sized the grids off the db item, swap in the generated layout
+        containerDetails.ContainerGridDetails.Clear();
+        containerDetails.ContainerGridDetails.AddRange(containerGridDetails);
+
+        containers[containerName] = containerDetails;
+    }
+
+    /// <summary>
     /// Attempt to add an item + children to a container
     /// </summary>
     /// <param name="botId">Bots unique id</param>

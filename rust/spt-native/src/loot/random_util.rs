@@ -8,8 +8,11 @@
 
 use std::cell::RefCell;
 
-use rand::{RngCore, SeedableRng};
+use indexmap::IndexMap;
+use rand::{Rng, SeedableRng};
 use rand_xoshiro::Xoshiro256StarStar;
+
+use super::item_helper::LootError;
 
 thread_local! {
     /// The test-only seeded generator; `None` means production entropy.
@@ -169,10 +172,52 @@ pub fn get_int(min: i32, max: i32) -> i32 {
     }
 }
 
+/// A random integer in `low..high`, or in `0..low` when `high` is `None`, matching
+/// `RandomUtil.RandInt` (`RandomUtil.cs:254-264`).
+///
+/// The upper bound is *exclusive*, unlike [`get_int`]'s: `rand_int(1, Some(3))` never returns 3.
+/// Equal bounds return `low` without drawing at all, so parity depends on which of the two is used.
+///
+/// The C# takes `int`s; the wider parameters here save the call sites a cast off their `i64` counts
+/// and are narrowed to the C# width before the draw.
+///
+/// # Panics
+///
+/// On an empty range — a `low` of 0 or less with no `high`, or a `high` below `low` — where both C#
+/// sources throw.
+pub fn rand_int(low: i64, high: Option<i64>) -> i64 {
+    let (from, to) = match high {
+        // Return a random integer from 0 to low if high is not provided
+        None => (0, low),
+        // Return low directly when low and high are equal
+        Some(high) if high == low => return low,
+        Some(high) => (low, high),
+    };
+
+    assert!(to > from, "rand_int: empty range {from}..{to}");
+
+    i64::from(get_int32(from as i32, to as i32))
+}
+
 /// A random float in `[min, max)`, matching `RandomUtil.GetDouble` (`RandomUtil.cs:77-81`).
 pub fn get_double(min: f64, max: f64) -> f64 {
     // Same shape as the C#, so an inverted range walks below `min` here too instead of panicking.
     min + next_double48() * (max - min)
+}
+
+/// A coin flip, matching `RandomUtil.GetBool` (`RandomUtil.cs:87-90`) — one draw, `true` below 0.5.
+pub fn get_bool() -> bool {
+    next_double48() < 0.5
+}
+
+/// A profile account id, matching `HashUtil.GenerateAccountId` (`HashUtil.cs:118-124`) — one
+/// [`get_int`] over its two hard-coded bounds. It lives here rather than in a `hash_util` module
+/// because the bounds are all there is to it and the draw is the only part parity depends on.
+pub fn generate_account_id() -> i32 {
+    const MIN: i32 = 1_000_000;
+    const MAX: i32 = 1_999_999;
+
+    get_int(MIN, MAX)
 }
 
 /// Whether an event with `chance_percent` (0-100) fires, matching `RandomUtil.GetChance100`
@@ -183,6 +228,48 @@ pub fn get_double(min: f64, max: f64) -> f64 {
 pub fn get_chance_100(chance_percent: f64) -> bool {
     // The C# `Math.Clamp(chance, 0, 100)` is a no-op against a 1-99 roll, so it is not ported.
     f64::from(get_int(1, 99)) <= chance_percent
+}
+
+/// Whether an event with `chance` (0-100) fires, matching `RandomUtil.RollChance`
+/// (`RandomUtil.cs:498-501`).
+///
+/// The C# rolls `GetInt(1, (int)(100 * scale)) / (1 * scale)` — an *inclusive* 1-100 integer at the
+/// default `scale` of 1, where the division is exact and drops out. Deliberately not
+/// [`get_chance_100`], whose roll is the exclusive 1-99 one: here 0% never fires, 100% always does,
+/// and either way a draw is consumed. No ported call site passes a `scale`, so it is not a
+/// parameter here.
+pub fn roll_chance(chance: f64) -> bool {
+    f64::from(get_int(1, 100)) <= chance
+}
+
+/// `Math.Round(value, digits)` with the default `MidpointRounding.ToEven`: .NET scales by a power
+/// of ten, rounds half to even, and scales back, leaving anything at or past its `1e16` round limit
+/// untouched.
+pub(crate) fn round_to_digits(value: f64, digits: i32) -> f64 {
+    if value.abs() >= 1e16 {
+        return value;
+    }
+
+    // Exact for the 0-15 digits `Math.Round` accepts, so this matches .NET's literal table.
+    let power10 = 10f64.powi(digits);
+
+    round_half_even(value * power10) / power10
+}
+
+/// `percent` percent of `value`, rounded to `to_fixed` decimal places, matching
+/// `RandomUtil.GetPercentOfValue` (`RandomUtil.cs:104-109`) — including its `number / 100` first,
+/// which is not the same double as `percent * number / 100`.
+///
+/// The C# `ArgumentOutOfRangeException` for `to_fixed` outside 0-15 is not ported; no call site
+/// passes anything but a small literal.
+pub fn get_percent_of_value(percent: f64, value: f64, to_fixed: i32) -> f64 {
+    round_to_digits(percent * (value / 100.0), to_fixed)
+}
+
+/// `value` reduced by `percent` percent, matching `RandomUtil.ReduceValueByPercent`
+/// (`RandomUtil.cs:131-136`). Unrounded, unlike [`get_percent_of_value`].
+pub fn reduce_value_by_percent(value: f64, percent: f64) -> f64 {
+    value - value * percent / 100.0
 }
 
 /// A normally distributed draw via the Box-Muller transform, matching
@@ -224,6 +311,68 @@ pub fn get_normally_distributed_random_number(mean: f64, sigma: f64) -> f64 {
     }
 }
 
+/// A gaussian-ish draw in `[min, max]` biased by `shift`, matching
+/// `RandomUtil.GetBiasedRandomNumber` (`RandomUtil.cs:361-432`).
+///
+/// `n` averages that many `next_double48` draws (`GetGaussianRandom`), and every rejected attempt
+/// of the `do`/`while` consumes its full `n` draws again — so the draw count is
+/// `n * attempts`, not `n`. The three guard arms below consume nothing at all.
+///
+/// The C# logs on the way out of those arms; `random_util` is context-free and has no logger, so
+/// the lines are dropped and recorded here instead, the same treatment
+/// [`get_chance_100`]'s clamp gets:
+/// - `max < min` → `logger.Error("Invalid argument, Bounded random number generation max is smaller than min({max} < {min}")` (the missing closing paren is in the C#), then `-1`.
+/// - `n < 1` → `logger.Error("Invalid argument, 'n' must be 1 or greater(received {n})")`, then `-1`.
+/// - `shift > max - min` → `logger.Warning("Bias shift for random number generation is greater than the range of available numbers. This will have a severe performance impact")` and `logger.Warning("min-> {min}; max-> {max}; shift-> {shift}")`, then carries on regardless.
+pub fn get_biased_random_number(min: f64, max: f64, shift: f64, n: f64) -> f64 {
+    if max < min {
+        return -1.0;
+    }
+
+    if n < 1.0 {
+        return -1.0;
+    }
+
+    #[expect(
+        clippy::float_cmp,
+        reason = "the C# compares exactly; a degenerate range is the intended trigger"
+    )]
+    if min == max {
+        return min;
+    }
+
+    // A shift past the range only warns in the C#; the rerolls below absorb it either way.
+    let biased_min = if shift >= 0.0 { min - shift } else { min };
+    let biased_max = if shift < 0.0 { max + shift } else { max };
+
+    // `do`/`while`: out-of-bounds rolls are thrown away and redrawn.
+    loop {
+        let num = bounded_gaussian(biased_min, biased_max, n);
+        if num >= min && num <= max {
+            return num;
+        }
+    }
+}
+
+/// `RandomUtil.GetBoundedGaussian` (`RandomUtil.cs:418-421`).
+fn bounded_gaussian(start: f64, end: f64, n: f64) -> f64 {
+    round_half_even(start + gaussian_random(n) * (end - start + 1.0))
+}
+
+/// `RandomUtil.GetGaussianRandom` (`RandomUtil.cs:423-432`). The C# loop counter is an `int`
+/// against a `double` bound, so a fractional `n` still draws `ceil(n)` times while dividing by the
+/// fraction — transcribed rather than simplified.
+fn gaussian_random(n: f64) -> f64 {
+    let mut rand = 0.0;
+    let mut i = 0i32;
+    while f64::from(i) < n {
+        rand += next_double48();
+        i += 1;
+    }
+
+    rand / n
+}
+
 /// A random element of `list`, matching `RandomUtil.GetRandomElement` (`RandomUtil.cs:159-175`).
 ///
 /// # Panics
@@ -231,6 +380,125 @@ pub fn get_normally_distributed_random_number(mean: f64, sigma: f64) -> f64 {
 /// If `list` is empty, as the C# throws on an empty collection.
 pub fn get_array_value<T>(list: &[T]) -> &T {
     &list[get_int(0, list.len() as i32 - 1) as usize]
+}
+
+/// A uniform `[0, 1)` draw, matching `RandomUtil.GetSecureRandomNumber` (`RandomUtil.cs:464-467`) —
+/// a straight delegation to the 48-bit shape, not the 53-bit one.
+pub fn get_secure_random_number() -> f64 {
+    next_double48()
+}
+
+/// `count` random elements of `original_list`, matching `RandomUtil.DrawRandomFromList`
+/// (`RandomUtil.cs:304-334`). A list either way, even at the C# default `count` of 1.
+///
+/// With `replacement` an element can be drawn more than once; without, the draws come out of a copy
+/// of the list that shrinks by one each time, and `count` is clamped to its length rather than
+/// running dry. Either way one [`rand_int`] is spent per draw — over a *shrinking* bound in the
+/// second case, so the two sequences diverge after the first draw.
+///
+/// The C# deep clones that copy through `ICloner`; the elements are cloned individually here, which
+/// comes to the same thing for the owned values the ported call sites pass.
+///
+/// # Panics
+///
+/// If `original_list` is empty and `replacement` is set, as the C# throws drawing an index out of an
+/// empty list. Without replacement there is nothing to draw and the result is empty, as in the C#.
+pub fn draw_random_from_list<T: Clone>(
+    original_list: &[T],
+    count: usize,
+    replacement: bool,
+) -> Vec<T> {
+    if replacement {
+        return (0..count)
+            .map(|_| original_list[rand_int(original_list.len() as i64, None) as usize].clone())
+            .collect();
+    }
+
+    let mut pool = original_list.to_vec();
+    let draw_count = count.min(pool.len());
+
+    (0..draw_count)
+        .map(|_| pool.remove(rand_int(pool.len() as i64, None) as usize))
+        .collect()
+}
+
+/// `count` random keys of `dict`, matching `RandomUtil.DrawRandomFromDict`
+/// (`RandomUtil.cs:345-351`) — the keys in insertion order, drawn by [`draw_random_from_list`].
+pub fn draw_random_from_dict<K: Clone, V>(
+    dict: &IndexMap<K, V>,
+    count: usize,
+    replacement: bool,
+) -> Vec<K> {
+    let keys: Vec<K> = dict.keys().cloned().collect();
+
+    draw_random_from_list(&keys, count, replacement)
+}
+
+/// A key drawn in proportion to its weight, matching `WeightedRandomHelper.GetWeightedValue`
+/// through `WeightedRandom` (`WeightedRandomHelper.cs:23-108`). Insertion order is the C#
+/// `Dictionary` enumeration order the original scans, so the map has to stay ordered.
+///
+/// Three paths, each consuming different RNG — call-site parity depends on which one runs:
+/// a single entry returns without drawing at all, weights summing to the entry count take one
+/// `get_int`, and everything else takes one `get_double`.
+///
+/// The C#'s `logger.Error` calls for empty or mismatched inputs are not ported: keys and weights
+/// come from one map here so they cannot disagree, and no ported call site passes an empty one.
+/// Its `logger.Warning("Weight at index: {i} is negative...")` is dropped too — the negative weight
+/// is still skipped with the same bug-for-bug effect below, only the log line is missing, so a mod
+/// shipping negative weights gets the same items without the diagnostic it would see on 4.1.2.
+///
+/// # Errors
+///
+/// Where the C# throws: an empty map (its uniform shortcut indexes out of bounds), or a scan that
+/// falls off the end ("No item was picked.").
+pub fn get_weighted_value<K: Clone + Eq + std::hash::Hash>(
+    values: &IndexMap<K, f64>,
+) -> Result<K, LootError> {
+    if values.len() == 1
+        && let Some(key) = values.keys().next()
+    {
+        return Ok(key.clone());
+    }
+
+    let mut cumulative_weights = vec![0.0; values.len()];
+    let mut sum_of_weights = 0.0;
+    for (index, weight) in values.values().enumerate() {
+        // Bug-for-bug: a skipped weight leaves its slot at 0 rather than at the running sum, so a
+        // zeroed slot can still win the `>= random_number` scan below when the sum is 0.
+        if *weight < 0.0 {
+            continue;
+        }
+
+        sum_of_weights += weight;
+        cumulative_weights[index] = sum_of_weights;
+    }
+
+    #[expect(
+        clippy::float_cmp,
+        reason = "the C# compares exactly; weights averaging 1.0 is the intended trigger"
+    )]
+    if sum_of_weights == values.len() as f64 {
+        // Weights are all the same, early exit
+        let random_index = get_int(0, values.len() as i32 - 1);
+        return values
+            .keys()
+            .nth(random_index as usize)
+            .cloned()
+            .ok_or_else(|| LootError::new("No item was picked."));
+    }
+
+    // Getting the random number in a range of [0...sum(weights)]
+    let random_number = sum_of_weights * get_double(0.0, 1.0);
+
+    // Picking the random item based on its weight.
+    for (index, key) in values.keys().enumerate() {
+        if cumulative_weights[index] >= random_number {
+            return Ok(key.clone());
+        }
+    }
+
+    Err(LootError::new("No item was picked."))
 }
 
 /// Rounds half to even, matching the default C# `Math.Round(double)`. Ported call sites must use
@@ -499,7 +767,162 @@ mod tests {
         println!("FILL5: {fill5:#04X?}");
         println!("GET_INT_1_10: {ints:?}");
         println!("GET_DOUBLE_0_100_BITS: [{}]", hex(&doubles));
+        let weighted: (Vec<String>, Vec<String>, Vec<String>) = {
+            let _g = TestSeedGuard::install(42);
+            (
+                draw(&kat_mixed_map(), 5),
+                draw(&kat_single_map(), 1),
+                draw(&kat_uniform_map(), 3),
+            )
+        };
+
+        let rolls: Vec<bool> = {
+            let _g = TestSeedGuard::install(42);
+            kat_roll_chance_sequence()
+        };
+        let percents: Vec<u64> = KAT_PERCENT_OF_VALUE_INPUTS
+            .iter()
+            .map(|(percent, value, to_fixed)| {
+                get_percent_of_value(*percent, *value, *to_fixed).to_bits()
+            })
+            .collect();
+        let reductions: Vec<u64> = KAT_REDUCE_BY_PERCENT_INPUTS
+            .iter()
+            .map(|(value, percent)| reduce_value_by_percent(*value, *percent).to_bits())
+            .collect();
+        let generic_indices = {
+            let _g = TestSeedGuard::install(42);
+            draw_indices(&kat_int_map(), 5)
+        };
+
+        let biased: Vec<f64> = {
+            let _g = TestSeedGuard::install(42);
+            (0..5)
+                .map(|_| get_biased_random_number(80.0, 120.0, 2.0, 2.0))
+                .collect()
+        };
+        let bools: Vec<bool> = {
+            let _g = TestSeedGuard::install(42);
+            (0..8).map(|_| get_bool()).collect()
+        };
+        let account_ids: Vec<i32> = {
+            let _g = TestSeedGuard::install(42);
+            (0..4).map(|_| generate_account_id()).collect()
+        };
+
         println!("GET_CHANCE100_50: {chances:?}");
+        println!("BIASED_80_120_SHIFT2_N2: {biased:?}");
+        println!("GET_BOOL: {bools:?}");
+        println!("ACCOUNT_IDS: {account_ids:?}");
+        println!("WEIGHTED_MIXED_5: {:?}", weighted.0);
+        println!("WEIGHTED_SINGLE: {:?}", weighted.1);
+        println!("WEIGHTED_UNIFORM_3: {:?}", weighted.2);
+        println!("ROLL_CHANCE_0_50_100: {rolls:?}");
+        println!("PERCENT_OF_VALUE_BITS: [{}]", hex(&percents));
+        println!("REDUCE_BY_PERCENT_BITS: [{}]", hex(&reductions));
+        println!("WEIGHTED_GENERIC_INDICES: {generic_indices:?}");
+
+        let rand_ints_low: Vec<i64> = {
+            let _g = TestSeedGuard::install(42);
+            (0..5).map(|_| rand_int(10, None)).collect()
+        };
+        let rand_ints_ranged: Vec<i64> = {
+            let _g = TestSeedGuard::install(42);
+            (0..5).map(|_| rand_int(5, Some(15))).collect()
+        };
+        let keys: Vec<String> = kat_keys().into_iter().map(str::to_owned).collect();
+        let drawn_with: Vec<String> = {
+            let _g = TestSeedGuard::install(42);
+            draw_random_from_list(&keys, 5, true)
+        };
+        let drawn_without: Vec<String> = {
+            let _g = TestSeedGuard::install(42);
+            draw_random_from_list(&keys, 3, false)
+        };
+        let drawn_keys: Vec<String> = {
+            let _g = TestSeedGuard::install(42);
+            draw_random_from_dict(&kat_mixed_map(), 3, false)
+        };
+
+        println!("RAND_INT_10: {rand_ints_low:?}");
+        println!("RAND_INT_5_15: {rand_ints_ranged:?}");
+        println!("DRAW_FROM_LIST_5: {drawn_with:?}");
+        println!("DRAW_FROM_LIST_NO_REPLACEMENT_3: {drawn_without:?}");
+        println!("DRAW_FROM_DICT_NO_REPLACEMENT_3: {drawn_keys:?}");
+    }
+
+    /// The KAT map keys, shared with the C# twin where they have to parse as `MongoId`s — hence
+    /// 24 hex characters rather than "a"/"b"/"c"/"d".
+    fn kat_keys() -> [&'static str; 4] {
+        [
+            "aaaaaaaaaaaaaaaaaaaaaaaa",
+            "bbbbbbbbbbbbbbbbbbbbbbbb",
+            "cccccccccccccccccccccccc",
+            "dddddddddddddddddddddddd",
+        ]
+    }
+
+    /// `{a:5, b:0, c:1, d:1}` — sum 7 against 4 entries, so the general cumulative-scan path.
+    fn kat_mixed_map() -> IndexMap<String, f64> {
+        kat_keys()
+            .into_iter()
+            .map(str::to_owned)
+            .zip([5.0, 0.0, 1.0, 1.0])
+            .collect()
+    }
+
+    /// All 1.0 — sum equals the entry count, so the uniform `get_int` shortcut.
+    fn kat_uniform_map() -> IndexMap<String, f64> {
+        kat_keys()
+            .into_iter()
+            .map(str::to_owned)
+            .zip([1.0; 4])
+            .collect()
+    }
+
+    fn kat_single_map() -> IndexMap<String, f64> {
+        IndexMap::from([(kat_keys()[1].to_owned(), 3.0)])
+    }
+
+    fn draw(map: &IndexMap<String, f64>, count: usize) -> Vec<String> {
+        (0..count)
+            .map(|_| get_weighted_value(map).expect("a key is always picked"))
+            .collect()
+    }
+
+    /// Positions rather than keys, so an `i64`-keyed and a `String`-keyed map of the same weights
+    /// are directly comparable.
+    fn draw_indices<K: Clone + Eq + std::hash::Hash>(
+        map: &IndexMap<K, f64>,
+        count: usize,
+    ) -> Vec<usize> {
+        (0..count)
+            .map(|_| {
+                let key = get_weighted_value(map).expect("a key is always picked");
+                map.get_index_of(&key).expect("the key came from the map")
+            })
+            .collect()
+    }
+
+    /// `{10:5, 20:0, 30:1, 40:1}` — the mixed weights again, on integer keys.
+    fn kat_int_map() -> IndexMap<i64, f64> {
+        IndexMap::from([(10, 5.0), (20, 0.0), (30, 1.0), (40, 1.0)])
+    }
+
+    /// The same weights and order as [`kat_int_map`], keyed by the decimal spellings.
+    fn kat_numeric_string_map() -> IndexMap<String, f64> {
+        kat_int_map()
+            .into_iter()
+            .map(|(key, weight)| (key.to_string(), weight))
+            .collect()
+    }
+
+    /// Three rolls each at 0%, 50% and 100%, on one uninterrupted stream.
+    fn kat_roll_chance_sequence() -> Vec<bool> {
+        [0.0, 50.0, 100.0]
+            .into_iter()
+            .flat_map(|chance| (0..3).map(move |_| roll_chance(chance)))
+            .collect()
     }
 
     // ---- Cross-language KAT pins. Twin fixture: RandomSourceParityTests.cs (C#). ----
@@ -531,6 +954,141 @@ mod tests {
         0x4040_3FCF_4EA6_0172,
     ];
     const KAT_GET_CHANCE100_50: [bool; 5] = [true, true, true, false, false];
+    /// Five general-path draws from `kat_mixed_map`, then the single-entry map (no draw), then
+    /// three uniform-shortcut draws from `kat_uniform_map` — one continuous stream.
+    const KAT_WEIGHTED_MIXED_5: [&str; 5] = [
+        "aaaaaaaaaaaaaaaaaaaaaaaa",
+        "cccccccccccccccccccccccc",
+        "aaaaaaaaaaaaaaaaaaaaaaaa",
+        "aaaaaaaaaaaaaaaaaaaaaaaa",
+        "dddddddddddddddddddddddd",
+    ];
+    const KAT_WEIGHTED_SINGLE: &str = "bbbbbbbbbbbbbbbbbbbbbbbb";
+    const KAT_WEIGHTED_UNIFORM_3: [&str; 3] = [
+        "aaaaaaaaaaaaaaaaaaaaaaaa",
+        "cccccccccccccccccccccccc",
+        "dddddddddddddddddddddddd",
+    ];
+
+    const KAT_ROLL_CHANCE_0_50_100: [bool; 9] =
+        [false, false, false, false, false, true, true, true, true];
+    /// `(percent, value, to_fixed)` — no RNG, so these pin the arithmetic and the `Math.Round`
+    /// half-to-even rounding rather than a stream.
+    const KAT_PERCENT_OF_VALUE_INPUTS: [(f64, f64, i32); 5] = [
+        (15.0, 200.0, 2),
+        (33.333, 99.0, 2),
+        (1.25, 100.0, 1),
+        (250.0, 7.5, 0),
+        (-15.0, 200.0, 2),
+    ];
+    const KAT_PERCENT_OF_VALUE_BITS: [u64; 5] = [
+        0x403E_0000_0000_0000,
+        0x4040_8000_0000_0000,
+        0x3FF3_3333_3333_3333,
+        0x4033_0000_0000_0000,
+        0xC03E_0000_0000_0000,
+    ];
+    /// `(value, percent)`.
+    const KAT_REDUCE_BY_PERCENT_INPUTS: [(f64, f64); 4] =
+        [(200.0, 15.0), (100.0, 33.333), (100.0, 150.0), (0.0, 50.0)];
+    const KAT_REDUCE_BY_PERCENT_BITS: [u64; 4] = [
+        0x4065_4000_0000_0000,
+        0x4050_AAB0_20C4_9BA6,
+        0xC049_0000_0000_0000,
+        0x0000_0000_0000_0000,
+    ];
+    /// Positions drawn from the mixed weights `{5, 0, 1, 1}` — identical whatever the key type.
+    const KAT_WEIGHTED_GENERIC_INDICES: [usize; 5] = [0, 2, 0, 0, 3];
+    /// `RandomiseOfferPrice`'s exact arguments for the default price range (0.8..1.2 * 100).
+    const KAT_BIASED_80_120_SHIFT2_N2: [f64; 5] = [97.0, 100.0, 110.0, 88.0, 95.0];
+    const KAT_GET_BOOL: [bool; 8] = [true, false, true, false, false, false, true, true];
+    const KAT_ACCOUNT_IDS: [i32; 4] = [1_968_470, 1_080_510, 1_301_473, 1_221_345];
+    /// `rand_int(10, None)` — the `0..low` shape [`draw_random_from_list`] indexes with.
+    const KAT_RAND_INT_10: [i64; 5] = [6, 1, 1, 4, 8];
+    /// `rand_int(5, Some(15))` — the same draws shifted, since the range is the same width.
+    const KAT_RAND_INT_5_15: [i64; 5] = [11, 6, 6, 9, 13];
+    /// Five draws with replacement from [`kat_keys`], so repeats are expected.
+    const KAT_DRAW_FROM_LIST_5: [&str; 5] = [
+        "cccccccccccccccccccccccc",
+        "cccccccccccccccccccccccc",
+        "bbbbbbbbbbbbbbbbbbbbbbbb",
+        "bbbbbbbbbbbbbbbbbbbbbbbb",
+        "aaaaaaaaaaaaaaaaaaaaaaaa",
+    ];
+    /// Three draws without replacement from [`kat_keys`]: each draw indexes a pool one shorter than
+    /// the last, so the sequence diverges from the with-replacement one after the first draw.
+    const KAT_DRAW_FROM_LIST_NO_REPLACEMENT_3: [&str; 3] = [
+        "cccccccccccccccccccccccc",
+        "dddddddddddddddddddddddd",
+        "bbbbbbbbbbbbbbbbbbbbbbbb",
+    ];
+
+    #[test]
+    fn kat_roll_chance_is_pinned() {
+        let _g = TestSeedGuard::install(KAT_SEED);
+        assert_eq!(kat_roll_chance_sequence(), KAT_ROLL_CHANCE_0_50_100);
+    }
+
+    #[test]
+    fn kat_percent_arithmetic_is_pinned() {
+        let percents: Vec<u64> = KAT_PERCENT_OF_VALUE_INPUTS
+            .iter()
+            .map(|(percent, value, to_fixed)| {
+                get_percent_of_value(*percent, *value, *to_fixed).to_bits()
+            })
+            .collect();
+        let reductions: Vec<u64> = KAT_REDUCE_BY_PERCENT_INPUTS
+            .iter()
+            .map(|(value, percent)| reduce_value_by_percent(*value, *percent).to_bits())
+            .collect();
+
+        assert_eq!(percents, KAT_PERCENT_OF_VALUE_BITS);
+        assert_eq!(reductions, KAT_REDUCE_BY_PERCENT_BITS);
+    }
+
+    #[test]
+    fn kat_generic_weighted_draws_are_pinned_and_key_type_agnostic() {
+        let ints = {
+            let _g = TestSeedGuard::install(KAT_SEED);
+            draw_indices(&kat_int_map(), 5)
+        };
+        let strings = {
+            let _g = TestSeedGuard::install(KAT_SEED);
+            draw_indices(&kat_numeric_string_map(), 5)
+        };
+
+        assert_eq!(ints, KAT_WEIGHTED_GENERIC_INDICES);
+        assert_eq!(strings, KAT_WEIGHTED_GENERIC_INDICES);
+    }
+
+    #[test]
+    fn roll_chance_at_one_hundred_percent_still_consumes_a_draw() {
+        // Parity depends on it: the C# rolls before comparing, so a certain roll still advances
+        // the stream for whatever draws next.
+        let baseline: Vec<i32> = {
+            let _g = TestSeedGuard::install(KAT_SEED);
+            (0..3).map(|_| get_int(1, 10)).collect()
+        };
+
+        let _g = TestSeedGuard::install(KAT_SEED);
+        for _ in 0..3 {
+            assert!(roll_chance(100.0));
+        }
+        let after: Vec<i32> = (0..3).map(|_| get_int(1, 10)).collect();
+
+        assert_ne!(after, baseline, "the certain rolls consumed nothing");
+    }
+
+    #[test]
+    fn roll_chance_can_fail_at_ninety_nine_percent() {
+        // The roll reaches 100, so 99% is not a certainty — unlike `get_chance_100`, whose 1-99
+        // roll always fires at 99. This is the assertion that tells the two apart.
+        assert!((0..10_000).any(|_| !roll_chance(99.0)));
+        for _ in 0..1000 {
+            assert!(!roll_chance(0.0));
+            assert!(roll_chance(100.0));
+        }
+    }
 
     #[test]
     fn kat_raw_u64_sequence_is_pinned() {
@@ -572,5 +1130,174 @@ mod tests {
         let _g = TestSeedGuard::install(KAT_SEED);
         let chances: Vec<bool> = (0..5).map(|_| get_chance_100(50.0)).collect();
         assert_eq!(chances, KAT_GET_CHANCE100_50);
+    }
+
+    #[test]
+    fn get_biased_random_number_matches_the_csharp_kat() {
+        let _g = TestSeedGuard::install(KAT_SEED);
+        // RandomiseOfferPrice's exact arguments for the default price range (0.8..1.2 * 100).
+        let values: Vec<f64> = (0..5)
+            .map(|_| get_biased_random_number(80.0, 120.0, 2.0, 2.0))
+            .collect();
+
+        assert_eq!(values, KAT_BIASED_80_120_SHIFT2_N2);
+    }
+
+    #[test]
+    fn get_biased_random_number_guard_arms_consume_no_draws() {
+        let _g = TestSeedGuard::install(KAT_SEED);
+        assert_eq!(get_biased_random_number(120.0, 80.0, 2.0, 2.0), -1.0);
+        assert_eq!(get_biased_random_number(80.0, 120.0, 2.0, 0.5), -1.0);
+        assert_eq!(get_biased_random_number(80.0, 80.0, 2.0, 2.0), 80.0);
+        // The stream is untouched, so this is the same value the previous test's first draw was.
+        assert_eq!(
+            get_biased_random_number(80.0, 120.0, 2.0, 2.0),
+            KAT_BIASED_80_120_SHIFT2_N2[0]
+        );
+    }
+
+    #[test]
+    fn get_bool_matches_the_csharp_kat() {
+        let _g = TestSeedGuard::install(KAT_SEED);
+        let values: Vec<bool> = (0..8).map(|_| get_bool()).collect();
+
+        assert_eq!(values, KAT_GET_BOOL);
+    }
+
+    #[test]
+    fn generate_account_id_matches_the_csharp_kat() {
+        let _g = TestSeedGuard::install(KAT_SEED);
+        let values: Vec<i32> = (0..4).map(|_| generate_account_id()).collect();
+
+        assert_eq!(values, KAT_ACCOUNT_IDS);
+    }
+
+    #[test]
+    fn kat_rand_int_is_pinned() {
+        {
+            let _g = TestSeedGuard::install(KAT_SEED);
+            let low_only: Vec<i64> = (0..5).map(|_| rand_int(10, None)).collect();
+            assert_eq!(low_only, KAT_RAND_INT_10);
+        }
+        let _g = TestSeedGuard::install(KAT_SEED);
+        let ranged: Vec<i64> = (0..5).map(|_| rand_int(5, Some(15))).collect();
+        assert_eq!(ranged, KAT_RAND_INT_5_15);
+    }
+
+    #[test]
+    fn rand_int_upper_bound_is_exclusive() {
+        // The C# hands `high` straight to `GetInt32` as its exclusive bound, unlike `get_int`, which
+        // adds one first. A seeded run of 200 draws over 1..3 therefore never yields 3.
+        let _g = TestSeedGuard::install(KAT_SEED);
+        let drawn: HashSet<i64> = (0..200).map(|_| rand_int(1, Some(3))).collect();
+
+        assert_eq!(drawn, HashSet::from([1, 2]));
+    }
+
+    #[test]
+    fn rand_int_returns_low_when_the_bounds_are_equal_without_drawing() {
+        // The C# shortcut returns `low` before reaching the source, so the stream is untouched for
+        // whatever draws next. Parity depends on it.
+        let _g = TestSeedGuard::install(KAT_SEED);
+        assert_eq!(rand_int(7, Some(7)), 7);
+
+        let after: Vec<i64> = (0..5).map(|_| rand_int(10, None)).collect();
+        assert_eq!(after, KAT_RAND_INT_10);
+    }
+
+    #[test]
+    #[should_panic(expected = "rand_int: empty range")]
+    fn rand_int_rejects_an_empty_range_as_the_csharp_does() {
+        // `RandomSource.GetInt32(0, 0)` throws on both C# sources; drawing an index out of an empty
+        // list is the call site that gets here.
+        rand_int(0, None);
+    }
+
+    #[test]
+    fn kat_draw_random_from_list_is_pinned() {
+        let list: Vec<String> = kat_keys().into_iter().map(str::to_owned).collect();
+
+        {
+            let _g = TestSeedGuard::install(KAT_SEED);
+            assert_eq!(draw_random_from_list(&list, 5, true), KAT_DRAW_FROM_LIST_5);
+        }
+        let _g = TestSeedGuard::install(KAT_SEED);
+        assert_eq!(
+            draw_random_from_list(&list, 3, false),
+            KAT_DRAW_FROM_LIST_NO_REPLACEMENT_3
+        );
+    }
+
+    #[test]
+    fn draw_random_from_list_without_replacement_never_repeats_and_stops_at_the_list_length() {
+        let list: Vec<String> = kat_keys().into_iter().map(str::to_owned).collect();
+
+        let _g = TestSeedGuard::install(KAT_SEED);
+        // The C# clamps `count` to the list length rather than running dry.
+        let drawn = draw_random_from_list(&list, 10, false);
+
+        assert_eq!(drawn.len(), 4);
+        assert_eq!(drawn.iter().collect::<HashSet<_>>().len(), 4);
+    }
+
+    #[test]
+    fn kat_draw_random_from_dict_is_pinned() {
+        // Keys only, in insertion order, so the draws are the list ones over the same four keys.
+        let _g = TestSeedGuard::install(KAT_SEED);
+        let drawn = draw_random_from_dict(&kat_mixed_map(), 3, false);
+
+        assert_eq!(drawn, KAT_DRAW_FROM_LIST_NO_REPLACEMENT_3);
+    }
+
+    #[test]
+    fn get_secure_random_number_is_the_forty_eight_bit_draw() {
+        // Same shape as `next_double48` — the C# `GetSecureRandomNumber` is a straight delegation,
+        // so it must land on the pinned 48-bit vectors rather than the 53-bit ones.
+        let _g = TestSeedGuard::install(KAT_SEED);
+        let bits: Vec<u64> = (0..3)
+            .map(|_| get_secure_random_number().to_bits())
+            .collect();
+
+        assert_eq!(bits, KAT_NEXT_DOUBLE48_BITS);
+    }
+
+    #[test]
+    fn kat_weighted_values_are_pinned() {
+        let _g = TestSeedGuard::install(KAT_SEED);
+        let mixed = draw(&kat_mixed_map(), 5);
+        let single = draw(&kat_single_map(), 1);
+        let uniform = draw(&kat_uniform_map(), 3);
+
+        assert_eq!(mixed, KAT_WEIGHTED_MIXED_5);
+        assert_eq!(single, [KAT_WEIGHTED_SINGLE]);
+        assert_eq!(uniform, KAT_WEIGHTED_UNIFORM_3);
+    }
+
+    #[test]
+    fn a_single_entry_map_consumes_no_draw() {
+        // The C# returns the lone key before touching the RNG (`WeightedRandomHelper.cs:26-29`),
+        // so the draws either side of it are one uninterrupted stream. Parity depends on it.
+        let _g = TestSeedGuard::install(KAT_SEED);
+        let without = draw(&kat_uniform_map(), 3);
+
+        let _g = TestSeedGuard::install(KAT_SEED);
+        draw(&kat_single_map(), 1);
+        let with = draw(&kat_uniform_map(), 3);
+
+        assert_eq!(with, without);
+    }
+
+    #[test]
+    fn negative_weights_leave_a_zeroed_slot_that_can_still_win() {
+        // Bug-for-bug: every weight skipped leaves `sum_of_weights` at 0, so `random_number` is 0
+        // and the first zeroed cumulative slot satisfies `>= 0`. Seed-independent.
+        let map: IndexMap<String, f64> = kat_keys()
+            .into_iter()
+            .map(str::to_owned)
+            .zip([-1.0, -2.0, -3.0, -4.0])
+            .collect();
+
+        let _g = TestSeedGuard::install(KAT_SEED);
+        assert_eq!(get_weighted_value(&map).unwrap(), kat_keys()[0]);
     }
 }

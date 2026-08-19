@@ -482,3 +482,5 @@ Patches/**/obj/
 
 /Libraries/**/bin/
 /Libraries/**/obj/
+# Cargo bin targets are source, not build output
+!rust/spt-native/src/bin/*

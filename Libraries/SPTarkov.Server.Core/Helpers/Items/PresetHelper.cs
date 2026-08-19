@@ -157,6 +157,27 @@ public class PresetHelper(GlobalTable globalTable, ItemHelper itemHelper, IClone
         return PresetCache.ContainsKey(templateId);
     }
 
+    /// <summary>
+    /// Every tpl <see cref="HasPreset"/> answers true for, so a caller that would otherwise probe it
+    /// per tpl can hand the whole set over the native boundary at once
+    /// </summary>
+    /// <returns>The preset cache's tpl keys</returns>
+    internal IReadOnlyCollection<MongoId> GetTplsWithPresets()
+    {
+        return PresetCache.Keys;
+    }
+
+    /// <summary>
+    /// The globals' preset map, keyed exactly as <see cref="IsPreset"/> and <see cref="GetPreset"/>
+    /// key it, so a caller handing the whole map over a boundary keeps that key domain. Not cloned -
+    /// unlike <see cref="GetAllPresets"/>, which also drops the keys
+    /// </summary>
+    /// <returns>Presets keyed by preset id</returns>
+    internal IReadOnlyDictionary<MongoId, Preset> GetPresetsByPresetId()
+    {
+        return globalTable.ItemPresets;
+    }
+
     public Preset? GetPreset(MongoId id)
     {
         return cloner.Clone(globalTable.ItemPresets[id]);

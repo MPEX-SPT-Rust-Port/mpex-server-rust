@@ -39,6 +39,22 @@ public class BotLootGenerator(
 )
 {
     /// <summary>
+    ///     Collaborators <c>BotPayloadProjection</c> needs, for same-assembly callers that hold this
+    ///     generator but not the services — <c>BotInventoryGenerator</c>'s constructor is frozen to
+    ///     its 4.1.2 signature and never took them.
+    /// </summary>
+    internal BotLootCacheService BotLootCacheService
+    {
+        get { return botLootCacheService; }
+    }
+
+    /// <inheritdoc cref="BotLootCacheService"/>
+    internal HandbookHelper HandbookHelper
+    {
+        get { return handbookHelper; }
+    }
+
+    /// <summary>
     /// Get a dictionary of item tpls and the number of times they can be spawned on a single bot
     /// Keyed by bot type
     /// </summary>

@@ -43,6 +43,45 @@ internal static unsafe partial class NativeMethods
     [LibraryImport(LibraryName, EntryPoint = "spt_generate_dynamic_loot")]
     internal static partial int GenerateDynamicLoot(byte* requestUtf8, nuint requestLen, byte** outPtr, nuint* outLen);
 
+    [LibraryImport(LibraryName, EntryPoint = "spt_create_random_loot")]
+    internal static partial int CreateRandomLoot(byte* requestUtf8, nuint requestLen, byte** outPtr, nuint* outLen);
+
+    [LibraryImport(LibraryName, EntryPoint = "spt_create_forced_loot")]
+    internal static partial int CreateForcedLoot(byte* requestUtf8, nuint requestLen, byte** outPtr, nuint* outLen);
+
+    [LibraryImport(LibraryName, EntryPoint = "spt_get_sealed_weapon_case_loot")]
+    internal static partial int GetSealedWeaponCaseLoot(byte* requestUtf8, nuint requestLen, byte** outPtr, nuint* outLen);
+
+    [LibraryImport(LibraryName, EntryPoint = "spt_get_random_loot_container_loot")]
+    internal static partial int GetRandomLootContainerLoot(byte* requestUtf8, nuint requestLen, byte** outPtr, nuint* outLen);
+
+    [LibraryImport(LibraryName, EntryPoint = "spt_generate_bot_inventory")]
+    internal static partial int GenerateBotInventory(byte* requestUtf8, nuint requestLen, byte** outPtr, nuint* outLen);
+
+    [LibraryImport(LibraryName, EntryPoint = "spt_generate_bot_inventory_batch")]
+    internal static partial int GenerateBotInventoryBatch(byte* requestUtf8, nuint requestLen, byte** outPtr, nuint* outLen);
+
+    [LibraryImport(LibraryName, EntryPoint = "spt_generate_dynamic_offers")]
+    internal static partial int GenerateDynamicOffers(byte* requestUtf8, nuint requestLen, byte** outPtr, nuint* outLen);
+
+    [LibraryImport(LibraryName, EntryPoint = "spt_generate_repeatable_quest")]
+    internal static partial int GenerateRepeatableQuest(byte* requestUtf8, nuint requestLen, byte** outPtr, nuint* outLen);
+
+    [LibraryImport(LibraryName, EntryPoint = "spt_generate_scav_case_rewards")]
+    internal static partial int GenerateScavCaseRewards(byte* requestUtf8, nuint requestLen, byte** outPtr, nuint* outLen);
+
+    [LibraryImport(LibraryName, EntryPoint = "spt_build_item_base_class_cache")]
+    internal static partial int BuildItemBaseClassCache(byte* requestUtf8, nuint requestLen, byte** outPtr, nuint* outLen);
+
+    [LibraryImport(LibraryName, EntryPoint = "spt_build_ragfair_linked_item_table")]
+    internal static partial int BuildRagfairLinkedItemTable(byte* requestUtf8, nuint requestLen, byte** outPtr, nuint* outLen);
+
+    [LibraryImport(LibraryName, EntryPoint = "spt_db_publish")]
+    internal static partial int DbPublish(byte* requestUtf8, nuint requestLen, byte** outPtr, nuint* outLen);
+
+    [LibraryImport(LibraryName, EntryPoint = "spt_locales_set")]
+    internal static partial int LocalesSet(byte* jsonUtf8, nuint jsonLen, byte** outPtr, nuint* outLen);
+
     [LibraryImport(LibraryName, EntryPoint = "spt_buf_free")]
     internal static partial void BufFree(byte* ptr, nuint len);
 }

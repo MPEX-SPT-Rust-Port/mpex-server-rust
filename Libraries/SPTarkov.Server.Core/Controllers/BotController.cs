@@ -27,6 +27,19 @@ using SPTarkov.Server.Core.Utils.Cloners;
 
 namespace SPTarkov.Server.Core.Controllers;
 
+/// <summary>
+/// Bot waves are dispatched in three tiers. GenerateBotWave offers the whole wave to
+/// BotWaveBatcher.TryGenerateWave first - one native call generates every inventory in it, with the
+/// shared views on the wire once. The batcher returns null whenever a mod could observe the
+/// difference from per-bot generation (config flag, a Harmony patch on a frozen member of this class
+/// or BotGenerator, a substituted BotGenerator) or when the wave could write nighttime equipment
+/// clamps, and the unchanged per-bot path below then runs .AsParallel() over
+/// BotInventoryGenerator.GenerateInventory - which falls to its own retained 4.1.2 legacy path under
+/// its own conditions.
+///
+/// A mod that constructs this class through the frozen 14 parameter constructor gets no batcher, so
+/// it never batches: per-bot semantics by construction, as before.
+/// </summary>
 [Injectable]
 public class BotController(
     ISptLogger<BotController> logger,
@@ -45,6 +58,50 @@ public class BotController(
     ICloner cloner
 )
 {
+    private readonly BotWaveBatcher? _botWaveBatcher;
+
+    /// <summary>
+    ///     The constructor the container uses: the frozen 4.1.2 one plus the wave batcher.
+    ///     Additive and apicompat-verified. A mod subclass built against the frozen constructor
+    ///     gets no batcher and therefore never batches - per-bot semantics by construction.
+    /// </summary>
+    public BotController(
+        ISptLogger<BotController> logger,
+        BotTable botTable,
+        BotGenerator botGenerator,
+        BotHelper botHelper,
+        BotDifficultyHelper botDifficultyHelper,
+        ServerLocalisationService serverLocalisationService,
+        SeasonalEventService seasonalEventService,
+        MatchBotDetailsCacheService matchBotDetailsCacheService,
+        ProfileHelper profileHelper,
+        ProfileActivityService profileActivityService,
+        RandomUtil randomUtil,
+        BotConfig botConfig,
+        PmcConfig pmcConfig,
+        ICloner cloner,
+        BotWaveBatcher botWaveBatcher
+    )
+        : this(
+            logger,
+            botTable,
+            botGenerator,
+            botHelper,
+            botDifficultyHelper,
+            serverLocalisationService,
+            seasonalEventService,
+            matchBotDetailsCacheService,
+            profileHelper,
+            profileActivityService,
+            randomUtil,
+            botConfig,
+            pmcConfig,
+            cloner
+        )
+    {
+        _botWaveBatcher = botWaveBatcher;
+    }
+
     /// <summary>
     ///     Return the number of bot load-out varieties to be generated
     /// </summary>
@@ -253,6 +310,19 @@ public class BotController(
             logger.Debug(
                 $"Generating wave of: {botGenerationDetails.BotCountToGenerate} bots of type: {role} {botGenerationDetails.BotDifficulty}"
             );
+        }
+
+        // Batched native wave: one call for every inventory in the wave. Declined - null - when
+        // a mod could observe the difference or the wave can write nighttime clamps, in which
+        // case the unchanged per-bot path below runs. A subclass never batches: its GetType()
+        // differs, and the frozen constructor leaves the batcher null anyway.
+        if (GetType() == typeof(BotController) && _botWaveBatcher is not null)
+        {
+            var batchedWave = _botWaveBatcher.TryGenerateWave(sessionId, botGenerationDetails);
+            if (batchedWave is not null)
+            {
+                return batchedWave;
+            }
         }
 
         var generatedBots = Enumerable

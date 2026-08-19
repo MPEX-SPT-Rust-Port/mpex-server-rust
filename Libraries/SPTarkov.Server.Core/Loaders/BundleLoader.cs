@@ -1,5 +1,4 @@
 ﻿using System.Collections.Concurrent;
-using Spectre.Console;
 using SPTarkov.Common.Models.Logging;
 using SPTarkov.DI.Annotations;
 using SPTarkov.Server.Core.Extensions;
@@ -39,56 +38,38 @@ public sealed class BundleLoader(ISptLogger<BundleLoader> logger, JsonUtil jsonU
         var ok = 0;
         var missing = 0;
 
-        await AnsiConsole
-            .Progress()
-            .AutoClear(false)
-            .HideCompleted(false)
-            .Columns(
-                new SpinnerColumn(),
-                new TaskDescriptionColumn(),
-                new ProgressBarColumn(),
-                new PercentageColumn(),
-                new RemainingTimeColumn()
-            )
-            .StartAsync(async ctx =>
+        logger.Info($"Loading {total} bundles for {mod.ModMetadata.Name}");
+
+        await Parallel.ForEachAsync(
+            modBundles.Manifest,
+            new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount },
+            async (bundleManifest, ct) =>
             {
-                var progressTask = ctx.AddTask(
-                    $"Loading bundles for {mod.ModMetadata.Name}",
-                    new ProgressTaskSettings { MaxValue = total }
-                );
+                var bundleLocalPath = Path.Join(bundlesPath, bundleManifest.Key).Replace('\\', '/');
 
-                await Parallel.ForEachAsync(
-                    modBundles.Manifest,
-                    new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount },
-                    async (bundleManifest, ct) =>
-                    {
-                        var bundleLocalPath = Path.Join(bundlesPath, bundleManifest.Key).Replace('\\', '/');
-
-                        if (!File.Exists(bundleLocalPath))
+                if (!File.Exists(bundleLocalPath))
+                {
+                    logger.Warning($"Could not find bundle {bundleManifest.Key} for mod {mod.ModMetadata.Name}");
+                    Interlocked.Increment(ref missing);
+                }
+                else
+                {
+                    var bundleHash = await bundleHashCacheService.CalculateMatchAndStoreHashAsync(bundleLocalPath, ct);
+                    AddBundle(
+                        bundleManifest.Key,
+                        new BundleInfo
                         {
-                            logger.Warning($"Could not find bundle {bundleManifest.Key} for mod {mod.ModMetadata.Name}");
-                            Interlocked.Increment(ref missing);
+                            ModPath = relativeModPath,
+                            Bundle = bundleManifest,
+                            Crc = bundleHash,
                         }
-                        else
-                        {
-                            var bundleHash = await bundleHashCacheService.CalculateMatchAndStoreHashAsync(bundleLocalPath, ct);
-                            AddBundle(
-                                bundleManifest.Key,
-                                new BundleInfo
-                                {
-                                    ModPath = relativeModPath,
-                                    Bundle = bundleManifest,
-                                    Crc = bundleHash,
-                                }
-                            );
-                            Interlocked.Increment(ref ok);
-                        }
+                    );
+                    Interlocked.Increment(ref ok);
+                }
+            }
+        );
 
-                        progressTask.Increment(1);
-                        progressTask.Description = $"Loading bundles for {mod.ModMetadata.Name} (ok: {ok}, missing: {missing})";
-                    }
-                );
-            });
+        logger.Info($"Loaded bundles for {mod.ModMetadata.Name} (ok: {ok}, missing: {missing})");
 
         await bundleHashCacheService.WriteCacheAsync(cancellationToken);
     }

@@ -2,6 +2,10 @@
 
 namespace SPTarkov.Common.Extensions;
 
+/// <summary>
+/// Retained for 4.1.2 mod compatibility. The returned colours are no longer rendered —
+/// the console handler emits plain text — but the surface stays bindable.
+/// </summary>
 public static class SptLogLevelExtensions
 {
     extension(LogLevel microsoftLogLevel)

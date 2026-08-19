@@ -47,6 +47,31 @@ public record ItemConfig : BaseConfig
     /// </summary>
     [JsonPropertyName("customItemGlobalPresets")]
     public required List<Preset> CustomItemGlobalPresets { get; set; }
+
+    /// <summary>
+    ///     Force the item base class cache build down the retained 4.1.2 C# path instead of
+    ///     spt-native. The escape hatch for hooks the patch detection cannot see - patches on the
+    ///     shared helpers the service calls into.
+    /// </summary>
+    [JsonPropertyName("forceLegacyItemBaseClassHydration")]
+    public bool ForceLegacyItemBaseClassHydration { get; set; }
+
+    /// <summary>
+    ///     Keep the native resident-DB fast path live even with mods loaded. Off, any loaded mod
+    ///     forces the views override onto every send. On, the instrumented mutation paths
+    ///     (CustomItemService, the blacklist caches, seasonal events) still trigger a republish,
+    ///     but a mod writing an injected table's dictionaries directly goes unseen - only enable
+    ///     when your mods don't do that.
+    /// </summary>
+    [JsonPropertyName("trustNativeRequestCacheWithMods")]
+    public bool TrustNativeRequestCacheWithMods { get; set; }
+
+    /// <summary>
+    ///     Always send the C#-built views override: disables the resident-DB fast path without
+    ///     touching the native path itself.
+    /// </summary>
+    [JsonPropertyName("disableNativeRequestCache")]
+    public bool DisableNativeRequestCache { get; set; }
 }
 
 public record HandbookPriceOverride

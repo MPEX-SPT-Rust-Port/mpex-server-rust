@@ -7,6 +7,7 @@
 //! each such site names the C# line it stands in for.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use indexmap::IndexMap;
 use serde_json::json;
@@ -14,15 +15,21 @@ use serde_json::json;
 use super::container_extensions::{
     FindSlotResult, find_slot_for_item, try_fill_container_map_with_item,
 };
-use super::item_helper::{self, LootContext, LootError};
+use super::item_helper::{self, LootContext, LootEpochError, LootError};
 use super::models::{
     CounterState, DEBUG, Diagnostic, DynamicLootRequest, DynamicLootResult, ERROR, Item,
-    ItemLocation, ItemRotation, LootCommon, LootConfigView, SUCCESS, Spawnpoint,
+    ItemLocation, ItemRotation, LootConfigView, LootVarying, LootViewsWire, SUCCESS, Spawnpoint,
     SpawnpointTemplate, SptLootItem, StaticContainer, StaticContainerData, StaticContainersRequest,
     StaticContainersResult, StaticForced, StaticLootDetails, Upd, WARNING,
 };
 use super::probability_object_array::{ProbabilityObject, ProbabilityObjectArray};
 use super::{mongo_id, random_util};
+use crate::db::models::LocationsRoot;
+use crate::diag::DiagSink;
+use crate::ragfair::views::RagfairDbViews;
+
+/// The `typeof(T).FullName` this file's diagnostics log under.
+const CATEGORY: &str = "SPTarkov.Server.Core.Generators.Loot.LocationLootGenerator";
 
 /// `LocationLootGenerator.cs:1269-1276`. C# types `ChosenCount` as `double?`; the empty group is
 /// seeded with -1 and every other value comes out of `GetInt`.
@@ -47,6 +54,7 @@ struct ContainerItem {
 /// A plain interpolated log line.
 fn diagnostic(level: &str, message: String) -> Diagnostic {
     Diagnostic {
+        category: CATEGORY,
         level: level.to_owned(),
         locale_key: None,
         args: None,
@@ -58,6 +66,7 @@ fn diagnostic(level: &str, message: String) -> Diagnostic {
 /// (a bare value for the `%s` keys, an object whose members match the C# anonymous type otherwise).
 fn localised(level: &str, locale_key: &str, args: serde_json::Value) -> Diagnostic {
     Diagnostic {
+        category: CATEGORY,
         level: level.to_owned(),
         locale_key: Some(locale_key.to_owned()),
         args: Some(args),
@@ -87,19 +96,107 @@ fn item_count(template: &SpawnpointTemplate) -> i32 {
     template.items.as_ref().map_or(0, Vec::len) as i32
 }
 
+/// The database half of a location-loot request: either borrowed out of the resident DB or moved
+/// out of the request's `viewsOverride`.
+pub enum LootViews {
+    Resident {
+        ragfair: Arc<RagfairDbViews>,
+        locations: Arc<LocationsRoot>,
+    },
+    Override(Box<LootViewsWire>),
+}
+
+pub fn resolve_views(
+    epoch: u64,
+    views_override: Option<Box<LootViewsWire>>,
+) -> Result<LootViews, LootEpochError> {
+    match views_override {
+        Some(wire) => Ok(LootViews::Override(wire)),
+        None => {
+            let db = crate::db::current().ok_or(LootEpochError::StaleEpoch)?;
+            if db.epoch != epoch {
+                return Err(LootEpochError::StaleEpoch);
+            }
+
+            Ok(LootViews::Resident {
+                ragfair: db.ragfair_views.clone().ok_or(LootEpochError::StaleEpoch)?,
+                locations: db.locations.clone().ok_or(LootEpochError::StaleEpoch)?,
+            })
+        }
+    }
+}
+
+/// The owned per-map statics a static-container run consumes — cloned out of the resident root
+/// or moved out of the override, so the run's ownership story is exactly the old parsed
+/// request's.
+struct StaticsBundle {
+    static_weapons: Option<Vec<SpawnpointTemplate>>,
+    static_containers: Option<Vec<StaticContainerData>>,
+    static_forced: Option<Vec<StaticForced>>,
+    static_loot_dist: HashMap<String, StaticLootDetails>,
+    statics: Option<StaticContainer>,
+}
+
+fn statics_for(views: &mut LootViews, location_id: &str) -> Result<StaticsBundle, LootError> {
+    match views {
+        LootViews::Resident { locations, .. } => {
+            let entry = locations.locations.get(location_id).ok_or_else(|| {
+                LootError::new(format!(
+                    "Location: {location_id} not found in the resident locations root"
+                ))
+            })?;
+            let details = entry.static_containers.as_ref();
+
+            Ok(StaticsBundle {
+                static_weapons: details.and_then(|d| d.static_weapons.clone()),
+                static_containers: details.and_then(|d| d.static_containers.clone()),
+                static_forced: details.and_then(|d| d.static_forced.clone()),
+                // C# dereferences a null StaticLoot before it could ever send (`mapData.StaticLoot!
+                // .Value!`); a published null lands here as a named error instead of an NRE.
+                static_loot_dist: entry.static_loot.clone().ok_or_else(|| {
+                    LootError::new(format!(
+                        "Static loot distribution missing for map: {location_id}"
+                    ))
+                })?,
+                statics: entry.statics.clone(),
+            })
+        }
+        LootViews::Override(wire) => Ok(StaticsBundle {
+            static_weapons: wire.static_weapons.take(),
+            static_containers: wire.static_containers.take(),
+            static_forced: wire.static_forced.take(),
+            static_loot_dist: wire.static_loot_dist.take().ok_or_else(|| {
+                LootError::new(format!(
+                    "Static loot distribution missing for map: {location_id}"
+                ))
+            })?,
+            statics: wire.statics.take(),
+        }),
+    }
+}
+
 /// The read-only half of a request, lent to the run; `counter` moves in so the run can mutate it
 /// and the totals can be handed back to C#.
-fn loot_context(common: &LootCommon, counter: CounterState) -> LootContext<'_> {
+fn loot_context<'a>(
+    views: &'a LootViews,
+    varying: &'a LootVarying,
+    counter: CounterState,
+) -> LootContext<'a> {
+    let (items_view, default_presets) = match views {
+        LootViews::Resident { ragfair, .. } => (&ragfair.items, &ragfair.default_presets_by_tpl),
+        LootViews::Override(wire) => (&wire.items_view, &wire.default_presets),
+    };
+
     LootContext {
-        items_view: &common.items_view,
-        static_ammo_dist: &common.static_ammo_dist,
-        default_presets: &common.default_presets,
-        money_tpls: &common.money_tpls,
-        lootable_item_blacklist: &common.lootable_item_blacklist,
-        config: &common.config,
-        seasonal: &common.seasonal,
+        items_view,
+        static_ammo_dist: &varying.static_ammo_dist,
+        default_presets,
+        money_tpls: &varying.money_tpls,
+        lootable_item_blacklist: &varying.lootable_item_blacklist,
+        config: &varying.config,
+        seasonal: &varying.seasonal,
         counter,
-        diagnostics: Vec::new(),
+        diagnostics: DiagSink::Pipeline,
     }
 }
 
@@ -115,29 +212,30 @@ fn into_result(
         tracked_counts: ctx.counter.tracked_counts,
         static_loot_item_count,
         static_container_count,
-        diagnostics: ctx.diagnostics,
     }
 }
 
 /// `LocationLootGenerator.GenerateStaticContainers` (`:94-266`) — mounted weapons, then every
 /// guaranteed container, then a weighted pick per container group.
 pub fn generate_static_containers(
-    mut request: StaticContainersRequest,
-) -> Result<StaticContainersResult, LootError> {
-    let _seed_guard = request
-        .common
-        .test_seed
-        .map(random_util::TestSeedGuard::install);
+    request: StaticContainersRequest,
+) -> Result<StaticContainersResult, LootEpochError> {
+    let mut views = resolve_views(request.epoch, request.views_override)?;
+    let mut varying = request.varying;
+    let _seed_guard = varying.test_seed.map(random_util::TestSeedGuard::install);
 
     // Everything the run mutates is moved out before the rest of the request is lent to the context.
-    let counter = std::mem::take(&mut request.common.counter);
-    let static_weapons = request.static_weapons.take();
-    let static_containers = request.static_containers.take();
-    let static_forced = request.static_forced.take();
-    let statics = request.statics.take();
+    let StaticsBundle {
+        static_weapons,
+        static_containers,
+        static_forced,
+        static_loot_dist,
+        statics,
+    } = statics_for(&mut views, &varying.location_id)?;
+    let counter = std::mem::take(&mut varying.counter);
 
-    let mut ctx = loot_context(&request.common, counter);
-    let location_id = request.common.location_id.as_str();
+    let mut ctx = loot_context(&views, &varying, counter);
+    let location_id = varying.location_id.as_str();
     let config = ctx.config;
     let seasonal = ctx.seasonal;
 
@@ -154,7 +252,8 @@ pub fn generate_static_containers(
         // `result.AddRange(staticWeaponsOnMap)` (`:111`) throws on the null it just logged about.
         return Err(LootError::new(format!(
             "Unable to find static weapon data for map: {location_id}"
-        )));
+        ))
+        .into());
     };
 
     // Add mounted weapons to output loot
@@ -182,7 +281,8 @@ pub fn generate_static_containers(
         // `GetRandomisableContainersOnMap` (`:134`) enumerates the null list and throws.
         return Err(LootError::new(format!(
             "Unable to find static container data for map: {location_id}"
-        )));
+        ))
+        .into());
     };
 
     // Remove christmas items from loot data
@@ -215,7 +315,7 @@ pub fn generate_static_containers(
             &mut ctx,
             container,
             static_forced.as_deref(),
-            &request.static_loot_dist,
+            &static_loot_dist,
             location_id,
         )?;
 
@@ -246,7 +346,7 @@ pub fn generate_static_containers(
                 &mut ctx,
                 container,
                 static_forced.as_deref(),
-                &request.static_loot_dist,
+                &static_loot_dist,
                 location_id,
             )?;
 
@@ -358,7 +458,7 @@ pub fn generate_static_containers(
                 &mut ctx,
                 container_object,
                 static_forced.as_deref(),
-                &request.static_loot_dist,
+                &static_loot_dist,
                 location_id,
             )?;
             static_container_count += 1;
@@ -887,22 +987,24 @@ fn is_always_spawn(spawn_point: &Spawnpoint) -> bool {
 /// `Root`). This owns a deserialized copy, so the caller's `LooseLoot` comes back untouched — the
 /// one documented behaviour change of the port.
 pub fn generate_dynamic_loot(
-    mut request: DynamicLootRequest,
-) -> Result<DynamicLootResult, LootError> {
+    request: DynamicLootRequest,
+) -> Result<DynamicLootResult, LootEpochError> {
+    let views = resolve_views(request.epoch, request.views_override)?;
+    let mut varying = request.varying;
     // `resume`, not `install`: this is the second half of one `GenerateLocationLoot`, and the C#
     // draws both halves from the single `SeededRandomSource` the caller installed, so the stream
     // carries on from where the static-container run ended.
-    let _seed_guard = request
+    let _seed_guard = varying
         .common
         .test_seed
         .map(random_util::TestSeedGuard::resume);
 
     // Everything the run mutates is moved out before the rest of the request is lent to the context.
-    let counter = std::mem::take(&mut request.common.counter);
-    let loose_loot = std::mem::take(&mut request.loose_loot);
+    let counter = std::mem::take(&mut varying.common.counter);
+    let loose_loot = varying.loose_loot;
 
-    let mut ctx = loot_context(&request.common, counter);
-    let location_name = request.common.location_id.as_str();
+    let mut ctx = loot_context(&views, &varying.common, counter);
+    let location_name = varying.common.location_id.as_str();
     let config = ctx.config;
     let seasonal = ctx.seasonal;
 
@@ -914,7 +1016,8 @@ pub fn generate_dynamic_loot(
     ) else {
         return Err(LootError::new(format!(
             "Loose loot data for map: {location_name} is incomplete"
-        )));
+        ))
+        .into());
     };
 
     // Remove christmas items from loot data
@@ -1155,7 +1258,6 @@ pub fn generate_dynamic_loot(
     Ok(DynamicLootResult {
         spawnpoints: loot,
         tracked_counts: ctx.counter.tracked_counts,
-        diagnostics: ctx.diagnostics,
     })
 }
 
@@ -1303,7 +1405,7 @@ fn create_dynamic_loot_item(
 
         // Both failures are C# crashes inside `AddCartridgesToAmmoBox`; unlike the static path,
         // there is no null to return here, so the run stops with them.
-        item_helper::add_cartridges_to_ammo_box(ctx, &mut ammo_box_item, chosen_tpl)
+        item_helper::add_cartridges_to_ammo_box(ctx.items_view, &mut ammo_box_item, chosen_tpl)
             .map_err(|failure| LootError::new(failure.message.unwrap_or_default()))?;
 
         item_with_mods.extend(ammo_box_item);
@@ -1421,7 +1523,9 @@ fn create_static_loot_item(
         height = size.map(|(_, height)| height);
     } else if item_helper::is_of_baseclass(items_view, chosen_tpl, item_helper::AMMO_BOX) {
         // No spawnPoint to fall back on, generate manually
-        if let Err(failure) = item_helper::add_cartridges_to_ammo_box(ctx, &mut items, chosen_tpl) {
+        if let Err(failure) =
+            item_helper::add_cartridges_to_ammo_box(ctx.items_view, &mut items, chosen_tpl)
+        {
             // The C# equivalents are crashes; reported and the box skipped instead.
             ctx.diagnostics.push(failure);
 
@@ -1470,7 +1574,8 @@ fn get_armor_items(ctx: &mut LootContext, chosen_tpl: &str, items: Vec<Item>) ->
         .is_some_and(|slots| !slots.is_empty());
     if has_slots {
         return item_helper::add_child_slot_items(
-            ctx,
+            items_view,
+            &mut ctx.diagnostics,
             items,
             chosen_tpl,
             Some(&config.mod_spawn_chance_percent),
@@ -1532,9 +1637,10 @@ fn create_weapon_root_and_children(
             json!({ "tpl": chosen_tpl, "parentId": parent_id }),
         ));
 
-        return Err(LootError::new(
-            "A critical error occurred when generating loot, see server log for details",
-        ));
+        return Err(LootError::new(crate::diag::localise(
+            "location-critical_error_see_log",
+            None,
+        )));
     };
 
     if !children.is_empty() {
@@ -1665,105 +1771,130 @@ mod tests {
     }
 
     /// Two guaranteed containers (`c1` at 100%, `c2` flagged always-spawn), three randomisable ones
-    /// in a single group of exactly two, a forced item in `c1`, and a 5x3 container grid.
+    /// in a single group of exactly two, a forced item in `c1`, and a 5x3 container grid — sent as
+    /// an override at epoch 0, so the module tests exercise the override arm without a store.
     fn fixture_request() -> StaticContainersRequest {
         serde_json::from_value(json!({
-            "locationId": "bigmap",
-            "itemsView": {
-                ITEM_NODE: {},
-                MONEY: { "parent": ITEM_NODE },
-                AMMO: { "parent": ITEM_NODE },
-                AMMO_BOX: { "parent": ITEM_NODE },
-                MAGAZINE: { "parent": ITEM_NODE },
-                WEAPON: { "parent": ITEM_NODE },
-                CONTAINER_TPL: {
-                    "parent": ITEM_NODE, "width": 1, "height": 1,
-                    "gridCellsH": 5, "gridCellsV": 3
+            "epoch": 0,
+            "viewsOverride": {
+                "itemsView": {
+                    ITEM_NODE: {},
+                    MONEY: { "parent": ITEM_NODE },
+                    AMMO: { "parent": ITEM_NODE },
+                    AMMO_BOX: { "parent": ITEM_NODE },
+                    MAGAZINE: { "parent": ITEM_NODE },
+                    WEAPON: { "parent": ITEM_NODE },
+                    CONTAINER_TPL: {
+                        "parent": ITEM_NODE, "width": 1, "height": 1,
+                        "gridCellsH": 5, "gridCellsV": 3
+                    },
+                    FORCED_TPL: { "parent": ITEM_NODE, "width": 1, "height": 1 },
+                    MONEY_TPL: {
+                        "parent": MONEY, "width": 1, "height": 1,
+                        "stackMaxSize": 500000, "stackMinRandom": 100, "stackMaxRandom": 200
+                    },
+                    AMMO_BOX_TPL: {
+                        "parent": AMMO_BOX, "width": 2, "height": 1,
+                        "stackSlotMaxCount": 60, "stackSlotFirstFilterFirst": CARTRIDGE_TPL
+                    },
+                    MAGAZINE_TPL: {
+                        "parent": MAGAZINE, "width": 1, "height": 2,
+                        "cartridgesMaxCount": 30, "cartridgesFirstFilter": [CARTRIDGE_TPL]
+                    },
+                    CARTRIDGE_TPL: { "parent": AMMO, "width": 1, "height": 1,
+                        "stackMaxSize": 30, "caliber": CALIBER },
+                    WEAPON_TPL: {
+                        "parent": WEAPON, "width": 2, "height": 1,
+                        "ammoCaliber": CALIBER, "defAmmo": CARTRIDGE_TPL,
+                        "chambersFirstFilter": [CARTRIDGE_TPL]
+                    },
+                    WEAPON_MOD_TPL: { "parent": ITEM_NODE, "width": 1, "height": 1 },
+                    ARMOR: { "parent": ITEM_NODE },
+                    ARMOR_TPL: {
+                        "parent": ARMOR, "width": 3, "height": 4,
+                        "slots": [{ "name": "mod_plate", "required": true, "filter": [ARMOR_MOD_TPL] }]
+                    },
+                    ARMOR_MOD_TPL: { "parent": ITEM_NODE, "width": 1, "height": 1 },
                 },
-                FORCED_TPL: { "parent": ITEM_NODE, "width": 1, "height": 1 },
-                MONEY_TPL: {
-                    "parent": MONEY, "width": 1, "height": 1,
-                    "stackMaxSize": 500000, "stackMinRandom": 100, "stackMaxRandom": 200
+                "defaultPresets": {},
+                "staticWeapons": [{
+                    "Id": "w1", "Root": mongo_id::generate(),
+                    "Items": [{ "_id": mongo_id::generate(), "_tpl": WEAPON_TPL }]
+                }],
+                "staticContainers": [
+                    container("c1", 1.0, false),
+                    container("c2", 0.5, true),
+                    container("r1", 0.5, false),
+                    container("r2", 0.5, false),
+                    container("r3", 0.5, false),
+                ],
+                "staticForced": [{ "containerId": "c1", "itemTpl": FORCED_TPL }],
+                "staticLootDist": {
+                    CONTAINER_TPL: {
+                        "itemcountDistribution": [{ "count": 4, "relativeProbability": 1 }],
+                        // The forced tpl is deliberately absent: it may only reach a container
+                        // through `staticForced`.
+                        "itemDistribution": [
+                            { "tpl": MONEY_TPL, "relativeProbability": 1 },
+                            { "tpl": AMMO_BOX_TPL, "relativeProbability": 1 },
+                            { "tpl": MAGAZINE_TPL, "relativeProbability": 1 },
+                        ]
+                    }
                 },
-                AMMO_BOX_TPL: {
-                    "parent": AMMO_BOX, "width": 2, "height": 1,
-                    "stackSlotMaxCount": 60, "stackSlotFirstFilterFirst": CARTRIDGE_TPL
-                },
-                MAGAZINE_TPL: {
-                    "parent": MAGAZINE, "width": 1, "height": 2,
-                    "cartridgesMaxCount": 30, "cartridgesFirstFilter": [CARTRIDGE_TPL]
-                },
-                CARTRIDGE_TPL: { "parent": AMMO, "width": 1, "height": 1,
-                    "stackMaxSize": 30, "caliber": CALIBER },
-                WEAPON_TPL: {
-                    "parent": WEAPON, "width": 2, "height": 1,
-                    "ammoCaliber": CALIBER, "defAmmo": CARTRIDGE_TPL,
-                    "chambersFirstFilter": [CARTRIDGE_TPL]
-                },
-                WEAPON_MOD_TPL: { "parent": ITEM_NODE, "width": 1, "height": 1 },
-                ARMOR: { "parent": ITEM_NODE },
-                ARMOR_TPL: {
-                    "parent": ARMOR, "width": 3, "height": 4,
-                    "slots": [{ "name": "mod_plate", "required": true, "filter": [ARMOR_MOD_TPL] }]
-                },
-                ARMOR_MOD_TPL: { "parent": ITEM_NODE, "width": 1, "height": 1 },
-            },
-            "defaultPresets": {},
-            "moneyTpls": [MONEY_TPL],
-            "staticAmmoDist": {
-                CALIBER: [{ "tpl": CARTRIDGE_TPL, "relativeProbability": 1 }]
-            },
-            "config": {
-                "containerRandomisationEnabled": true, "locationInRandomisationMaps": true,
-                "containerTypesToNotRandomise": [], "containerGroupMinSizeMultiplier": 1,
-                "containerGroupMaxSizeMultiplier": 1, "allowDuplicateItemsInStaticContainers": true,
-                "tplsToStripChildItemsFrom": [], "fitLootIntoContainerAttempts": 3,
-                "magazineLootHasAmmoChancePercent": 100,
-                "staticMagazineLootHasAmmoChancePercent": 100,
-                "minFillLooseMagazinePercent": 30, "minFillStaticMagazinePercent": 30,
-                "staticLootMultiplier": 1, "looseLootMultiplier": 1,
-                "modSpawnChancePercent": {}, "looseLootBlacklist": []
-            },
-            "seasonal": {
-                "seasonalEventActive": false, "christmasEventEnabled": false,
-                "inactiveSeasonalItems": [], "christmasContainerIds": []
-            },
-            "lootableItemBlacklist": [],
-            "counter": { "maxCounts": {}, "trackedCounts": {} },
-            "staticWeapons": [{
-                "Id": "w1", "Root": mongo_id::generate(),
-                "Items": [{ "_id": mongo_id::generate(), "_tpl": WEAPON_TPL }]
-            }],
-            "staticContainers": [
-                container("c1", 1.0, false),
-                container("c2", 0.5, true),
-                container("r1", 0.5, false),
-                container("r2", 0.5, false),
-                container("r3", 0.5, false),
-            ],
-            "staticForced": [{ "containerId": "c1", "itemTpl": FORCED_TPL }],
-            "staticLootDist": {
-                CONTAINER_TPL: {
-                    "itemcountDistribution": [{ "count": 4, "relativeProbability": 1 }],
-                    // The forced tpl is deliberately absent: it may only reach a container through
-                    // `staticForced`.
-                    "itemDistribution": [
-                        { "tpl": MONEY_TPL, "relativeProbability": 1 },
-                        { "tpl": AMMO_BOX_TPL, "relativeProbability": 1 },
-                        { "tpl": MAGAZINE_TPL, "relativeProbability": 1 },
-                    ]
+                "statics": {
+                    "containersGroups": { "g1": { "minContainers": 2, "maxContainers": 2 } },
+                    "containers": {
+                        "r1": { "groupId": "g1" },
+                        "r2": { "groupId": "g1" },
+                        "r3": { "groupId": "g1" },
+                    }
                 }
             },
-            "statics": {
-                "containersGroups": { "g1": { "minContainers": 2, "maxContainers": 2 } },
-                "containers": {
-                    "r1": { "groupId": "g1" },
-                    "r2": { "groupId": "g1" },
-                    "r3": { "groupId": "g1" },
-                }
+            "varying": {
+                "locationId": "bigmap",
+                "moneyTpls": [MONEY_TPL],
+                "staticAmmoDist": {
+                    CALIBER: [{ "tpl": CARTRIDGE_TPL, "relativeProbability": 1 }]
+                },
+                "config": {
+                    "containerRandomisationEnabled": true, "locationInRandomisationMaps": true,
+                    "containerTypesToNotRandomise": [], "containerGroupMinSizeMultiplier": 1,
+                    "containerGroupMaxSizeMultiplier": 1, "allowDuplicateItemsInStaticContainers": true,
+                    "tplsToStripChildItemsFrom": [], "fitLootIntoContainerAttempts": 3,
+                    "magazineLootHasAmmoChancePercent": 100,
+                    "staticMagazineLootHasAmmoChancePercent": 100,
+                    "minFillLooseMagazinePercent": 30, "minFillStaticMagazinePercent": 30,
+                    "staticLootMultiplier": 1, "looseLootMultiplier": 1,
+                    "modSpawnChancePercent": {}, "looseLootBlacklist": []
+                },
+                "seasonal": {
+                    "seasonalEventActive": false, "christmasEventEnabled": false,
+                    "inactiveSeasonalItems": [], "christmasContainerIds": []
+                },
+                "lootableItemBlacklist": [],
+                "counter": { "maxCounts": {}, "trackedCounts": {} }
             }
         }))
         .unwrap()
+    }
+
+    /// The fixture's override wire, for tests that reshape the database half of a request.
+    fn wire_mut(request: &mut StaticContainersRequest) -> &mut LootViewsWire {
+        request
+            .views_override
+            .as_mut()
+            .expect("fixture has an override")
+    }
+
+    /// The override arm of a fixture request, split the way `generate_static_containers` splits
+    /// it, for tests that drive `add_loot_to_container` and friends directly.
+    fn parts(request: StaticContainersRequest) -> (LootViews, LootVarying, StaticsBundle) {
+        let mut views =
+            resolve_views(request.epoch, request.views_override).expect("override resolves");
+        let varying = request.varying;
+        let statics = statics_for(&mut views, &varying.location_id).expect("fixture has statics");
+
+        (views, varying, statics)
     }
 
     fn spawnpoint_ids(result: &StaticContainersResult) -> Vec<&str> {
@@ -1826,7 +1957,10 @@ mod tests {
     /// hides the per-group draw in `get_group_id_to_container_mappings` — the order-sensitive path.
     fn multi_group_fixture() -> StaticContainersRequest {
         let mut request = fixture_request();
-        let statics = request.statics.as_mut().expect("fixture has statics");
+        let statics = wire_mut(&mut request)
+            .statics
+            .as_mut()
+            .expect("fixture has statics");
 
         statics.containers_groups = Some(
             serde_json::from_value(json!({
@@ -1846,7 +1980,7 @@ mod tests {
 
         // Ceilings high enough never to bite, purely so several tpls land in `trackedCounts` — it
         // stays empty under the base fixture, which would hide its ordering from the comparison.
-        request.common.counter.max_counts = [MONEY_TPL, AMMO_BOX_TPL, MAGAZINE_TPL]
+        request.varying.counter.max_counts = [MONEY_TPL, AMMO_BOX_TPL, MAGAZINE_TPL]
             .into_iter()
             .map(|tpl| (tpl.to_owned(), 9999))
             .collect();
@@ -1862,9 +1996,9 @@ mod tests {
         // a regression to `HashMap` on the container-group map or `trackedCounts` surfaces.
         for seed in 0..25 {
             let mut request_a = multi_group_fixture();
-            request_a.common.test_seed = Some(seed);
+            request_a.varying.test_seed = Some(seed);
             let mut request_b = multi_group_fixture();
-            request_b.common.test_seed = Some(seed);
+            request_b.varying.test_seed = Some(seed);
 
             let result_a = generate_static_containers(request_a).unwrap();
             let result_b = generate_static_containers(request_b).unwrap();
@@ -1874,6 +2008,14 @@ mod tests {
                 strip_mongo_ids(&serde_json::to_string(&result_b).unwrap())
             );
         }
+    }
+
+    #[test]
+    fn an_override_send_needs_no_resident_db() {
+        // views_override present short-circuits the store entirely (epoch is not consulted).
+        let request = fixture_request();
+        assert!(request.views_override.is_some());
+        assert!(generate_static_containers(request).is_ok());
     }
 
     #[test]
@@ -1905,8 +2047,10 @@ mod tests {
     fn spawn_limits_cap_a_tpl_across_every_container() {
         let mut request = fixture_request();
         // Money is the only thing left in the pool, so every draw of every container is money.
-        request
+        wire_mut(&mut request)
             .static_loot_dist
+            .as_mut()
+            .unwrap()
             .get_mut(CONTAINER_TPL)
             .unwrap()
             .item_distribution = Some(
@@ -1914,7 +2058,7 @@ mod tests {
                 .unwrap(),
         );
         request
-            .common
+            .varying
             .counter
             .max_counts
             .insert(MONEY_TPL.to_owned(), 1);
@@ -1935,7 +2079,7 @@ mod tests {
     #[test]
     fn disabled_randomisation_adds_every_container() {
         let mut request = fixture_request();
-        request.common.config.container_randomisation_enabled = false;
+        request.varying.config.container_randomisation_enabled = false;
 
         let result = generate_static_containers(request).unwrap();
         let ids = spawnpoint_ids(&result);
@@ -1984,16 +2128,17 @@ mod tests {
 
     #[test]
     fn adding_loot_leaves_the_request_container_untouched() {
-        let request = fixture_request();
-        let mut ctx = loot_context(&request.common, CounterState::default());
-        let container = &request.static_containers.as_ref().unwrap()[0];
+        let (views, varying, statics) = parts(fixture_request());
+        let mut ctx = loot_context(&views, &varying, CounterState::default());
+        ctx.diagnostics = DiagSink::capture();
+        let container = &statics.static_containers.as_ref().unwrap()[0];
         let before = serde_json::to_value(container).unwrap();
 
         let filled = add_loot_to_container(
             &mut ctx,
             container,
-            request.static_forced.as_deref(),
-            &request.static_loot_dist,
+            statics.static_forced.as_deref(),
+            &statics.static_loot_dist,
             "bigmap",
         )
         .unwrap();
@@ -2017,14 +2162,15 @@ mod tests {
 
     #[test]
     fn weighted_count_errors_when_the_container_is_absent_from_the_loot_dist() {
-        let request = fixture_request();
-        let mut ctx = loot_context(&request.common, CounterState::default());
+        let (views, varying, statics) = parts(fixture_request());
+        let mut ctx = loot_context(&views, &varying, CounterState::default());
+        ctx.diagnostics = DiagSink::capture();
 
         assert!(
             get_weighted_count_of_container_items(
                 &mut ctx,
                 FORCED_TPL,
-                &request.static_loot_dist,
+                &statics.static_loot_dist,
                 "bigmap"
             )
             .is_err()
@@ -2033,8 +2179,9 @@ mod tests {
 
     #[test]
     fn containers_by_probability_returns_the_whole_pool_when_it_is_too_small() {
-        let request = fixture_request();
-        let mut ctx = loot_context(&request.common, CounterState::default());
+        let (views, varying, _statics) = parts(fixture_request());
+        let mut ctx = loot_context(&views, &varying, CounterState::default());
+        ctx.diagnostics = DiagSink::capture();
         let container_data = ContainerGroupCount {
             container_ids_with_probability: IndexMap::from([("r1".to_owned(), 0.5)]),
             chosen_count: 3.0,
@@ -2053,8 +2200,9 @@ mod tests {
         // order, so a sorted map would answer `[r1, r2, r3]` instead. The same ordering decides
         // which container each `get_chance_100` roll belongs to in the ungrouped edge case, and the
         // index each one takes in the probability array on the drawing path.
-        let request = fixture_request();
-        let mut ctx = loot_context(&request.common, CounterState::default());
+        let (views, varying, _statics) = parts(fixture_request());
+        let mut ctx = loot_context(&views, &varying, CounterState::default());
+        ctx.diagnostics = DiagSink::capture();
         let container_data = ContainerGroupCount {
             container_ids_with_probability: IndexMap::from([
                 ("r3".to_owned(), 0.5),
@@ -2077,8 +2225,11 @@ mod tests {
         // a sorted map emits `z_group`'s container after `a_group`'s, and rolls the ungrouped
         // containers before either.
         let mut request = fixture_request();
-        request.common.test_seed = Some(42);
-        let statics = request.statics.as_mut().expect("fixture has statics");
+        request.varying.test_seed = Some(42);
+        let statics = wire_mut(&mut request)
+            .statics
+            .as_mut()
+            .expect("fixture has statics");
         // Rides on serde_json's `preserve_order`, as the FFI entry points do: without it the `json!`
         // below - and the request the C# caller sends - would arrive alphabetised.
         statics.containers_groups = Some(
@@ -2108,7 +2259,7 @@ mod tests {
     fn christmas_containers_are_dropped_outside_the_event() {
         let mut request = fixture_request();
         request
-            .common
+            .varying
             .seasonal
             .christmas_container_ids
             .insert("c1".to_owned());
@@ -2118,11 +2269,11 @@ mod tests {
 
         let mut request = fixture_request();
         request
-            .common
+            .varying
             .seasonal
             .christmas_container_ids
             .insert("c1".to_owned());
-        request.common.seasonal.christmas_event_enabled = true;
+        request.varying.seasonal.christmas_event_enabled = true;
 
         let result = generate_static_containers(request).unwrap();
         assert!(spawnpoint_ids(&result).contains(&"c1"));
@@ -2131,31 +2282,27 @@ mod tests {
     #[test]
     fn missing_statics_stops_after_the_guaranteed_containers() {
         let mut request = fixture_request();
-        request.statics = None;
+        wire_mut(&mut request).statics = None;
 
         let result = generate_static_containers(request).unwrap();
 
         assert_eq!(spawnpoint_ids(&result), vec!["w1", "c1", "c2"]);
         assert_eq!(result.static_container_count, 2);
-        assert!(result.diagnostics.iter().any(|entry| {
-            entry.level == WARNING
-                && entry.locale_key.as_deref() == Some("location-unable_to_generate_static_loot")
-        }));
     }
 
     #[test]
     fn absent_static_data_is_fatal() {
         let mut request = fixture_request();
-        request.static_weapons = None;
+        wire_mut(&mut request).static_weapons = None;
         assert!(generate_static_containers(request).is_err());
 
         let mut request = fixture_request();
-        request.static_containers = None;
+        wire_mut(&mut request).static_containers = None;
         assert!(generate_static_containers(request).is_err());
 
         // The forced list is only reached once a container is filled, exactly as in C#.
         let mut request = fixture_request();
-        request.static_forced = None;
+        wire_mut(&mut request).static_forced = None;
         assert!(generate_static_containers(request).is_err());
     }
 
@@ -2166,12 +2313,13 @@ mod tests {
     fn ungrouped_containers_roll_their_own_probability() {
         for (probability, expected_containers) in [(0.99, 5), (0.005, 2)] {
             let mut request = fixture_request();
-            request.statics.as_mut().unwrap().containers = Some(HashMap::from([
+            let wire = wire_mut(&mut request);
+            wire.statics.as_mut().unwrap().containers = Some(HashMap::from([
                 ("r1".to_owned(), ContainerData::default()),
                 ("r2".to_owned(), ContainerData::default()),
                 ("r3".to_owned(), ContainerData::default()),
             ]));
-            for container in request.static_containers.as_mut().unwrap() {
+            for container in wire.static_containers.as_mut().unwrap() {
                 if template_id(container).starts_with('r') {
                     container.probability = Some(probability);
                 }
@@ -2187,7 +2335,7 @@ mod tests {
     #[test]
     fn weapons_are_built_from_their_default_preset() {
         let mut request = fixture_request();
-        request.common.default_presets = serde_json::from_value(json!({
+        wire_mut(&mut request).default_presets = serde_json::from_value(json!({
             WEAPON_TPL: { "items": [
                 { "_id": "p1", "_tpl": WEAPON_TPL },
                 { "_id": "p2", "_tpl": WEAPON_MOD_TPL, "parentId": "p1", "slotId": "mod_handguard" },
@@ -2195,7 +2343,9 @@ mod tests {
             ]}
         }))
         .unwrap();
-        let mut ctx = loot_context(&request.common, CounterState::default());
+        let (views, varying, _statics) = parts(request);
+        let mut ctx = loot_context(&views, &varying, CounterState::default());
+        ctx.diagnostics = DiagSink::capture();
 
         let weapon = create_static_loot_item(&mut ctx, WEAPON_TPL, Some("container"))
             .unwrap()
@@ -2222,36 +2372,65 @@ mod tests {
     #[test]
     fn an_empty_weapon_preset_is_fatal() {
         let mut request = fixture_request();
-        request.common.default_presets =
+        wire_mut(&mut request).default_presets =
             serde_json::from_value(json!({ WEAPON_TPL: { "items": [] } })).unwrap();
-        let mut ctx = loot_context(&request.common, CounterState::default());
+        let (views, varying, _statics) = parts(request);
+        let mut ctx = loot_context(&views, &varying, CounterState::default());
+        ctx.diagnostics = DiagSink::capture();
 
         assert!(create_static_loot_item(&mut ctx, WEAPON_TPL, None).is_err());
-        assert!(ctx.diagnostics.iter().any(|entry| {
+        assert!(ctx.diagnostics.captured().iter().any(|entry| {
             entry.level == ERROR && entry.locale_key.as_deref() == Some("location-preset_not_found")
+        }));
+    }
+
+    #[test]
+    fn a_missing_weapon_root_carries_the_critical_error_locale_key() {
+        let (views, varying, _statics) = parts(fixture_request());
+        let mut ctx = loot_context(&views, &varying, CounterState::default());
+        ctx.diagnostics = DiagSink::capture();
+
+        // The arm guards an empty item list, which `create_static_loot_item` never produces —
+        // reach it directly, as C#'s guard would be reached.
+        let error =
+            match create_weapon_root_and_children(&mut ctx, WEAPON_TPL, None, &mut Vec::new()) {
+                Err(error) => error,
+                Ok(_) => panic!("expected the missing-root failure"),
+            };
+
+        // `localise` falls back to the key when the process-global table lacks it, and no test
+        // installs this key — deterministic under any interleaving with `logger_exports_roundtrip`.
+        assert_eq!(error.message, "location-critical_error_see_log");
+        assert!(ctx.diagnostics.captured().iter().any(|entry| {
+            entry.level == ERROR
+                && entry.locale_key.as_deref() == Some("location-missing_root_item")
         }));
     }
 
     #[test]
     fn an_absent_count_distribution_warns_and_counts_nothing() {
         let mut request = fixture_request();
-        request
+        wire_mut(&mut request)
             .static_loot_dist
+            .as_mut()
+            .unwrap()
             .get_mut(CONTAINER_TPL)
             .unwrap()
             .item_count_distribution = None;
-        let mut ctx = loot_context(&request.common, CounterState::default());
+        let (views, varying, statics) = parts(request);
+        let mut ctx = loot_context(&views, &varying, CounterState::default());
+        ctx.diagnostics = DiagSink::capture();
 
         let count = get_weighted_count_of_container_items(
             &mut ctx,
             CONTAINER_TPL,
-            &request.static_loot_dist,
+            &statics.static_loot_dist,
             "bigmap",
         )
         .unwrap();
 
         assert_eq!(count, 0);
-        let warning = &ctx.diagnostics[0];
+        let warning = &ctx.diagnostics.captured()[0];
         assert_eq!(warning.level, WARNING);
         assert_eq!(
             warning.locale_key.as_deref(),
@@ -2265,8 +2444,9 @@ mod tests {
 
     #[test]
     fn static_loot_items_are_hydrated_by_base_class() {
-        let request = fixture_request();
-        let mut ctx = loot_context(&request.common, CounterState::default());
+        let (views, varying, _statics) = parts(fixture_request());
+        let mut ctx = loot_context(&views, &varying, CounterState::default());
+        ctx.diagnostics = DiagSink::capture();
 
         let money = create_static_loot_item(&mut ctx, MONEY_TPL, Some("parent"))
             .unwrap()
@@ -2291,7 +2471,7 @@ mod tests {
             .unwrap();
         assert_eq!(weapon.items.len(), 1);
         assert_eq!((weapon.width, weapon.height), (Some(2), Some(1)));
-        assert!(ctx.diagnostics.iter().any(|entry| {
+        assert!(ctx.diagnostics.captured().iter().any(|entry| {
             entry.level == DEBUG
                 && entry.message.as_deref()
                     == Some(&format!(
@@ -2303,8 +2483,9 @@ mod tests {
     #[test]
     fn armor_is_hydrated_from_a_preset_or_its_slots() {
         // No preset: the base item made by the caller keeps its parent and gains its slot mods.
-        let request = fixture_request();
-        let mut ctx = loot_context(&request.common, CounterState::default());
+        let (views, varying, _statics) = parts(fixture_request());
+        let mut ctx = loot_context(&views, &varying, CounterState::default());
+        ctx.diagnostics = DiagSink::capture();
 
         let armor = create_static_loot_item(&mut ctx, ARMOR_TPL, Some("container"))
             .unwrap()
@@ -2317,14 +2498,16 @@ mod tests {
 
         // Preset: its items replace the base one wholesale, re-ided, under the same parent.
         let mut request = fixture_request();
-        request.common.default_presets = serde_json::from_value(json!({
+        wire_mut(&mut request).default_presets = serde_json::from_value(json!({
             ARMOR_TPL: { "items": [
                 { "_id": "p1", "_tpl": ARMOR_TPL },
                 { "_id": "p2", "_tpl": ARMOR_MOD_TPL, "parentId": "p1", "slotId": "mod_plate" },
             ]}
         }))
         .unwrap();
-        let mut ctx = loot_context(&request.common, CounterState::default());
+        let (views, varying, _statics) = parts(request);
+        let mut ctx = loot_context(&views, &varying, CounterState::default());
+        ctx.diagnostics = DiagSink::capture();
 
         let armor = create_static_loot_item(&mut ctx, ARMOR_TPL, Some("container"))
             .unwrap()
@@ -2399,78 +2582,84 @@ mod tests {
         always_spawn_point["template"]["IsAlwaysSpawn"] = json!(true);
 
         serde_json::from_value(json!({
-            "locationId": "bigmap",
-            "itemsView": {
-                ITEM_NODE: {},
-                MONEY: { "parent": ITEM_NODE },
-                AMMO: { "parent": ITEM_NODE },
-                AMMO_BOX: { "parent": ITEM_NODE },
-                MAGAZINE: { "parent": ITEM_NODE },
-                WEAPON: { "parent": ITEM_NODE },
-                MONEY_TPL: {
-                    "parent": MONEY, "width": 1, "height": 1,
-                    "stackMaxSize": 500000, "stackMinRandom": 100, "stackMaxRandom": 200
+            "epoch": 0,
+            "viewsOverride": {
+                "itemsView": {
+                    ITEM_NODE: {},
+                    MONEY: { "parent": ITEM_NODE },
+                    AMMO: { "parent": ITEM_NODE },
+                    AMMO_BOX: { "parent": ITEM_NODE },
+                    MAGAZINE: { "parent": ITEM_NODE },
+                    WEAPON: { "parent": ITEM_NODE },
+                    MONEY_TPL: {
+                        "parent": MONEY, "width": 1, "height": 1,
+                        "stackMaxSize": 500000, "stackMinRandom": 100, "stackMaxRandom": 200
+                    },
+                    WEAPON_TPL: { "parent": WEAPON, "width": 2, "height": 1 },
+                    WEAPON_MOD_TPL: { "parent": ITEM_NODE, "width": 1, "height": 1 },
+                    MAGAZINE_TPL: {
+                        "parent": MAGAZINE, "width": 1, "height": 2,
+                        "cartridgesMaxCount": 30, "cartridgesFirstFilter": [CARTRIDGE_TPL]
+                    },
+                    CARTRIDGE_TPL: { "parent": AMMO, "width": 1, "height": 1,
+                        "stackMaxSize": 30, "caliber": CALIBER },
+                    FORCED_TPL: { "parent": ITEM_NODE, "width": 1, "height": 1 },
+                    PLAIN_TPL: { "parent": ITEM_NODE, "width": 1, "height": 1 },
+                    SEASONAL_TPL: { "parent": ITEM_NODE, "width": 1, "height": 1 },
                 },
-                WEAPON_TPL: { "parent": WEAPON, "width": 2, "height": 1 },
-                WEAPON_MOD_TPL: { "parent": ITEM_NODE, "width": 1, "height": 1 },
-                MAGAZINE_TPL: {
-                    "parent": MAGAZINE, "width": 1, "height": 2,
-                    "cartridgesMaxCount": 30, "cartridgesFirstFilter": [CARTRIDGE_TPL]
+                // No statics members: the dynamic send omits them, mirroring the old envelope.
+                "defaultPresets": {},
+            },
+            "varying": {
+                "locationId": "bigmap",
+                "moneyTpls": [MONEY_TPL],
+                "staticAmmoDist": {
+                    CALIBER: [{ "tpl": CARTRIDGE_TPL, "relativeProbability": 1 }]
                 },
-                CARTRIDGE_TPL: { "parent": AMMO, "width": 1, "height": 1,
-                    "stackMaxSize": 30, "caliber": CALIBER },
-                FORCED_TPL: { "parent": ITEM_NODE, "width": 1, "height": 1 },
-                PLAIN_TPL: { "parent": ITEM_NODE, "width": 1, "height": 1 },
-                SEASONAL_TPL: { "parent": ITEM_NODE, "width": 1, "height": 1 },
-            },
-            "defaultPresets": {},
-            "moneyTpls": [MONEY_TPL],
-            "staticAmmoDist": {
-                CALIBER: [{ "tpl": CARTRIDGE_TPL, "relativeProbability": 1 }]
-            },
-            "config": {
-                "containerRandomisationEnabled": true, "locationInRandomisationMaps": true,
-                "containerTypesToNotRandomise": [], "containerGroupMinSizeMultiplier": 1,
-                "containerGroupMaxSizeMultiplier": 1, "allowDuplicateItemsInStaticContainers": true,
-                "tplsToStripChildItemsFrom": [], "fitLootIntoContainerAttempts": 3,
-                // The two magazine settings the loose path must NOT use are set to fail loudly:
-                // a 0% chance never fills, a 10% fill leaves a third of the stack.
-                "magazineLootHasAmmoChancePercent": 0,
-                "staticMagazineLootHasAmmoChancePercent": 100,
-                "minFillLooseMagazinePercent": 90, "minFillStaticMagazinePercent": 10,
-                "staticLootMultiplier": 1, "looseLootMultiplier": 1,
-                "modSpawnChancePercent": {}, "looseLootBlacklist": ["blacklisted_1"]
-            },
-            "seasonal": {
-                "seasonalEventActive": false, "christmasEventEnabled": false,
-                "inactiveSeasonalItems": [SEASONAL_TPL], "christmasContainerIds": []
-            },
-            "lootableItemBlacklist": [],
-            "counter": { "maxCounts": { SEASONAL_TPL: 5 }, "trackedCounts": {} },
-            "looseLoot": {
-                "spawnpointCount": { "mean": 6, "std": 0 },
-                "spawnpointsForced": [
-                    loose_point("f1", 1.0, "forced_1", vec![loose_item("fi1", FORCED_TPL)]),
-                    // Same template id as the point above, so it is logged and dropped.
-                    loose_point("f2", 1.0, "forced_1", vec![loose_item("fi2", FORCED_TPL)]),
-                    loose_point("f3", 1.0, "forced_seasonal", vec![loose_item("fi3", SEASONAL_TPL)]),
-                ],
-                "spawnpoints": [
-                    loose_point("money_1", 1.0, "money_1", vec![loose_item("mi1", MONEY_TPL)]),
-                    loose_point("weapon_1", 1.0, "weapon_1", vec![
-                        loose_item("wi1", WEAPON_TPL),
-                        loose_child("wi2", WEAPON_MOD_TPL, "wi1"),
-                    ]),
-                    loose_point("magazine_1", 1.0, "magazine_1", vec![loose_item("gi1", MAGAZINE_TPL)]),
-                    // Two guaranteed points on one position: only the first may survive the dedupe.
-                    loose_point("shared_location", 1.0, "dupe_first", vec![loose_item("di1", PLAIN_TPL)]),
-                    loose_point("shared_location", 1.0, "dupe_second", vec![loose_item("di2", PLAIN_TPL)]),
-                    loose_point("christmas_1", 1.0, "Christmas_1", vec![loose_item("ci1", PLAIN_TPL)]),
-                    loose_point("blacklisted_1", 1.0, "blacklisted_1", vec![loose_item("bi1", PLAIN_TPL)]),
-                    loose_point("weighted_1", 0.5, "weighted_1", vec![loose_item("wi3", PLAIN_TPL)]),
-                    loose_point("weighted_2", 0.5, "weighted_2", vec![loose_item("wi4", PLAIN_TPL)]),
-                    always_spawn_point,
-                ]
+                "config": {
+                    "containerRandomisationEnabled": true, "locationInRandomisationMaps": true,
+                    "containerTypesToNotRandomise": [], "containerGroupMinSizeMultiplier": 1,
+                    "containerGroupMaxSizeMultiplier": 1, "allowDuplicateItemsInStaticContainers": true,
+                    "tplsToStripChildItemsFrom": [], "fitLootIntoContainerAttempts": 3,
+                    // The two magazine settings the loose path must NOT use are set to fail loudly:
+                    // a 0% chance never fills, a 10% fill leaves a third of the stack.
+                    "magazineLootHasAmmoChancePercent": 0,
+                    "staticMagazineLootHasAmmoChancePercent": 100,
+                    "minFillLooseMagazinePercent": 90, "minFillStaticMagazinePercent": 10,
+                    "staticLootMultiplier": 1, "looseLootMultiplier": 1,
+                    "modSpawnChancePercent": {}, "looseLootBlacklist": ["blacklisted_1"]
+                },
+                "seasonal": {
+                    "seasonalEventActive": false, "christmasEventEnabled": false,
+                    "inactiveSeasonalItems": [SEASONAL_TPL], "christmasContainerIds": []
+                },
+                "lootableItemBlacklist": [],
+                "counter": { "maxCounts": { SEASONAL_TPL: 5 }, "trackedCounts": {} },
+                "looseLoot": {
+                    "spawnpointCount": { "mean": 6, "std": 0 },
+                    "spawnpointsForced": [
+                        loose_point("f1", 1.0, "forced_1", vec![loose_item("fi1", FORCED_TPL)]),
+                        // Same template id as the point above, so it is logged and dropped.
+                        loose_point("f2", 1.0, "forced_1", vec![loose_item("fi2", FORCED_TPL)]),
+                        loose_point("f3", 1.0, "forced_seasonal", vec![loose_item("fi3", SEASONAL_TPL)]),
+                    ],
+                    "spawnpoints": [
+                        loose_point("money_1", 1.0, "money_1", vec![loose_item("mi1", MONEY_TPL)]),
+                        loose_point("weapon_1", 1.0, "weapon_1", vec![
+                            loose_item("wi1", WEAPON_TPL),
+                            loose_child("wi2", WEAPON_MOD_TPL, "wi1"),
+                        ]),
+                        loose_point("magazine_1", 1.0, "magazine_1", vec![loose_item("gi1", MAGAZINE_TPL)]),
+                        // Two guaranteed points on one position: only the first may survive the dedupe.
+                        loose_point("shared_location", 1.0, "dupe_first", vec![loose_item("di1", PLAIN_TPL)]),
+                        loose_point("shared_location", 1.0, "dupe_second", vec![loose_item("di2", PLAIN_TPL)]),
+                        loose_point("christmas_1", 1.0, "Christmas_1", vec![loose_item("ci1", PLAIN_TPL)]),
+                        loose_point("blacklisted_1", 1.0, "blacklisted_1", vec![loose_item("bi1", PLAIN_TPL)]),
+                        loose_point("weighted_1", 0.5, "weighted_1", vec![loose_item("wi3", PLAIN_TPL)]),
+                        loose_point("weighted_2", 0.5, "weighted_2", vec![loose_item("wi4", PLAIN_TPL)]),
+                        always_spawn_point,
+                    ]
+                }
             }
         }))
         .unwrap()
@@ -2509,14 +2698,6 @@ mod tests {
             // 2 forced + 4 guaranteed (5 less the deduped one) + 1 of the 2 weighted points.
             assert_eq!(result.spawnpoints.len(), 7, "{ids:?}");
         }
-
-        let result = generate_dynamic_loot(fixture_dynamic_request()).unwrap();
-        assert!(result.diagnostics.iter().any(|entry| {
-            entry.level == DEBUG
-                && entry.message.as_deref().is_some_and(|message| {
-                    message.starts_with("Attempted to add a forced loot location with Id: forced_1")
-                })
-        }));
     }
 
     #[test]
@@ -2529,7 +2710,7 @@ mod tests {
         assert_eq!(result.tracked_counts[SEASONAL_TPL], 1);
 
         let mut request = fixture_dynamic_request();
-        request.common.seasonal.seasonal_event_active = true;
+        request.varying.common.seasonal.seasonal_event_active = true;
 
         let result = generate_dynamic_loot(request).unwrap();
         assert!(dynamic_ids(&result).contains(&"forced_seasonal"));
@@ -2546,15 +2727,9 @@ mod tests {
             assert!(!ids.contains(&"blacklisted_1"), "{ids:?}");
         }
 
-        let result = generate_dynamic_loot(fixture_dynamic_request()).unwrap();
-        assert!(result.diagnostics.iter().any(|entry| {
-            entry.level == DEBUG
-                && entry.message.as_deref() == Some("Ignoring loose loot location: blacklisted_1")
-        }));
-
         // The christmas point comes back for the event, the blacklisted one never does.
         let mut request = fixture_dynamic_request();
-        request.common.seasonal.christmas_event_enabled = true;
+        request.varying.common.seasonal.christmas_event_enabled = true;
 
         let result = generate_dynamic_loot(request).unwrap();
         assert!(dynamic_ids(&result).contains(&"Christmas_1"));
@@ -2564,6 +2739,7 @@ mod tests {
     fn spawn_limits_gate_dynamic_spawn_points() {
         let mut request = fixture_dynamic_request();
         request
+            .varying
             .common
             .counter
             .max_counts
@@ -2685,11 +2861,11 @@ mod tests {
     #[test]
     fn missing_loose_loot_data_is_fatal() {
         let mut request = fixture_dynamic_request();
-        request.loose_loot.spawnpoints = None;
+        request.varying.loose_loot.spawnpoints = None;
         assert!(generate_dynamic_loot(request).is_err());
 
         let mut request = fixture_dynamic_request();
-        request.loose_loot.spawnpoint_count = None;
+        request.varying.loose_loot.spawnpoint_count = None;
         assert!(generate_dynamic_loot(request).is_err());
     }
 
@@ -2697,20 +2873,22 @@ mod tests {
     fn the_loot_pool_drops_out_of_season_and_blacklisted_items() {
         let mut request = fixture_request();
         request
-            .common
+            .varying
             .seasonal
             .inactive_seasonal_items
             .insert(MONEY_TPL.to_owned());
         request
-            .common
+            .varying
             .lootable_item_blacklist
             .insert(AMMO_BOX_TPL.to_owned());
-        let mut ctx = loot_context(&request.common, CounterState::default());
+        let (views, varying, statics) = parts(request);
+        let mut ctx = loot_context(&views, &varying, CounterState::default());
+        ctx.diagnostics = DiagSink::capture();
 
         let pool = get_possible_loot_items_for_container(
             &mut ctx,
             CONTAINER_TPL,
-            &request.static_loot_dist,
+            &statics.static_loot_dist,
         );
 
         assert_eq!(pool.len(), 1);

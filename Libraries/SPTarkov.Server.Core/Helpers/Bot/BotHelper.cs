@@ -24,6 +24,15 @@ public class BotHelper(ISptLogger<BotHelper> logger, BotTable botTable, RandomUt
     private readonly ConcurrentDictionary<string, List<string>> _pmcNameCache = new();
 
     /// <summary>
+    ///     The bot table this helper reads its PMC name pools from, so the native ragfair projection
+    ///     can build those pools without a constructor change on its caller.
+    /// </summary>
+    internal BotTable BotTable
+    {
+        get { return botTable; }
+    }
+
+    /// <summary>
     ///     Get a template object for the specified botRole from bots.types db
     /// </summary>
     /// <param name="role">botRole to get template for</param>

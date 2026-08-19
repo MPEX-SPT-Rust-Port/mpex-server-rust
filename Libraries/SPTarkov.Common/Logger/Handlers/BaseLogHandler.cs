@@ -1,4 +1,3 @@
-using Spectre.Console;
 using SPTarkov.Common.Models.Logging;
 
 namespace SPTarkov.Common.Logger.Handlers;
@@ -16,38 +15,22 @@ public abstract class BaseLogHandler : ILogHandler
         var formattedMessage = string.Format(
             null,
             format,
-            EscapeOrEmpty(message.LogTime.ToString("yyyy-MM-dd")),
-            EscapeOrEmpty(message.LogTime.ToString("HH:mm:ss.fff")),
+            message.LogTime.ToString("yyyy-MM-dd"),
+            message.LogTime.ToString("HH:mm:ss.fff"),
             processedMessage ?? string.Empty,
-            EscapeOrEmpty(GetLoggerShortName(message.Logger)),
-            EscapeOrEmpty(message.Logger),
-            EscapeOrEmpty(message.threadId.ToString()),
-            EscapeOrEmpty(message.threadName),
+            GetLoggerShortName(message.Logger),
+            message.Logger,
+            message.threadId.ToString(),
+            message.threadName ?? string.Empty,
             message.LogLevel.ToString()
         );
 
         if (message.Exception != null)
         {
-            return string.Concat(
-                formattedMessage,
-                "\n",
-                EscapeOrEmpty(message.Exception.Message),
-                "\n",
-                EscapeOrEmpty(message.Exception.StackTrace)
-            );
+            return string.Concat(formattedMessage, "\n", message.Exception.Message, "\n", message.Exception.StackTrace);
         }
 
         return formattedMessage;
-    }
-
-    private static string EscapeOrEmpty(string? text)
-    {
-        if (string.IsNullOrEmpty(text))
-        {
-            return string.Empty;
-        }
-
-        return Markup.Escape(text);
     }
 
     protected string GetLoggerShortName(string logger)

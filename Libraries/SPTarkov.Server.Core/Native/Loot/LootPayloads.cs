@@ -17,23 +17,13 @@ namespace SPTarkov.Server.Core.Native.Loot;
 /// <see cref="JsonIgnoreCondition.WhenWritingNull"/>, so a null member is omitted and Rust reads it
 /// back as <c>None</c>.
 /// </summary>
-public record LootCommon
+public record LootVarying
 {
     /// <summary>
     /// Lowercased by the caller.
     /// </summary>
     [JsonPropertyName("locationId")]
     public required string LocationId { get; set; }
-
-    /// <summary>
-    /// The slice of every <c>TemplateItem</c> the generator reads, keyed by tpl. Templates without
-    /// props have no representation here and must be left out.
-    /// </summary>
-    [JsonPropertyName("itemsView")]
-    public required Dictionary<MongoId, ItemView> ItemsView { get; set; }
-
-    [JsonPropertyName("defaultPresets")]
-    public required Dictionary<MongoId, PresetView> DefaultPresets { get; set; }
 
     [JsonPropertyName("moneyTpls")]
     public required List<MongoId> MoneyTpls { get; set; }
@@ -159,6 +149,160 @@ public record ItemView
 
     [JsonPropertyName("defAmmo")]
     public MongoId? DefAmmo { get; set; }
+
+    /// <summary>
+    /// <c>TemplateItem.Name</c> - the template's <c>_name</c>, not a localised one.
+    /// </summary>
+    [JsonPropertyName("name")]
+    public string? Name { get; set; }
+
+    /// <summary>
+    /// <c>TemplateItem.Type</c> - the template's <c>_type</c>.
+    /// </summary>
+    [JsonPropertyName("type")]
+    public string? Type { get; set; }
+
+    [JsonPropertyName("armorClass")]
+    public int? ArmorClass { get; set; }
+
+    /// <summary>
+    /// Null and <c>false</c> are not interchangeable: the reward pool filters on one and the sealed
+    /// container pool on the other.
+    /// </summary>
+    [JsonPropertyName("questItem")]
+    public bool? QuestItem { get; set; }
+
+    // Added for the bot port. Every one is nullable, so the loot payloads that never read them stay
+    // absent from the wire and the loot side of the contract is unchanged.
+
+    /// <summary>
+    /// <c>Chambers</c> as slot objects - <see cref="ChambersFirstFilter"/> flattens the first
+    /// chamber only. Projected verbatim: an empty list must stay an empty list, because the native
+    /// <c>patron_in_weapon</c> lookup tells "no chambers" and "chambers with nothing in them" apart.
+    /// </summary>
+    [JsonPropertyName("chambers")]
+    public List<SlotView>? Chambers { get; set; }
+
+    /// <summary>
+    /// <c>Cartridges</c> as slot objects - <see cref="CartridgesMaxCount"/> and
+    /// <see cref="CartridgesFirstFilter"/> flatten the first cartridge only.
+    /// </summary>
+    [JsonPropertyName("cartridges")]
+    public List<SlotView>? Cartridges { get; set; }
+
+    /// <summary>
+    /// The <c>ReloadMode</c> enum member name - the native side compares it against
+    /// <c>OnlyBarrel</c> as a string.
+    /// </summary>
+    [JsonPropertyName("reloadMode")]
+    public string? ReloadMode { get; set; }
+
+    /// <summary>
+    /// The <c>ReloadMagType</c> enum member name, compared against <c>InternalMagazine</c>.
+    /// </summary>
+    [JsonPropertyName("reloadMagType")]
+    public string? ReloadMagType { get; set; }
+
+    [JsonPropertyName("isChamberLoad")]
+    public bool? IsChamberLoad { get; set; }
+
+    [JsonPropertyName("defMagType")]
+    public MongoId? DefMagType { get; set; }
+
+    [JsonPropertyName("linkedWeapon")]
+    public string? LinkedWeapon { get; set; }
+
+    [JsonPropertyName("maxDurability")]
+    public double? MaxDurability { get; set; }
+
+    /// <summary>
+    /// Only its presence is read - it is what marks a template "is a weapon".
+    /// </summary>
+    [JsonPropertyName("weapClass")]
+    public string? WeapClass { get; set; }
+
+    [JsonPropertyName("hasHinge")]
+    public bool? HasHinge { get; set; }
+
+    [JsonPropertyName("foldable")]
+    public bool? Foldable { get; set; }
+
+    [JsonPropertyName("foldedSlot")]
+    public string? FoldedSlot { get; set; }
+
+    [JsonPropertyName("sizeReduceRight")]
+    public int? SizeReduceRight { get; set; }
+
+    [JsonPropertyName("weapFireType")]
+    public HashSet<string>? WeapFireType { get; set; }
+
+    [JsonPropertyName("maxHpResource")]
+    public int? MaxHpResource { get; set; }
+
+    [JsonPropertyName("maxResource")]
+    public int? MaxResource { get; set; }
+
+    [JsonPropertyName("foodUseTime")]
+    public double? FoodUseTime { get; set; }
+
+    [JsonPropertyName("faceShieldComponent")]
+    public bool? FaceShieldComponent { get; set; }
+
+    [JsonPropertyName("blocksEarpiece")]
+    public bool? BlocksEarpiece { get; set; }
+
+    [JsonPropertyName("blocksEyewear")]
+    public bool? BlocksEyewear { get; set; }
+
+    [JsonPropertyName("blocksFaceCover")]
+    public bool? BlocksFaceCover { get; set; }
+
+    [JsonPropertyName("blocksHeadwear")]
+    public bool? BlocksHeadwear { get; set; }
+
+    [JsonPropertyName("blocksFolding")]
+    public bool? BlocksFolding { get; set; }
+
+    [JsonPropertyName("blocksCollapsible")]
+    public bool? BlocksCollapsible { get; set; }
+
+    /// <summary>
+    /// The C# prop is <c>BlockLeftStance</c>, not <c>Blocks…</c>.
+    /// </summary>
+    [JsonPropertyName("blockLeftStance")]
+    public bool? BlockLeftStance { get; set; }
+
+    [JsonPropertyName("blocksArmorVest")]
+    public bool? BlocksArmorVest { get; set; }
+
+    /// <summary>
+    /// Every grid, not just the first: a bot container is walked grid by grid.
+    /// <see cref="GridCellsH"/> / <see cref="GridCellsV"/> flatten the first one.
+    /// </summary>
+    [JsonPropertyName("grids")]
+    public List<GridView>? Grids { get; set; }
+
+    // Added for the ragfair port. Nullable like the bot additions, so the loot and bot payloads that
+    // never read them stay absent from the wire.
+
+    /// <summary>
+    /// <c>Durability</c> - the ragfair condition path reads "is repairable" off its presence.
+    /// </summary>
+    [JsonPropertyName("durability")]
+    public double? Durability { get; set; }
+
+    [JsonPropertyName("maximumNumberOfUsage")]
+    public int? MaximumNumberOfUsage { get; set; }
+
+    [JsonPropertyName("maxRepairResource")]
+    public int? MaxRepairResource { get; set; }
+
+    /// <summary>
+    /// <c>CanSellOnRagfair</c> - the BSG flea blacklist. The native side never writes it back; the
+    /// templates it would have flipped come home as <c>rejectedCanSellTemplates</c>.
+    /// </summary>
+    [JsonPropertyName("canSellOnRagfair")]
+    public bool? CanSellOnRagfair { get; set; }
 }
 
 /// <summary>
@@ -177,12 +321,66 @@ public record SlotView
     /// </summary>
     [JsonPropertyName("filter")]
     public HashSet<MongoId>? Filter { get; set; }
+
+    /// <summary>
+    /// <c>Props.Filters[0].Plate</c> - read by the bot port's default-plate lookup only.
+    /// </summary>
+    [JsonPropertyName("plate")]
+    public MongoId? Plate { get; set; }
+}
+
+/// <summary>
+/// A <c>Grid</c> flattened onto its <c>_props</c>.
+/// </summary>
+public record GridView
+{
+    /// <summary>
+    /// <c>Grid._name</c> - becomes the placed item's <c>slotId</c>.
+    /// </summary>
+    [JsonPropertyName("name")]
+    public string? Name { get; set; }
+
+    [JsonPropertyName("cellsH")]
+    public int? CellsH { get; set; }
+
+    [JsonPropertyName("cellsV")]
+    public int? CellsV { get; set; }
+
+    [JsonPropertyName("filters")]
+    public List<GridFilterView>? Filters { get; set; }
+}
+
+public record GridFilterView
+{
+    [JsonPropertyName("filter")]
+    public HashSet<MongoId>? Filter { get; set; }
+
+    [JsonPropertyName("excludedFilter")]
+    public HashSet<MongoId>? ExcludedFilter { get; set; }
 }
 
 public record PresetView
 {
     [JsonPropertyName("items")]
     public required List<Item> Items { get; set; }
+
+    /// <summary>
+    /// <c>Preset.Id</c>, read only for diagnostics.
+    /// </summary>
+    [JsonPropertyName("id")]
+    public MongoId? Id { get; set; }
+
+    /// <summary>
+    /// <c>Preset.Name</c>, read only for diagnostics.
+    /// </summary>
+    [JsonPropertyName("name")]
+    public string? Name { get; set; }
+
+    /// <summary>
+    /// <c>Preset.Encyclopedia</c> - the root tpl of a default preset.
+    /// </summary>
+    [JsonPropertyName("encyclopedia")]
+    public MongoId? Encyclopedia { get; set; }
 }
 
 /// <summary>
@@ -285,8 +483,24 @@ public record CounterState
     public required Dictionary<MongoId, int> TrackedCounts { get; set; }
 }
 
-public record StaticContainersRequest : LootCommon
+/// <summary>
+/// The distrust fallback (spec § Exports): the C#-built database half, used for this call only and
+/// never made resident. Present iff the caller is ineligible for residency. The statics members
+/// ride on static-container sends and are omitted on dynamic sends, mirroring the two old
+/// envelopes.
+/// </summary>
+public record LootViewsOverride
 {
+    /// <summary>
+    /// The slice of every <c>TemplateItem</c> the generator reads, keyed by tpl. Templates without
+    /// props have no representation here and must be left out.
+    /// </summary>
+    [JsonPropertyName("itemsView")]
+    public required Dictionary<MongoId, ItemView> ItemsView { get; set; }
+
+    [JsonPropertyName("defaultPresets")]
+    public required Dictionary<MongoId, PresetView> DefaultPresets { get; set; }
+
     /// <summary>
     /// Null when the map's <c>StaticContainerDetails</c> is missing the list; the native side logs a
     /// map-specific error for each, so an empty list is not a substitute.
@@ -303,17 +517,58 @@ public record StaticContainersRequest : LootCommon
     public IEnumerable<StaticForced>? StaticForced { get; set; }
 
     [JsonPropertyName("staticLootDist")]
-    public required Dictionary<MongoId, StaticLootDetails> StaticLootDist { get; set; }
+    public Dictionary<MongoId, StaticLootDetails>? StaticLootDist { get; set; }
 
     [JsonPropertyName("statics")]
     public StaticContainer? Statics { get; set; }
 }
 
-public record DynamicLootRequest : LootCommon
+public record StaticContainersRequest
 {
     /// <summary>
-    /// Either a <see cref="Models.Eft.Common.LooseLoot"/> - assign one directly, it converts - or the
-    /// raw JSON of a location's <c>looseLoot.json</c>. Same wire shape either way.
+    ///     Resident-DB epoch this request was built against; 0 with <see cref="ViewsOverride"/>
+    ///     present (spec § Exports).
+    /// </summary>
+    [JsonPropertyName("epoch")]
+    public required ulong Epoch { get; set; }
+
+    /// <summary>
+    ///     The distrust fallback (spec § Exports): the C#-built view bundle, used for this call
+    ///     only and never made resident. Present iff the caller is ineligible for residency.
+    /// </summary>
+    [JsonPropertyName("viewsOverride")]
+    public LootViewsOverride? ViewsOverride { get; set; }
+
+    [JsonPropertyName("varying")]
+    public required LootVarying Varying { get; set; }
+}
+
+public record DynamicLootRequest
+{
+    /// <summary>
+    ///     Resident-DB epoch this request was built against; 0 with <see cref="ViewsOverride"/>
+    ///     present (spec § Exports).
+    /// </summary>
+    [JsonPropertyName("epoch")]
+    public required ulong Epoch { get; set; }
+
+    /// <summary>
+    ///     The distrust fallback (spec § Exports): the C#-built view bundle, used for this call
+    ///     only and never made resident. Present iff the caller is ineligible for residency.
+    /// </summary>
+    [JsonPropertyName("viewsOverride")]
+    public LootViewsOverride? ViewsOverride { get; set; }
+
+    [JsonPropertyName("varying")]
+    public required DynamicLootVarying Varying { get; set; }
+}
+
+public record DynamicLootVarying : LootVarying
+{
+    /// <summary>
+    ///     The caller's loot data, so any transformer or patch applied to it is honoured. Either a
+    ///     <see cref="Models.Eft.Common.LooseLoot"/> - assign one directly, it converts - or the
+    ///     raw JSON of a location's <c>looseLoot.json</c>. Same wire shape either way.
     /// </summary>
     [JsonPropertyName("looseLoot")]
     public required LooseLootPayload LooseLoot { get; set; }
@@ -374,30 +629,6 @@ public sealed class LooseLootPayloadConverter : JsonConverter<LooseLootPayload>
     }
 }
 
-/// <summary>
-/// One log line the native side would have written itself. <c>Level</c> is one of <c>debug</c>,
-/// <c>warning</c>, <c>error</c> or <c>success</c>; either <see cref="LocaleKey"/> or
-/// <see cref="Message"/> is set, and the other members are written as explicit nulls.
-/// </summary>
-public record Diagnostic
-{
-    [JsonPropertyName("level")]
-    public required string Level { get; set; }
-
-    [JsonPropertyName("localeKey")]
-    public string? LocaleKey { get; set; }
-
-    /// <summary>
-    /// Arguments for <see cref="LocaleKey"/> - an object of named replacements, or a bare scalar for
-    /// the single-value locale overload.
-    /// </summary>
-    [JsonPropertyName("args")]
-    public JsonElement? Args { get; set; }
-
-    [JsonPropertyName("message")]
-    public string? Message { get; set; }
-}
-
 public record StaticContainersResult
 {
     [JsonPropertyName("spawnpoints")]
@@ -411,9 +642,6 @@ public record StaticContainersResult
 
     [JsonPropertyName("staticContainerCount")]
     public required int StaticContainerCount { get; set; }
-
-    [JsonPropertyName("diagnostics")]
-    public required List<Diagnostic> Diagnostics { get; set; }
 }
 
 public record DynamicLootResult
@@ -423,7 +651,4 @@ public record DynamicLootResult
 
     [JsonPropertyName("trackedCounts")]
     public required Dictionary<MongoId, int> TrackedCounts { get; set; }
-
-    [JsonPropertyName("diagnostics")]
-    public required List<Diagnostic> Diagnostics { get; set; }
 }

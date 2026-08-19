@@ -1,5 +1,21 @@
 # .graphifyignore
 
+# only index Libraries, rust, and SPTarkov.Server, ignore everything else
+*
+!ARCHITECTURE.md
+!RUST-ROADMAP.md
+!Libraries/
+!Libraries/**
+!rust/
+!rust/**
+!SPTarkov.Server/
+!SPTarkov.Server/**
+
+*.razor
+*.dat
+*.css
+*.html
+
 graphify-out/
 .claude/
 .git/
@@ -12,8 +28,6 @@ LICENSE
 *.7z
 
 # scoped out for the initial graph build - too large / not code
-/Tools/
-/Testing/
 /Libraries/SPTarkov.Server.Assets/
 *.png
 *.jpg
@@ -23,3 +37,40 @@ LICENSE
 *.ico
 *.webp
 *.svg
+
+docs/
+rust/target/
+todo/
+
+/Ceciler/
+
+Libraries/SPTarkov.Server.Assets/SPT_Data/checks.dat
+
+# Extracted from looseLoot.7z by scripts/decompress-assets.sh (or .ps1)
+Libraries/SPTarkov.Server.Assets/SPT_Data/database/locations/**/looseLoot.json
+Libraries/SPTarkov.Server.Assets/SPT_Data/database/templates/items.json
+
+# Automatically generated file containing metadata on build
+Libraries/SPTarkov.Server.Core/Utils/ProgramStatics.Generated.cs
+
+# Not necessary to be included in the repo
+Testing/**/Properties/launchSettings.json
+
+/Tools/**/bin/
+/Tools/**/obj/
+
+/Testing/**/bin/
+/Testing/**/obj/
+
+/SPTarkov.Server/bin/
+/SPTarkov.Server/obj/
+
+/rust/spt-native/target/
+
+Patches/**/bin/
+Patches/**/obj/
+
+/Libraries/**/bin/
+/Libraries/**/obj/
+
+/rust/Cargo.lock

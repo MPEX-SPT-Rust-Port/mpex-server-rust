@@ -48,6 +48,54 @@ impl<K: Clone + PartialEq, V> ProbabilityObjectArray<K, V> {
         self.items.iter().find(|po| po.key == *key)?.data.as_ref()
     }
 
+    /// The relative probability of the first entry with `key`, mirroring `Probability`
+    /// (`ProbabilityObjectArray.cs:108-112`).
+    ///
+    /// C# returns `double?`, so a missing key — and any lookup on an empty array — is null and the
+    /// caller supplies its own default (`EliminationQuestGenerator.cs:425`).
+    pub fn probability(&self, key: &K) -> Option<f64> {
+        self.items
+            .iter()
+            .find(|po| po.key == *key)
+            .map(|po| po.relative_probability)
+    }
+
+    /// The largest relative probability in the pool, mirroring `MaxProbability`
+    /// (`ProbabilityObjectArray.cs:121-124`).
+    ///
+    /// # Panics
+    /// On an empty pool, as the C# does: `Max` over a nullable selector yields null and `.Value`
+    /// throws.
+    pub fn max_probability(&self) -> f64 {
+        self.items
+            .iter()
+            .map(|po| po.relative_probability)
+            .reduce(f64::max)
+            .expect("max_probability on an empty ProbabilityObjectArray")
+    }
+
+    /// The smallest relative probability in the pool, mirroring `MinProbability`
+    /// (`ProbabilityObjectArray.cs:133-136`).
+    ///
+    /// `f64::min` drops NaN where .NET's `Min` propagates it; weights are parsed from JSON, which
+    /// has no NaN literal, so no pool can reach that difference.
+    ///
+    /// # Panics
+    /// On an empty pool, as the C# does: `Min` over an empty sequence throws.
+    pub fn min_probability(&self) -> f64 {
+        self.items
+            .iter()
+            .map(|po| po.relative_probability)
+            .reduce(f64::min)
+            .expect("min_probability on an empty ProbabilityObjectArray")
+    }
+
+    /// Removes every entry matching `predicate`, keeping the rest in order, mirroring
+    /// `List<T>.RemoveAll` (`EliminationQuestGenerator.cs:542,551`).
+    pub fn remove_all(&mut self, mut predicate: impl FnMut(&ProbabilityObject<K, V>) -> bool) {
+        self.items.retain(|po| !predicate(po));
+    }
+
     /// Draws `item_count_to_draw` keys with replacement, mirroring `Draw`
     /// (`ProbabilityObjectArray.cs:145-173`).
     ///
@@ -159,6 +207,21 @@ impl<K: Clone + PartialEq, V> ProbabilityObjectArray<K, V> {
         }
 
         drawn_keys
+    }
+}
+
+impl<K: Clone + PartialEq, V: Clone> ProbabilityObjectArray<K, V> {
+    /// A new array holding the entries matching `predicate`, in order, mirroring `Filter`
+    /// (`ProbabilityObjectArray.cs:52-64`). The source array is left untouched.
+    pub fn filter(&self, predicate: impl Fn(&ProbabilityObject<K, V>) -> bool) -> Self {
+        let mut result = Self::new();
+        for probability_object in &self.items {
+            if predicate(probability_object) {
+                result.add(probability_object.clone());
+            }
+        }
+
+        result
     }
 }
 
@@ -317,6 +380,104 @@ mod tests {
 
         assert_eq!(array.data(&"a".to_string()), Some(&"data-a".to_string()));
         assert_eq!(array.data(&"missing".to_string()), None);
+    }
+
+    #[test]
+    fn filter_keeps_the_matching_entries_in_order() {
+        let array = pool(&[("a", 5.0), ("b", 1.0), ("c", 2.0), ("d", 3.0)]);
+
+        let filtered = array.filter(|po| po.key != "b");
+
+        assert_eq!(array.len(), 4, "filter must not touch the source array");
+        let kept: Vec<(&str, f64)> = filtered
+            .items
+            .iter()
+            .map(|po| (po.key.as_str(), po.relative_probability))
+            .collect();
+        assert_eq!(kept, vec![("a", 5.0), ("c", 2.0), ("d", 3.0)]);
+        // Data rides along with the entry.
+        assert_eq!(filtered.data(&"c".to_string()), Some(&"data-c".to_string()));
+    }
+
+    #[test]
+    fn filter_that_matches_nothing_returns_an_empty_array() {
+        let array = pool(&[("a", 5.0), ("b", 1.0)]);
+
+        assert!(array.filter(|_| false).is_empty());
+    }
+
+    #[test]
+    fn probability_is_none_for_a_missing_key() {
+        // C# `Probability` returns `double?` off a `FirstOrDefault`, so a missing key is null and
+        // the callers pick their own default (`EliminationQuestGenerator.cs:425` uses `?? 0d`).
+        let array = pool(&[("a", 5.0), ("b", 1.0)]);
+
+        assert_eq!(array.probability(&"a".to_string()), Some(5.0));
+        assert_eq!(array.probability(&"missing".to_string()), None);
+
+        let empty: ProbabilityObjectArray<String, String> = ProbabilityObjectArray::new();
+        assert_eq!(empty.probability(&"a".to_string()), None);
+    }
+
+    #[test]
+    fn probability_returns_the_first_match() {
+        let mut array = pool(&[("a", 5.0)]);
+        array.add(ProbabilityObject {
+            key: "a".to_string(),
+            relative_probability: 99.0,
+            data: None,
+        });
+
+        assert_eq!(array.probability(&"a".to_string()), Some(5.0));
+    }
+
+    #[test]
+    fn max_and_min_probability_span_the_pool() {
+        let array = pool(&[("a", 5.0), ("b", 1.0), ("c", 2.0)]);
+
+        assert_eq!(array.max_probability(), 5.0);
+        assert_eq!(array.min_probability(), 1.0);
+    }
+
+    #[test]
+    #[should_panic(expected = "max_probability on an empty ProbabilityObjectArray")]
+    fn max_probability_on_an_empty_pool_panics() {
+        // C# `this.Max(x => x.RelativeProbability).Value` gets null off an empty sequence and the
+        // `.Value` throws InvalidOperationException.
+        let empty: ProbabilityObjectArray<String, String> = ProbabilityObjectArray::new();
+
+        empty.max_probability();
+    }
+
+    #[test]
+    #[should_panic(expected = "min_probability on an empty ProbabilityObjectArray")]
+    fn min_probability_on_an_empty_pool_panics() {
+        // C# `this.Min(x => x.RelativeProbability.Value)` throws InvalidOperationException
+        // ("Sequence contains no elements") on an empty sequence.
+        let empty: ProbabilityObjectArray<String, String> = ProbabilityObjectArray::new();
+
+        empty.min_probability();
+    }
+
+    #[test]
+    fn remove_all_drops_the_matching_entries_and_keeps_the_order() {
+        let mut array = pool(&[("a", 5.0), ("b", 1.0), ("c", 2.0), ("d", 3.0)]);
+
+        array.remove_all(|po| po.key == "b" || po.key == "d");
+
+        let left: Vec<&str> = array.items.iter().map(|po| po.key.as_str()).collect();
+        assert_eq!(left, vec!["a", "c"]);
+        assert_eq!(array.probability(&"a".to_string()), Some(5.0));
+        assert_eq!(array.probability(&"b".to_string()), None);
+    }
+
+    #[test]
+    fn remove_all_that_matches_nothing_leaves_the_pool_alone() {
+        let mut array = pool(&[("a", 5.0), ("b", 1.0)]);
+
+        array.remove_all(|_| false);
+
+        assert_eq!(array.len(), 2);
     }
 
     #[test]

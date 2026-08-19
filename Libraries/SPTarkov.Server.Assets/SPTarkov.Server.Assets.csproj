@@ -16,9 +16,8 @@
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
   </PropertyGroup>
   <ItemGroup>
-    <None Include="build\PostBuild.cs" />
     <None Include="SPT_Data\**" Exclude="SPT_Data\checks.dat">
-      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <PackageCopyToOutput>True</PackageCopyToOutput>
       <ExcludeFromSingleFile>True</ExcludeFromSingleFile>
       <buildAction>None</buildAction>
@@ -26,7 +25,7 @@
       <PackagePath>contentFiles\any\any\SPT_Data\</PackagePath>
     </None>
     <None Include="SPT_Data\checks.dat" Condition="'$(Configuration)' == 'Release'">
-      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <PackageCopyToOutput>True</PackageCopyToOutput>
       <ExcludeFromSingleFile>True</ExcludeFromSingleFile>
       <buildAction>None</buildAction>
@@ -34,15 +33,17 @@
       <PackagePath>contentFiles\any\any\SPT_Data\</PackagePath>
     </None>
   </ItemGroup>
+  <!-- The gen_checks bin runs on the build host, so no $(CargoTargetFlag): a cross-RID publish
+       still hashes with a host-triple binary. -->
   <Target Name="PreBuildHashFile" BeforeTargets="BeforeBuild" Condition="'$(Configuration)' == 'Release'">
-    <Exec Command="dotnet run PostBuild.cs" WorkingDirectory="$(ProjectDir)\build">
+    <Exec
+      Command="cargo run --locked --release --bin gen_checks -- &quot;$(ProjectDir)SPT_Data&quot;"
+      WorkingDirectory="$(ProjectDir)..\..\rust"
+    >
       <Output TaskParameter="ExitCode" PropertyName="HashFileExitCode" />
     </Exec>
     <Error Message="Failed to hash files" Condition=" '$(HashFileExitCode)' != '0'" />
   </Target>
-  <ItemGroup>
-    <Compile Remove="build\PostBuild.cs" />
-  </ItemGroup>
   <ItemGroup>
     <None Include="..\..\LICENSE" Pack="true" Visible="false" PackagePath="" />
   </ItemGroup>

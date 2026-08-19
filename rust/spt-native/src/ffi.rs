@@ -1,12 +1,29 @@
+use std::any::Any;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicI32, Ordering};
 
+use rayon::prelude::*;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use crate::loot::item_helper::LootError;
+use crate::base_class::{self, BaseClassRequest, BaseClassResponse};
+use crate::bot::bot_inventory_generator::{generate_inventory, generate_inventory_batch};
+use crate::diag::DiagSink;
+use crate::linked_items::{self, LinkedItemsRequest, LinkedItemsResponse};
+use crate::logger::{LogLevel, LogRecord, Logger};
+use crate::loot::item_helper::{LootEpochError, LootError};
 use crate::loot::location_loot_generator::{generate_dynamic_loot, generate_static_containers};
+use crate::loot::loot_generator::{
+    create_forced_loot, create_random_loot, get_random_loot_container_loot,
+    get_sealed_weapon_case_loot,
+};
+use crate::quest::{QuestError, generate_repeatable_quest};
+use crate::ragfair::models::{DynamicOffersHeader, DynamicOffersResult};
+use crate::ragfair::offer_generator::{RagfairError, generate_dynamic_offers};
 use crate::runtime::runtime;
+use crate::scav_case::{ScavCaseError, generate_scav_case_rewards};
 use crate::verify;
 
 pub const STATUS_OK: i32 = 0;
@@ -14,6 +31,111 @@ pub const STATUS_BAD_ARGS: i32 = 1;
 pub const STATUS_PANIC: i32 = 2;
 /// Generation failed: the error message, not a result, is in the out-buffer.
 pub const STATUS_ERROR: i32 = 3;
+/// A request named a resident-DB epoch this process does not hold; the caller republishes and
+/// retries.
+pub const STATUS_STALE_EPOCH: i32 = 4;
+
+/// How a generator failure crosses the boundary: which status code, and what message buffer.
+pub trait FfiFailure {
+    fn status(&self) -> i32;
+    fn into_message(self) -> String;
+}
+
+impl FfiFailure for LootError {
+    fn status(&self) -> i32 {
+        STATUS_ERROR
+    }
+
+    fn into_message(self) -> String {
+        self.message
+    }
+}
+
+impl FfiFailure for LootEpochError {
+    fn status(&self) -> i32 {
+        match self {
+            LootEpochError::Loot(_) => STATUS_ERROR,
+            LootEpochError::StaleEpoch => STATUS_STALE_EPOCH,
+        }
+    }
+
+    fn into_message(self) -> String {
+        match self {
+            LootEpochError::Loot(error) => error.message,
+            LootEpochError::StaleEpoch => {
+                "resident DB epoch mismatch; republish and retry".to_string()
+            }
+        }
+    }
+}
+
+impl FfiFailure for RagfairError {
+    fn status(&self) -> i32 {
+        match self {
+            RagfairError::Loot(_) => STATUS_ERROR,
+            RagfairError::StaleEpoch => STATUS_STALE_EPOCH,
+        }
+    }
+
+    fn into_message(self) -> String {
+        match self {
+            RagfairError::Loot(error) => error.message,
+            RagfairError::StaleEpoch => {
+                "resident DB epoch mismatch; republish and retry".to_string()
+            }
+        }
+    }
+}
+
+impl FfiFailure for QuestError {
+    fn status(&self) -> i32 {
+        match self {
+            QuestError::Failed(_) => STATUS_ERROR,
+            QuestError::StaleEpoch => STATUS_STALE_EPOCH,
+        }
+    }
+
+    fn into_message(self) -> String {
+        match self {
+            QuestError::Failed(message) => message,
+            QuestError::StaleEpoch => "resident DB epoch mismatch; republish and retry".to_string(),
+        }
+    }
+}
+
+impl FfiFailure for ScavCaseError {
+    fn status(&self) -> i32 {
+        STATUS_ERROR
+    }
+
+    fn into_message(self) -> String {
+        self.message
+    }
+}
+
+impl FfiFailure for crate::db::StaleEpoch {
+    fn status(&self) -> i32 {
+        STATUS_STALE_EPOCH
+    }
+
+    fn into_message(self) -> String {
+        "resident DB epoch mismatch; republish and retry".to_string()
+    }
+}
+
+impl FfiFailure for crate::db::PublishError {
+    fn status(&self) -> i32 {
+        STATUS_ERROR
+    }
+
+    fn into_message(self) -> String {
+        match self {
+            crate::db::PublishError::Schema(message) | crate::db::PublishError::Views(message) => {
+                message
+            }
+        }
+    }
+}
 
 #[unsafe(no_mangle)]
 pub extern "C" fn spt_native_abi_version() -> u32 {
@@ -71,7 +193,29 @@ unsafe fn write_buffer(bytes: Vec<u8>, out_ptr: *mut *mut u8, out_len: *mut usiz
     }
 }
 
-/// The shared body of the two generation exports: JSON request in, status plus either the JSON
+/// The payload encoding tags of the framed ragfair envelope.
+///
+/// The stage-B tag: no longer written, still accepted by the C# reader.
+pub const PAYLOAD_JSON: u8 = 0;
+/// What `write_framed_offers` emits from stage C on: `rmp_serde::to_vec_named`, so the maps stay
+/// string-keyed under the same wire names the JSON stage used.
+pub const PAYLOAD_MSGPACK: u8 = 1;
+
+/// The text a caught panic carries — `panic!`/`expect` payloads are a `String` or a `&str`.
+/// Anything else gets fixed fallback text; the payload type is not worth reporting.
+pub(crate) fn panic_message(payload: Box<dyn Any + Send>) -> String {
+    payload
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| {
+            payload
+                .downcast_ref::<&str>()
+                .map(|text| (*text).to_owned())
+        })
+        .unwrap_or_else(|| "native call panicked with a non-string payload".to_owned())
+}
+
+/// The shared body of the generation exports: JSON request in, status plus either the JSON
 /// result or an error message out. Runs on the calling thread.
 ///
 /// # Safety
@@ -87,6 +231,30 @@ where
     Request: DeserializeOwned,
     Response: Serialize,
 {
+    unsafe {
+        run_generator_with(req_ptr, req_len, out_ptr, out_len, generate, |response| {
+            serde_json::to_vec(&response).expect("result serialization cannot fail")
+        })
+    }
+}
+
+/// `run_generator` with the response encoding open: the ragfair export frames its response
+/// instead of emitting one JSON document.
+///
+/// # Safety
+/// As documented on the exports below.
+unsafe fn run_generator_with<Request, Response, Error>(
+    req_ptr: *const u8,
+    req_len: usize,
+    out_ptr: *mut *mut u8,
+    out_len: *mut usize,
+    generate: fn(Request) -> Result<Response, Error>,
+    encode: fn(Response) -> Vec<u8>,
+) -> i32
+where
+    Request: DeserializeOwned,
+    Error: FfiFailure,
+{
     if req_ptr.is_null() || out_ptr.is_null() || out_len.is_null() {
         return STATUS_BAD_ARGS;
     }
@@ -100,11 +268,7 @@ where
         }
     };
 
-    let result = catch_unwind(AssertUnwindSafe(|| {
-        generate(request).map(|response| {
-            serde_json::to_vec(&response).expect("result serialization cannot fail")
-        })
-    }));
+    let result = catch_unwind(AssertUnwindSafe(|| generate(request).map(encode)));
 
     match result {
         Ok(Ok(json)) => {
@@ -112,13 +276,19 @@ where
 
             STATUS_OK
         }
-        // Only the message survives: diagnostics gathered before the failure are dropped.
+        // Diagnostics emitted before the failure are already in the log (DiagSink emits live);
+        // only the failure message itself needs to cross.
         Ok(Err(error)) => {
-            unsafe { write_buffer(error.message.into_bytes(), out_ptr, out_len) };
+            let status = error.status();
+            unsafe { write_buffer(error.into_message().into_bytes(), out_ptr, out_len) };
 
-            STATUS_ERROR
+            status
         }
-        Err(_) => STATUS_PANIC,
+        Err(payload) => {
+            unsafe { write_buffer(panic_message(payload).into_bytes(), out_ptr, out_len) };
+
+            STATUS_PANIC
+        }
     }
 }
 
@@ -134,12 +304,13 @@ pub unsafe extern "C" fn spt_generate_static_containers(
     out_len: *mut usize,
 ) -> i32 {
     unsafe {
-        run_generator(
+        run_generator_with(
             req_ptr,
             req_len,
             out_ptr,
             out_len,
             generate_static_containers,
+            |response| serde_json::to_vec(&response).expect("result serialization cannot fail"),
         )
     }
 }
@@ -153,7 +324,698 @@ pub unsafe extern "C" fn spt_generate_dynamic_loot(
     out_ptr: *mut *mut u8,
     out_len: *mut usize,
 ) -> i32 {
-    unsafe { run_generator(req_ptr, req_len, out_ptr, out_len, generate_dynamic_loot) }
+    unsafe {
+        run_generator_with(
+            req_ptr,
+            req_len,
+            out_ptr,
+            out_len,
+            generate_dynamic_loot,
+            |response| serde_json::to_vec(&response).expect("result serialization cannot fail"),
+        )
+    }
+}
+
+/// # Safety
+/// See `spt_generate_static_containers`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn spt_create_random_loot(
+    req_ptr: *const u8,
+    req_len: usize,
+    out_ptr: *mut *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    unsafe {
+        run_generator_with(
+            req_ptr,
+            req_len,
+            out_ptr,
+            out_len,
+            |request| create_random_loot(request, &mut DiagSink::Pipeline),
+            |response| serde_json::to_vec(&response).expect("result serialization cannot fail"),
+        )
+    }
+}
+
+/// # Safety
+/// See `spt_generate_static_containers`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn spt_create_forced_loot(
+    req_ptr: *const u8,
+    req_len: usize,
+    out_ptr: *mut *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    unsafe {
+        run_generator_with(
+            req_ptr,
+            req_len,
+            out_ptr,
+            out_len,
+            create_forced_loot,
+            |response| serde_json::to_vec(&response).expect("result serialization cannot fail"),
+        )
+    }
+}
+
+/// # Safety
+/// See `spt_generate_static_containers`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn spt_get_sealed_weapon_case_loot(
+    req_ptr: *const u8,
+    req_len: usize,
+    out_ptr: *mut *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    unsafe {
+        run_generator_with(
+            req_ptr,
+            req_len,
+            out_ptr,
+            out_len,
+            |request| get_sealed_weapon_case_loot(request, &mut DiagSink::Pipeline),
+            |response| serde_json::to_vec(&response).expect("result serialization cannot fail"),
+        )
+    }
+}
+
+/// # Safety
+/// See `spt_generate_static_containers`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn spt_get_random_loot_container_loot(
+    req_ptr: *const u8,
+    req_len: usize,
+    out_ptr: *mut *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    unsafe {
+        run_generator_with(
+            req_ptr,
+            req_len,
+            out_ptr,
+            out_len,
+            get_random_loot_container_loot,
+            |response| serde_json::to_vec(&response).expect("result serialization cannot fail"),
+        )
+    }
+}
+
+/// # Safety
+/// See `spt_generate_static_containers`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn spt_generate_bot_inventory(
+    req_ptr: *const u8,
+    req_len: usize,
+    out_ptr: *mut *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    unsafe { run_generator(req_ptr, req_len, out_ptr, out_len, generate_inventory) }
+}
+
+/// One wave of bots in one call - the shared views ride once instead of once per bot.
+///
+/// # Safety
+/// See `spt_generate_static_containers`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn spt_generate_bot_inventory_batch(
+    req_ptr: *const u8,
+    req_len: usize,
+    out_ptr: *mut *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    unsafe { run_generator(req_ptr, req_len, out_ptr, out_len, generate_inventory_batch) }
+}
+
+/// The framed ragfair response: encoding tag, length-prefixed header, then one length-prefixed
+/// payload per offer, serialized across rayon. Stage C changes only the payloads' encoding.
+fn write_framed_offers(result: DynamicOffersResult) -> Vec<u8> {
+    let header = rmp_serde::to_vec_named(&DynamicOffersHeader {
+        rejected_can_sell_templates: result.rejected_can_sell_templates,
+    })
+    .expect("header serialization cannot fail");
+    let payloads: Vec<Vec<u8>> = result
+        .offers
+        .par_iter()
+        .map(|offer| rmp_serde::to_vec_named(offer).expect("offer serialization cannot fail"))
+        .collect();
+
+    let body: usize = payloads.iter().map(|payload| 4 + payload.len()).sum();
+    let mut out = Vec::with_capacity(1 + 4 + header.len() + 4 + body);
+    out.push(PAYLOAD_MSGPACK);
+    out.extend_from_slice(
+        &u32::try_from(header.len())
+            .expect("header fits u32")
+            .to_le_bytes(),
+    );
+    out.extend_from_slice(&header);
+    out.extend_from_slice(
+        &u32::try_from(payloads.len())
+            .expect("count fits u32")
+            .to_le_bytes(),
+    );
+    for payload in &payloads {
+        out.extend_from_slice(
+            &u32::try_from(payload.len())
+                .expect("offer fits u32")
+                .to_le_bytes(),
+        );
+        out.extend_from_slice(payload);
+    }
+    out
+}
+
+/// # Safety
+/// See `spt_generate_static_containers`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn spt_generate_dynamic_offers(
+    req_ptr: *const u8,
+    req_len: usize,
+    out_ptr: *mut *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    unsafe {
+        run_generator_with(
+            req_ptr,
+            req_len,
+            out_ptr,
+            out_len,
+            generate_dynamic_offers,
+            write_framed_offers,
+        )
+    }
+}
+
+/// One repeatable quest, off the resident DB's derived views or the override this request
+/// carries.
+///
+/// # Safety
+/// See `spt_generate_static_containers`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn spt_generate_repeatable_quest(
+    req_ptr: *const u8,
+    req_len: usize,
+    out_ptr: *mut *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    unsafe {
+        run_generator_with(
+            req_ptr,
+            req_len,
+            out_ptr,
+            out_len,
+            generate_repeatable_quest,
+            |response| {
+                serde_json::to_vec(&response).expect("quest response serialization cannot fail")
+            },
+        )
+    }
+}
+
+/// One scav case craft's rewards.
+///
+/// # Safety
+/// See `spt_generate_static_containers`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn spt_generate_scav_case_rewards(
+    req_ptr: *const u8,
+    req_len: usize,
+    out_ptr: *mut *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    unsafe {
+        run_generator_with(
+            req_ptr,
+            req_len,
+            out_ptr,
+            out_len,
+            |request| generate_scav_case_rewards(request, &mut DiagSink::Pipeline),
+            |response| {
+                serde_json::to_vec(&response).expect("scav case response serialization cannot fail")
+            },
+        )
+    }
+}
+
+/// The success envelope of `spt_build_item_base_class_cache`: the response under `result`, the
+/// same shape `ScavCaseResponse` puts on the wire.
+#[derive(Serialize)]
+struct BaseClassEnvelope {
+    result: BaseClassResponse,
+}
+
+/// The whole `_itemBaseClassesCache` in one call, off the resident templates root or the override
+/// this request carries. An override-less request naming an epoch the process does not hold is
+/// `STATUS_STALE_EPOCH`.
+///
+/// # Safety
+/// See `spt_generate_static_containers`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn spt_build_item_base_class_cache(
+    req_ptr: *const u8,
+    req_len: usize,
+    out_ptr: *mut *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    unsafe {
+        run_generator_with(
+            req_ptr,
+            req_len,
+            out_ptr,
+            out_len,
+            |request: BaseClassRequest| {
+                base_class::run(request).map(|result| BaseClassEnvelope { result })
+            },
+            |envelope| {
+                serde_json::to_vec(&envelope)
+                    .expect("base class response serialization cannot fail")
+            },
+        )
+    }
+}
+
+/// The success envelope of `spt_build_ragfair_linked_item_table`: the response under `result`,
+/// the same shape `BaseClassEnvelope` puts on the wire.
+#[derive(Serialize)]
+struct LinkedItemsEnvelope {
+    result: LinkedItemsResponse,
+}
+
+/// The whole `linkedItemsCache` in one call, off the resident templates root or the override
+/// this request carries. An override-less request naming an epoch the process does not hold is
+/// `STATUS_STALE_EPOCH`.
+///
+/// # Safety
+/// See `spt_generate_static_containers`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn spt_build_ragfair_linked_item_table(
+    req_ptr: *const u8,
+    req_len: usize,
+    out_ptr: *mut *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    unsafe {
+        run_generator_with(
+            req_ptr,
+            req_len,
+            out_ptr,
+            out_len,
+            |request: LinkedItemsRequest| {
+                linked_items::run(request).map(|result| LinkedItemsEnvelope { result })
+            },
+            |envelope| {
+                serde_json::to_vec(&envelope)
+                    .expect("linked items response serialization cannot fail")
+            },
+        )
+    }
+}
+
+/// Installs a publish envelope's roots into the process-global resident DB and answers the new
+/// epoch as `{"epoch":N}`. A parse failure (including an unknown root name) is `STATUS_BAD_ARGS`;
+/// a schema or view-derivation failure is `STATUS_ERROR` and leaves the previous DB intact.
+///
+/// # Safety
+/// See `spt_generate_static_containers`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn spt_db_publish(
+    req_ptr: *const u8,
+    req_len: usize,
+    out_ptr: *mut *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    unsafe {
+        run_generator_with(
+            req_ptr,
+            req_len,
+            out_ptr,
+            out_len,
+            crate::db::publish,
+            |epoch| format!("{{\"epoch\":{epoch}}}").into_bytes(),
+        )
+    }
+}
+
+/// The process-wide log pipeline and its init ref-count. A plain `Mutex<Option>` rather than a
+/// `OnceLock` so `spt_logger_close` can take it down (and tests can re-initialise afterwards); the
+/// count lives inside the same lock so init and close cannot race each other.
+static LOGGER: Mutex<(usize, Option<Logger>)> = Mutex::new((0, None));
+
+fn logger_guard() -> std::sync::MutexGuard<'static, (usize, Option<Logger>)> {
+    LOGGER
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// The C# callback receiving Rust-originated log lines, so mod-registered ILogHandlers see the
+/// full stream and not only what crossed spt_log_emit. Spans are category, message, thread
+/// name; scalars are level, tid, unix-millis. Buffers are valid only for the call.
+type LogTap =
+    unsafe extern "C" fn(*const u8, usize, *const u8, usize, *const u8, usize, i32, i32, i64);
+
+/// Poison-tolerant like `logger_guard` — a panicked taker must not kill logging.
+static LOG_TAP: Mutex<Option<LogTap>> = Mutex::new(None);
+
+fn log_tap() -> Option<LogTap> {
+    *LOG_TAP
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Native emitters get a small process-local id per thread — the managed thread id never crosses
+/// the boundary for lines Rust originates, but worker threads still stay distinguishable.
+static NEXT_EMIT_TID: AtomicI32 = AtomicI32::new(1);
+thread_local! {
+    static EMIT_TID: i32 = NEXT_EMIT_TID.fetch_add(1, Ordering::Relaxed);
+}
+
+/// The native-side entry to the same pipeline `spt_log_emit` feeds: filters, level gate, format,
+/// sinks. Uninitialised pipeline is a silent no-op, matching the export's contract.
+pub(crate) fn emit_pipeline(category: &str, level: LogLevel, message: &str) {
+    let unix_millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as i64)
+        .unwrap_or(0);
+    let thread = std::thread::current();
+    let record = LogRecord {
+        category,
+        message,
+        exception: "",
+        thread_name: thread.name().unwrap_or(""),
+        level,
+        tid: EMIT_TID.with(|tid| *tid),
+        unix_millis,
+    };
+    // Rust-originated lines only: C#-originated lines fan out to handlers on the C# side, with
+    // their original Exception object.
+    // The tap must fire before LOGGER is taken - a handler may call straight back into spt_log_emit.
+    if let Some(tap) = log_tap() {
+        unsafe {
+            tap(
+                record.category.as_ptr(),
+                record.category.len(),
+                record.message.as_ptr(),
+                record.message.len(),
+                record.thread_name.as_ptr(),
+                record.thread_name.len(),
+                record.level as i32,
+                record.tid,
+                record.unix_millis,
+            )
+        };
+    }
+    if let Some(logger) = logger_guard().1.as_ref() {
+        logger.emit(&record);
+    }
+}
+
+/// Initialises the log pipeline from the raw bytes of `sptLogger.json`. Ref-counted: a call while
+/// already initialised keeps the running pipeline, ignores the new config, bumps the count and
+/// returns `STATUS_OK`. It takes as many `spt_logger_close` calls as there were successful inits to
+/// tear the pipeline down - the prepatcher's nested `Program.Main` disposes its own container while
+/// the outer host keeps logging. On `STATUS_ERROR` the parse-error text is in the out-buffer, the
+/// count is untouched, the pipeline stays uninitialised and every later emit is a silent no-op - a
+/// broken log config must not stop the server.
+///
+/// # Safety
+/// `config_ptr` must point to `config_len` readable bytes of UTF-8; `out_ptr` and `out_len` must
+/// be valid for writes. A returned buffer is released with `spt_buf_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn spt_logger_init(
+    config_ptr: *const u8,
+    config_len: usize,
+    out_ptr: *mut *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    if out_ptr.is_null() || out_len.is_null() {
+        return STATUS_BAD_ARGS;
+    }
+
+    // Zeroed before the `config_ptr` guard: a bad-args return still leaves the caller's out-params
+    // written, never stale.
+    unsafe {
+        *out_ptr = std::ptr::null_mut();
+        *out_len = 0;
+    }
+
+    if config_ptr.is_null() {
+        return STATUS_BAD_ARGS;
+    }
+
+    let bytes = unsafe { std::slice::from_raw_parts(config_ptr, config_len) };
+
+    match catch_unwind(AssertUnwindSafe(|| {
+        let mut guard = logger_guard();
+        if guard.1.is_some() {
+            guard.0 += 1;
+            return Ok(());
+        }
+        Logger::from_json(bytes).map(|logger| {
+            *guard = (1, Some(logger));
+        })
+    })) {
+        Ok(Ok(())) => STATUS_OK,
+        Ok(Err(error)) => {
+            unsafe { write_buffer(error.into_bytes(), out_ptr, out_len) };
+            STATUS_ERROR
+        }
+        Err(payload) => {
+            unsafe { write_buffer(panic_message(payload).into_bytes(), out_ptr, out_len) };
+
+            STATUS_PANIC
+        }
+    }
+}
+
+/// Replaces the running pipeline's configuration in place: the C# side's answer to a mod mutating
+/// `SptLoggerConfiguration.Loggers` at runtime. Parse failure (`STATUS_ERROR`, message in the
+/// out-buffer) leaves the running pipeline untouched, as does calling before `spt_logger_init` has
+/// run. The init ref-count is untouched — a reinit is not an init. New sinks open under the
+/// pipeline lock, so a same-path target reopens in append mode (`freshened_paths`) rather than
+/// cascading the archives a second time; the old sinks flush and join after the swap.
+///
+/// # Safety
+/// `config_ptr` must point to `config_len` readable bytes of UTF-8; `out_ptr` and `out_len` must
+/// be valid for writes. A returned buffer is released with `spt_buf_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn spt_logger_reinit(
+    config_ptr: *const u8,
+    config_len: usize,
+    out_ptr: *mut *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    if out_ptr.is_null() || out_len.is_null() {
+        return STATUS_BAD_ARGS;
+    }
+
+    // Zeroed before the `config_ptr` guard: a bad-args return still leaves the caller's out-params
+    // written, never stale.
+    unsafe {
+        *out_ptr = std::ptr::null_mut();
+        *out_len = 0;
+    }
+
+    if config_ptr.is_null() {
+        return STATUS_BAD_ARGS;
+    }
+
+    let bytes = unsafe { std::slice::from_raw_parts(config_ptr, config_len) };
+
+    match catch_unwind(AssertUnwindSafe(|| {
+        // Parsing and opening the new sinks under the lock keeps the swap atomic against emits -
+        // reinit is rare, so briefly blocking the pipeline is the cheap side of that trade.
+        let mut guard = logger_guard();
+        if guard.1.is_none() {
+            return Err(
+                "the log pipeline is not initialised; call spt_logger_init first".to_owned(),
+            );
+        }
+        let new_logger = Logger::from_json(bytes)?;
+        let old = guard.1.replace(new_logger);
+        drop(guard);
+        // Join the old writer threads outside the lock, same rule as `spt_logger_close`.
+        if let Some(old) = old {
+            old.close();
+        }
+        Ok(())
+    })) {
+        Ok(Ok(())) => STATUS_OK,
+        Ok(Err(error)) => {
+            unsafe { write_buffer(error.into_bytes(), out_ptr, out_len) };
+            STATUS_ERROR
+        }
+        Err(payload) => {
+            unsafe { write_buffer(panic_message(payload).into_bytes(), out_ptr, out_len) };
+
+            STATUS_PANIC
+        }
+    }
+}
+
+/// Queues one log message through the pipeline: filters, level gate, per-target formatting, and
+/// the console/file writer threads. `STATUS_OK` no-op when the pipeline is uninitialised - init
+/// failure was already reported once, per-line noise would drown it.
+///
+/// # Safety
+/// Each pointer must point to its length in readable UTF-8 bytes, unless the length is 0 - an
+/// empty `ReadOnlySpan<byte>` marshals as a null pointer, which must not be rejected.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn spt_log_emit(
+    category_ptr: *const u8,
+    category_len: usize,
+    message_ptr: *const u8,
+    message_len: usize,
+    exception_ptr: *const u8,
+    exception_len: usize,
+    thread_name_ptr: *const u8,
+    thread_name_len: usize,
+    level: i32,
+    tid: i32,
+    unix_millis: i64,
+) -> i32 {
+    fn as_str<'a>(ptr: *const u8, len: usize) -> Option<&'a str> {
+        if len == 0 {
+            return Some("");
+        }
+        if ptr.is_null() {
+            return None;
+        }
+        std::str::from_utf8(unsafe { std::slice::from_raw_parts(ptr, len) }).ok()
+    }
+
+    let (Some(category), Some(message), Some(exception), Some(thread_name)) = (
+        as_str(category_ptr, category_len),
+        as_str(message_ptr, message_len),
+        as_str(exception_ptr, exception_len),
+        as_str(thread_name_ptr, thread_name_len),
+    ) else {
+        return STATUS_BAD_ARGS;
+    };
+
+    let Some(level) = LogLevel::from_i32(level) else {
+        return STATUS_BAD_ARGS;
+    };
+
+    let record = LogRecord {
+        category,
+        message,
+        exception,
+        thread_name,
+        level,
+        tid,
+        unix_millis,
+    };
+
+    match catch_unwind(AssertUnwindSafe(|| {
+        if let Some(logger) = logger_guard().1.as_ref() {
+            logger.emit(&record);
+        }
+    })) {
+        Ok(()) => STATUS_OK,
+        Err(_) => STATUS_PANIC,
+    }
+}
+
+/// Drops one `spt_logger_init` reference; on the last one, flushes every sink and joins the writer
+/// threads. Closing more often than init was called is an idempotent `STATUS_OK` no-op, and a later
+/// `spt_logger_init` re-initialises from zero.
+///
+/// # Safety
+/// No pointer arguments; marked unsafe only for symmetry with the export family.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn spt_logger_close() -> i32 {
+    match catch_unwind(AssertUnwindSafe(|| {
+        // The guard drops at the end of this block: the writer-thread join below must not hold the
+        // lock, or a concurrent emit blocks until the join finishes.
+        let taken = {
+            let mut guard = logger_guard();
+            match guard.0 {
+                0 => None,
+                1 => {
+                    guard.0 = 0;
+                    guard.1.take()
+                }
+                count => {
+                    guard.0 = count - 1;
+                    None
+                }
+            }
+        };
+        if let Some(logger) = taken {
+            logger.close();
+        }
+    })) {
+        Ok(()) => STATUS_OK,
+        Err(_) => STATUS_PANIC,
+    }
+}
+
+/// Registers — or with a null pointer clears — the process-wide tap receiving Rust-originated
+/// log lines. Independent of pipeline init state: a tap set before `spt_logger_init` still
+/// receives generator lines.
+///
+/// # Safety
+/// A non-null `tap` must stay callable until cleared or process exit (C# roots the delegate),
+/// and must not unwind. The spans it receives are valid only for the duration of each call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn spt_log_set_tap(tap: Option<LogTap>) -> i32 {
+    match catch_unwind(AssertUnwindSafe(|| {
+        *LOG_TAP
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = tap;
+    })) {
+        Ok(()) => STATUS_OK,
+        Err(_) => STATUS_PANIC,
+    }
+}
+
+/// Stores the resolved server-locale table generator diagnostics render against. Overwrites any
+/// previous table — the prepatch host pushing twice is harmless. On `STATUS_ERROR` the parse-error
+/// text is in the out-buffer and the previously stored table (if any) is untouched; generator
+/// lines then fall back to their locale keys, which must not stop the server.
+///
+/// # Safety
+/// `json_ptr` must point to `json_len` readable bytes of UTF-8; `out_ptr` and `out_len` must be
+/// valid for writes. A returned buffer is released with `spt_buf_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn spt_locales_set(
+    json_ptr: *const u8,
+    json_len: usize,
+    out_ptr: *mut *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    if out_ptr.is_null() || out_len.is_null() {
+        return STATUS_BAD_ARGS;
+    }
+
+    // Zeroed before the `json_ptr` guard: a bad-args return still leaves the caller's out-params
+    // written, never stale.
+    unsafe {
+        *out_ptr = std::ptr::null_mut();
+        *out_len = 0;
+    }
+
+    if json_ptr.is_null() {
+        return STATUS_BAD_ARGS;
+    }
+
+    let bytes = unsafe { std::slice::from_raw_parts(json_ptr, json_len) };
+
+    match catch_unwind(AssertUnwindSafe(|| {
+        serde_json::from_slice::<std::collections::HashMap<String, String>>(bytes)
+            .map(crate::diag::set_locales)
+            .map_err(|error| format!("locale table did not parse: {error}"))
+    })) {
+        Ok(Ok(())) => STATUS_OK,
+        Ok(Err(error)) => {
+            unsafe { write_buffer(error.into_bytes(), out_ptr, out_len) };
+            STATUS_ERROR
+        }
+        Err(payload) => {
+            unsafe { write_buffer(panic_message(payload).into_bytes(), out_ptr, out_len) };
+
+            STATUS_PANIC
+        }
+    }
 }
 
 /// # Safety
@@ -191,6 +1053,11 @@ mod tests {
     #[test]
     fn abi_version_export_matches_crate_const() {
         assert_eq!(spt_native_abi_version(), crate::ABI_VERSION);
+        assert_eq!(
+            crate::ABI_VERSION,
+            25,
+            "bump SptNative.ExpectedAbiVersion too"
+        );
     }
 
     #[test]
@@ -233,14 +1100,13 @@ mod tests {
     }
 
     /// The container tpl the error-path request below spawns; matches the `itemsView` key in
-    /// `COMMON_JSON`, which cannot interpolate a const.
+    /// `VIEWS_JSON`, which cannot interpolate a const.
     const CONTAINER_TPL: &str = "111111111111111111111111";
 
-    /// Every required `LootCommon` member, spliced into the request literals below.
-    const COMMON_JSON: &str = r#"
+    /// Every required `LootVarying` member, spliced into the request literals below.
+    const VARYING_JSON: &str = r#"
         "locationId":"bigmap",
-        "itemsView":{"111111111111111111111111":{"width":1,"height":1,"gridCellsH":2,"gridCellsV":2}},
-        "defaultPresets":{},"moneyTpls":[],"staticAmmoDist":{},
+        "moneyTpls":[],"staticAmmoDist":{},
         "config":{"containerRandomisationEnabled":false,"locationInRandomisationMaps":false,
             "containerTypesToNotRandomise":[],"containerGroupMinSizeMultiplier":1,
             "containerGroupMaxSizeMultiplier":1,"allowDuplicateItemsInStaticContainers":true,
@@ -252,6 +1118,12 @@ mod tests {
         "seasonal":{"seasonalEventActive":false,"christmasEventEnabled":false,
             "inactiveSeasonalItems":[],"christmasContainerIds":[]},
         "lootableItemBlacklist":[],"counter":{"maxCounts":{},"trackedCounts":{}}
+    "#;
+
+    /// The two `LootViewsWire` members every override send carries.
+    const VIEWS_JSON: &str = r#"
+        "itemsView":{"111111111111111111111111":{"width":1,"height":1,"gridCellsH":2,"gridCellsV":2}},
+        "defaultPresets":{}
     "#;
 
     type Export = unsafe extern "C" fn(*const u8, usize, *mut *mut u8, *mut usize) -> i32;
@@ -272,8 +1144,8 @@ mod tests {
     /// An empty map: no weapons, no containers, nothing to draw from.
     fn empty_static_request() -> String {
         format!(
-            r#"{{{COMMON_JSON},"staticWeapons":[],"staticContainers":[],"staticForced":[],
-            "staticLootDist":{{}}}}"#
+            r#"{{"epoch":0,"viewsOverride":{{{VIEWS_JSON},"staticWeapons":[],"staticContainers":[],
+            "staticForced":[],"staticLootDist":{{}}}},"varying":{{{VARYING_JSON}}}}}"#
         )
     }
 
@@ -294,8 +1166,9 @@ mod tests {
     #[test]
     fn dynamic_loot_roundtrips_result_json() {
         let request = format!(
-            r#"{{{COMMON_JSON},"looseLoot":{{"spawnpointCount":{{"mean":0,"std":0}},
-            "spawnpointsForced":[],"spawnpoints":[]}}}}"#
+            r#"{{"epoch":0,"viewsOverride":{{{VIEWS_JSON}}},"varying":{{{VARYING_JSON},
+            "looseLoot":{{"spawnpointCount":{{"mean":0,"std":0}},
+            "spawnpointsForced":[],"spawnpoints":[]}}}}}}"#
         );
 
         let (status, out) = call_generate(spt_generate_dynamic_loot, request.as_bytes());
@@ -304,6 +1177,23 @@ mod tests {
         let result: serde_json::Value = serde_json::from_slice(&out).unwrap();
         assert_eq!(result["spawnpoints"], serde_json::json!([]));
         assert_eq!(result["trackedCounts"], serde_json::json!({}));
+    }
+
+    #[test]
+    fn a_stale_loot_epoch_returns_status_4() {
+        // No viewsOverride and an epoch the store can never hold (u64::MAX is unreachable —
+        // epochs count up from 1). The varying block is the fixture's, so the JSON fully parses
+        // and the epoch check in resolve_views is what answers.
+        let request = format!(
+            r#"{{"epoch":18446744073709551615,"varying":{{{VARYING_JSON},
+            "looseLoot":{{"spawnpointCount":{{"mean":0,"std":0}},
+            "spawnpointsForced":[],"spawnpoints":[]}}}}}}"#
+        );
+
+        let (status, out) = call_generate(spt_generate_dynamic_loot, request.as_bytes());
+
+        assert_eq!(status, STATUS_STALE_EPOCH);
+        assert!(String::from_utf8(out).unwrap().contains("epoch mismatch"));
     }
 
     #[test]
@@ -332,10 +1222,12 @@ mod tests {
         // The container draws items, but `staticLootDist` has no entry for its tpl — the C#
         // `staticLootDist[containerTypeId]` throws a KeyNotFoundException here.
         let request = format!(
-            r#"{{{COMMON_JSON},"staticWeapons":[],"staticForced":[],"staticLootDist":{{}},
+            r#"{{"epoch":0,"viewsOverride":{{{VIEWS_JSON},
+            "staticWeapons":[],"staticForced":[],"staticLootDist":{{}},
             "staticContainers":[{{"probability":1,"template":{{"Id":"c1","IsContainer":true,
                 "Root":"aaaaaaaaaaaaaaaaaaaaaaaa",
-                "Items":[{{"_id":"aaaaaaaaaaaaaaaaaaaaaaaa","_tpl":"{CONTAINER_TPL}"}}]}}}}]}}"#
+                "Items":[{{"_id":"aaaaaaaaaaaaaaaaaaaaaaaa","_tpl":"{CONTAINER_TPL}"}}]}}}}]}},
+            "varying":{{{VARYING_JSON}}}}}"#
         );
 
         let (status, out) = call_generate(spt_generate_static_containers, request.as_bytes());
@@ -344,6 +1236,1011 @@ mod tests {
         assert_eq!(
             String::from_utf8(out).unwrap(),
             format!("Container: {CONTAINER_TPL} is missing from staticLoot.json")
+        );
+    }
+
+    #[test]
+    fn a_panicking_generator_returns_status_panic_and_the_message() {
+        let mut out_ptr: *mut u8 = std::ptr::null_mut();
+        let mut out_len: usize = 0;
+
+        // No generator family has a reachable panic (C# crash-equivalents were ported as
+        // `LootError`), so the envelope is driven directly with a panicking generate fn. The
+        // literal payload exercises the `&str` downcast; the quest roundtrip test's `.expect`
+        // covers the `String` one.
+        let status = unsafe {
+            run_generator(
+                b"{}".as_ptr(),
+                2,
+                &mut out_ptr,
+                &mut out_len,
+                |_: serde_json::Value| -> Result<serde_json::Value, LootError> {
+                    panic!("kaboom: it went sideways")
+                },
+            )
+        };
+
+        assert_eq!(status, STATUS_PANIC);
+        assert!(!out_ptr.is_null(), "the panic message buffer is missing");
+        let message = unsafe { std::slice::from_raw_parts(out_ptr, out_len) }.to_vec();
+        unsafe { spt_buf_free(out_ptr, out_len) };
+        assert_eq!(
+            String::from_utf8(message).unwrap(),
+            "kaboom: it went sideways"
+        );
+    }
+
+    #[test]
+    fn a_non_string_panic_payload_crosses_as_the_fallback_text() {
+        let mut out_ptr: *mut u8 = std::ptr::null_mut();
+        let mut out_len: usize = 0;
+
+        let status = unsafe {
+            run_generator(
+                b"{}".as_ptr(),
+                2,
+                &mut out_ptr,
+                &mut out_len,
+                |_: serde_json::Value| -> Result<serde_json::Value, LootError> {
+                    std::panic::panic_any(42)
+                },
+            )
+        };
+
+        assert_eq!(status, STATUS_PANIC);
+        assert!(!out_ptr.is_null(), "the panic message buffer is missing");
+        let message = unsafe { std::slice::from_raw_parts(out_ptr, out_len) }.to_vec();
+        unsafe { spt_buf_free(out_ptr, out_len) };
+        assert_eq!(
+            String::from_utf8(message).unwrap(),
+            "native call panicked with a non-string payload"
+        );
+    }
+
+    /// The `RewardViewsWire` members every override reward send carries; sealed adds
+    /// `presetsByTpl` and container adds `presetTpls` beside these.
+    const REWARD_VIEWS_JSON: &str =
+        r#""itemsView":{},"defaultPresets":[],"defaultPresetsByTpl":{}"#;
+
+    /// Every required `RewardLootVarying` member, spliced beside each request's per-export
+    /// varying members below.
+    const REWARD_VARYING_JSON: &str = r#"
+        "globalBlacklist":[],"configBlacklist":[],
+        "rewardItemBlacklist":[],"rewardBaseTypeBlacklist":[],
+        "bossItems":[],"inactiveSeasonalItems":[]
+    "#;
+
+    #[test]
+    fn random_loot_roundtrips_result_json() {
+        // Every count zero and an empty type whitelist: nothing to draw, so no fixture is needed.
+        let request = format!(
+            r#"{{"epoch":0,"viewsOverride":{{{REWARD_VIEWS_JSON}}},
+            "varying":{{{REWARD_VARYING_JSON},
+            "lootRequest":{{"weaponPresetCount":{{"min":0,"max":0}},
+            "armorPresetCount":{{"min":0,"max":0}},"itemCount":{{"min":0,"max":0}},
+            "weaponCrateCount":{{"min":0,"max":0}},"itemBlacklist":[],"itemTypeWhitelist":[],
+            "itemLimits":{{}},"itemStackLimits":{{}},"armorLevelWhitelist":[]}}}}}}"#
+        );
+
+        let (status, out) = call_generate(spt_create_random_loot, request.as_bytes());
+
+        assert_eq!(status, STATUS_OK);
+        let result: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(result["items"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn forced_loot_roundtrips_result_json() {
+        let request = format!(
+            r#"{{"epoch":0,"viewsOverride":{{{REWARD_VIEWS_JSON}}},
+            "varying":{{{REWARD_VARYING_JSON},"forcedLoot":{{}}}}}}"#
+        );
+
+        let (status, out) = call_generate(spt_create_forced_loot, request.as_bytes());
+
+        assert_eq!(status, STATUS_OK);
+        let result: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(result["items"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn sealed_weapon_case_roundtrips_result_json() {
+        // The drawn weapon is not in `itemsView`, so the generator takes its diagnostic early-out —
+        // a result, not an error, which is what the transport has to carry.
+        let request = format!(
+            r#"{{"epoch":0,"viewsOverride":{{{REWARD_VIEWS_JSON},"presetsByTpl":{{}}}},
+            "varying":{{{REWARD_VARYING_JSON},"containerSettings":{{
+            "weaponRewardWeight":{{"888888888888888888888888":1}},"defaultPresetsOnly":false,
+            "weaponModRewardLimits":{{}},"rewardTypeLimits":{{}},"ammoBoxWhitelist":[],
+            "allowBossItems":false}},"linkedItems":{{}}}}}}"#
+        );
+
+        let (status, out) = call_generate(spt_get_sealed_weapon_case_loot, request.as_bytes());
+
+        assert_eq!(status, STATUS_OK);
+        let result: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(result["items"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn random_loot_container_roundtrips_result_json() {
+        let request = format!(
+            r#"{{"epoch":0,"viewsOverride":{{{REWARD_VIEWS_JSON},"presetTpls":[]}},
+            "varying":{{{REWARD_VARYING_JSON},"rewardDetails":{{"rewardCount":0}}}}}}"#
+        );
+
+        let (status, out) = call_generate(spt_get_random_loot_container_loot, request.as_bytes());
+
+        assert_eq!(status, STATUS_OK);
+        let result: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(result["items"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn unparseable_reward_loot_request_returns_bad_args_with_the_parse_error() {
+        let (status, out) = call_generate(spt_create_random_loot, b"{\"itemsView\":");
+
+        assert_eq!(status, STATUS_BAD_ARGS);
+        let message = String::from_utf8(out).unwrap();
+        assert!(
+            message.contains("EOF while parsing"),
+            "expected the serde error, got: {message}"
+        );
+    }
+
+    #[test]
+    fn a_reward_loot_failure_returns_status_error_and_the_message() {
+        // An empty `lootRequest` parses — every member is optional — and then fails on the first
+        // null the C# would have thrown on.
+        let request = format!(
+            r#"{{"epoch":0,"viewsOverride":{{{REWARD_VIEWS_JSON}}},
+            "varying":{{{REWARD_VARYING_JSON},"lootRequest":{{}}}}}}"#
+        );
+
+        let (status, out) = call_generate(spt_create_random_loot, request.as_bytes());
+
+        assert_eq!(status, STATUS_ERROR);
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "LootRequest.ItemLimits is null"
+        );
+    }
+
+    /// Every required `GenerateBotInventoryRequest` member, pared down from the orchestrator's own
+    /// fixture: no items view, an empty `Pockets` pool (present, or `:516` derefs a null), and zero
+    /// loot counts, so the bot generates nothing but the six inventory roots. `equipmentChances` is
+    /// left open because the failure case below is the missing `FirstPrimaryWeapon` key.
+    fn bot_request(equipment_chances: &str) -> String {
+        format!(
+            r#"{{
+            "botId":"bbbbbbbbbbbbbbbbbbbbbbbb",
+            "details":{{"role":"assault","roleLowercase":"assault","side":"Savage","botLevel":15,
+                "isPmc":false,"isPlayerScav":false,"gameVersion":"standard","location":"bigmap",
+                "botDifficulty":"normal","clearBotContainerCacheAfterGeneration":false}},
+            "template":{{
+                "inventory":{{"equipment":{{"Pockets":{{}},"Holster":{{}}}},"Ammo":{{}},
+                    "items":{{"Backpack":{{}},"Pockets":{{}},"SecuredContainer":{{}},
+                        "SpecialLoot":{{}},"TacticalVest":{{}}}},
+                    "mods":{{}}}},
+                "chances":{{"equipment":{equipment_chances},"weaponMods":{{}},
+                    "equipmentMods":{{}}}},
+                "generation":{{"items":{{"grenades":{{"weights":{{"0":1}}}},
+                    "healing":{{"weights":{{"0":1}}}},"drugs":{{"weights":{{"0":1}}}},
+                    "food":{{"weights":{{"0":1}}}},"drink":{{"weights":{{"0":1}}}},
+                    "currency":{{"weights":{{"0":1}}}},"stims":{{"weights":{{"0":1}}}},
+                    "backpackLoot":{{"weights":{{"0":1}}}},"pocketLoot":{{"weights":{{"0":1}}}},
+                    "vestLoot":{{"weights":{{"0":1}}}},"specialItems":{{"weights":{{"0":1}}}},
+                    "magazines":{{"weights":{{"0":1}}}}}}}}}},
+            "generatingPlayerLevel":20,
+            "isNightTime":false,
+            "equipment":{{}},
+            "bosses":[],
+            "durability":{{
+                "default":{{"armor":{{"maxDelta":10,"minDelta":0,"minLimitPercent":15}},
+                    "weapon":{{"lowestMax":60,"highestMax":100,"maxDelta":10,"minDelta":0,
+                        "minLimitPercent":15}}}},
+                "botDurabilities":{{}},
+                "pmc":{{"armor":{{"lowestMaxPercent":90,"highestMaxPercent":100,"maxDelta":10,
+                        "minDelta":0,"minLimitPercent":15}},
+                    "weapon":{{"lowestMax":95,"highestMax":100,"maxDelta":5,"minDelta":0,
+                        "minLimitPercent":15}}}}}},
+            "itemSpawnLimits":{{}},
+            "walletLoot":{{"chancePercent":0}},
+            "currencyStackSize":{{}},
+            "secureContainerAmmoStackCount":0,
+            "disableLootOnBotTypes":[],
+            "lowProfileGasBlockTpls":[],
+            "lootItemResourceRandomization":{{}},
+            "pmcConfig":{{}},
+            "repairKitWeapon":{{"rarityWeight":{{}},"bonusTypeWeight":{{}},"Common":{{}},
+                "Rare":{{}}}},
+            "equipmentBlacklist":{{}},
+            "weaponModEquipmentBlacklist":{{}},
+            "lootPools":{{}},
+            "itemPresets":{{}},
+            "defaultPresetsByTpl":{{}},
+            "configBlacklist":[],
+            "handbookPrices":{{}},
+            "items":{{}}
+        }}"#
+        )
+    }
+
+    #[test]
+    fn bot_inventory_roundtrips_result_json() {
+        let request = bot_request(r#"{"FirstPrimaryWeapon":0}"#);
+
+        let (status, out) = call_generate(spt_generate_bot_inventory, request.as_bytes());
+
+        assert_eq!(status, STATUS_OK);
+        let result: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        // The six `GenerateInventoryBase` roots and nothing else: every pool is empty.
+        assert_eq!(result["inventory"]["items"].as_array().unwrap().len(), 6);
+        assert_eq!(
+            result["inventory"]["items"][0]["_id"],
+            result["inventory"]["equipment"]
+        );
+        assert_eq!(result["randomisationClamps"], serde_json::json!({}));
+    }
+
+    #[test]
+    fn unparseable_bot_request_returns_bad_args_with_the_parse_error() {
+        let (status, out) = call_generate(spt_generate_bot_inventory, b"{\"botId\":");
+
+        assert_eq!(status, STATUS_BAD_ARGS);
+        let message = String::from_utf8(out).unwrap();
+        assert!(
+            message.contains("EOF while parsing"),
+            "expected the serde error, got: {message}"
+        );
+    }
+
+    #[test]
+    fn a_bot_generation_failure_returns_status_error_and_the_message() {
+        // `GetDesiredWeaponsForBot` indexes `chances.equipment["FirstPrimaryWeapon"]`
+        // unconditionally, so a chances map without it throws where the C# dictionary would.
+        let request = bot_request("{}");
+
+        let (status, out) = call_generate(spt_generate_bot_inventory, request.as_bytes());
+
+        assert_eq!(status, STATUS_ERROR);
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "The given key 'FirstPrimaryWeapon' was not present in the dictionary."
+        );
+    }
+
+    /// `RagfairConfig.Dynamic` pared to the members the wire type names, every chance at zero so no
+    /// draw the offer path makes can change the outcome. `offerItemCount` is left open: the failure
+    /// case below is a config with neither an entry for the item's parent nor a `"default"`.
+    fn ragfair_dynamic(offer_item_count: &str) -> String {
+        format!(
+            r#"{{"useTraderPriceForOffersIfHigher":true,
+            "barter":{{"chancePercent":0,"itemCountMin":1,"itemCountMax":3,
+                "priceRangeVariancePercent":15,"minRoubleCostToBecomeBarter":15000,
+                "makeSingleStackOnly":false,"itemTplBlacklist":[],"itemTypeBlacklist":[]}},
+            "pack":{{"chancePercent":0,"itemCountMin":2,"itemCountMax":10,"itemTypeWhitelist":[]}},
+            "offerAdjustment":{{"adjustPriceWhenBelowHandbookPrice":true,
+                "maxPriceDifferenceBelowHandbookPercent":70,"handbookPriceMultiplier":1.5,
+                "priceThresholdRub":6000}},
+            "offerItemCount":{offer_item_count},
+            "priceRanges":{{"default":{{"min":0.8,"max":1.2}},"preset":{{"min":0.9,"max":1.4}},
+                "pack":{{"min":0.5,"max":0.8}}}},
+            "showDefaultPresetsOnly":false,"ignoreQualityPriceVarianceBlacklist":[],
+            "endTimeSeconds":{{"min":1000,"max":36000}},"condition":{{}},
+            "stackablePercent":{{"min":10,"max":100}},"nonStackableCount":{{"min":1,"max":2}},
+            "rating":{{"min":0.2,"max":0.95}},
+            "armor":{{"removeRemovablePlateChance":0,"plateSlotIdToRemovePool":[]}},
+            "offerCurrencyChancePercent":{{"5449016a4bdc2d6f028b456f":100}},
+            "showAsSingleStack":[],"removeSeasonalItemsWhenNotInEvent":true,
+            "blacklist":{{"damagedAmmoPacks":true,"custom":[],"enableBsgList":true,
+                "enableQuestList":true,"traderItems":false,
+                "armorPlate":{{"maxProtectionLevel":3,"ignoreSlots":[]}},
+                "enableCustomItemCategoryList":false,"customItemCategoryList":[]}},
+            "unreasonableModPrices":{{}},
+            "generateBaseFleaPrices":{{"useHandbookPrice":true,"priceMultiplier":1.1,
+                "preventPriceBeingBelowTraderBuyPrice":true,"itemTplMultiplierOverride":{{}},
+                "itemTypeMultiplierOverride":{{}},"useHideoutCraftMultiplier":false,
+                "hideoutCraftMultiplier":1,"generatePresetPriceByChildren":true}}}}"#
+        )
+    }
+
+    /// Every member of the views override, braces included. The two price tables always know
+    /// `SELLABLE_TPL`, which only matters when the items view carries it.
+    fn ragfair_views_override(items: &str) -> String {
+        format!(
+            r#"{{"itemPresets":{{}},"defaultPresets":[],"defaultPresetsByTpl":{{}},
+            "presetsByTpl":{{}},
+            "fleaPrices":{{"{SELLABLE_TPL}":25000}},"handbookPrices":{{"{SELLABLE_TPL}":20000}},
+            "highestTraderPrices":{{"{SELLABLE_TPL}":12000}},"items":{items}}}"#
+        )
+    }
+
+    /// The varying half, config and service state included (spec § C# driver carve-out). Starts with
+    /// `timestamp` so the expired-pass test can splice `expiredOffers` in front of it.
+    fn ragfair_varying(offer_item_count: &str) -> String {
+        let dynamic = ragfair_dynamic(offer_item_count);
+        format!(
+            r#""varying":{{"timestamp":1700000000,"offerCounterStart":0,
+            "dynamic":{dynamic},"configBlacklist":[],
+            "seasonalEventActive":false,"seasonalItemTplBlacklist":[],
+            "pmcNamesUsec":["Deagle"],"pmcNamesBear":["Kirill"]}}"#
+        )
+    }
+
+    /// Every required `GenerateDynamicOffersRequest` member, views override included.
+    fn ragfair_request_with(items: &str, offer_item_count: &str) -> String {
+        let varying = ragfair_varying(offer_item_count);
+        let views_override = ragfair_views_override(items);
+        format!(r#"{{"epoch":0,{varying},"viewsOverride":{views_override}}}"#)
+    }
+
+    /// The minimal override-less request naming `epoch` — the resident-DB half of the protocol.
+    fn ragfair_request_at_epoch(epoch: u64) -> String {
+        let varying = ragfair_varying(r#"{"default":{"min":2,"max":5}}"#);
+        format!(r#"{{"epoch":{epoch},{varying}}}"#)
+    }
+
+    /// The one tpl the offer path would accept, were it in the items view.
+    const SELLABLE_TPL: &str = "bbbbbbbbbbbbbbbbbbbbbbbb";
+
+    fn ragfair_request() -> String {
+        ragfair_request_with("{}", r#"{"default":{"min":2,"max":5}}"#)
+    }
+
+    /// One sellable item and an `offerItemCount` with neither its parent nor a `"default"` entry.
+    fn ragfair_request_missing_default() -> String {
+        ragfair_request_with(
+            &format!(
+                r#"{{"{SELLABLE_TPL}":{{"parent":"cccccccccccccccccccccccc","type":"Item",
+                "stackMaxSize":1,"canSellOnRagfair":true}}}}"#
+            ),
+            "{}",
+        )
+    }
+
+    /// Decodes one frame payload by the envelope's encoding tag. The writer never emits msgpack
+    /// bin/ext, so every payload lands in a `Value` cleanly.
+    fn decode(encoding: u8, payload: &[u8]) -> serde_json::Value {
+        match encoding {
+            PAYLOAD_JSON => serde_json::from_slice(payload).unwrap(),
+            PAYLOAD_MSGPACK => rmp_serde::from_slice(payload).unwrap(),
+            other => panic!("unknown payload encoding {other}"),
+        }
+    }
+
+    /// Splits a framed ragfair response: (encoding, header, offer payloads).
+    fn parse_framed(out: &[u8]) -> (u8, serde_json::Value, Vec<Vec<u8>>) {
+        let encoding = out[0];
+        let mut at = 1;
+        let read_len = |buf: &[u8], at: usize| {
+            u32::from_le_bytes(buf[at..at + 4].try_into().unwrap()) as usize
+        };
+        let header_len = read_len(out, at);
+        at += 4;
+        let header = decode(encoding, &out[at..at + header_len]);
+        at += header_len;
+        let count = read_len(out, at);
+        at += 4;
+        let mut payloads = Vec::with_capacity(count);
+        for _ in 0..count {
+            let len = read_len(out, at);
+            at += 4;
+            payloads.push(out[at..at + len].to_vec());
+            at += len;
+        }
+        assert_eq!(at, out.len(), "trailing bytes after the last frame");
+        (encoding, header, payloads)
+    }
+
+    #[test]
+    fn a_minimal_dynamic_offers_request_returns_an_empty_offer_list() {
+        // Empty items view and empty presets: the assort walk yields nothing, so no draws happen.
+        let (status, out) =
+            call_generate(spt_generate_dynamic_offers, ragfair_request().as_bytes());
+
+        assert_eq!(status, STATUS_OK);
+        let (encoding, header, payloads) = parse_framed(&out);
+        assert_eq!(encoding, PAYLOAD_MSGPACK);
+        assert!(payloads.is_empty());
+        assert_eq!(header["rejectedCanSellTemplates"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn unparseable_dynamic_offers_request_returns_bad_args_with_the_parse_error() {
+        let (status, out) = call_generate(spt_generate_dynamic_offers, b"{\"timestamp\":");
+
+        assert_eq!(status, STATUS_BAD_ARGS);
+        assert!(
+            String::from_utf8(out)
+                .unwrap()
+                .contains("EOF while parsing")
+        );
+    }
+
+    #[test]
+    fn a_dynamic_offers_failure_returns_status_error_and_the_message() {
+        // `offerItemCount` without a "default" entry is the unguarded C# dictionary miss: it
+        // dereferences the null `MinMax` `GetValueOrDefault` hands back, so the message is the
+        // null-reference one, not one naming the key.
+        let (status, out) = call_generate(
+            spt_generate_dynamic_offers,
+            ragfair_request_missing_default().as_bytes(),
+        );
+
+        assert_eq!(status, STATUS_ERROR);
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "Object reference not set to an instance of an object."
+        );
+    }
+
+    /// Thirty expired single-item entries, unseeded — the parallel walk. One offer per expired
+    /// entry, `intId` sequential from `offerCounterStart`, offers in assort order: the merge
+    /// contract stage A must preserve.
+    #[test]
+    fn an_unseeded_expired_pass_keeps_assort_order_and_sequential_int_ids() {
+        let expired: Vec<String> = (0..30)
+            .map(|i| format!(r#"[{{"_id":"{i:024x}","_tpl":"{SELLABLE_TPL}"}}]"#))
+            .collect();
+        let request = ragfair_request_with(
+            &format!(
+                r#"{{"{SELLABLE_TPL}":{{"parent":"cccccccccccccccccccccccc","type":"Item",
+                "stackMaxSize":1,"canSellOnRagfair":true}}}}"#
+            ),
+            r#"{"default":{"min":2,"max":5}}"#,
+        )
+        // splice the expired entries and a non-zero counter start into the request JSON
+        .replacen(
+            r#"{"timestamp":"#,
+            &format!(r#"{{"expiredOffers":[{}],"timestamp":"#, expired.join(",")),
+            1,
+        )
+        .replacen(r#""offerCounterStart":0"#, r#""offerCounterStart":7"#, 1);
+
+        let (status, out) = call_generate(spt_generate_dynamic_offers, request.as_bytes());
+
+        assert_eq!(status, STATUS_OK);
+        let (encoding, _, payloads) = parse_framed(&out);
+        assert_eq!(encoding, PAYLOAD_MSGPACK);
+        assert_eq!(payloads.len(), 30);
+        for (i, payload) in payloads.iter().enumerate() {
+            let offer = decode(encoding, payload);
+            assert_eq!(offer["intId"], serde_json::json!(7 + i as i64));
+            assert_eq!(offer["root"], serde_json::json!(format!("{i:024x}")));
+        }
+
+        // The C# reader keys off the JSON wire names — a serde rename regression must fail here.
+        let offer: serde_json::Value = rmp_serde::from_slice(&payloads[0]).unwrap();
+        for key in ["_id", "intId", "user", "root", "items", "requirements"] {
+            assert!(
+                offer.get(key).is_some(),
+                "offer payload lost wire key {key}"
+            );
+        }
+    }
+
+    #[test]
+    fn ragfair_epoch_protocol_gates_override_less_requests() {
+        let _guard = db_lock();
+        crate::db::clear();
+
+        // No publish yet: an override-less request has no resident DB to generate from
+        let (status, _) = call_generate(
+            spt_generate_dynamic_offers,
+            ragfair_request_at_epoch(1).as_bytes(),
+        );
+        assert_eq!(status, STATUS_STALE_EPOCH);
+
+        // Publish the mini roots (junk roots parse as empty typed containers, so the empty
+        // ragfair views derive) and name the returned epoch: the request generates
+        let (status, out) = call_generate(
+            spt_db_publish,
+            br#"{"schema":1,"roots":{"templates":{"a":1},"traders":{"b":2},"globals":{"c":3}}}"#,
+        );
+        assert_eq!(status, STATUS_OK);
+        let epoch = serde_json::from_slice::<serde_json::Value>(&out).unwrap()["epoch"]
+            .as_u64()
+            .unwrap();
+
+        let (status, _) = call_generate(
+            spt_generate_dynamic_offers,
+            ragfair_request_at_epoch(epoch).as_bytes(),
+        );
+        assert_eq!(status, STATUS_OK);
+
+        // A mismatched epoch is a stale miss carrying the republish-and-retry message
+        let (status, out) = call_generate(
+            spt_generate_dynamic_offers,
+            ragfair_request_at_epoch(epoch + 1).as_bytes(),
+        );
+        assert_eq!(status, STATUS_STALE_EPOCH);
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "resident DB epoch mismatch; republish and retry"
+        );
+
+        // The distrust fallback: a views override at epoch 0 never reads the resident DB
+        let (status, _) = call_generate(spt_generate_dynamic_offers, ragfair_request().as_bytes());
+        assert_eq!(status, STATUS_OK);
+    }
+
+    /// A repeatable-quest request at `epoch`, with the views override sent or omitted, off the
+    /// fixtures the model tests already pin against the shipped database.
+    fn quest_request(epoch: u64, include_override: bool, seed: Option<u64>) -> Vec<u8> {
+        let mut varying = crate::quest::models::tests::varying_value();
+        if let Some(seed) = seed {
+            varying["seed"] = serde_json::json!(seed);
+        }
+        let mut request = serde_json::json!({"epoch": epoch, "varying": varying});
+        if include_override {
+            request["viewsOverride"] = crate::quest::models::tests::views_override_value();
+        }
+
+        serde_json::to_vec(&request).expect("request serializes")
+    }
+
+    /// Every 24-character hex run in `bytes` — the mongo ids crossing the boundary, whichever way.
+    fn mongo_ids(bytes: &[u8]) -> Vec<String> {
+        let text = std::str::from_utf8(bytes).expect("the payload is UTF-8");
+        let mut ids = Vec::new();
+        let mut run = String::new();
+        // A trailing separator so a run ending at the last byte is closed like every other.
+        for character in text.chars().chain(std::iter::once(' ')) {
+            if character.is_ascii_hexdigit() {
+                run.push(character);
+                continue;
+            }
+            if run.len() == 24 {
+                ids.push(run.clone());
+            }
+            run.clear();
+        }
+
+        ids
+    }
+
+    /// Blanks only the ids the generators *minted*: the response ids the request did not carry.
+    /// Those come off a process counter and a clock, outside the seeded stream, so no seed pins
+    /// them. Every id the request already knew — the trader, the template, the item tpls a reward
+    /// draw picks — stays visible, which is where a seed regression has to show. Ids appearing as
+    /// a `"_tpl"` value count as known even when the request never carried them (a drawn reward's
+    /// template comes from the database, never the mint), so a same-price different-item
+    /// regression stays visible too.
+    fn mask_minted_ids(out: &[u8], request: &[u8]) -> String {
+        let mut known: std::collections::HashSet<String> = mongo_ids(request).into_iter().collect();
+        let text = std::str::from_utf8(out).expect("the response is UTF-8");
+        for (idx, _) in text.match_indices("\"_tpl\":\"") {
+            let value = &text[idx + 8..];
+            if value.len() >= 24 && value.as_bytes()[24] == b'"' {
+                known.insert(value[..24].to_string());
+            }
+        }
+        let mut masked = String::from_utf8(out.to_vec()).expect("the response is UTF-8");
+        for id in mongo_ids(out) {
+            if !known.contains(&id) {
+                masked = masked.replace(&id, "<minted>");
+            }
+        }
+
+        masked
+    }
+
+    #[test]
+    fn quest_epoch_protocol_gates_override_less_requests() {
+        let _guard = db_lock();
+        crate::db::clear();
+
+        // No publish yet: an override-less request has no resident DB to generate from
+        let (status, _) = call_generate(
+            spt_generate_repeatable_quest,
+            &quest_request(1, false, None),
+        );
+        assert_eq!(status, STATUS_STALE_EPOCH);
+
+        // Publish the mini roots (junk roots parse as empty typed containers, so the empty quest
+        // views derive) and name the returned epoch: the request generates
+        let (status, out) = call_generate(
+            spt_db_publish,
+            br#"{"schema":1,"roots":{"templates":{"a":1},"traders":{"b":2},"globals":{"c":3},"locations":{"factory4_day":{}}}}"#,
+        );
+        assert_eq!(status, STATUS_OK);
+        let epoch = serde_json::from_slice::<serde_json::Value>(&out).unwrap()["epoch"]
+            .as_u64()
+            .unwrap();
+
+        let (status, _) = call_generate(
+            spt_generate_repeatable_quest,
+            &quest_request(epoch, false, None),
+        );
+        assert_eq!(status, STATUS_OK);
+
+        // A mismatched epoch is a stale miss carrying the republish-and-retry message
+        let (status, out) = call_generate(
+            spt_generate_repeatable_quest,
+            &quest_request(epoch + 1, false, None),
+        );
+        assert_eq!(status, STATUS_STALE_EPOCH);
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "resident DB epoch mismatch; republish and retry"
+        );
+
+        // The distrust fallback: a views override at epoch 0 never reads the resident DB
+        let (status, _) =
+            call_generate(spt_generate_repeatable_quest, &quest_request(0, true, None));
+        assert_eq!(status, STATUS_OK);
+    }
+
+    #[test]
+    fn a_quest_generator_throw_returns_status_error_and_the_message() {
+        // The Daily config ships no `Pickup` block, and `PickupQuestGenerator:39` dereferences it
+        // unconditionally — the C#-sanctioned throw, ported as a panic. Rides the override path,
+        // so the resident DB is never read.
+        let mut request: serde_json::Value =
+            serde_json::from_slice(&quest_request(0, true, None)).unwrap();
+        request["varying"]["questType"] = serde_json::json!("Pickup");
+
+        let (status, out) = call_generate(
+            spt_generate_repeatable_quest,
+            &serde_json::to_vec(&request).unwrap(),
+        );
+
+        assert_eq!(status, STATUS_ERROR);
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "Pickup config was null at PickupQuestGenerator:39"
+        );
+    }
+
+    /// Publish a resident DB rich enough to draw a real elimination quest from: the shipped
+    /// repeatable-quest templates plus the one priced weapon item the wire fixtures pin, as
+    /// roots. Returns the epoch override-less requests must name.
+    fn publish_quest_roots() -> u64 {
+        let templates_block = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../Libraries/SPTarkov.Server.Assets/SPT_Data/database/templates/repeatableQuests.json"
+        ))
+        .expect("SPT_Data file readable");
+        let request = format!(
+            r#"{{"schema":1,"roots":{{
+                "templates":{{
+                    "items":{{
+                        "5422acb9af1c889c16000029":{{"_name":"weapon","_type":"Node","_parent":"","_props":{{}}}},
+                        "bbbbbbbbbbbbbbbbbbbbbbbb":{{"_name":"item","_type":"Item",
+                            "_parent":"5422acb9af1c889c16000029","_props":{{"StackMaxSize":1}}}}
+                    }},
+                    "handbook":{{"Items":[{{"Id":"bbbbbbbbbbbbbbbbbbbbbbbb","ParentId":"cat","Price":20000.0}}]}},
+                    "prices":{{"bbbbbbbbbbbbbbbbbbbbbbbb":25000.0}},
+                    "repeatableQuests":{templates_block}
+                }},
+                "traders":{{}},
+                "globals":{{"ItemPresets":{{"preset1":{{"_id":"preset1","_name":"default",
+                    "_items":[{{"_id":"aaaaaaaaaaaaaaaaaaaaaaaa","_tpl":"bbbbbbbbbbbbbbbbbbbbbbbb"}}],
+                    "_encyclopedia":"bbbbbbbbbbbbbbbbbbbbbbbb"}}}}}},
+                "locations":{{}}
+            }}}}"#
+        );
+
+        let (status, out) = call_generate(spt_db_publish, request.as_bytes());
+        assert_eq!(status, STATUS_OK);
+        serde_json::from_slice::<serde_json::Value>(&out).unwrap()["epoch"]
+            .as_u64()
+            .expect("publish answers an epoch")
+    }
+
+    #[test]
+    fn a_seeded_quest_request_answers_the_same_bytes_twice() {
+        let _guard = db_lock();
+        let epoch = publish_quest_roots();
+        let request = quest_request(epoch, false, Some(42));
+
+        let (first_status, first) = call_generate(spt_generate_repeatable_quest, &request);
+        let (second_status, second) = call_generate(spt_generate_repeatable_quest, &request);
+
+        assert_eq!(first_status, STATUS_OK);
+        assert_eq!(second_status, STATUS_OK);
+        let response: serde_json::Value = serde_json::from_slice(&first).unwrap();
+        assert!(
+            response["quest"].is_object(),
+            "the fixture request generates a quest"
+        );
+        assert!(response["pool"]["types"].is_array());
+        // The ids a draw can move — the trader the quest is minted for, and the tpls it hands over
+        // — come off the request, so the masking leaves them in the compared bytes.
+        assert!(
+            mask_minted_ids(&first, &request).contains("54cb50c76803fa8b248b4571"),
+            "the request's own ids must survive the masking"
+        );
+        assert_eq!(
+            mask_minted_ids(&first, &request),
+            mask_minted_ids(&second, &request)
+        );
+
+        // …and the masking has teeth: another seed draws a different quest.
+        let other_request = quest_request(epoch, false, Some(7));
+        let (status, other) = call_generate(spt_generate_repeatable_quest, &other_request);
+        assert_eq!(status, STATUS_OK);
+        assert_ne!(
+            mask_minted_ids(&first, &request),
+            mask_minted_ids(&other, &other_request)
+        );
+    }
+
+    /// A scav case craft off the generator's own synthetic table, seeded so the reward list is the
+    /// one its end-to-end KAT pins.
+    fn scav_case_request() -> Vec<u8> {
+        let mut request = crate::scav_case::generator::tests::container_request_json();
+        request["testSeed"] = serde_json::json!(42);
+
+        serde_json::to_vec(&request).expect("request serializes")
+    }
+
+    #[test]
+    fn scav_case_rewards_roundtrip_result_json() {
+        let (status, out) = call_generate(spt_generate_scav_case_rewards, &scav_case_request());
+
+        assert_eq!(status, STATUS_OK);
+        let result: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        let rewards = result["result"].as_array().unwrap();
+        assert!(!rewards.is_empty(), "the fixture craft draws rewards");
+        // Each entry is one reward item plus its children, so every group has a root with a tpl.
+        assert!(
+            rewards
+                .iter()
+                .all(|group| group[0]["_tpl"].is_string() && group[0]["_id"].is_string())
+        );
+    }
+
+    #[test]
+    fn unparseable_scav_case_request_returns_bad_args_with_the_parse_error() {
+        let (status, out) = call_generate(spt_generate_scav_case_rewards, b"{\"recipeId\":");
+
+        assert_eq!(status, STATUS_BAD_ARGS);
+        let message = String::from_utf8(out).unwrap();
+        assert!(
+            message.contains("EOF while parsing"),
+            "expected the serde error, got: {message}"
+        );
+    }
+
+    #[test]
+    fn a_scav_case_failure_returns_status_error_and_the_message() {
+        // `FirstOrDefault` (`:54`) answers null for a recipe id the table does not hold, which the
+        // C# then NREs dereferencing — reported here as an error naming the recipe.
+        let mut request: serde_json::Value = serde_json::from_slice(&scav_case_request()).unwrap();
+        request["recipeId"] = serde_json::json!("ffffffffffffffffffffffff");
+
+        let (status, out) = call_generate(
+            spt_generate_scav_case_rewards,
+            &serde_json::to_vec(&request).unwrap(),
+        );
+
+        assert_eq!(status, STATUS_ERROR);
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "No scav case recipe found with id: ffffffffffffffffffffffff"
+        );
+    }
+
+    /// `child` is an Item whose chain climbs through the `node` root to a `root` the view never
+    /// holds — the three-template shape `base_class`'s own tests pin, here across the boundary.
+    const BASE_CLASS_REQUEST: &[u8] = br#"{"epoch":0,"viewsOverride":{"itemsView":{
+        "child":{"parent":"node","type":"Item"},
+        "node":{"parent":"root","type":"Node"}
+    }}}"#;
+
+    #[test]
+    fn build_item_base_class_cache_export_round_trips() {
+        let (status, out) = call_generate(spt_build_item_base_class_cache, BASE_CLASS_REQUEST);
+
+        assert_eq!(status, STATUS_OK);
+        let result: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        // Only the Item-type template is cached; the `node` root must not leak into the map.
+        let cache = result["result"]["itemBaseClasses"].as_object().unwrap();
+        assert_eq!(cache.len(), 1);
+        // A `HashSet` crosses as an array, so the chain is order-independent.
+        let chain = result["result"]["itemBaseClasses"]["child"]
+            .as_array()
+            .unwrap();
+        assert_eq!(chain.len(), 2);
+        assert!(chain.contains(&serde_json::json!("node")));
+        assert!(chain.contains(&serde_json::json!("root")));
+        assert_eq!(result["result"]["rootNodeIds"], serde_json::json!(["node"]));
+    }
+
+    #[test]
+    fn build_item_base_class_cache_rejects_malformed_json() {
+        let (status, out) = call_generate(spt_build_item_base_class_cache, b"not json");
+
+        assert_eq!(status, STATUS_BAD_ARGS);
+        let message = String::from_utf8(out).unwrap();
+        assert!(
+            message.contains("expected ident"),
+            "expected the serde error, got: {message}"
+        );
+    }
+
+    #[test]
+    fn build_item_base_class_cache_epoch_protocol_gates_override_less_requests() {
+        let _guard = db_lock();
+        crate::db::clear();
+
+        // No publish yet: an override-less request has no resident DB to build from
+        let (status, _) = call_generate(spt_build_item_base_class_cache, br#"{"epoch":1}"#);
+        assert_eq!(status, STATUS_STALE_EPOCH);
+
+        // Publish a templates-only mini root and name the returned epoch: the request builds
+        let (status, out) = call_generate(
+            spt_db_publish,
+            br#"{"schema":1,"roots":{"templates":{"items":{
+                "child":{"_parent":"node","_type":"Item"},
+                "node":{"_parent":"root","_type":"Node"}
+            }}}}"#,
+        );
+        assert_eq!(status, STATUS_OK);
+        let epoch = serde_json::from_slice::<serde_json::Value>(&out).unwrap()["epoch"]
+            .as_u64()
+            .unwrap();
+
+        let (status, out) = call_generate(
+            spt_build_item_base_class_cache,
+            format!(r#"{{"epoch":{epoch}}}"#).as_bytes(),
+        );
+        assert_eq!(status, STATUS_OK);
+        let result: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        let chain = result["result"]["itemBaseClasses"]["child"]
+            .as_array()
+            .unwrap();
+        assert_eq!(chain.len(), 2);
+        assert_eq!(result["result"]["rootNodeIds"], serde_json::json!(["node"]));
+
+        // A mismatched epoch is a stale miss carrying the republish-and-retry message
+        let (status, out) = call_generate(
+            spt_build_item_base_class_cache,
+            format!(r#"{{"epoch":{}}}"#, epoch + 1).as_bytes(),
+        );
+        assert_eq!(status, STATUS_STALE_EPOCH);
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "resident DB epoch mismatch; republish and retry"
+        );
+    }
+
+    /// One weapon linking one stock — enough to see both directions cross the boundary.
+    const LINKED_ITEMS_REQUEST: &[u8] = br#"{"epoch":0,"viewsOverride":{"itemsView":{
+        "weapon":{"parent":"p","slots":[{"name":"mod_stock","filter":["stockA"]}]},
+        "stockA":{"parent":"p"}
+    }}}"#;
+
+    #[test]
+    fn build_ragfair_linked_item_table_export_round_trips() {
+        let (status, out) =
+            call_generate(spt_build_ragfair_linked_item_table, LINKED_ITEMS_REQUEST);
+
+        assert_eq!(status, STATUS_OK);
+        let result: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        let linked = result["result"]["linkedItems"].as_object().unwrap();
+        assert_eq!(linked.len(), 2);
+        // A `HashSet` crosses as an array.
+        let weapon = linked["weapon"].as_array().unwrap();
+        assert_eq!(weapon.len(), 1);
+        assert!(weapon.contains(&serde_json::json!("stockA")));
+        let stock = linked["stockA"].as_array().unwrap();
+        assert!(stock.contains(&serde_json::json!("weapon")));
+    }
+
+    #[test]
+    fn build_ragfair_linked_item_table_rejects_malformed_json() {
+        let (status, out) = call_generate(spt_build_ragfair_linked_item_table, b"not json");
+
+        assert_eq!(status, STATUS_BAD_ARGS);
+        let message = String::from_utf8(out).unwrap();
+        assert!(
+            message.contains("expected ident"),
+            "expected the serde error, got: {message}"
+        );
+    }
+
+    #[test]
+    fn build_ragfair_linked_item_table_epoch_protocol_gates_override_less_requests() {
+        let _guard = db_lock();
+        crate::db::clear();
+
+        let (status, _) = call_generate(spt_build_ragfair_linked_item_table, br#"{"epoch":1}"#);
+        assert_eq!(status, STATUS_STALE_EPOCH);
+
+        let (status, out) = call_generate(
+            spt_db_publish,
+            br#"{"schema":1,"roots":{"templates":{"items":{
+                "weapon":{"_parent":"p","_props":{"Slots":[{"_name":"mod_stock","_props":{"filters":[{"Filter":["stockA"]}]}}]}},
+                "stockA":{"_parent":"p"}
+            }}}}"#,
+        );
+        assert_eq!(status, STATUS_OK);
+        let epoch = serde_json::from_slice::<serde_json::Value>(&out).unwrap()["epoch"]
+            .as_u64()
+            .unwrap();
+
+        let (status, out) = call_generate(
+            spt_build_ragfair_linked_item_table,
+            format!(r#"{{"epoch":{epoch}}}"#).as_bytes(),
+        );
+        assert_eq!(status, STATUS_OK);
+        let result: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        let weapon = result["result"]["linkedItems"]["weapon"]
+            .as_array()
+            .unwrap();
+        assert!(weapon.contains(&serde_json::json!("stockA")));
+        assert!(
+            result["result"]["linkedItems"]["stockA"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("weapon"))
+        );
+
+        let (status, out) = call_generate(
+            spt_build_ragfair_linked_item_table,
+            format!(r#"{{"epoch":{}}}"#, epoch + 1).as_bytes(),
+        );
+        assert_eq!(status, STATUS_STALE_EPOCH);
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "resident DB epoch mismatch; republish and retry"
+        );
+    }
+
+    /// Every publish writes the one process-global resident DB, so these run under its test lock.
+    fn db_lock() -> std::sync::MutexGuard<'static, ()> {
+        crate::db::tests::DB_TEST_LOCK.lock().unwrap()
+    }
+
+    #[test]
+    fn db_publish_bumps_the_epoch_per_publish() {
+        let _guard = db_lock();
+        crate::db::clear();
+
+        // All three mini roots resident: the publish also derives the ragfair views.
+        let (status, out) = call_generate(
+            spt_db_publish,
+            br#"{"schema":1,"roots":{"templates":{"a":1},"traders":{"b":2},"globals":{"c":3}}}"#,
+        );
+        assert_eq!(status, STATUS_OK);
+        let body: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(body, serde_json::json!({"epoch": 1}));
+
+        let (status, out) = call_generate(
+            spt_db_publish,
+            br#"{"schema":1,"roots":{"templates":{"a":9}}}"#,
+        );
+        assert_eq!(status, STATUS_OK);
+        let body: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(body, serde_json::json!({"epoch": 2}));
+    }
+
+    #[test]
+    fn db_publish_rejects_an_unknown_root_as_bad_args() {
+        let _guard = db_lock();
+        let (status, out) =
+            call_generate(spt_db_publish, br#"{"schema":1,"roots":{"tempaltes":{}}}"#);
+
+        assert_eq!(status, STATUS_BAD_ARGS);
+        let message = String::from_utf8(out).unwrap();
+        assert!(
+            message.contains("unknown field"),
+            "expected the serde error, got: {message}"
+        );
+    }
+
+    #[test]
+    fn db_publish_reports_a_schema_error_as_status_error() {
+        let _guard = db_lock();
+        let (status, out) = call_generate(spt_db_publish, br#"{"schema":2,"roots":{}}"#);
+
+        assert_eq!(status, STATUS_ERROR);
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "unsupported publish schema 2"
         );
     }
 
@@ -388,5 +2285,310 @@ mod tests {
 
         assert_eq!(status, STATUS_BAD_ARGS);
         assert_eq!(out_len, 0, "nothing may be written when out_ptr is null");
+    }
+
+    static TAP_LINES: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+    unsafe extern "C" fn roundtrip_tap(
+        _category_ptr: *const u8,
+        _category_len: usize,
+        message_ptr: *const u8,
+        message_len: usize,
+        _tname_ptr: *const u8,
+        _tname_len: usize,
+        level: i32,
+        _tid: i32,
+        _millis: i64,
+    ) {
+        let message =
+            std::str::from_utf8(unsafe { std::slice::from_raw_parts(message_ptr, message_len) })
+                .unwrap_or("<bad utf8>")
+                .to_owned();
+        TAP_LINES.lock().unwrap().push(format!("{level}:{message}"));
+    }
+
+    #[test]
+    fn logger_exports_roundtrip() {
+        /// The messages this test emits; everything else in the file belongs to a generator.
+        const MINE: [&str; 10] = [
+            "hello",
+            "nullspans",
+            "still up",
+            "after teardown",
+            "before init",
+            "Unable to find an item with tpl of: 54009119af1c881c07000029 in Db",
+            "plain line",
+            "moved",
+            "survives reinit failure",
+            "not tapped",
+        ];
+
+        let dir = TempDir::new().unwrap();
+        let config = format!(
+            r#"{{ "loggers": [ {{ "type": "File", "logLevel": "Information",
+                "format": "%message%", "filePath": {path:?}, "filePattern": "spt.log",
+                "maxFileSizeMB": 10, "maxRollingFiles": 10, "filters": [] }} ] }}"#,
+            path = dir.path().display().to_string(),
+        );
+
+        let mut out_ptr: *mut u8 = std::ptr::null_mut();
+        let mut out_len: usize = 0;
+
+        // Bad JSON: error status, message in the buffer, pipeline stays uninitialised.
+        let status = unsafe { spt_logger_init(b"nope".as_ptr(), 4, &mut out_ptr, &mut out_len) };
+        assert_eq!(status, STATUS_ERROR);
+        assert!(!out_ptr.is_null());
+        unsafe { spt_buf_free(out_ptr, out_len) };
+
+        // Emit before init is an OK no-op.
+        let status = emit("Cat", "dropped", "", "main");
+        assert_eq!(status, STATUS_OK);
+
+        // Reinit before init: an error naming the missing init, pipeline stays down.
+        let status =
+            unsafe { spt_logger_reinit(config.as_ptr(), config.len(), &mut out_ptr, &mut out_len) };
+        assert_eq!(status, STATUS_ERROR);
+        assert!(!out_ptr.is_null());
+        unsafe { spt_buf_free(out_ptr, out_len) };
+
+        // Same for a generator diagnostic: a run before the host initialised logging drops its
+        // lines rather than panicking on the empty pipeline.
+        crate::diag::DiagSink::Pipeline.push(crate::loot::models::Diagnostic {
+            category: "SPTarkov.Server.Core.Generators.Loot.LootGenerator",
+            level: crate::loot::models::WARNING.to_owned(),
+            locale_key: None,
+            args: None,
+            message: Some("before init".to_owned()),
+        });
+
+        // Real init; the second init keeps the running pipeline and takes a reference.
+        let mut out_ptr: *mut u8 = std::ptr::null_mut();
+        let mut out_len: usize = 0;
+        let status =
+            unsafe { spt_logger_init(config.as_ptr(), config.len(), &mut out_ptr, &mut out_len) };
+        assert_eq!(status, STATUS_OK);
+        let status =
+            unsafe { spt_logger_init(config.as_ptr(), config.len(), &mut out_ptr, &mut out_len) };
+        assert_eq!(status, STATUS_OK);
+
+        assert_eq!(emit("Cat", "hello", "", "main"), STATUS_OK);
+
+        // An empty `ReadOnlySpan<byte>` marshals as a null pointer with a zero length - the empty
+        // spans must arrive as an empty string, not as a bad argument.
+        let status = unsafe {
+            spt_log_emit(
+                "Cat".as_ptr(),
+                3,
+                "nullspans".as_ptr(),
+                9,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                2, // Information
+                1,
+                0,
+            )
+        };
+        assert_eq!(status, STATUS_OK);
+
+        // An invalid UTF-8 message is rejected.
+        let bad = [0xFFu8, 0xFE];
+        let status = unsafe {
+            spt_log_emit(
+                "Cat".as_ptr(),
+                3,
+                bad.as_ptr(),
+                bad.len(),
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                2, // Information
+                1,
+                0,
+            )
+        };
+        assert_eq!(status, STATUS_BAD_ARGS);
+
+        // A bad level is rejected.
+        let status = unsafe {
+            spt_log_emit(
+                "Cat".as_ptr(),
+                3,
+                "x".as_ptr(),
+                1,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                42,
+                1,
+                0,
+            )
+        };
+        assert_eq!(status, STATUS_BAD_ARGS);
+
+        // Reinit with unparseable JSON: error reported, the running pipeline is untouched.
+        let mut out_ptr: *mut u8 = std::ptr::null_mut();
+        let mut out_len: usize = 0;
+        let status = unsafe { spt_logger_reinit(b"nope".as_ptr(), 4, &mut out_ptr, &mut out_len) };
+        assert_eq!(status, STATUS_ERROR);
+        assert!(!out_ptr.is_null());
+        unsafe { spt_buf_free(out_ptr, out_len) };
+        assert_eq!(
+            emit("Cat", "survives reinit failure", "", "main"),
+            STATUS_OK
+        );
+
+        // Reinit to a second directory: later lines land there, not in the first file.
+        let moved_dir = TempDir::new().unwrap();
+        let moved_config = format!(
+            r#"{{ "loggers": [ {{ "type": "File", "logLevel": "Information",
+                "format": "%message%", "filePath": {path:?}, "filePattern": "spt.log",
+                "maxFileSizeMB": 10, "maxRollingFiles": 10, "filters": [] }} ] }}"#,
+            path = moved_dir.path().display().to_string(),
+        );
+        let status = unsafe {
+            spt_logger_reinit(
+                moved_config.as_ptr(),
+                moved_config.len(),
+                &mut out_ptr,
+                &mut out_len,
+            )
+        };
+        assert_eq!(status, STATUS_OK);
+        assert_eq!(emit("Cat", "moved", "", "main"), STATUS_OK);
+
+        // Reinit back to the first directory: a path this process already freshened reopens in
+        // append mode - no second cascade, so no spt.1.log appears beside the live file.
+        let status =
+            unsafe { spt_logger_reinit(config.as_ptr(), config.len(), &mut out_ptr, &mut out_len) };
+        assert_eq!(status, STATUS_OK);
+
+        // The tap receives Rust-originated lines only - this line crosses spt_log_emit inside the
+        // armed window, so it proves the export does not tap rather than merely arriving too early.
+        assert_eq!(unsafe { spt_log_set_tap(Some(roundtrip_tap)) }, STATUS_OK);
+        assert_eq!(emit("Cat", "not tapped", "", "main"), STATUS_OK);
+
+        // Locale table + live diagnostic emission share the same run: bad JSON first.
+        let status = unsafe { spt_locales_set(b"nope".as_ptr(), 4, &mut out_ptr, &mut out_len) };
+        assert_eq!(status, STATUS_ERROR);
+        assert!(!out_ptr.is_null());
+        unsafe { spt_buf_free(out_ptr, out_len) };
+
+        let locales =
+            br#"{ "roundtrip-test-key": "Unable to find an item with tpl of: %s in Db" }"#;
+        let status =
+            unsafe { spt_locales_set(locales.as_ptr(), locales.len(), &mut out_ptr, &mut out_len) };
+        assert_eq!(status, STATUS_OK);
+
+        let mut sink = crate::diag::DiagSink::Pipeline;
+        sink.push(crate::loot::models::Diagnostic {
+            category: "SPTarkov.Server.Core.Helpers.Items.ItemHelper",
+            level: crate::loot::models::ERROR.to_owned(),
+            locale_key: Some("roundtrip-test-key".to_owned()),
+            args: Some(serde_json::json!("54009119af1c881c07000029")),
+            message: None,
+        });
+        sink.push(crate::loot::models::Diagnostic {
+            category: "SPTarkov.Server.Core.Generators.Loot.LootGenerator",
+            level: crate::loot::models::WARNING.to_owned(),
+            locale_key: None,
+            args: None,
+            message: Some("plain line".to_owned()),
+        });
+
+        // Parallel tests' generator diagnostics share the process-global tap; filter to ours.
+        {
+            let tapped = TAP_LINES.lock().unwrap();
+            assert!(tapped.contains(
+                &"4:Unable to find an item with tpl of: 54009119af1c881c07000029 in Db".to_owned()
+            ));
+            assert!(tapped.contains(&"3:plain line".to_owned()));
+            assert!(
+                !tapped.iter().any(|line| line.ends_with(":not tapped")),
+                "spt_log_emit lines fan out C#-side and must not reach the tap"
+            );
+        }
+
+        // A cleared tap receives nothing further.
+        assert_eq!(unsafe { spt_log_set_tap(None) }, STATUS_OK);
+        sink.push(crate::loot::models::Diagnostic {
+            category: "SPTarkov.Server.Core.Generators.Loot.LootGenerator",
+            level: crate::loot::models::WARNING.to_owned(),
+            locale_key: None,
+            args: None,
+            message: Some("untapped line".to_owned()),
+        });
+        assert!(
+            !TAP_LINES
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|line| line.ends_with(":untapped line")),
+            "a cleared tap must receive nothing"
+        );
+
+        // The first close drops the second init's reference - the nested `Program.Main` disposing
+        // its container must not take the outer host's logging down with it.
+        assert_eq!(unsafe { spt_logger_close() }, STATUS_OK);
+        assert_eq!(emit("Cat", "still up", "", "main"), STATUS_OK);
+
+        // The matching close flushes and tears down; further closes are no-ops.
+        assert_eq!(unsafe { spt_logger_close() }, STATUS_OK);
+        assert_eq!(unsafe { spt_logger_close() }, STATUS_OK);
+        assert_eq!(emit("Cat", "after teardown", "", "main"), STATUS_OK);
+
+        // Generators in other tests emit their diagnostics through the same process-global
+        // pipeline, so only this test's own lines can be asserted on.
+        // Same shared-pipeline caveat as the first file below: other tests' generator diagnostics
+        // land here too for as long as the reinit pointed the pipeline at this directory.
+        let moved_contents = fs::read_to_string(moved_dir.path().join("spt.log")).unwrap();
+        let moved_mine: Vec<&str> = moved_contents
+            .lines()
+            .filter(|line| MINE.contains(line))
+            .collect();
+        assert_eq!(moved_mine, ["moved"]);
+        assert!(
+            !dir.path().join("spt.1.log").exists(),
+            "reinit to an already-freshened path must append, not cascade"
+        );
+        let contents = fs::read_to_string(dir.path().join("spt.log")).unwrap();
+        let mine: Vec<&str> = contents
+            .lines()
+            .filter(|line| MINE.contains(line))
+            .collect();
+        // "before init" and "after teardown" never reach the file: no pipeline, nothing written.
+        assert_eq!(
+            mine,
+            [
+                "hello",
+                "nullspans",
+                "survives reinit failure",
+                "not tapped",
+                "Unable to find an item with tpl of: 54009119af1c881c07000029 in Db",
+                "plain line",
+                "still up",
+            ]
+        );
+    }
+
+    fn emit(category: &str, message: &str, exception: &str, tname: &str) -> i32 {
+        unsafe {
+            spt_log_emit(
+                category.as_ptr(),
+                category.len(),
+                message.as_ptr(),
+                message.len(),
+                exception.as_ptr(),
+                exception.len(),
+                tname.as_ptr(),
+                tname.len(),
+                2, // Information
+                1,
+                0,
+            )
+        }
     }
 }

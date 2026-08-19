@@ -8,7 +8,6 @@ public static partial class ProgramStatics
 {
     private static bool _debug;
     private static bool _compiled;
-    private static bool _mods;
 
     public static void Initialize()
     {
@@ -17,18 +16,10 @@ public static partial class ProgramStatics
             case EntryType.RELEASE:
                 _debug = false;
                 _compiled = true;
-                _mods = true;
-                break;
-            case EntryType.BLEEDINGEDGE:
-                _debug = true;
-                _compiled = true;
-                _mods = false;
                 break;
             case EntryType.DEBUG:
-            case EntryType.BLEEDINGEDGEMODS:
                 _debug = true;
                 _compiled = true;
-                _mods = true;
                 break;
             case EntryType.LOCAL:
             default:
@@ -36,7 +27,6 @@ public static partial class ProgramStatics
                 _debug = true;
 #endif
                 _compiled = false;
-                _mods = true;
                 break;
         }
 
@@ -44,7 +34,6 @@ public static partial class ProgramStatics
         Console.WriteLine($"SPTarkov.Server.Core: entrytype: {BuildType}");
         Console.WriteLine($"SPTarkov.Server.Core: debug: {_debug}");
         Console.WriteLine($"SPTarkov.Server.Core: compiled: {_compiled}");
-        Console.WriteLine($"SPTarkov.Server.Core: mods: {_mods}");
 #endif
     }
 
@@ -74,12 +63,11 @@ public static partial class ProgramStatics
     }
 
     /// <summary>
-    /// Are mods enable for the server
+    /// Retained for 4.1.2 mod compatibility. Mods can no longer be disabled, so this is always true.
     /// </summary>
-    /// <returns></returns>
     public static bool MODS()
     {
-        return _mods;
+        return true;
     }
 
     public static Version SPT_VERSION()
@@ -101,13 +89,14 @@ public static partial class ProgramStatics
         return BuildTime;
     }
 
+    /// <summary>
+    /// Retained for 4.1.2 mod compatibility. The watermark no longer renders in colour.
+    /// </summary>
     public static Color BUILD_TEXT_COLOR()
     {
         return BuildType switch
         {
-            EntryType.RELEASE => Color.FromInt32(3),
             EntryType.LOCAL or EntryType.DEBUG => Color.SlateBlue3_1,
-            EntryType.BLEEDINGEDGE or EntryType.BLEEDINGEDGEMODS => Color.Magenta3,
             _ => Color.FromInt32(3),
         };
     }

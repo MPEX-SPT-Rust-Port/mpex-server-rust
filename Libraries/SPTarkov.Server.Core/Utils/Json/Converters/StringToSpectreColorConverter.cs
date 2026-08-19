@@ -4,6 +4,9 @@ using Spectre.Console;
 
 namespace SPTarkov.Server.Core.Utils.Json.Converters;
 
+/// <summary>
+/// Retained for 4.1.2 mod compatibility. The parsed colour is no longer rendered.
+/// </summary>
 public class StringToSpectreColorConverter : JsonConverter<Color>
 {
     public override Color Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)

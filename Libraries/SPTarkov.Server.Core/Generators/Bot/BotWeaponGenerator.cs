@@ -44,6 +44,22 @@ public class BotWeaponGenerator(
     private const string ModMagazineSlotId = "mod_magazine";
     protected readonly IEnumerable<IInventoryMagGen> InventoryMagGenComponents = MagGenSetUp(inventoryMagGenComponents);
 
+    /// <summary>
+    ///     Collaborators <c>BotPayloadProjection</c> needs, for same-assembly callers that hold this
+    ///     generator but not the services — <c>BotInventoryGenerator</c>'s constructor is frozen to
+    ///     its 4.1.2 signature and never took them.
+    /// </summary>
+    internal GlobalTable GlobalTable
+    {
+        get { return globalTable; }
+    }
+
+    /// <inheritdoc cref="GlobalTable"/>
+    internal RepairConfig RepairConfig
+    {
+        get { return repairConfig; }
+    }
+
     protected static List<IInventoryMagGen> MagGenSetUp(IEnumerable<IInventoryMagGen> components)
     {
         var inventoryMagGens = components.ToList();

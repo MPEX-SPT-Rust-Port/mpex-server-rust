@@ -5,12 +5,37 @@ namespace UnitTests.Tests.Generators;
 /// <summary>
 /// Rewrites item IDs in serialized loot output to positional placeholders so the two loot paths
 /// can be compared: fresh MongoIds are time/PID/counter-derived on both sides and never match.
-/// Every _id value maps to "id-N" in document order of first appearance; _id, parentId and Root
-/// values found in the map are rewritten; everything else (notably _tpl) is untouched.
+/// Every _id value maps to "id-N" in document order of first appearance; the id-bearing fields
+/// below are rewritten when their value is a known id; everything else (notably _tpl) is untouched.
 /// </summary>
 internal static class LootIdNormalizer
 {
-    private static readonly string[] _idFields = ["_id", "parentId", "Root"];
+    // The last six are BotBaseInventory's root pointers - each names one of the six base items the
+    // bot inventory starts with, so each is a fresh MongoId that would never match across paths.
+    // "root" is RagfairOffer's, pointing at its own items[0].
+    // "qid"/"uid" are QuestStatus's back-pointers (quest id and session id) and "target" is a
+    // Reward's pointer at its own items[0] - the repeatable-quest equivalents of "root". "id" is
+    // there for the same reason: a repeatable quest carries several, and one aliasing an _id in the
+    // same document has to resolve to that anchor rather than stay raw. A value no _id anchors is
+    // left alone either way, so a member that happens to be named "id" and holds something else is
+    // untouched.
+    private static readonly string[] _idFields =
+    [
+        "_id",
+        "id",
+        "parentId",
+        "Root",
+        "root",
+        "qid",
+        "uid",
+        "target",
+        "equipment",
+        "stash",
+        "sortingTable",
+        "questRaidItems",
+        "questStashItems",
+        "hideoutCustomizationStashId",
+    ];
 
     internal static string Normalize(string json)
     {

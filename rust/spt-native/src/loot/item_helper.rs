@@ -3,12 +3,18 @@
 
 use std::collections::{HashMap, HashSet};
 
+use indexmap::IndexMap;
+
 use super::models::{
     CounterState, DEBUG, Diagnostic, ERROR, Item, ItemView, LootConfigView, PresetView,
-    SeasonalView, SptLootItem, StaticAmmoDetails, Upd, WARNING,
+    SeasonalView, SptLootItem, StaticAmmoDetails, Upd, UpdRepairable, WARNING,
 };
 use super::probability_object_array::{ProbabilityObject, ProbabilityObjectArray};
 use super::{mongo_id, random_util};
+use crate::diag::DiagSink;
+
+/// The `typeof(T).FullName` this file's diagnostics log under.
+const CATEGORY: &str = "SPTarkov.Server.Core.Helpers.Items.ItemHelper";
 
 // Base-class tpls, copied verbatim from `Models/Enums/BaseClasses.cs`. They live here rather than in
 // their own module because `item_helper` is the only place base classes are ever tested against.
@@ -33,15 +39,72 @@ pub const HEADWEAR: &str = "5a341c4086f77401f2541505";
 pub const VEST: &str = "5448e5284bdc2dcb718b4567";
 /// `BaseClasses.ARMOR`
 pub const ARMOR: &str = "5448e54d4bdc2dcc718b4568";
+/// `BaseClasses.ARMORED_EQUIPMENT`
+pub const ARMORED_EQUIPMENT: &str = "57bef4c42459772e8d35a53b";
+/// `BaseClasses.ARMOR_PLATE`
+pub const ARMOR_PLATE: &str = "644120aa86ffbe10ee032b6f";
+/// `BaseClasses.FUEL`
+pub const FUEL: &str = "5d650c3e815116009f6201d2";
+/// `BaseClasses.MOD`
+pub const MOD: &str = "5448fe124bdc2da5018b4567";
+/// `BaseClasses.MOUNT`
+pub const MOUNT: &str = "55818b224bdc2dde698b456f";
+/// `BaseClasses.IRON_SIGHT`
+pub const IRON_SIGHT: &str = "55818ac54bdc2d5b648b456e";
+/// `BaseClasses.SIGHTS`
+pub const SIGHTS: &str = "5448fe7a4bdc2d6f028b456b";
+/// `BaseClasses.ASSAULT_SCOPE`
+pub const ASSAULT_SCOPE: &str = "55818add4bdc2d5b648b456f";
+/// `BaseClasses.OPTIC_SCOPE`
+pub const OPTIC_SCOPE: &str = "55818ae44bdc2dde698b456c";
+/// `BaseClasses.SPECIAL_SCOPE`
+pub const SPECIAL_SCOPE: &str = "55818aeb4bdc2ddc698b456a";
+/// `BaseClasses.SHOTGUN`
+pub const SHOTGUN: &str = "5447b6094bdc2dc3278b4567";
+/// `BaseClasses.COLLIMATOR`
+pub const COLLIMATOR: &str = "55818ad54bdc2ddc698b4569";
+/// `BaseClasses.COMPACT_COLLIMATOR`
+pub const COMPACT_COLLIMATOR: &str = "55818acf4bdc2dde698b456b";
+/// `BaseClasses.PORTABLE_RANGE_FINDER`
+pub const PORTABLE_RANGE_FINDER: &str = "61605ddea09d851a0a0c1bbc";
+/// `BaseClasses.BUILT_IN_INSERTS`
+pub const BUILT_IN_INSERTS: &str = "65649eb40bf0ed77b8044453";
+/// `BaseClasses.LOOT_CONTAINER`
+pub const LOOT_CONTAINER: &str = "566965d44bdc2d814c8b4571";
+/// `BaseClasses.MOB_CONTAINER`
+pub const MOB_CONTAINER: &str = "5448bf274bdc2dfc2f8b456a";
+/// `BaseClasses.STASH`
+pub const STASH: &str = "566abbb64bdc2d144c8b457d";
+/// `BaseClasses.SORTING_TABLE`
+pub const SORTING_TABLE: &str = "6050cac987d3f925bf016837";
+/// `BaseClasses.INVENTORY`
+pub const INVENTORY: &str = "55d720f24bdc2d88028b456d";
+/// `BaseClasses.STATIONARY_CONTAINER`
+pub const STATIONARY_CONTAINER: &str = "567583764bdc2d98058b456e";
+/// `BaseClasses.POCKETS`
+pub const POCKETS: &str = "557596e64bdc2dc2118b4571";
+
+/// `ItemHelper._defaultInvalidBaseTypes` (`ItemHelper.cs:35-44`) — what [`is_valid_item`] falls back
+/// to when its C# caller passes no list of its own, as `RagfairServerHelper.IsItemValidRagfairItem`
+/// (`:47`) does.
+pub const DEFAULT_INVALID_BASE_TYPES: [&str; 7] = [
+    LOOT_CONTAINER,
+    MOB_CONTAINER,
+    STASH,
+    SORTING_TABLE,
+    INVENTORY,
+    STATIONARY_CONTAINER,
+    POCKETS,
+];
 
 /// `ItemHelper.GetItem` (`ItemHelper.cs:491-501`) — a plain lookup, absent tpl included.
-pub fn get_item<'a>(items_view: &'a HashMap<String, ItemView>, tpl: &str) -> Option<&'a ItemView> {
+pub fn get_item<'a>(items_view: &'a IndexMap<String, ItemView>, tpl: &str) -> Option<&'a ItemView> {
     items_view.get(tpl)
 }
 
 /// `ItemHelper.IsOfBaseclass` (`ItemHelper.cs:296-299`).
 pub fn is_of_baseclass(
-    items_view: &HashMap<String, ItemView>,
+    items_view: &IndexMap<String, ItemView>,
     tpl: &str,
     base_class_tpl: &str,
 ) -> bool {
@@ -58,10 +121,10 @@ pub fn is_of_baseclass(
 ///
 /// The one C# behaviour not reproducible here is the `_rootNodeIds` short-circuit — the cache only
 /// covers templates with `_type == "Item"`, so C# returns false for a *node* tpl even though its
-/// parent chain would match. `ItemView` carries no `_type`, and the loot generator only ever asks
-/// about real item tpls, so nothing observable hangs on it.
+/// parent chain would match. This walk does not read `ItemView::item_type` at all, and the loot
+/// generator only ever asks about real item tpls, so nothing observable hangs on it.
 pub fn is_of_baseclasses(
-    items_view: &HashMap<String, ItemView>,
+    items_view: &IndexMap<String, ItemView>,
     tpl: &str,
     base_class_tpls: &[&str],
 ) -> bool {
@@ -85,10 +148,378 @@ pub fn is_of_baseclasses(
     false
 }
 
+/// `Services/Items/ItemBaseClassService.cs` — every template's parent chain flattened into one
+/// set at build time, so a base-class test is a hash probe per candidate instead of a chain walk
+/// per call. Built once per cached invariant slice (quest's `OnceLock`, ragfair's
+/// `PreparedSlice`); bot and loot receive their views per request and keep the walk.
+///
+/// Answer-equivalent to [`is_of_baseclasses`]: `build` performs that exact walk once per template
+/// and stores every parent id the walk would have tested — including a final parent missing from
+/// the view. The C# `_rootNodeIds` short-circuit is not reproduced, for the reason given on
+/// [`is_of_baseclasses`], and no lazy fill on miss (`ItemBaseClassService.cs:107-110`) is needed:
+/// the view is projected from the live table, so mod-added templates are already in it.
+#[derive(Debug, Default, Clone)]
+pub struct ItemBaseClassCache {
+    /// Key = item tpl, values = ids of its parents (`_itemBaseClassesCache`).
+    ancestors: HashMap<String, HashSet<String>>,
+}
+
+impl ItemBaseClassCache {
+    /// `ItemBaseClassService.HydrateItemBaseClassCache` (`ItemBaseClassService.cs:31-40`) over
+    /// `items_view` — one [`is_of_baseclasses`] walk per template, stored.
+    pub fn build(items_view: &IndexMap<String, ItemView>) -> Self {
+        let mut ancestors: HashMap<String, HashSet<String>> =
+            HashMap::with_capacity(items_view.len());
+
+        for tpl in items_view.keys() {
+            let mut chain = HashSet::new();
+            let mut current = items_view.get(tpl);
+
+            while let Some(item) = current {
+                let parent = match item.parent.as_deref() {
+                    Some(parent) if !parent.is_empty() => parent,
+                    // Root node reached, chain exhausted.
+                    _ => break,
+                };
+
+                // A re-seen parent means a cyclic chain (mod-added data only) the free walk would
+                // spin on, and contributes nothing new either way.
+                if !chain.insert(parent.to_owned()) {
+                    break;
+                }
+
+                // A parent that is not in the view ends the walk on the next pass, after it was
+                // stored — the walk tests a parent before looking it up.
+                current = items_view.get(parent);
+            }
+
+            ancestors.insert(tpl.clone(), chain);
+        }
+
+        Self { ancestors }
+    }
+
+    /// `_itemBaseClassesCache` itself, moved out — what the bulk-build seam
+    /// ([`crate::base_class::build`]) partitions by template type. Every other caller answers
+    /// through the probe methods below instead.
+    pub fn into_ancestors(self) -> HashMap<String, HashSet<String>> {
+        self.ancestors
+    }
+
+    /// `ItemHelper.IsOfBaseclass` answered from the cache
+    /// (`ItemBaseClassService.ItemHasBaseClass`, single-candidate overload).
+    pub fn is_of_baseclass(&self, tpl: &str, base_class_tpl: &str) -> bool {
+        self.is_of_baseclasses(tpl, &[base_class_tpl])
+    }
+
+    /// `ItemHelper.IsOfBaseclasses` answered from the cache
+    /// (`ItemBaseClassService.ItemHasBaseClass`, `Overlaps` overload) — one probe for the chain,
+    /// then a scan of it.
+    ///
+    /// The enumeration direction is deliberately flipped relative to the C#, which is why this
+    /// scans rather than probes: `baseClassList.Overlaps(baseClasses)`
+    /// (`ItemBaseClassService.cs:115`) enumerates its argument and probes the receiver, so C#
+    /// hashes each candidate against the chain set. Same intersection either way.
+    pub fn is_of_baseclasses(&self, tpl: &str, base_class_tpls: &[&str]) -> bool {
+        self.ancestors.get(tpl).is_some_and(|chain| {
+            chain
+                .iter()
+                .any(|ancestor| base_class_tpls.contains(&ancestor.as_str()))
+        })
+    }
+
+    /// [`Self::is_of_baseclasses`] with the candidates in a set — the scan of the candidate list
+    /// becomes one probe per chain link, which is what the Completion whitelist/blacklist sites
+    /// need: their candidate lists are whole levelled whitelists (hundreds of ids) where every
+    /// other caller passes one to fourteen. Same enumeration direction as the slice form, so the
+    /// answers are identical.
+    ///
+    /// Keeping that direction matters here: the chain holds one id per link of a parent walk
+    /// (single digits) against hundreds of candidates, so probing the candidates costs less than
+    /// the C# direction's hash per candidate. The `completion` walk-ratio guard routes through
+    /// this form and measures exactly that, so restoring the C# direction fails it.
+    pub fn is_of_baseclasses_set(&self, tpl: &str, base_class_tpls: &HashSet<&str>) -> bool {
+        self.ancestors.get(tpl).is_some_and(|chain| {
+            chain
+                .iter()
+                .any(|ancestor| base_class_tpls.contains(ancestor.as_str()))
+        })
+    }
+}
+
 /// `ItemHelper.ArmorItemCanHoldMods` (`ItemHelper.cs:319-322`) — `_armorSlotsThatCanHoldMods`
 /// (`ItemHelper.cs:102`).
-pub fn armor_item_can_hold_mods(items_view: &HashMap<String, ItemView>, tpl: &str) -> bool {
+pub fn armor_item_can_hold_mods(items_view: &IndexMap<String, ItemView>, tpl: &str) -> bool {
     is_of_baseclasses(items_view, tpl, &[HEADWEAR, VEST, ARMOR])
+}
+
+/// `ItemHelper._softInsertIds` (`ItemHelper.cs:82-98`).
+const SOFT_INSERT_IDS: [&str; 14] = [
+    "groin",
+    "groin_back",
+    "soft_armor_back",
+    "soft_armor_front",
+    "soft_armor_left",
+    "soft_armor_right",
+    "shoulder_l",
+    "shoulder_r",
+    "collar",
+    "helmet_top",
+    "helmet_back",
+    "helmet_eyes",
+    "helmet_jaw",
+    "helmet_ears",
+];
+
+/// `ItemHelper.ItemRequiresSoftInserts` (`ItemHelper.cs:369-392`). The `GetItem` miss and the
+/// no-slots exit collapse into the same `is_none_or` here — both return false there too.
+pub fn item_requires_soft_inserts(items_view: &IndexMap<String, ItemView>, item_tpl: &str) -> bool {
+    // Not a slot that takes soft-inserts
+    if !armor_item_can_hold_mods(items_view, item_tpl) {
+        return false;
+    }
+
+    get_item(items_view, item_tpl)
+        .and_then(|details| details.slots.as_deref())
+        .is_some_and(|slots| {
+            slots.iter().any(|slot| {
+                SOFT_INSERT_IDS.contains(
+                    &slot
+                        .name
+                        .as_deref()
+                        .unwrap_or_default()
+                        .to_lowercase()
+                        .as_str(),
+                )
+            })
+        })
+}
+
+/// `ItemHelper._removablePlateSlotIds` (`ItemHelper.cs:100`).
+const REMOVABLE_PLATE_SLOT_IDS: [&str; 4] = [
+    "front_plate",
+    "back_plate",
+    "left_side_plate",
+    "right_side_plate",
+];
+
+/// `ItemHelper.GetRemovablePlateSlotIds` (`ItemHelper.cs:1679-1682`).
+pub fn get_removable_plate_slot_ids() -> &'static [&'static str] {
+    &REMOVABLE_PLATE_SLOT_IDS
+}
+
+/// `ItemHelper.IsRemovablePlateSlot` (`ItemHelper.cs:1670-1673`). Every call site lowercases the
+/// name before the call, as the C# helper itself does.
+pub fn is_removable_plate_slot(slot_name: &str) -> bool {
+    get_removable_plate_slot_ids().contains(&slot_name.to_lowercase().as_str())
+}
+
+/// `ItemHelper.ArmorItemHasRemovablePlateSlots` (`ItemHelper.cs:354-362`). The `GetItem` miss and
+/// the null-slots exit collapse into the same `is_some_and` here — both are false there too, and a
+/// null slot name tests as the empty string either way.
+pub fn armor_item_has_removable_plate_slots(
+    items_view: &IndexMap<String, ItemView>,
+    tpl: &str,
+) -> bool {
+    get_item(items_view, tpl)
+        .and_then(|details| details.slots.as_deref())
+        .is_some_and(|slots| {
+            slots
+                .iter()
+                .any(|slot| is_removable_plate_slot(slot.name.as_deref().unwrap_or_default()))
+        })
+}
+
+/// `ItemHelper.ArmorItemHasRemovableOrSoftInsertSlots` (`ItemHelper.cs:339-347`). The
+/// `ArmorItemCanHoldMods` guard is what the plate half needs — [`item_requires_soft_inserts`]
+/// re-checks it itself, [`armor_item_has_removable_plate_slots`] does not.
+pub fn armor_item_has_removable_or_soft_insert_slots(
+    items_view: &IndexMap<String, ItemView>,
+    item_tpl: &str,
+) -> bool {
+    if !armor_item_can_hold_mods(items_view, item_tpl) {
+        return false;
+    }
+
+    armor_item_has_removable_plate_slots(items_view, item_tpl)
+        || item_requires_soft_inserts(items_view, item_tpl)
+}
+
+/// `ItemHelper.GetItemPrice` (`ItemHelper.cs:431-440`) — the handbook price when it is at least 1,
+/// the flea price otherwise, and `None` when neither table knows the tpl.
+pub(crate) fn get_item_price(
+    handbook_prices: &IndexMap<String, f64>,
+    flea_prices: &IndexMap<String, f64>,
+    tpl: &str,
+) -> Option<f64> {
+    match handbook_prices.get(tpl) {
+        // `GetStaticItemPrice` folds anything below 1 to 0, so only `>= 1` short-circuits here.
+        Some(price) if *price >= 1.0 => Some(*price),
+        _ => flea_prices.get(tpl).copied(),
+    }
+}
+
+/// `ItemHelper.IsValidItem` (`ItemHelper.cs:289-298`) reached through its tpl overload
+/// (`ItemHelper.cs:267-276`), so a tpl the view does not know is invalid rather than a panic.
+///
+/// `invalid_base_types` is the caller's list; the C# `_defaultInvalidBaseTypes` fallback
+/// (`ItemHelper.cs:35-44`) is not reproduced because every ported call site passes its own.
+///
+/// Base-class tests are answered from `base_classes`, which must be built over the same view.
+pub fn is_valid_item(
+    items_view: &IndexMap<String, ItemView>,
+    base_classes: &ItemBaseClassCache,
+    blacklist: &HashSet<String>,
+    handbook_prices: &IndexMap<String, f64>,
+    flea_prices: &IndexMap<String, f64>,
+    tpl: &str,
+    invalid_base_types: &[&str],
+) -> bool {
+    let Some(details) = get_item(items_view, tpl) else {
+        return false;
+    };
+
+    !details.quest_item.unwrap_or(false)
+        && details
+            .item_type
+            .as_deref()
+            .is_some_and(|item_type| item_type.eq_ignore_ascii_case("Item"))
+        && get_item_price(handbook_prices, flea_prices, tpl).is_some_and(|price| price > 0.0)
+        && !blacklist.contains(tpl)
+        // `baseTypes.All(x => !IsOfBaseclass(...))` — none of them may match.
+        && !base_classes.is_of_baseclasses(tpl, invalid_base_types)
+}
+
+/// `ItemHelper.GetItemQualityModifier` (`ItemHelper.cs:582-646`) — a 0-1 condition ratio, `-1` for
+/// a zero-durability armor when `skip_armor_items_without_durability` is set, and a `0.01` floor so
+/// a fully spent item never prices at nothing.
+///
+/// Pure, so no draw is consumed. The C#'s
+/// `logger.Warning("Item: {tpl} lacks properties, cannot ascertain quality level, assuming 100%")`
+/// is dropped — an unknown tpl still returns 1 here, only without the diagnostic.
+pub fn get_item_quality_modifier(
+    items_view: &IndexMap<String, ItemView>,
+    item: &Item,
+    skip_armor_items_without_durability: bool,
+) -> f64 {
+    // Default to 100%
+    let mut result = 1.0;
+
+    let Some(item_details) = get_item(items_view, &item.template) else {
+        return 1.0;
+    };
+
+    // Is armor and has 0 max durability
+    if skip_armor_items_without_durability
+        && is_of_baseclass(items_view, &item.template, ARMOR)
+        && item_details.max_durability == Some(0.0)
+    {
+        return -1.0;
+    }
+
+    let Some(upd) = item.upd.as_ref() else {
+        return result;
+    };
+
+    if let Some(med_kit) = upd.med_kit.as_ref() {
+        // Meds
+        result = med_kit.hp_resource.unwrap_or(0.0)
+            / f64::from(item_details.max_hp_resource.unwrap_or(0));
+    } else if let Some(repairable) = upd.repairable.as_ref() {
+        result = get_repairable_item_quality_value(item_details, repairable);
+    } else if let Some(food_drink) = upd.food_drink.as_ref() {
+        result = food_drink.hp_percent.unwrap_or(0.0)
+            / f64::from(item_details.max_resource.unwrap_or(0));
+    } else if let Some(key) = upd.key.as_ref()
+        && let Some(number_of_usages) = key.number_of_usages
+        && number_of_usages > 0
+        && let Some(maximum_number_of_usage) = item_details.maximum_number_of_usage
+        && maximum_number_of_usage > 0
+    {
+        // keys - keys count upwards, not down like everything else
+        let max_num_of_usages = f64::from(maximum_number_of_usage);
+        result = (max_num_of_usages - f64::from(number_of_usages)) / max_num_of_usages;
+    } else if let Some(resource) = upd.resource.as_ref()
+        // Item is less than 100% usage
+        && resource.units_consumed.is_some_and(|units| units > 0.0)
+    {
+        // E.g. fuel tank
+        result = resource.value.unwrap_or(0.0) / f64::from(item_details.max_resource.unwrap_or(0));
+    } else if let Some(repair_kit) = upd.repair_kit.as_ref() {
+        result =
+            repair_kit.resource.unwrap_or(0.0) / item_details.max_repair_resource.unwrap_or(0.0);
+    }
+
+    // Exact, as the C# is: only a ratio of precisely zero is floored.
+    if result == 0.0 {
+        // make item non-zero but still very low
+        result = 0.01;
+    }
+
+    result
+}
+
+/// `ItemHelper.GetRepairableItemQualityValue` (`ItemHelper.cs:655-680`).
+///
+/// Two dropped diagnostics, both log-only in the C#: the `logger.Debug` for a durability above the
+/// max, and the `logger.Error(GetText("item-durability_value_invalid_use_default"))` behind the
+/// zero-durability arm.
+///
+/// The `Debug` arm also *writes* the raised max back onto `repairable.MaxDurability`
+/// (`ItemHelper.cs:658-664`), and that write is not local to the calculation: `UpdRepairable` is a
+/// reference the caller keeps holding. `RagfairOfferGenerator.CreateSingleOfferForItem` hands the
+/// same priced list to `CreateFleaOfferDetails.Items` (`RagfairOfferGenerator.cs:492`), so a
+/// mutation there is serialized into the offer the client receives; the profile-side callers
+/// (`RagfairOfferHelper.cs:1043`, `RagfairController.cs:577/680/777`) price live player items, where
+/// it persists into the save. This port cannot reproduce it — the brief pins an immutable `&Item` —
+/// so the raise is applied to a local copy and the write is dropped.
+///
+/// The *return value* is identical either way, and the trigger is unreachable on the generator's own
+/// path: `RandomiseWeaponDurability` / `RandomiseArmorDurabilityValues` never emit a `Durability`
+/// above the `MaxDurability` they write alongside it. So a hand-edited or mod-supplied item with an
+/// inverted pair is the only thing that can diverge, and only in the write, never in the price. Lift
+/// the signature to `&mut Item` if a caller ever needs the write back.
+fn get_repairable_item_quality_value(item_details: &ItemView, repairable: &UpdRepairable) -> f64 {
+    // Edge case, durability above max
+    let repairable_max_durability = match (repairable.durability, repairable.max_durability) {
+        (Some(durability), Some(max_durability)) if durability > max_durability => Some(durability),
+        _ => repairable.max_durability,
+    };
+
+    // Attempt to get the max durability from _props. If not available, use Repairable max durability
+    // value instead.
+    let max_possible_durability = item_details.max_durability.or(repairable_max_durability);
+    let durability = repairable
+        .durability
+        .zip(max_possible_durability)
+        .map(|(durability, max)| durability / max);
+
+    // `double? == 0` in the C#, so a null ratio is not a zero one.
+    if durability == Some(0.0) {
+        return 1.0;
+    }
+
+    // A null ratio falls through the C# `?? 0` to a sqrt of zero, not to 1.
+    durability.unwrap_or(0.0).sqrt()
+}
+
+/// `ItemHelper.GetRandomisedAmmoStackSize` (`ItemHelper.cs:1767-1775`) with its `maxLimit` default
+/// of 60, which is the only value any caller passes.
+pub fn get_randomised_ammo_stack_size(ammo_item_template: &ItemView) -> i32 {
+    const MAX_LIMIT: i32 = 60;
+
+    if ammo_item_template.stack_max_size == Some(1) {
+        // Max is one, nothing to randomise
+        return 1;
+    }
+
+    random_util::get_int(
+        ammo_item_template.stack_min_random.unwrap_or(1),
+        ammo_item_template
+            .stack_max_random
+            .unwrap_or(1)
+            .min(MAX_LIMIT),
+    )
 }
 
 /// `ItemExtensions.GetItemWithChildren` (`ItemExtensions.cs:240-278`) — a stack walk that emits the
@@ -218,7 +649,7 @@ pub fn reparent_item_and_children(root_item: &Item, item_with_children: &mut [It
 /// `ItemHelper.GetItemSize` (`ItemHelper.cs:1179-1234`) — `(width, height)`. Non-forced child extra
 /// size takes the largest per direction, forced extra size sums across every child.
 pub fn get_item_size(
-    items_view: &HashMap<String, ItemView>,
+    items_view: &IndexMap<String, ItemView>,
     items: &[Item],
     root_item_id: &str,
 ) -> Option<(i32, i32)> {
@@ -262,7 +693,7 @@ pub fn get_item_size(
 /// (`ItemHelper.cs:1794-1798`) — `CellsV` rows of `CellsH` free cells. C# throws
 /// `ItemHelperException` when either is missing; this returns the same message as an `Err`.
 pub fn get_container_mapping(
-    items_view: &HashMap<String, ItemView>,
+    items_view: &IndexMap<String, ItemView>,
     container_tpl: &str,
 ) -> Result<Vec<Vec<u8>>, String> {
     let container_template = get_item(items_view, container_tpl);
@@ -291,26 +722,130 @@ pub fn to_loot_item(item: &Item) -> SptLootItem {
     }
 }
 
+/// `ItemHelper.SplitStack` (`ItemHelper.cs:753-784`) — chops `Upd.StackObjectsCount` into
+/// `StackMaxSize`-sized stacks, each one a clone of the input carrying a fresh [`mongo_id`]. A count
+/// that already fits comes back as a single clone under the *original* id.
+///
+/// C# hands back the very item it was given when the count is null and a clone in every other case;
+/// here every element is an owned clone, so a caller mutating the result never reaches the input.
+///
+/// The `Upd.StackObjectsCount` setter's `MidpointRounding.AwayFromZero` is not replicated (see
+/// `models::Upd`): every count that reaches this function has already been through that setter, so
+/// the chunks are integral and the rounding is a no-op.
+///
+/// **`Err` is the C# hang path.** With a null or non-positive `StackMaxSize` — a tpl missing from the
+/// view, or a template without the property — `remainingCount <= maxStackSize` is false and
+/// `ItemHelper.cs:773` then subtracts `Math.Min(remaining, maxStackSize ?? 0)`, zero or negative,
+/// from `remainingCount` on every pass: the loop never ends and clones pile up until the process
+/// dies. A non-finite count loops forever the same way.
+pub fn split_stack(
+    items_view: &IndexMap<String, ItemView>,
+    item_to_split: &Item,
+) -> Result<Vec<Item>, LootError> {
+    // No count to split by — the template is never consulted.
+    let Some(remaining_count) = item_to_split
+        .upd
+        .as_ref()
+        .and_then(|upd| upd.stack_objects_count)
+    else {
+        return Ok(vec![item_to_split.clone()]);
+    };
+
+    let max_stack_size =
+        get_item(items_view, &item_to_split.template).and_then(|template| template.stack_max_size);
+
+    // If the current count is already equal or less than the max return the item as is. A lifted
+    // comparison in C#, so a null max answers false rather than true.
+    if max_stack_size.is_some_and(|max_stack_size| remaining_count <= f64::from(max_stack_size)) {
+        return Ok(vec![item_to_split.clone()]);
+    }
+
+    // `while (remainingCount > 0)` never runs, so C# returns the list it built: empty. A NaN count
+    // fails that comparison too, in C# as here.
+    if remaining_count <= 0.0 || remaining_count.is_nan() {
+        return Ok(Vec::new());
+    }
+
+    let Some(max_stack_size) = max_stack_size.filter(|max_stack_size| *max_stack_size > 0) else {
+        return Err(LootError::new(format!(
+            "StackMaxSize is null or not positive when trying to split stack of item: {}",
+            item_to_split.template
+        )));
+    };
+
+    if !remaining_count.is_finite() {
+        return Err(LootError::new(format!(
+            "StackObjectsCount is not finite when trying to split stack of item: {}",
+            item_to_split.template
+        )));
+    }
+
+    let mut remaining_count = remaining_count;
+    let mut root_and_children = Vec::new();
+
+    while remaining_count > 0.0 {
+        let amount = remaining_count.min(f64::from(max_stack_size));
+        let mut new_stack_clone = item_to_split.clone();
+
+        new_stack_clone.id = mongo_id::generate();
+        // Upd is present — the count came out of it.
+        if let Some(upd) = new_stack_clone.upd.as_mut() {
+            upd.stack_objects_count = Some(amount);
+        }
+
+        remaining_count -= amount;
+        root_and_children.push(new_stack_clone);
+    }
+
+    Ok(root_and_children)
+}
+
+/// `ItemHelper.SetFoundInRaid(IEnumerable<Item>)` (`ItemHelper.cs:1033-1050`) — flags every item as
+/// found in raid, except money and ammo, which have any existing flag *cleared* instead (and never
+/// gain an `Upd` they did not already have).
+///
+/// C# assigns `null` to `Upd.SpawnedInSession` and `WhenWritingNull` drops it on the way out, so
+/// removing the key is what reproduces the C# JSON.
+pub fn set_found_in_raid(items_view: &IndexMap<String, ItemView>, items: &mut [Item]) {
+    for item in items.iter_mut() {
+        if is_of_baseclasses(items_view, &item.template, &[MONEY, AMMO]) {
+            if let Some(upd) = item.upd.as_mut() {
+                upd.extra.remove("SpawnedInSession");
+            }
+
+            continue;
+        }
+
+        item.upd
+            .get_or_insert_default()
+            .extra
+            .insert("SpawnedInSession".to_owned(), serde_json::Value::Bool(true));
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Cartridge / magazine / child-slot assembly
 // ---------------------------------------------------------------------------
 
 /// The read-only views a generation run consults, plus the two things it mutates as it goes: the
-/// spawn-limit counters and the diagnostics the C# caller replays through its logger.
+/// spawn-limit counters and the [`DiagSink`] its diagnostics emit through.
 ///
 /// Every view is borrowed for `'a`, so copying one out (`let items_view = ctx.items_view;`) releases
 /// the `&mut ctx` and leaves the diagnostics writable — the ported functions lean on that.
 pub struct LootContext<'a> {
-    pub items_view: &'a HashMap<String, ItemView>,
+    pub items_view: &'a IndexMap<String, ItemView>,
     pub static_ammo_dist: &'a HashMap<String, Vec<StaticAmmoDetails>>,
-    pub default_presets: &'a HashMap<String, PresetView>,
+    /// `IndexMap` for the same reason as [`Self::items_view`]: looked up by key, never iterated,
+    /// so the map type is not draw-order-bearing — and the resident arm borrows it straight off
+    /// `RagfairDbViews.default_presets_by_tpl`.
+    pub default_presets: &'a IndexMap<String, PresetView>,
     pub money_tpls: &'a [String],
     pub lootable_item_blacklist: &'a HashSet<String>,
     pub config: &'a LootConfigView,
     pub seasonal: &'a SeasonalView,
     /// `CounterTrackerHelper`'s state, moved in for the run and handed back in the result.
     pub counter: CounterState,
-    pub diagnostics: Vec<Diagnostic>,
+    pub diagnostics: DiagSink,
 }
 
 /// A fatal failure — the C# equivalent throws (`ItemHelperException`) or dereferences a null and
@@ -328,9 +863,24 @@ impl LootError {
     }
 }
 
+/// A flipped loot export's failure: the family's fatal error, or an epoch the resident DB no
+/// longer holds (status 4; C# republishes and retries once).
+#[derive(Debug)]
+pub enum LootEpochError {
+    Loot(LootError),
+    StaleEpoch,
+}
+
+impl From<LootError> for LootEpochError {
+    fn from(error: LootError) -> Self {
+        Self::Loot(error)
+    }
+}
+
 /// A plain interpolated log line, the shape most of the ported call sites use.
 fn diagnostic(level: &str, message: String) -> Diagnostic {
     Diagnostic {
+        category: CATEGORY,
         level: level.to_owned(),
         locale_key: None,
         args: None,
@@ -378,11 +928,11 @@ pub fn create_cartridges(parent_id: &str, ammo_tpl: &str, stack_count: i32, loca
 // enough to trip the lint. It is a log line on a skip path, not something worth boxing.
 #[allow(clippy::result_large_err)]
 pub fn add_cartridges_to_ammo_box(
-    ctx: &LootContext,
+    items_view: &IndexMap<String, ItemView>,
     ammo_box: &mut Vec<Item>,
     ammo_box_tpl: &str,
 ) -> Result<(), Diagnostic> {
-    let ammo_box_details = get_item(ctx.items_view, ammo_box_tpl);
+    let ammo_box_details = get_item(items_view, ammo_box_tpl);
     let ammo_box_max_cartridge_count =
         ammo_box_details.and_then(|details| details.stack_slot_max_count);
     let Some(cartridge_tpl) =
@@ -396,7 +946,7 @@ pub fn add_cartridges_to_ammo_box(
         ));
     };
     let cartridge_max_stack_size =
-        get_item(ctx.items_view, cartridge_tpl).and_then(|details| details.stack_max_size);
+        get_item(items_view, cartridge_tpl).and_then(|details| details.stack_max_size);
 
     // Exit early if ammo already exists in box
     if ammo_box.iter().any(|item| item.template == cartridge_tpl) {
@@ -507,7 +1057,16 @@ pub fn fill_magazine_with_random_cartridge(
         return Ok(());
     };
 
-    fill_magazine_with_cartridge(ctx, magazine, mag_tpl, &cartridge_tpl, min_size_percent)
+    let diagnostics = &mut ctx.diagnostics;
+
+    fill_magazine_with_cartridge(
+        items_view,
+        diagnostics,
+        magazine,
+        mag_tpl,
+        &cartridge_tpl,
+        min_size_percent,
+    )
 }
 
 /// `ItemHelper.FillMagazineWithCartridge` (`ItemHelper.cs:1339-1418`) — stacks ascend from location
@@ -516,15 +1075,18 @@ pub fn fill_magazine_with_random_cartridge(
 /// The `Err` case is the C# crash at `ItemHelper.cs:1409`: a cartridge with no `StackMaxSize` leaves
 /// `cartridgeCountToAdd` null and `+= cartridgeCountToAdd!.Value` throws. Like C#, that is only
 /// reached once the loop actually runs.
+///
+/// Takes the two things it reads rather than a whole [`LootContext`], the way
+/// [`add_cartridges_to_ammo_box`] does: `bot::bot_weapon_generator_helper::create_magazine_with_ammo`
+/// calls it with a `BotContext`'s fields.
 pub fn fill_magazine_with_cartridge(
-    ctx: &mut LootContext,
+    items_view: &IndexMap<String, ItemView>,
+    diagnostics: &mut DiagSink,
     magazine: &mut Vec<Item>,
     mag_tpl: &str,
     cartridge_tpl: &str,
     min_size_multiplier: f64,
 ) -> Result<(), LootError> {
-    let items_view = ctx.items_view;
-
     // UBGL don't have mags
     if is_of_baseclass(items_view, mag_tpl, LAUNCHER) {
         return Ok(());
@@ -533,7 +1095,8 @@ pub fn fill_magazine_with_cartridge(
     // Get cartridge properties and max allowed stack size
     let cartridge_details = get_item(items_view, cartridge_tpl);
     if cartridge_details.is_none() {
-        ctx.diagnostics.push(Diagnostic {
+        diagnostics.push(Diagnostic {
+            category: CATEGORY,
             level: ERROR.to_owned(),
             locale_key: Some("item-invalid_tpl_item".to_owned()),
             args: Some(serde_json::Value::String(cartridge_tpl.to_owned())),
@@ -543,7 +1106,7 @@ pub fn fill_magazine_with_cartridge(
 
     let cartridge_max_stack_size = cartridge_details.and_then(|details| details.stack_max_size);
     if cartridge_max_stack_size.is_none() {
-        ctx.diagnostics.push(diagnostic(
+        diagnostics.push(diagnostic(
             ERROR,
             format!("Item with tpl: {cartridge_tpl} lacks a _props or StackMaxSize property"),
         ));
@@ -562,7 +1125,7 @@ pub fn fill_magazine_with_cartridge(
         };
 
     let Some(magazine_cartridge_max_count) = magazine_cartridge_max_count else {
-        ctx.diagnostics.push(diagnostic(
+        diagnostics.push(diagnostic(
             WARNING,
             format!(
                 "Magazine: {mag_tpl} lacks a Cartridges array, unable to fill magazine with ammo"
@@ -578,7 +1141,7 @@ pub fn fill_magazine_with_cartridge(
     );
 
     if magazine.len() > 1 {
-        ctx.diagnostics.push(diagnostic(
+        diagnostics.push(diagnostic(
             WARNING,
             format!("Magazine {mag_tpl} already has cartridges defined,  this may cause issues"),
         ));
@@ -636,13 +1199,16 @@ pub fn fill_magazine_with_cartridge(
 
 /// `ItemHelper.AddChildSlotItems` (`ItemHelper.cs:1557-1636`), minus the `requiredOnly` flag no loot
 /// call site passes, with `GetCompatibleTplFromArray` (`ItemHelper.cs:1644-1653`) inlined.
+///
+/// Takes the two things it reads off the context rather than the context itself: the bot family has
+/// its own ([`crate::bot::BotContext`]) and calls this from `AddRequiredChildItemsToParent`.
 pub fn add_child_slot_items(
-    ctx: &mut LootContext,
+    items_view: &IndexMap<String, ItemView>,
+    diagnostics: &mut DiagSink,
     item_to_add: Vec<Item>,
     item_tpl: &str,
     mod_spawn_chance_dict: Option<&HashMap<String, f64>>,
 ) -> Vec<Item> {
-    let items_view = ctx.items_view;
     let mut result = item_to_add;
     let mut incompatible_mod_tpls: HashSet<&str> = HashSet::new();
     // C# reads `result[0]` per slot and throws on an empty list; the root never moves, so it is read
@@ -670,7 +1236,7 @@ pub fn add_child_slot_items(
 
         let item_pool = slot.filter.as_deref().unwrap_or_default();
         if item_pool.is_empty() {
-            ctx.diagnostics.push(diagnostic(
+            diagnostics.push(diagnostic(
                 DEBUG,
                 format!("Unable to choose a mod for slot: {slot_name} on item: {item_tpl}, parents' 'Filter' array is empty, skipping"),
             ));
@@ -683,7 +1249,7 @@ pub fn add_child_slot_items(
             .filter(|tpl| !incompatible_mod_tpls.contains(tpl.as_str()))
             .collect();
         if compatible_tpls.is_empty() {
-            ctx.diagnostics.push(diagnostic(
+            diagnostics.push(diagnostic(
                 DEBUG,
                 format!(
                     "Unable to choose a mod for slot: {slot_name} on item: {item_tpl}, no compatible tpl found in pool of {}, skipping",
@@ -721,7 +1287,7 @@ pub fn add_child_slot_items(
 /// makes `DrawRandomFromList` index `RandInt(0)`, or an item with no `Caliber`) — come back as
 /// [`LootError`] with the C# message.
 fn get_random_valid_caliber(
-    items_view: &HashMap<String, ItemView>,
+    items_view: &IndexMap<String, ItemView>,
     mag_tpl: &str,
 ) -> Result<String, LootError> {
     let Some(ammo_tpls) = get_item(items_view, mag_tpl)
@@ -836,10 +1402,13 @@ mod tests {
     const MOD_FORCED_B_TPL: &str = "666666666666666666666666";
     const CONTAINER_TPL: &str = "777777777777777777777777";
     const ORPHAN_TPL: &str = "888888888888888888888888";
+    /// Stackable, and money — so it splits, and `set_found_in_raid` clears its flag.
+    const MONEY_ROUBLES_TPL: &str = "f0f0f0f0f0f0f0f0f0f0f0f0";
+    const AMMO_545_TPL: &str = "f1f1f1f1f1f1f1f1f1f1f1f1";
 
     /// Every view is built through serde so the tests exercise the same wire shape the C# caller
     /// sends, rather than a hand-rolled struct literal.
-    fn fixture() -> HashMap<String, ItemView> {
+    fn fixture() -> IndexMap<String, ItemView> {
         serde_json::from_value(json!({
             // Parent chain: ITEM_NODE <- ARMOR <- ARMOR_VEST_TPL, ITEM_NODE <- HEADWEAR <- HELMET_TPL.
             ITEM_NODE: {},
@@ -866,6 +1435,10 @@ mod tests {
                 "extraSizeLeft": 2, "extraSizeRight": 0, "extraSizeForceAdd": true
             },
             CONTAINER_TPL: { "parent": ITEM_NODE, "gridCellsH": 5, "gridCellsV": 3 },
+            MONEY: { "parent": ITEM_NODE },
+            AMMO: { "parent": ITEM_NODE },
+            MONEY_ROUBLES_TPL: { "parent": MONEY, "stackMaxSize": 100 },
+            AMMO_545_TPL: { "parent": AMMO, "stackMaxSize": 60 },
             // Parent points at a tpl that is not in the view at all.
             ORPHAN_TPL: { "parent": "999999999999999999999999" },
         }))
@@ -948,12 +1521,368 @@ mod tests {
     }
 
     #[test]
+    fn the_base_class_cache_answers_exactly_as_the_walk_does() {
+        let view = fixture();
+        let cache = ItemBaseClassCache::build(&view);
+
+        // Every tpl in the view, plus the orphan's missing parent — the walk tests a parent id
+        // before looking it up, so the cache must contain it too — plus a fully unknown tpl.
+        let mut candidates: Vec<&str> = view.keys().map(String::as_str).collect();
+        candidates.push("999999999999999999999999");
+        candidates.push("aaaaaaaaaaaaaaaaaaaaaaaa");
+
+        let candidate_set: HashSet<&str> = candidates.iter().copied().collect();
+
+        for tpl in &candidates {
+            for base in &candidates {
+                assert_eq!(
+                    cache.is_of_baseclass(tpl, base),
+                    is_of_baseclass(&view, tpl, base),
+                    "cache and walk disagree for tpl {tpl} against base {base}"
+                );
+            }
+
+            assert_eq!(
+                cache.is_of_baseclasses(tpl, &candidates),
+                is_of_baseclasses(&view, tpl, &candidates),
+                "cache and walk disagree for tpl {tpl} against the full candidate list"
+            );
+
+            assert_eq!(
+                cache.is_of_baseclasses_set(tpl, &candidate_set),
+                is_of_baseclasses(&view, tpl, &candidates),
+                "set-probing cache and walk disagree for tpl {tpl}"
+            );
+        }
+
+        // The set argument has to discriminate: HELMET_TPL's chain is HEADWEAR → ITEM_NODE.
+        assert!(cache.is_of_baseclasses_set(HELMET_TPL, &HashSet::from([HEADWEAR])));
+        assert!(!cache.is_of_baseclasses_set(HELMET_TPL, &HashSet::from([VEST])));
+    }
+
+    #[test]
     fn armor_item_can_hold_mods_covers_headwear_vest_and_armor() {
         let view = fixture();
 
         assert!(armor_item_can_hold_mods(&view, HELMET_TPL));
         assert!(armor_item_can_hold_mods(&view, ARMOR_VEST_TPL));
         assert!(!armor_item_can_hold_mods(&view, CONTAINER_TPL));
+    }
+
+    /// Condition-bearing templates for the quality-modifier chain, one per `if`/`else if` arm.
+    const MEDKIT_TPL: &str = "a1a1a1a1a1a1a1a1a1a1a1a1";
+    const REPAIRABLE_WEAPON_TPL: &str = "a2a2a2a2a2a2a2a2a2a2a2a2";
+    const FOOD_TPL: &str = "a3a3a3a3a3a3a3a3a3a3a3a3";
+    const KEY_TPL: &str = "a4a4a4a4a4a4a4a4a4a4a4a4";
+    const FUEL_TPL: &str = "a5a5a5a5a5a5a5a5a5a5a5a5";
+    const REPAIR_KIT_TPL: &str = "a6a6a6a6a6a6a6a6a6a6a6a6";
+    /// Armor whose template max durability is 0 — the `-1` early-out.
+    const PLATELESS_ARMOR_TPL: &str = "a7a7a7a7a7a7a7a7a7a7a7a7";
+    /// Armor carrying one removable plate slot plus a soft-insert slot that is not one.
+    const PLATED_ARMOR_TPL: &str = "a8a8a8a8a8a8a8a8a8a8a8a8";
+    /// Armor whose only slot is a removable plate one.
+    const PLATE_ONLY_ARMOR_TPL: &str = "b3b3b3b3b3b3b3b3b3b3b3b3";
+    /// Armor whose only slot is a soft-insert one.
+    const SOFT_ONLY_ARMOR_TPL: &str = "b4b4b4b4b4b4b4b4b4b4b4b4";
+    /// A plate slot on a template that is not one of the mod-holding armor base classes.
+    const PLATED_NON_ARMOR_TPL: &str = "b5b5b5b5b5b5b5b5b5b5b5b5";
+
+    fn quality_fixture() -> IndexMap<String, ItemView> {
+        serde_json::from_value(json!({
+            ITEM_NODE: {},
+            ARMOR: { "parent": ITEM_NODE },
+            MEDKIT_TPL: { "parent": ITEM_NODE, "type": "Item", "maxHpResource": 100 },
+            REPAIRABLE_WEAPON_TPL: { "parent": ITEM_NODE, "type": "Item", "maxDurability": 100 },
+            FOOD_TPL: { "parent": ITEM_NODE, "type": "Item", "maxResource": 100 },
+            KEY_TPL: { "parent": ITEM_NODE, "type": "Item", "maximumNumberOfUsage": 10 },
+            FUEL_TPL: { "parent": ITEM_NODE, "type": "Item", "maxResource": 100 },
+            REPAIR_KIT_TPL: { "parent": ITEM_NODE, "type": "Item", "maxRepairResource": 40 },
+            PLATELESS_ARMOR_TPL: { "parent": ARMOR, "type": "Item", "maxDurability": 0 },
+            PLATED_ARMOR_TPL: {
+                "parent": ARMOR, "type": "Item", "maxDurability": 50,
+                "slots": [{ "name": "Soft_armor_front" }, { "name": "Front_plate" }]
+            },
+            PLATE_ONLY_ARMOR_TPL: {
+                "parent": ARMOR, "type": "Item", "slots": [{ "name": "Back_plate" }]
+            },
+            SOFT_ONLY_ARMOR_TPL: {
+                "parent": ARMOR, "type": "Item", "slots": [{ "name": "Soft_armor_back" }]
+            },
+            PLATED_NON_ARMOR_TPL: {
+                "parent": ITEM_NODE, "type": "Item", "slots": [{ "name": "Front_plate" }]
+            },
+            // A quest item, and one the base-type filter rejects.
+            "a9a9a9a9a9a9a9a9a9a9a9a9": { "parent": ITEM_NODE, "type": "Item", "questItem": true },
+            "b1b1b1b1b1b1b1b1b1b1b1b1": { "parent": ARMOR, "type": "Item" },
+            // Typed as a node rather than an item.
+            "b2b2b2b2b2b2b2b2b2b2b2b2": { "parent": ITEM_NODE, "type": "Node" },
+        }))
+        .unwrap()
+    }
+
+    /// An item of `template` whose `upd` is built from the same wire shape the C# `Upd` serializes
+    /// to, so the renames are exercised rather than bypassed by a struct literal.
+    fn item_with_upd(template: &str, upd: serde_json::Value) -> Item {
+        Item {
+            id: "quality".to_owned(),
+            template: template.to_owned(),
+            upd: serde_json::from_value(upd).unwrap(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn get_item_quality_modifier_reads_each_condition_arm() {
+        let view = quality_fixture();
+        let modifier = |item: &Item| get_item_quality_modifier(&view, item, false);
+
+        // Meds: half the template's max HP resource.
+        assert_eq!(
+            modifier(&item_with_upd(
+                MEDKIT_TPL,
+                json!({ "MedKit": { "HpResource": 50 } })
+            )),
+            0.5
+        );
+        // Repairable: the square root of durability over the template's max.
+        assert_eq!(
+            modifier(&item_with_upd(
+                REPAIRABLE_WEAPON_TPL,
+                json!({ "Repairable": { "Durability": 25, "MaxDurability": 100 } })
+            )),
+            0.5
+        );
+        assert_eq!(
+            modifier(&item_with_upd(
+                FOOD_TPL,
+                json!({ "FoodDrink": { "HpPercent": 40 } })
+            )),
+            0.4
+        );
+        // Keys count upwards: 4 of 10 uses spent leaves 60%.
+        assert_eq!(
+            modifier(&item_with_upd(
+                KEY_TPL,
+                json!({ "Key": { "NumberOfUsages": 4 } })
+            )),
+            0.6
+        );
+        // Fuel: only read once something has been consumed.
+        assert_eq!(
+            modifier(&item_with_upd(
+                FUEL_TPL,
+                json!({ "Resource": { "Value": 30, "UnitsConsumed": 70 } })
+            )),
+            0.3
+        );
+        assert_eq!(
+            modifier(&item_with_upd(
+                REPAIR_KIT_TPL,
+                json!({ "RepairKit": { "Resource": 10 } })
+            )),
+            0.25
+        );
+    }
+
+    #[test]
+    fn get_item_quality_modifier_defaults_to_full_condition() {
+        let view = quality_fixture();
+
+        // No `upd` at all.
+        assert_eq!(
+            get_item_quality_modifier(&view, &item("no-upd", MEDKIT_TPL, None), false),
+            1.0
+        );
+        // An `upd` with none of the condition members.
+        assert_eq!(
+            get_item_quality_modifier(
+                &view,
+                &item_with_upd(MEDKIT_TPL, json!({ "StackObjectsCount": 2 })),
+                false
+            ),
+            1.0
+        );
+        // A tpl the view does not know — the C# warns and assumes 100%.
+        assert_eq!(
+            get_item_quality_modifier(&view, &item("unknown", ORPHAN_TPL, None), false),
+            1.0
+        );
+        // Unconsumed fuel skips the resource arm entirely rather than pricing at zero.
+        assert_eq!(
+            get_item_quality_modifier(
+                &view,
+                &item_with_upd(
+                    FUEL_TPL,
+                    json!({ "Resource": { "Value": 0, "UnitsConsumed": 0 } })
+                ),
+                false
+            ),
+            1.0
+        );
+    }
+
+    #[test]
+    fn get_item_quality_modifier_floors_a_zero_ratio_and_skips_durabilityless_armor() {
+        let view = quality_fixture();
+
+        // A spent medkit rates 0, which the floor lifts to a non-zero minimum.
+        assert_eq!(
+            get_item_quality_modifier(
+                &view,
+                &item_with_upd(MEDKIT_TPL, json!({ "MedKit": { "HpResource": 0 } })),
+                false
+            ),
+            0.01
+        );
+        // Armor with a 0 max durability, only when the caller asks to skip it.
+        let armor = item("armor", PLATELESS_ARMOR_TPL, None);
+        assert_eq!(get_item_quality_modifier(&view, &armor, true), -1.0);
+        assert_eq!(get_item_quality_modifier(&view, &armor, false), 1.0);
+        // The skip is armor-only: a weapon with no max durability is untouched by it.
+        assert_eq!(
+            get_item_quality_modifier(&view, &item("gun", REPAIRABLE_WEAPON_TPL, None), true),
+            1.0
+        );
+    }
+
+    #[test]
+    fn get_item_quality_modifier_treats_a_zeroed_durability_as_full_condition() {
+        // `GetRepairableItemQualityValue` logs and returns 1 for a 0 ratio rather than falling
+        // through to the 0.01 floor, and a durability above the max is raised to it.
+        let view = quality_fixture();
+
+        assert_eq!(
+            get_item_quality_modifier(
+                &view,
+                &item_with_upd(
+                    REPAIRABLE_WEAPON_TPL,
+                    json!({ "Repairable": { "Durability": 0, "MaxDurability": 100 } })
+                ),
+                false
+            ),
+            1.0
+        );
+        // The template's own max wins over the `Upd` one, so this is sqrt(64/100), not sqrt(1).
+        assert_eq!(
+            get_item_quality_modifier(
+                &view,
+                &item_with_upd(
+                    REPAIRABLE_WEAPON_TPL,
+                    json!({ "Repairable": { "Durability": 64, "MaxDurability": 10 } })
+                ),
+                false
+            ),
+            0.8
+        );
+    }
+
+    #[test]
+    fn is_valid_item_requires_a_priced_unblacklisted_item_of_an_allowed_base_type() {
+        let view = quality_fixture();
+        let blacklist = HashSet::from([REPAIR_KIT_TPL.to_owned()]);
+        let handbook: IndexMap<String, f64> = view
+            .keys()
+            .map(|tpl| (tpl.clone(), 100.0))
+            .collect::<IndexMap<_, _>>();
+        let flea = IndexMap::new();
+        let cache = ItemBaseClassCache::build(&view);
+        let valid =
+            |tpl: &str| is_valid_item(&view, &cache, &blacklist, &handbook, &flea, tpl, &[ARMOR]);
+
+        assert!(valid(MEDKIT_TPL));
+        // Quest item, blacklisted, an excluded base type, a node, and an unknown tpl.
+        assert!(!valid("a9a9a9a9a9a9a9a9a9a9a9a9"));
+        assert!(!valid(REPAIR_KIT_TPL));
+        assert!(!valid("b1b1b1b1b1b1b1b1b1b1b1b1"));
+        assert!(!valid("b2b2b2b2b2b2b2b2b2b2b2b2"));
+        assert!(!valid(ORPHAN_TPL));
+    }
+
+    #[test]
+    fn is_valid_item_falls_back_to_the_flea_price_below_a_handbook_price_of_one() {
+        let view = quality_fixture();
+        let blacklist = HashSet::new();
+        let flea = IndexMap::from([(MEDKIT_TPL.to_owned(), 250.0)]);
+        let cache = ItemBaseClassCache::build(&view);
+        let valid = |handbook: &IndexMap<String, f64>| {
+            is_valid_item(&view, &cache, &blacklist, handbook, &flea, MEDKIT_TPL, &[])
+        };
+
+        // A handbook price of at least 1 is taken as-is.
+        assert!(valid(&IndexMap::from([(MEDKIT_TPL.to_owned(), 1.0)])));
+        // Below 1, and missing entirely, both fall through to the flea table.
+        assert!(valid(&IndexMap::from([(MEDKIT_TPL.to_owned(), 0.5)])));
+        assert!(valid(&IndexMap::new()));
+        // Neither table knows the tpl, so there is no price at all.
+        assert!(!is_valid_item(
+            &view,
+            &cache,
+            &blacklist,
+            &IndexMap::new(),
+            &IndexMap::new(),
+            FOOD_TPL,
+            &[]
+        ));
+    }
+
+    #[test]
+    fn removable_plate_slots_are_matched_case_insensitively() {
+        let view = quality_fixture();
+
+        assert_eq!(get_removable_plate_slot_ids().len(), 4);
+        assert!(is_removable_plate_slot("front_plate"));
+        assert!(is_removable_plate_slot("Left_Side_Plate"));
+        assert!(!is_removable_plate_slot("soft_armor_front"));
+
+        assert!(armor_item_has_removable_plate_slots(
+            &view,
+            PLATED_ARMOR_TPL
+        ));
+        // No slots at all, and a tpl the view does not know.
+        assert!(!armor_item_has_removable_plate_slots(
+            &view,
+            PLATELESS_ARMOR_TPL
+        ));
+        assert!(!armor_item_has_removable_plate_slots(&view, ORPHAN_TPL));
+    }
+
+    #[test]
+    fn armor_item_has_removable_or_soft_insert_slots_takes_either_kind() {
+        let view = quality_fixture();
+
+        // Either slot kind on its own is enough, as is both at once.
+        assert!(armor_item_has_removable_or_soft_insert_slots(
+            &view,
+            PLATE_ONLY_ARMOR_TPL
+        ));
+        assert!(armor_item_has_removable_or_soft_insert_slots(
+            &view,
+            SOFT_ONLY_ARMOR_TPL
+        ));
+        assert!(armor_item_has_removable_or_soft_insert_slots(
+            &view,
+            PLATED_ARMOR_TPL
+        ));
+
+        // Armor with no slots at all.
+        assert!(!armor_item_has_removable_or_soft_insert_slots(
+            &view,
+            PLATELESS_ARMOR_TPL
+        ));
+        // The `ArmorItemCanHoldMods` guard: plate slots on a non-armor tpl do not count, even
+        // though `armor_item_has_removable_plate_slots` alone says they do.
+        assert!(armor_item_has_removable_plate_slots(
+            &view,
+            PLATED_NON_ARMOR_TPL
+        ));
+        assert!(!armor_item_has_removable_or_soft_insert_slots(
+            &view,
+            PLATED_NON_ARMOR_TPL
+        ));
+        // A tpl the view does not know fails the guard first.
+        assert!(!armor_item_has_removable_or_soft_insert_slots(
+            &view, ORPHAN_TPL
+        ));
     }
 
     #[test]
@@ -1148,6 +2077,158 @@ mod tests {
         assert!(out.as_object().unwrap().get("composedKey").is_none());
     }
 
+    /// A stack of `count` roubles, id `s`.
+    fn stack(template: &str, count: f64) -> Item {
+        Item {
+            id: "s".to_owned(),
+            template: template.to_owned(),
+            upd: Some(Upd {
+                stack_objects_count: Some(count),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn counts(items: &[Item]) -> Vec<Option<f64>> {
+        items
+            .iter()
+            .map(|item| item.upd.as_ref().and_then(|upd| upd.stack_objects_count))
+            .collect()
+    }
+
+    #[test]
+    fn split_stack_chunks_the_count_into_max_size_pieces() {
+        let result = split_stack(&fixture(), &stack(MONEY_ROUBLES_TPL, 250.0)).unwrap();
+
+        assert_eq!(counts(&result), vec![Some(100.0), Some(100.0), Some(50.0)]);
+        // Every chunk is a fresh MongoId, none of them the original's.
+        let new_ids: HashSet<&str> = ids(&result).into_iter().collect();
+        assert_eq!(new_ids.len(), 3);
+        assert!(!new_ids.contains("s"));
+        assert!(result.iter().all(|item| item.id.len() == 24));
+        assert!(result.iter().all(|item| item.template == MONEY_ROUBLES_TPL));
+    }
+
+    #[test]
+    fn split_stack_returns_the_item_unchanged_when_it_fits() {
+        let view = fixture();
+
+        for count in [1.0, 99.0, 100.0] {
+            let result = split_stack(&view, &stack(MONEY_ROUBLES_TPL, count)).unwrap();
+
+            assert_eq!(counts(&result), vec![Some(count)]);
+            assert_eq!(ids(&result), vec!["s"]);
+        }
+    }
+
+    /// `ItemHelper.cs:755` returns the item as-is when there is no count to split by, without
+    /// consulting the template at all.
+    #[test]
+    fn split_stack_returns_the_item_when_the_count_is_absent() {
+        let view = fixture();
+
+        let no_upd = item("s", ORPHAN_TPL, None);
+        assert_eq!(ids(&split_stack(&view, &no_upd).unwrap()), vec!["s"]);
+
+        let mut no_count = no_upd.clone();
+        no_count.upd = Some(Upd::default());
+        assert_eq!(ids(&split_stack(&view, &no_count).unwrap()), vec!["s"]);
+    }
+
+    /// The C# hang path: a null (or non-positive) `StackMaxSize` makes `ItemHelper.cs:773` subtract
+    /// nothing from `remainingCount` on every pass.
+    #[test]
+    fn split_stack_errors_when_the_max_size_cannot_end_the_loop() {
+        let view = fixture();
+
+        // Template absent from the view entirely.
+        assert!(split_stack(&view, &stack("999999999999999999999999", 5.0)).is_err());
+        // Template present, no StackMaxSize.
+        assert!(split_stack(&view, &stack(HELMET_TPL, 5.0)).is_err());
+        // Would never terminate either, for all that JSON cannot carry it.
+        assert!(split_stack(&view, &stack(MONEY_ROUBLES_TPL, f64::INFINITY)).is_err());
+    }
+
+    /// `remainingCount <= maxStackSize` is false against a null max, and `while (remainingCount > 0)`
+    /// is false for a count that is not positive, so C# returns the empty list it just built.
+    #[test]
+    fn split_stack_is_empty_for_a_non_positive_count_with_no_max_size() {
+        let view = fixture();
+
+        assert!(
+            split_stack(&view, &stack(HELMET_TPL, 0.0))
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            split_stack(&view, &stack(HELMET_TPL, -5.0))
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            split_stack(&view, &stack(HELMET_TPL, f64::NAN))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn set_found_in_raid_flags_every_item_in_the_tree() {
+        let view = fixture();
+        let mut items = vec![
+            item("r", HELMET_TPL, None),
+            item("a", MOD_PLAIN_A_TPL, Some("r")),
+            item("b", MOD_PLAIN_B_TPL, Some("r")),
+        ];
+        // An item that already has an Upd keeps the rest of it.
+        items[1].upd = Some(Upd {
+            stack_objects_count: Some(2.0),
+            ..Default::default()
+        });
+
+        set_found_in_raid(&view, &mut items);
+
+        for item in &items {
+            let upd = item.upd.as_ref().expect("Upd is created when missing");
+            assert_eq!(upd.extra["SpawnedInSession"], json!(true));
+        }
+        assert_eq!(counts(&items[1..2]), vec![Some(2.0)]);
+    }
+
+    /// `ItemHelper.cs:1037-1045`: money and ammo have the flag cleared, never set, and a missing
+    /// `Upd` is left missing.
+    #[test]
+    fn set_found_in_raid_clears_the_flag_on_money_and_ammo() {
+        let view = fixture();
+        let mut items = vec![
+            stack(MONEY_ROUBLES_TPL, 1.0),
+            item("a", AMMO_545_TPL, None),
+            item("b", AMMO_545_TPL, None),
+        ];
+        items[0]
+            .upd
+            .as_mut()
+            .unwrap()
+            .extra
+            .insert("SpawnedInSession".to_owned(), json!(true));
+        items[2].upd = Some(Upd::default());
+
+        set_found_in_raid(&view, &mut items);
+
+        // C# assigns null, and WhenWritingNull drops it — so the key is gone on the wire.
+        let money = serde_json::to_value(&items[0]).unwrap();
+        assert!(
+            money["upd"]
+                .as_object()
+                .unwrap()
+                .get("SpawnedInSession")
+                .is_none()
+        );
+        assert!(items[1].upd.is_none());
+        assert!(items[2].upd.as_ref().unwrap().extra.is_empty());
+    }
+
     // -----------------------------------------------------------------------
     // Cartridge / magazine / child-slot assembly
     // -----------------------------------------------------------------------
@@ -1178,7 +2259,7 @@ mod tests {
     const ITEM_CONFLICT_TPL: &str = "e1e1e1e1e1e1e1e1e1e1e1e1";
     const ITEM_CONFLICT_DEAD_TPL: &str = "e2e2e2e2e2e2e2e2e2e2e2e2";
 
-    fn ammo_fixture() -> HashMap<String, ItemView> {
+    fn ammo_fixture() -> IndexMap<String, ItemView> {
         serde_json::from_value(json!({
             ITEM_NODE: {},
             AMMO_BOX: { "parent": ITEM_NODE },
@@ -1277,12 +2358,12 @@ mod tests {
     }
 
     fn context<'a>(
-        items_view: &'a HashMap<String, ItemView>,
+        items_view: &'a IndexMap<String, ItemView>,
         static_ammo_dist: &'a HashMap<String, Vec<StaticAmmoDetails>>,
     ) -> LootContext<'a> {
         // The assembly functions read neither presets, money, blacklist, config nor season, so
         // those members are stubbed and the fixtures stay about ammo.
-        static PRESETS: LazyLock<HashMap<String, PresetView>> = LazyLock::new(HashMap::new);
+        static PRESETS: LazyLock<IndexMap<String, PresetView>> = LazyLock::new(IndexMap::new);
         static MONEY_TPLS: LazyLock<Vec<String>> = LazyLock::new(Vec::new);
         static BLACKLIST: LazyLock<HashSet<String>> = LazyLock::new(HashSet::new);
         static CONFIG: LazyLock<LootConfigView> = LazyLock::new(LootConfigView::default);
@@ -1297,7 +2378,7 @@ mod tests {
             config: &CONFIG,
             seasonal: &SEASONAL,
             counter: CounterState::default(),
-            diagnostics: Vec::new(),
+            diagnostics: DiagSink::capture(),
         }
     }
 
@@ -1319,6 +2400,7 @@ mod tests {
 
     fn levels<'a>(ctx: &'a LootContext<'a>) -> Vec<&'a str> {
         ctx.diagnostics
+            .captured()
             .iter()
             .map(|entry| entry.level.as_str())
             .collect()
@@ -1326,6 +2408,7 @@ mod tests {
 
     fn messages(ctx: &LootContext) -> String {
         ctx.diagnostics
+            .captured()
             .iter()
             .filter_map(|entry| entry.message.as_deref())
             .collect::<Vec<_>>()
@@ -1355,7 +2438,7 @@ mod tests {
         let ctx = context(&view, &dist);
         let mut ammo_box = root(AMMO_BOX_TPL);
 
-        add_cartridges_to_ammo_box(&ctx, &mut ammo_box, AMMO_BOX_TPL).unwrap();
+        add_cartridges_to_ammo_box(ctx.items_view, &mut ammo_box, AMMO_BOX_TPL).unwrap();
 
         // 90 capacity / 30 per stack -> three stacks, locations 2, 1, then absent.
         assert_eq!(ammo_box.len(), 4);
@@ -1378,7 +2461,7 @@ mod tests {
         let ctx = context(&view, &dist);
         let mut ammo_box = root(AMMO_BOX_REMAINDER_TPL);
 
-        add_cartridges_to_ammo_box(&ctx, &mut ammo_box, AMMO_BOX_REMAINDER_TPL).unwrap();
+        add_cartridges_to_ammo_box(ctx.items_view, &mut ammo_box, AMMO_BOX_REMAINDER_TPL).unwrap();
 
         assert_eq!(ammo_box.len(), 3);
         assert_eq!(stack_count_of(&ammo_box[1]), Some(30.0));
@@ -1394,7 +2477,7 @@ mod tests {
         let ctx = context(&view, &dist);
         let mut ammo_box = root(AMMO_BOX_SINGLE_TPL);
 
-        add_cartridges_to_ammo_box(&ctx, &mut ammo_box, AMMO_BOX_SINGLE_TPL).unwrap();
+        add_cartridges_to_ammo_box(ctx.items_view, &mut ammo_box, AMMO_BOX_SINGLE_TPL).unwrap();
 
         assert_eq!(ammo_box.len(), 2);
         assert_eq!(stack_count_of(&ammo_box[1]), Some(30.0));
@@ -1413,7 +2496,7 @@ mod tests {
             ..Default::default()
         });
 
-        add_cartridges_to_ammo_box(&ctx, &mut ammo_box, AMMO_BOX_TPL).unwrap();
+        add_cartridges_to_ammo_box(ctx.items_view, &mut ammo_box, AMMO_BOX_TPL).unwrap();
 
         assert_eq!(ammo_box.len(), 2);
     }
@@ -1427,7 +2510,8 @@ mod tests {
 
         // C# dereferences `cartridgeTpl!.Value` here and throws.
         let error =
-            add_cartridges_to_ammo_box(&ctx, &mut ammo_box, AMMO_BOX_NO_FILTER_TPL).unwrap_err();
+            add_cartridges_to_ammo_box(ctx.items_view, &mut ammo_box, AMMO_BOX_NO_FILTER_TPL)
+                .unwrap_err();
 
         assert_eq!(error.level, ERROR);
         assert_eq!(ammo_box.len(), 1);
@@ -1441,8 +2525,9 @@ mod tests {
         let mut ammo_box = root(AMMO_BOX_NO_STACK_SIZE_TPL);
 
         // Deviation: `maxPerStack` of 0 makes the C# `while` loop add empty stacks forever.
-        let error = add_cartridges_to_ammo_box(&ctx, &mut ammo_box, AMMO_BOX_NO_STACK_SIZE_TPL)
-            .unwrap_err();
+        let error =
+            add_cartridges_to_ammo_box(ctx.items_view, &mut ammo_box, AMMO_BOX_NO_STACK_SIZE_TPL)
+                .unwrap_err();
 
         assert_eq!(error.level, ERROR);
         assert_eq!(ammo_box.len(), 1);
@@ -1455,11 +2540,18 @@ mod tests {
         let mut ctx = context(&view, &dist);
         let mut magazine = root(UBGL_TPL);
 
-        fill_magazine_with_cartridge(&mut ctx, &mut magazine, UBGL_TPL, CARTRIDGE_A_TPL, 1.0)
-            .unwrap();
+        fill_magazine_with_cartridge(
+            ctx.items_view,
+            &mut ctx.diagnostics,
+            &mut magazine,
+            UBGL_TPL,
+            CARTRIDGE_A_TPL,
+            1.0,
+        )
+        .unwrap();
 
         assert_eq!(magazine.len(), 1);
-        assert!(ctx.diagnostics.is_empty());
+        assert!(ctx.diagnostics.captured().is_empty());
     }
 
     #[test]
@@ -1470,8 +2562,15 @@ mod tests {
         let mut magazine = root(MAGAZINE_TPL);
 
         // A multiplier of 1 pins the desired count to the magazine's 60, so 30-round stacks fill it.
-        fill_magazine_with_cartridge(&mut ctx, &mut magazine, MAGAZINE_TPL, CARTRIDGE_A_TPL, 1.0)
-            .unwrap();
+        fill_magazine_with_cartridge(
+            ctx.items_view,
+            &mut ctx.diagnostics,
+            &mut magazine,
+            MAGAZINE_TPL,
+            CARTRIDGE_A_TPL,
+            1.0,
+        )
+        .unwrap();
 
         assert_eq!(magazine.len(), 3);
         assert_eq!(location_of(&magazine[1]), Some(0));
@@ -1489,8 +2588,15 @@ mod tests {
         let mut magazine = root(MAGAZINE_TPL);
 
         // A 60-round stack size swallows the whole 60-round magazine in one go.
-        fill_magazine_with_cartridge(&mut ctx, &mut magazine, MAGAZINE_TPL, CARTRIDGE_B_TPL, 1.0)
-            .unwrap();
+        fill_magazine_with_cartridge(
+            ctx.items_view,
+            &mut ctx.diagnostics,
+            &mut magazine,
+            MAGAZINE_TPL,
+            CARTRIDGE_B_TPL,
+            1.0,
+        )
+        .unwrap();
 
         assert_eq!(magazine.len(), 2);
         assert_eq!(stack_count_of(&magazine[1]), Some(60.0));
@@ -1504,8 +2610,15 @@ mod tests {
         let mut ctx = context(&view, &dist);
         let mut magazine = root(CYLINDER_TPL);
 
-        fill_magazine_with_cartridge(&mut ctx, &mut magazine, CYLINDER_TPL, CARTRIDGE_B_TPL, 1.0)
-            .unwrap();
+        fill_magazine_with_cartridge(
+            ctx.items_view,
+            &mut ctx.diagnostics,
+            &mut magazine,
+            CYLINDER_TPL,
+            CARTRIDGE_B_TPL,
+            1.0,
+        )
+        .unwrap();
 
         // Six slots, no Cartridges entry at all.
         assert_eq!(magazine.len(), 2);
@@ -1520,7 +2633,8 @@ mod tests {
         let mut magazine = root(MAGAZINE_NO_CARTRIDGES_TPL);
 
         fill_magazine_with_cartridge(
-            &mut ctx,
+            ctx.items_view,
+            &mut ctx.diagnostics,
             &mut magazine,
             MAGAZINE_NO_CARTRIDGES_TPL,
             CARTRIDGE_A_TPL,
@@ -1542,7 +2656,8 @@ mod tests {
 
         // C# adds `cartridgeCountToAdd!.Value` on a null and crashes.
         let error = fill_magazine_with_cartridge(
-            &mut ctx,
+            ctx.items_view,
+            &mut ctx.diagnostics,
             &mut magazine,
             MAGAZINE_TPL,
             CARTRIDGE_NO_STACK_TPL,
@@ -1562,16 +2677,23 @@ mod tests {
         let mut magazine = root(MAGAZINE_TPL);
 
         let unknown = "999999999999999999999999";
-        fill_magazine_with_cartridge(&mut ctx, &mut magazine, MAGAZINE_TPL, unknown, 1.0)
-            .unwrap_err();
+        fill_magazine_with_cartridge(
+            ctx.items_view,
+            &mut ctx.diagnostics,
+            &mut magazine,
+            MAGAZINE_TPL,
+            unknown,
+            1.0,
+        )
+        .unwrap_err();
 
         assert_eq!(levels(&ctx), vec![ERROR, ERROR]);
         assert_eq!(
-            ctx.diagnostics[0].locale_key.as_deref(),
+            ctx.diagnostics.captured()[0].locale_key.as_deref(),
             Some("item-invalid_tpl_item")
         );
-        assert_eq!(ctx.diagnostics[0].args, Some(json!(unknown)));
-        assert!(ctx.diagnostics[0].message.is_none());
+        assert_eq!(ctx.diagnostics.captured()[0].args, Some(json!(unknown)));
+        assert!(ctx.diagnostics.captured()[0].message.is_none());
     }
 
     #[test]
@@ -1586,7 +2708,8 @@ mod tests {
 
             // 0.5 * 5 = 2.5, which banker's rounding takes to 2 — away-from-zero would say 3.
             fill_magazine_with_cartridge(
-                &mut ctx,
+                ctx.items_view,
+                &mut ctx.diagnostics,
                 &mut magazine,
                 MAGAZINE_SMALL_TPL,
                 CARTRIDGE_B_TPL,
@@ -1613,8 +2736,15 @@ mod tests {
             ..Default::default()
         });
 
-        fill_magazine_with_cartridge(&mut ctx, &mut magazine, MAGAZINE_TPL, CARTRIDGE_B_TPL, 1.0)
-            .unwrap();
+        fill_magazine_with_cartridge(
+            ctx.items_view,
+            &mut ctx.diagnostics,
+            &mut magazine,
+            MAGAZINE_TPL,
+            CARTRIDGE_B_TPL,
+            1.0,
+        )
+        .unwrap();
 
         assert_eq!(levels(&ctx), vec![WARNING]);
         assert!(messages(&ctx).contains("already has cartridges defined"));
@@ -1649,7 +2779,7 @@ mod tests {
                 .iter()
                 .all(|item| item.template == CARTRIDGE_A_TPL)
         );
-        assert!(ctx.diagnostics.is_empty());
+        assert!(ctx.diagnostics.captured().is_empty());
     }
 
     #[test]
@@ -1843,7 +2973,8 @@ mod tests {
         let mut ctx = context(&view, &dist);
 
         let result = add_child_slot_items(
-            &mut ctx,
+            &view,
+            &mut ctx.diagnostics,
             root(ITEM_WITH_SLOTS_TPL),
             ITEM_WITH_SLOTS_TPL,
             None,
@@ -1881,7 +3012,8 @@ mod tests {
             let mut ctx = context(&view, &dist);
 
             let result = add_child_slot_items(
-                &mut ctx,
+                &view,
+                &mut ctx.diagnostics,
                 root(ITEM_WITH_SLOTS_TPL),
                 ITEM_WITH_SLOTS_TPL,
                 Some(&chances),
@@ -1904,7 +3036,8 @@ mod tests {
             let mut ctx = context(&view, &dist);
 
             let result = add_child_slot_items(
-                &mut ctx,
+                &view,
+                &mut ctx.diagnostics,
                 root(ITEM_WITH_SLOTS_TPL),
                 ITEM_WITH_SLOTS_TPL,
                 Some(&chances),
@@ -1928,8 +3061,13 @@ mod tests {
         for _ in 0..50 {
             let mut ctx = context(&view, &dist);
 
-            let result =
-                add_child_slot_items(&mut ctx, root(ITEM_CONFLICT_TPL), ITEM_CONFLICT_TPL, None);
+            let result = add_child_slot_items(
+                &view,
+                &mut ctx.diagnostics,
+                root(ITEM_CONFLICT_TPL),
+                ITEM_CONFLICT_TPL,
+                None,
+            );
 
             // MOD_A conflicts with MOD_B, so slot two can only ever land on MOD_C.
             assert_eq!(result.len(), 3);
@@ -1945,7 +3083,8 @@ mod tests {
         let mut ctx = context(&view, &dist);
 
         let result = add_child_slot_items(
-            &mut ctx,
+            &view,
+            &mut ctx.diagnostics,
             root(ITEM_CONFLICT_DEAD_TPL),
             ITEM_CONFLICT_DEAD_TPL,
             None,

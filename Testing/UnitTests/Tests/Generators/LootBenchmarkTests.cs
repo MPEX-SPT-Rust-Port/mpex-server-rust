@@ -79,7 +79,7 @@ public class LootBenchmarkTests
         GC.Collect();
 
         TestContext.Out.WriteLine(
-            $"{label,-20} process peak RSS={process.PeakWorkingSet64 / 1024.0 / 1024.0:F0} MB  "
+            $"{label, -20} process peak RSS={process.PeakWorkingSet64 / 1024.0 / 1024.0:F0} MB  "
                 + $"settled RSS={Environment.WorkingSet / 1024.0 / 1024.0:F0} MB  "
                 + $"managed heap={GC.GetTotalMemory(forceFullCollection: false) / 1024.0 / 1024.0:F0} MB  "
                 + $"alloc/run={stats.AllocatedPerRunMb:F1} MB"
@@ -100,8 +100,8 @@ public class LootBenchmarkTests
             var file = new FileInfo(Path.Combine(AppContext.BaseDirectory, binary));
             TestContext.Out.WriteLine(
                 file.Exists
-                    ? $"{binary,-26} {file.Length / 1024.0 / 1024.0:F2} MB"
-                    : $"{binary,-26} not present in {AppContext.BaseDirectory}"
+                    ? $"{binary, -26} {file.Length / 1024.0 / 1024.0:F2} MB"
+                    : $"{binary, -26} not present in {AppContext.BaseDirectory}"
             );
         }
     }
@@ -169,11 +169,11 @@ public class LootBenchmarkTests
     {
         var (gen0, gen1, gen2) = stats.Collections;
         TestContext.Out.WriteLine(
-            $"{label,-20} n={stats.Timings.Count}  mean={stats.Timings.Average():F2} ms  median={Median(stats.Timings):F2} ms  "
+            $"{label, -20} n={stats.Timings.Count}  mean={stats.Timings.Average():F2} ms  median={Median(stats.Timings):F2} ms  "
                 + $"min={stats.Timings.Min():F2} ms  max={stats.Timings.Max():F2} ms"
         );
         TestContext.Out.WriteLine(
-            $"{"",-20} alloc/run={stats.AllocatedPerRunMb:F1} MB  peak RSS={stats.PeakWorkingSetMb:F0} MB "
+            $"{"", -20} alloc/run={stats.AllocatedPerRunMb:F1} MB  peak RSS={stats.PeakWorkingSetMb:F0} MB "
                 + $"(+{stats.WorkingSetGrowthMb:F0} MB over the phase)  GC gen0/1/2={gen0}/{gen1}/{gen2}"
         );
     }

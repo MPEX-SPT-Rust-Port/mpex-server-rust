@@ -42,10 +42,7 @@ public class ClientLogCallbacks(
     {
         var data = coreConfig.Release;
 
-        data.BetaDisclaimerText = ProgramStatics.MODS()
-            ? serverLocalisationService.GetText("release-beta-disclaimer-mods-enabled")
-            : serverLocalisationService.GetText("release-beta-disclaimer");
-
+        data.BetaDisclaimerText = serverLocalisationService.GetText("release-beta-disclaimer-mods-enabled");
         data.BetaDisclaimerAcceptText = serverLocalisationService.GetText("release-beta-disclaimer-accept");
         data.ServerModsLoadedText = serverLocalisationService.GetText("release-server-mods-loaded");
         data.ServerModsLoadedDebugText = serverLocalisationService.GetText("release-server-mods-debug-message");
@@ -54,8 +51,8 @@ public class ClientLogCallbacks(
         data.IllegalPluginsLoadedText = serverLocalisationService.GetText("release-illegal-plugins-loaded");
         data.IllegalPluginsExceptionText = serverLocalisationService.GetText("release-illegal-plugins-exception");
         data.ReleaseSummaryText = serverLocalisationService.GetText("release-summary");
-        data.IsBeta = ProgramStatics.ENTRY_TYPE() is EntryType.BLEEDINGEDGE or EntryType.BLEEDINGEDGEMODS;
-        data.IsModdable = ProgramStatics.MODS();
+        data.IsBeta = false;
+        data.IsModdable = true;
         data.IsModded = loadedMods.Count > 0;
 
         return new ValueTask<string>(httpResponseUtil.NoBody(data));

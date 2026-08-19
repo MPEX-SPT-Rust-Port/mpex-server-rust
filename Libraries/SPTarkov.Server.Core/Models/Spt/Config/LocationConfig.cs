@@ -18,6 +18,23 @@ public record LocationConfig : BaseConfig
     public bool ForceLegacyLootGeneration { get; set; }
 
     /// <summary>
+    ///     Keep the native resident-DB fast path live even with mods loaded. Off, any loaded mod
+    ///     forces the views override onto every send. On, the instrumented mutation paths
+    ///     (CustomItemService, the blacklist caches, seasonal events) still trigger a republish,
+    ///     but a mod writing an injected table's dictionaries directly goes unseen - only enable
+    ///     when your mods don't do that.
+    /// </summary>
+    [JsonPropertyName("trustNativeRequestCacheWithMods")]
+    public bool TrustNativeRequestCacheWithMods { get; set; }
+
+    /// <summary>
+    ///     Always send the C#-built views override: disables the resident-DB fast path without
+    ///     touching the native path itself.
+    /// </summary>
+    [JsonPropertyName("disableNativeRequestCache")]
+    public bool DisableNativeRequestCache { get; set; }
+
+    /// <summary>
     ///     Rogues are classified as bosses and spawn immediately, this can result in no scavs spawning, delay rogues spawning to allow scavs to spawn first
     /// </summary>
     [JsonPropertyName("rogueLighthouseSpawnTimeSettings")]

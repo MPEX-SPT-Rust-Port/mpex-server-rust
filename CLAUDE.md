@@ -7,12 +7,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 scripts/decompress-assets.sh                        # REQUIRED before first build (or .ps1 on Windows) - unpacks looseLoot.7z
 # rustup (Rust 1.97.1) is REQUIRED: dotnet build invokes cargo for rust/spt-native
-dotnet build                                        # solution is server-csharp.slnx (README's .sln path is stale)
+dotnet build                                        # solution is server-csharp.slnx
 dotnet test                                         # all tests (Testing/UnitTests, NUnit)
 dotnet test --filter "FullyQualifiedName~MongoIdTests"   # single fixture
 dotnet test --filter "Name=EveryRegisteredServiceCanBeResolved"   # single test
+dotnet build && dotnet test --no-build --filter "..."    # iterating on one filter: build once, rerun tests without rebuilding
 csharpier format .                                  # run before opening a PR
 cd rust && cargo test && cargo fmt --check && cargo clippy --all-targets -- -D warnings   # Rust checks
+scripts/smoke-mpex-server.sh                         # e2e: Rust mpex-server launcher boots the CLR, asserts /health
 ```
 
 The server refuses to start unless the working directory contains `sptLogger.json`/`sptLogger.Development.json`, so run
@@ -20,28 +22,26 @@ the built `SPT.Server` executable from its output directory (`SPTarkov.Server/bi
 `dotnet run` from the repo root. IDE profiles for this are in `SPTarkov.Server/Properties/launchSettings.json`.
 
 Publish flags (`dotnet publish`) feed the generated `ProgramStatics` class: `-p:SptVersion=`, `-p:SptCommit=`,
-`-p:SptBuildTime=`, `-p:SptBuildType=` (`LOCAL`/`DEBUG`/`RELEASE`/`BLEEDINGEDGE`/`BLEEDINGEDGEMODS`). Defaults live in
+`-p:SptBuildTime=`, `-p:SptBuildType=` (`LOCAL`/`DEBUG`/`RELEASE`). Defaults live in
 `Build.props`.
 
 `cargo` must be on `PATH` for **any** `dotnet build` of the solution — `SPTarkov.Server.Core` builds `rust/spt-native`
 first, and a missing toolchain fails the build with `MSB3073`. Publishing for a RID other than the build host's needs
 `-p:SptNativeRid=<rid>` as well (`dotnet publish -r` alone never reaches a RID-agnostic project reference, so cargo
 would silently emit a host-triple library); `Build.props` maps the RID to a Rust target triple and
-`SPTarkov.Server.csproj` errors out for unmapped RIDs. Only `linux-x64` on Linux hosts is mapped — arm64 is not a
-supported target for this fork, and Docker builds accept only `TARGETARCH=amd64`.
+`SPTarkov.Server.csproj` errors out for unmapped RIDs.
 
-Release builds also regenerate `SPT_Data/checks.dat` by running `Libraries/SPTarkov.Server.Assets/build/PostBuild.cs`,
-which pulls `System.IO.Hashing` from NuGet — a Release build on a machine with an empty NuGet cache needs network
-access.
+Release builds also regenerate `SPT_Data/checks.dat` by running the `gen_checks` bin in `rust/spt-native`
+(`cargo run --bin gen_checks`).
 
-This fork has no CI: `.github/` (workflows, CODEOWNERS, issue templates, funding config) was removed. Formatting,
-tests, and build checks are local-only — nothing enforces them on push. Upstream formats JSON under `SPT_Data` with
-Biome; there is no committed `biome.json` to reproduce that locally.
+## Pull Requests
+Pull requests will target the `dev` branch unless explicitly told otherwise.
 
-Upstream stores its large database JSON files (`looseLoot.json`, `items.json`) via a custom LFS server and rejects PRs
-that touch them — open an issue instead. This fork instead bundles those files as a plain 7z archive
-(`Libraries/SPTarkov.Server.Assets/looseLoot.7z`, extracted by `scripts/decompress-assets.sh`/`.ps1`), so no LFS
-setup is needed here and normal PRs touching them are fine.
+## Supported CPU Architecture
+Only `x86_64` (64-bit) CPUs are supported.
+- Rust's `cargo` targets `x86_64-unknown-linux-gnu` and `x86_64-pc-windows-msvc`.
+- Rust also compiles with `target-cpu=x86-64-v3` for modern CPU extensions.
+- Docker/Podman's Containerfiles target `fedora-minimal:44-x86_64`.
 
 ## Architecture
 
@@ -66,6 +66,10 @@ persistence, websockets, admin panel, mods, build-time codegen. The rules that k
 ## Style
 
 **Rust Porting** - Follow the nomenclature and naming scheme of the C# you are replacing.
+[RUST-ROADMAP.md](RUST-ROADMAP.md) is the status/guidelines reference, [rust/ARCHITECTURE.md](rust/ARCHITECTURE.md) the
+FFI/wire-format one. Adding or changing an export means bumping `ABI_VERSION` in `rust/spt-native/src/lib.rs` *and*
+`SptNative.ExpectedAbiVersion` in `Libraries/SPTarkov.Server.Core/Native/SptNative.cs` — they are asserted equal at
+startup and in `ffi.rs` tests.
 
 CSharpier plus `.editorconfig` handle formatting. The rules a formatter can't catch:
 

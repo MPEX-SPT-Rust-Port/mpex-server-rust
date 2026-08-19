@@ -39,6 +39,21 @@ public class RagfairAssortGenerator(
     ];
 
     /// <summary>
+    ///     Exposed so the native ragfair projection can build the same blacklist and seasonal
+    ///     inputs this generator reads, without a constructor change on its caller.
+    /// </summary>
+    internal ItemFilterService ItemFilterService
+    {
+        get { return itemFilterService; }
+    }
+
+    /// <inheritdoc cref="ItemFilterService"/>
+    internal SeasonalEventService SeasonalEventService
+    {
+        get { return seasonalEventService; }
+    }
+
+    /// <summary>
     ///     Generate a list of lists (item + children) the flea can sell
     /// </summary>
     /// <returns> List of lists (item + children)</returns>
