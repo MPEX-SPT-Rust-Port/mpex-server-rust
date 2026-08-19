@@ -11,6 +11,7 @@ pub mod level_generator;
 pub(crate) mod mod_pool_service;
 pub mod models;
 pub(crate) mod repair_service;
+pub mod views;
 
 use indexmap::IndexMap;
 

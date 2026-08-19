@@ -196,6 +196,44 @@ pub struct GlobalsRoot {
     /// answer from.
     #[serde(rename = "ItemPresets", default)]
     pub item_presets: IndexMap<String, Preset>,
+    /// `GlobalTable.Configuration` (`GlobalTable.cs:12-13`) — see [`GlobalsConfigLift`].
+    #[serde(default, rename = "config")]
+    pub config: GlobalsConfigLift,
+    #[serde(flatten)]
+    pub extra: IndexMap<String, Value>,
+}
+
+/// Globals `config` lift: `exp.level.exp_table` only (flip #6) — everything else
+/// rides `extra`. Wire names pin to GlobalTable.cs (`config`/`exp`/`level`/`exp_table`,
+/// entries `{"exp": n}` — GlobalTable.cs:12, :299, :1166, :1290, :1311).
+#[derive(Debug, Default, Deserialize)]
+pub struct GlobalsConfigLift {
+    #[serde(default)]
+    pub exp: GlobalsExpLift,
+    #[serde(flatten)]
+    pub extra: IndexMap<String, Value>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct GlobalsExpLift {
+    #[serde(default)]
+    pub level: GlobalsExpLevelLift,
+    #[serde(flatten)]
+    pub extra: IndexMap<String, Value>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct GlobalsExpLevelLift {
+    #[serde(default, rename = "exp_table")]
+    pub exp_table: Vec<ExpTableEntry>,
+    #[serde(flatten)]
+    pub extra: IndexMap<String, Value>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct ExpTableEntry {
+    #[serde(default)]
+    pub exp: i32,
     #[serde(flatten)]
     pub extra: IndexMap<String, Value>,
 }

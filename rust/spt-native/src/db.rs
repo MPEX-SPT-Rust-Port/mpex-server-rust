@@ -9,6 +9,7 @@ pub mod models;
 
 use std::sync::{Arc, RwLock};
 
+use crate::bot::views::BotDbViews;
 use crate::db::models::{
     GlobalsRoot, HideoutRoot, LocationsRoot, PublishRequest, TemplatesRoot, TradersRoot,
 };
@@ -29,13 +30,16 @@ pub struct ResidentDb {
     /// derived (which additionally needs traders). C# always publishes all four roots together,
     /// so in practice both view sets derive on the same publish.
     pub quest_views: Option<Arc<QuestDbViews>>,
+    /// `Some` whenever templates+globals are resident **and** [`Self::ragfair_views`] derived —
+    /// in practice the same publishes as the other view sets.
+    pub bot_views: Option<Arc<BotDbViews>>,
 }
 
 #[derive(Debug)]
 pub enum PublishError {
     Schema(String),
-    /// A view derivation failure, ragfair or quest. Aborts the publish before the swap — the
-    /// previous resident DB stays fully intact.
+    /// A view derivation failure — ragfair, quest or bot. Aborts the publish before the swap —
+    /// the previous resident DB stays fully intact.
     Views(String),
 }
 
@@ -128,6 +132,22 @@ pub fn publish(request: PublishRequest) -> Result<u64, PublishError> {
         _ => None,
     };
 
+    // Same containment as the ragfair derive above: caught panic, abort before the swap.
+    let bot_views = match (&templates, &globals, &ragfair_views) {
+        (Some(templates), Some(globals), Some(ragfair_views)) => {
+            let derived = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                #[cfg(test)]
+                if tests::PANIC_ON_BOT_DERIVE.load(std::sync::atomic::Ordering::Relaxed) {
+                    panic!("injected bot derive panic");
+                }
+                crate::bot::views::derive(templates, globals, ragfair_views)
+            }))
+            .unwrap_or_else(|_| Err("bot view derivation panicked".to_string()));
+            Some(Arc::new(derived.map_err(PublishError::Views)?))
+        }
+        _ => None,
+    };
+
     *slot = Some(Arc::new(ResidentDb {
         epoch,
         templates,
@@ -137,6 +157,7 @@ pub fn publish(request: PublishRequest) -> Result<u64, PublishError> {
         hideout,
         ragfair_views,
         quest_views,
+        bot_views,
     }));
 
     Ok(epoch)
@@ -159,6 +180,10 @@ pub mod tests {
     /// [`PANIC_ON_DERIVE`]'s twin for the quest derive block — the ragfair injection errors the
     /// publish before the quest derive ever runs, so proving its catch needs its own seam.
     pub static PANIC_ON_QUEST_DERIVE: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+
+    /// [`PANIC_ON_DERIVE`]'s twin for the bot derive block, for the same reason.
+    pub static PANIC_ON_BOT_DERIVE: std::sync::atomic::AtomicBool =
         std::sync::atomic::AtomicBool::new(false);
 }
 
@@ -327,6 +352,61 @@ mod store_tests {
         let second = current().unwrap();
         let second_views = second.quest_views.as_ref().expect("quest views re-derived");
         assert!(!Arc::ptr_eq(first_views, second_views));
+    }
+
+    #[test]
+    fn full_publish_derives_bot_views_and_a_republish_rederives() {
+        let _guard = tests::DB_TEST_LOCK.lock().unwrap();
+        clear();
+
+        // Templates+globals resident but no traders: no ragfair views, so no bot views either
+        publish(request(
+            r#"{"schema":1,"roots":{"templates":{"a":1},"globals":{"c":3,"config":{"exp":{"level":{"exp_table":[{"exp":10},{"exp":20}]}}}}}}"#,
+        ))
+        .unwrap();
+        let partial = current().unwrap();
+        assert!(partial.ragfair_views.is_none());
+        assert!(partial.bot_views.is_none());
+
+        // Traders arrives: templates+globals+ragfair views all resident, bot views derive
+        publish(request(r#"{"schema":1,"roots":{"traders":{"b":2}}}"#)).unwrap();
+        let first = current().unwrap();
+        let first_views = first.bot_views.as_ref().expect("bot views derived");
+        assert_eq!(first_views.exp_table, vec![10, 20]);
+        // The embedded ragfair views are the resident Arc, not a second derivation
+        assert!(Arc::ptr_eq(
+            &first_views.ragfair,
+            first.ragfair_views.as_ref().unwrap()
+        ));
+
+        // A templates-only republish re-derives even though globals/traders are unchanged
+        publish(request(r#"{"schema":1,"roots":{"templates":{"a":9}}}"#)).unwrap();
+        let second = current().unwrap();
+        let second_views = second.bot_views.as_ref().expect("bot views re-derived");
+        assert!(!Arc::ptr_eq(first_views, second_views));
+    }
+
+    #[test]
+    fn bot_derivation_panic_is_a_views_error_and_does_not_poison_the_lock() {
+        let _guard = tests::DB_TEST_LOCK.lock().unwrap();
+        use std::sync::atomic::Ordering;
+        clear();
+        publish(request(
+            r#"{"schema":1,"roots":{"templates":{"a":1},"traders":{"b":2},"globals":{"c":3}}}"#,
+        ))
+        .unwrap();
+        let before = current().unwrap();
+
+        tests::PANIC_ON_BOT_DERIVE.store(true, Ordering::Relaxed);
+        let error = publish(request(r#"{"schema":1,"roots":{"templates":{"a":9}}}"#)).unwrap_err();
+        tests::PANIC_ON_BOT_DERIVE.store(false, Ordering::Relaxed);
+        assert!(matches!(error, PublishError::Views(_)));
+
+        // The lock is not poisoned: reads and a follow-up publish still succeed
+        let after = current().unwrap();
+        assert_eq!(after.epoch, before.epoch);
+        let healed = publish(request(r#"{"schema":1,"roots":{"templates":{"a":9}}}"#)).unwrap();
+        assert_eq!(healed, before.epoch + 1);
     }
 
     #[test]
