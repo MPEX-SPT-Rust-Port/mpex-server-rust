@@ -15,7 +15,7 @@ too, and has no legacy path: `SPTLoggerDispatcher` hands every line to the crate
 
 Twenty-three C-ABI exports (`src/ffi.rs`) carry all of it, JSON in and JSON out — except the ragfair
 response, which is a framed MessagePack envelope, and `spt_log_emit`, which passes the fields of one
-line directly (current ABI 24).
+line directly (current ABI 26).
 
 Native is not uniformly faster. Loot and repeatable quests win; bots, reward loot, ragfair, scav
 case, the base-class hydrate and the linked-item table are slower than the C# they replace, and
@@ -180,9 +180,9 @@ silently drops camora ammo on the fifth); and the native `_type` test being
    state. Full protocol: the epoch-protocol section of
    docs/superpowers/specs/2026-08-17-rust-state-ownership-design.md. Ragfair (flip #1), the
    repeatable quests (flip #2), the two startup one-shots — the base-class hydrate and the
-   ragfair linked-item table (flip #3) — and the loot family — location and reward loot
-   (flip #4) — ride it today; every other family still projects per call — see *Exceptions in
-   force*.
+   ragfair linked-item table (flip #3) — the loot family — location and reward loot
+   (flip #4) — and the scav case (flip #5) ride it today; only the bot family still projects
+   per call — see *Exceptions in force*.
 4. **RNG parity.** Both sides draw through the shared xoshiro256\*\* source behind test-only seams
    (`Utils/RandomSource.cs` / `random_util.rs`), pinned by twin known-answer tests. Production C#
    randomness stays bit-for-bit unchanged.
@@ -205,7 +205,9 @@ silently drops camora ammo on the fifth); and the native `_type` test being
 adds `LocationConfig` (extended in place — it post-dates the baseline — with the loaded-mod list
 + `DbPublisher` in flip #4, when `LocationLootGenerator` took an additive overload adding the
 same pair), the four quest generators add `QuestConfig` +
-`RepeatableQuestNativeRequestBuilder`, `ScavCaseRewardGenerator` adds `ScavCaseNativeRequestBuilder`,
+`RepeatableQuestNativeRequestBuilder`, `ScavCaseRewardGenerator` adds `ScavCaseNativeRequestBuilder`
+(and, since flip #5, a further overload adding the loaded-mod list + `DbPublisher` — the pair loot
+took, chained through the earlier one),
 `ItemBaseClassService` adds `ItemBaseClassNativeRequestBuilder` + `ItemConfig`,
 `RagfairLinkedItemService` adds `RagfairLinkedItemNativeRequestBuilder` + `RagfairConfig`. The
 container selects the overload; anything built through the frozen 4.1.2 constructor gets a null
@@ -218,8 +220,9 @@ is no per-generator flag. Elsewhere: `BotConfig.ForceLegacyBotGeneration` and `F
 `QuestConfig.ForceLegacyRepeatableQuestGeneration`,
 `ScavCaseConfig.ForceLegacyScavCaseGeneration`, `ItemConfig.ForceLegacyItemBaseClassHydration`, plus
 `TrustNativeRequestCacheWithMods` / `DisableNativeRequestCache`, which carry the resident-DB
-eligibility gate and exist on `RagfairConfig`, `QuestConfig`, (since flip #3) `ItemConfig` and
-(since flip #4) `LocationConfig`, whose pair covers both loot generators;
+eligibility gate and exist on `RagfairConfig`, `QuestConfig`, (since flip #3) `ItemConfig`,
+(since flip #4) `LocationConfig`, whose pair covers both loot generators, and (since flip #5)
+`ScavCaseConfig`;
 the linked-item table reads `RagfairConfig`'s pair rather than gaining its own. Only
 `forceLegacyLootGeneration` is serialised into a shipped `.json` (`location.json`); the rest exist
 as C# defaults and a user who wants one adds it to the file.
@@ -311,8 +314,8 @@ frame per offer behind a header frame (since ABI 10, encoding tag 1), deserialis
 `Parallel.For` straight out of the native buffer. Ragfair is the only export that uses it. Its batch
 also takes **one timestamp** where legacy calls `TimeUtil.GetTimeStamp()` per offer.
 
-**Ragfair, the repeatable quests, the two startup one-shots and the loot family read the
-resident DB — the departures from per-call projection (guideline 3).** All key freshness on the same `DatabaseMutationStamp`, a
+**Ragfair, the repeatable quests, the two startup one-shots, the loot family and the scav case
+read the resident DB — the departures from per-call projection (guideline 3).** All key freshness on the same `DatabaseMutationStamp`, a
 monotonic counter bumped from `SeasonalEventService.UpdateGlobalEvents`, `ItemFilterService`'s
 blacklist `Add*` methods, `CustomItemService`'s `Create*` methods and a guarded replay bump when
 `CanSellOnRagfair` flips true→false. **Ragfair (flip #1, ABI 22) and quests (flip #2, ABI 23)
@@ -330,17 +333,24 @@ location loot's two and reward loot's four — on the same envelope**: the three
 existing locations-root entries, serialized at publish from each `LazyLoad.Value` so registered
 transformers are applied; the preset views ride `RagfairDbViews`, which gained its one flip-#4
 derivation, `default_presets_by_tpl_key` (forced loot). looseLoot stays a per-call splice and
-`staticAmmoDist` stays a parameter — the flip #4 ledger has both decisions. Six quest service/config-backed fields (`itemBlacklist`, `rewardItemBlacklist`,
+`staticAmmoDist` stays a parameter — the flip #4 ledger has both decisions. **Flip #5 (ABI 26)
+put the scav case export on the same envelope**: a new `hideout` root — `production.scavRecipes`
+only, the locations-root partial-projection precedent — went resident; the recipe views derive
+from it at request time rather than at publish (flip-#3 precedent, preserving the C#
+skip-a-malformed-recipe semantics bug-for-bug), and `itemsView`/`staticPrices`/
+`defaultPresetsByTpl` borrow the already-resident ragfair views. Six quest service/config-backed fields (`itemBlacklist`, `rewardItemBlacklist`,
 `bossItems`, `seasonalItemTplBlacklist`, `repeatableQuestTemplateIds`, `locationIdMap`) ride the
 varying block per call until Phases 2/4 — the same carve-out ragfair's config-derived fields
 took, and loot's carve-out set (`config`, `seasonal`, `lootableItemBlacklist`, `moneyTpls`, the
-six reward blacklists/sets, sealed's mod-extendable `linkedItems`) rides the same way.
+six reward blacklists/sets, sealed's mod-extendable `linkedItems`) rides the same way, as does
+scav case's (`recipeId`, `config`, `inactiveSeasonalItems`, `globalBlacklist`,
+`rewardItemBlacklist`, `bossItems`).
 **A mod writing an injected table's dictionaries directly is invisible to the stamp by design** —
 the eligibility gate carries that weight instead: resident state is trusted only when no mods are
 loaded, with `TrustNativeRequestCacheWithMods` as the opt-in and `DisableNativeRequestCache` as the
 kill switch; ineligible callers send a per-call `viewsOverride` with `epoch: 0` instead — a
 documented wire contract, not runtime-enforced (guideline 3).
-Only the scav case and bot payloads are still projected per call.
+Only the bot payloads are still projected per call.
 
 **Flip #1 ledger.** (a) Helper-cache freshness: legacy's hydrate-once caches — `TraderHelper`'s
 trader prices, `HandbookHelper`'s handbook price lookup, `PresetHelper`'s preset store and
@@ -414,6 +424,34 @@ projection, which survives intact as the ineligible `viewsOverride` arm; what wa
 six `{epoch, viewsOverride?, varying}` envelopes with their per-export varying records and the
 statics projection in `DbPayloadProjection`.
 
+**Flip #5 ledger.** (a) Freshness delta — a direction flip: pre-flip the native scav case
+re-derived its item and price pools per call, so it was *fresher than legacy* for runtime-added
+items (legacy's `DbItemsCache`/`DbAmmoItemsCache` effectively never invalidate — the bullet
+under *Broken / known divergences*); post-flip the eligible path reads last-published state,
+fresh-per-publish, and the kill switches (`DisableNativeRequestCache`, mods loaded without trust)
+restore per-call freshness. Presets moved the same way flip #4's did: the eligible path reads the
+globals-derived `defaultPresetsByTpl` instead of `PresetHelper` per call. (b) The `hideout` root
+added for this flip carries `production.scavRecipes` only (the locations-root partial-projection
+precedent), at the real table path's `JsonPropertyName`s; no view derives from it at publish —
+the recipe views derive at request time, a filter over a handful of recipes that preserves the C#
+skip-a-recipe-missing-`endProducts`-or-a-band semantics bug-for-bug, where a publish-time derive
+would have to abort loudly. The raw root pins the capitalized `Common`/`Rare`/`Superrare` wire
+names (`HideoutProduction.cs`); the request-time derivation maps them onto the existing lowercase
+`ScavRecipeView` — zero generator-algorithm change. Eligibility + branch + stale-retry sit in
+`ScavCaseRewardGenerator` mirroring `LootGenerator` exactly (nullable additive `DbPublisher?` +
+loaded-mod list via a new DI ctor chaining the old one, the frozen 4.1.2 ctor untouched; private
+`ResidentDbEligible`, where loot's is internal — the benchmark seam here needs only `Build`).
+The varying carve-out (`recipeId`, `config`, the four service-backed sets) rides every send until
+Phases 2/4, the standing carve-out every flip has taken. The pre-flip hydration sweep found readers
+only (`ScavCaseRewardGenerator`, `HideoutController`) and no lazy writer into
+`Production.ScavRecipes`, so no `DbPublisher` pre-touch carve-out was needed. (c) Net `Native/`
+delta for the flip (`git diff --stat a9a224f..ed0144d -- Libraries/SPTarkov.Server.Core/Native/`):
++110/−30 lines across 5 files — growth like flips #3/#4, because the pre-flip payload *was* the
+per-call projection, which survives intact: `BuildViewsOverride()` is the ineligible arm, and
+`Build(recipeId, testSeed)` survives as a three-line epoch-0 composition for the protected
+benchmark seam; what was added is the `{epoch, viewsOverride?, varying}` split and the hideout
+projection in `DbPayloadProjection`.
+
 **The ported 4.1.2 quirks are documented at their call sites**, as numbered `Quirk N` comments in
 `rust/spt-native/src/quest/*.rs`, `src/scav_case/generator.rs`, `src/base_class.rs`,
 `src/linked_items.rs` and `src/loot/container_extensions.rs`; grep case-insensitively for `quirk`,
@@ -433,8 +471,9 @@ written against, not the current file.
    goldens passing *unchanged*, BENCHMARK.md re-measured before the next starts. Landed: #1
    ragfair, #2 repeatable quests, #3 base-class hydrate + linked-item table, #4 loot (statics
    resident on the locations root; looseLoot deliberately stays a per-call splice — the flip #4
-   ledger has the 549 MiB number, Phase 3 the residency point). Remaining: #5
-   scav case, #6 bots (biggest expected win; `SharedBotViewsWire` dissolves into resident views).
+   ledger has the 549 MiB number, Phase 3 the residency point), #5 scav case (2026-08-19,
+   ABI 26; recipes resident on a new `hideout` root). Remaining: #6 bots (biggest expected win;
+   `SharedBotViewsWire` dissolves into resident views).
    Then Phase 2 (Ceciler write barriers, which retires the mods-off eligibility gate and flips
    `TrustNativeRequestCacheWithMods` default-on), Phase 3 (Rust loads `SPT_Data`), Phase 4
    (configs join the resident set, closing the runtime-config ceiling flip #1's ledger records),
@@ -445,8 +484,8 @@ written against, not the current file.
    been executed on Windows); 6b (the delegate-loader shim flip, where the resident DB's
    statics move into the exe and `SptNative.cs`'s `DllImport` layer dissolves into a vtable of
    the existing exports) waits on Phases 3 and 5.
-2. Port candidates and their costing live in [todo/TODO.md](todo/TODO.md); with #1-#4
-   landed, the unstarted front is #5, #6 and tier 2. The two axes
+2. Port candidates and their costing live in [todo/TODO.md](todo/TODO.md); with #1-#5
+   landed, the unstarted front is #6 and tier 2. The two axes
    are independent — a flip re-homes data for something already ported, a TODO item ports
    something new.
 3. Convert `is_valid_reward_item`'s trader whitelist (`quest/reward_generator.rs:869`, a `Vec<&str>`
