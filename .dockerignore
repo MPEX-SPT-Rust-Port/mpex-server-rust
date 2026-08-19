@@ -1,6 +1,6 @@
 # Build Outputs
 **/bin/
-!rust/spt-native/src/bin/
+!rust/*/src/bin/
 **/obj/
 rust/target/
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # End-to-end proof of the Rust launcher: Debug-publish the C# server (framework-dependent),
-# copy mpex-server beside it, boot through the launcher, assert /health answers.
+# boot through the published mpex-server, assert /health answers.
 # Prerequisites: scripts/decompress-assets.sh has run; dotnet SDK + cargo on PATH.
 set -euo pipefail
 
@@ -9,10 +9,9 @@ out="$(mktemp -d)"
 server_pid=""
 trap '{ kill "$server_pid" && wait "$server_pid"; } 2>/dev/null || true; rm -rf "$out"' EXIT
 
-# BuildSptNative runs `cargo build --locked` at the workspace root during publish, so this
-# also produces rust/target/debug/mpex-server — no separate cargo invocation needed.
+# The publish itself ships mpex-server into $out (IncludeMpexServerLauncher target), so the
+# smoke fails if that wiring regresses — no separate cargo invocation or copy needed.
 dotnet publish "$root/SPTarkov.Server/SPTarkov.Server.csproj" -c Debug -o "$out"
-cp "$root/rust/target/debug/mpex-server" "$out/"
 
 cd "$out"   # sptLogger.Development.json lands here; the server requires it in CWD
 ./mpex-server &
