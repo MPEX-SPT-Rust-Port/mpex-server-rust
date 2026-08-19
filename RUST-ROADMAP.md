@@ -401,7 +401,7 @@ from it at request time rather than at publish (flip-#3 precedent, preserving th
 skip-a-malformed-recipe semantics bug-for-bug), and `itemsView`/`staticPrices`/
 `defaultPresetsByTpl` borrow the already-resident ragfair views. Six quest service/config-backed fields (`itemBlacklist`, `rewardItemBlacklist`,
 `bossItems`, `seasonalItemTplBlacklist`, `repeatableQuestTemplateIds`, `locationIdMap`) ride the
-varying block per call until Phases 2/4 — the same carve-out ragfair's config-derived fields
+varying block per call until Phase 4 — the same carve-out ragfair's config-derived fields
 took, and loot's carve-out set (`config`, `seasonal`, `lootableItemBlacklist`, `moneyTpls`, the
 six reward blacklists/sets, sealed's mod-extendable `linkedItems`) rides the same way, as does
 scav case's (`recipeId`, `config`, `inactiveSeasonalItems`, `globalBlacklist`,
@@ -421,9 +421,9 @@ own product, not a database view.
 carries that weight: `TrustNativeRequestCacheWithMods` defaults **on**, a modded server rides
 resident state, and the flag is honoured only where `WriteBarrier.Installed` — Ceciler runs on
 Release and publish, never Debug. `DisableNativeRequestCache` remains the kill switch, and the
-container gap plus the rest of the barriers' blind spots are the *Broken* ledger's first bullet;
-ineligible callers send a per-call `viewsOverride` with `epoch: 0` instead — a
-documented wire contract, not runtime-enforced (guideline 3). The rule itself and the one
+container gap plus the rest of the barriers' blind spots are the *Broken* ledger's
+container-mutations bullet; ineligible callers send a per-call `viewsOverride` with `epoch: 0`
+instead — a documented wire contract, not runtime-enforced (guideline 3). The rule itself and the one
 stale-epoch retry are `Native/Db/ResidentDbDispatch`'s two methods, which flip #6 extracted from
 the seven copies that had accumulated; every family calls them now, across nine sites.
 
@@ -628,8 +628,8 @@ written against, not the current file.
    `TrustNativeRequestCacheWithMods` now defaults **on** in all six configs, gated on
    `WriteBarrier.Installed` so a Debug build — which Ceciler never rewrites — still forces the views
    override with mods loaded. A modded Release server rides the resident DB; the container gap and the
-   rest of the residual blind spots are the *Broken* ledger's first bullet, the startup and churn
-   numbers are BENCHMARK.md § Phase 2.
+   rest of the residual blind spots are the *Broken* ledger's container-mutations bullet, the startup
+   and churn numbers are BENCHMARK.md § Phase 2.
    Next is Phase 3 (Rust loads `SPT_Data`), Phase 4
    (configs join the resident set, closing the runtime-config ceiling flip #1's ledger records),
    Phase 5 (profile persistence) and Phase 6 (process inversion: an `mpex-server` bin crate hosts
