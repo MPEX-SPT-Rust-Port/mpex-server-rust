@@ -61,14 +61,14 @@ pub fn collect_files(
     files
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct VerifyReport {
     pub ok: bool,
     pub failures: Vec<Failure>,
     pub checked: usize,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct Failure {
     pub path: String,
     pub reason: String,

@@ -5,6 +5,7 @@
 //! write lock. Epoch starts at 1 on the first successful publish and increments on every
 //! publish, full or partial. A failed publish leaves the previous resident DB fully intact.
 
+pub mod load;
 pub mod models;
 
 use std::sync::{Arc, RwLock};

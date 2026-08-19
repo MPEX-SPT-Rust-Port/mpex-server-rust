@@ -437,9 +437,15 @@ pub struct TemplateItemProperties {
     pub ammo_caliber: Option<String>,
     #[serde(rename = "defAmmo")]
     pub def_ammo: Option<String>,
-    /// `[JsonConverter(StringToNumberFactoryConverter)] int?` in C# — but a published root has
-    /// already been through the C# record, which re-serializes the value as a plain number.
-    #[serde(rename = "armorClass")]
+    /// `[JsonConverter(StringToNumberFactoryConverter)] int?` in C# (`TemplateItem.cs:666-669`).
+    /// A root published by C# carries a plain number, but the fused load (`db::load`) splices the
+    /// shipped `items.json` in raw, where most templates write it as a string — see
+    /// [`deserialize_string_or_number`].
+    #[serde(
+        rename = "armorClass",
+        default,
+        deserialize_with = "deserialize_string_or_number"
+    )]
     pub armor_class: Option<i32>,
     #[serde(rename = "QuestItem")]
     pub quest_item: Option<bool>,
@@ -605,6 +611,24 @@ pub struct StackSlotProperties {
     pub filters: Option<Vec<SlotFilter>>,
     #[serde(flatten)]
     pub extra: IndexMap<String, Value>,
+}
+
+/// `StringToNumberFactoryConverter` (`Utils/Json/Converters/StringToNumberFactoryConverter.cs`):
+/// a string parses to the number, with empty/whitespace, `__REPLACEME__` and any parse failure
+/// all collapsing to the C# `default` (null here); a number or null passes through. The shipped
+/// `items.json` writes `armorClass` as a string on most templates and a number on the rest, and
+/// the fused load splices those raw bytes without the C# round-trip that used to normalize them.
+fn deserialize_string_or_number<'de, D>(deserializer: D) -> Result<Option<i32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match Option::<Value>::deserialize(deserializer)? {
+        Some(Value::Number(number)) => {
+            Ok(number.as_i64().and_then(|value| i32::try_from(value).ok()))
+        }
+        Some(Value::String(text)) => Ok(text.trim().parse().ok()),
+        _ => Ok(None),
+    }
 }
 
 /// `Models/Enums/ReloadMode.cs` in declaration order — index = numeric enum value.
@@ -773,6 +797,32 @@ mod tests {
         // The unlifted RepeatableQuestDatabase members ride in extra
         assert!(repeatable.extra.contains_key("rewards"));
         assert!(repeatable.extra.contains_key("samples"));
+    }
+
+    #[test]
+    fn armor_class_reads_the_shipped_string_form_as_well_as_a_number() {
+        // The C# publish normalizes through StringToNumberFactoryConverter; the fused load splices
+        // the shipped items.json raw, where most templates write armorClass as a string.
+        let root: TemplatesRoot = serde_json::from_str(
+            r#"{"items":{
+                "string":{"_props":{"armorClass":"5"}},
+                "number":{"_props":{"armorClass":6}},
+                "blank":{"_props":{"armorClass":""}},
+                "placeholder":{"_props":{"armorClass":"__REPLACEME__"}},
+                "null":{"_props":{"armorClass":null}},
+                "absent":{"_props":{}}
+            }}"#,
+        )
+        .unwrap();
+
+        let armor_class = |id: &str| root.items[id].properties.as_ref().unwrap().armor_class;
+        assert_eq!(armor_class("string"), Some(5));
+        assert_eq!(armor_class("number"), Some(6));
+        // Every C# `default` path collapses to null
+        assert_eq!(armor_class("blank"), None);
+        assert_eq!(armor_class("placeholder"), None);
+        assert_eq!(armor_class("null"), None);
+        assert_eq!(armor_class("absent"), None);
     }
 
     #[test]
