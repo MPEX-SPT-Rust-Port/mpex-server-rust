@@ -3,7 +3,6 @@
 # only index Libraries, rust, and SPTarkov.Server, ignore everything else
 *
 !ARCHITECTURE.md
-!RUST-ROADMAP.md
 !Libraries/
 !Libraries/**
 !rust/

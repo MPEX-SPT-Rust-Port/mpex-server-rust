@@ -1,14 +1,32 @@
-# Libraries/ — Architecture
+# **Libraries** Architecture
+
+## 1. Overview Summary
 
 Map of the six projects under `Libraries/`: which project owns what, what each depends on, and what
-deliberately lives elsewhere.
+deliberately lives elsewhere. All game logic sits in one of them (`SPTarkov.Server.Core`, ~91% of the files
+and ~94% of the lines here); the other five are a container, a logging front end, a patching toolkit, the
+Blazor admin panel and a content-only asset payload.
 
-| Document | Answers |
-|---|---|
-| [`SPTarkov.Server.Core/ARCHITECTURE.md`](SPTarkov.Server.Core/ARCHITECTURE.md) | Everything internal to Core (91% of the code here): layers, routing, item events, config loading, model conventions |
-| [root `ARCHITECTURE.md`](../ARCHITECTURE.md) | Behaviour spanning `Libraries/` + `SPTarkov.Server/` + `rust/` |
+| Language | Lines of Code | File Count |
+|-----------|-----------------|-----------|
+| `C#` | `125,848` | `938` |
+| `Razor` | `6,394` | `34` |
 
-## Project graph
+Per project (`.cs` only, `obj/`+`bin/` excluded; all 34 `.razor` files are Web's, and one of Core's
+files is the build-generated `Utils/ProgramStatics.Generated.cs`):
+
+| Project | .cs files | Lines | Depends on | NuGet of note |
+|---|---:|---:|---|---|
+| `SPTarkov.Common` | 22 | 1,515 | — | SemanticVersioning, ZLinq |
+| `SPTarkov.DI` | 3 | 304 | — | MS.Extensions.DependencyInjection.Abstractions, Hosting.Abstractions |
+| `SPTarkov.Reflection` | 8 | 757 | `SPTarkov.DI` | HarmonyX |
+| `SPTarkov.Server.Core` | 855 | 117,812 | `SPTarkov.Common`, `SPTarkov.DI` | HarmonyX, FastCloner, System.IO.Hashing, MessagePack |
+| `SPTarkov.Server.Web` | 50 | 5,460 | `SPTarkov.Server.Core` | MudBlazor, Argon2Sharp |
+| `SPTarkov.Server.Assets` | 0 | 0 | — | — |
+
+---
+
+## 2. High Level Design
 
 ```
 SPTarkov.Common ──────┐
@@ -20,21 +38,20 @@ SPTarkov.Server.Assets                          (content-only; the host project-
                                                  solely to copy SPT_Data to output)
 ```
 
-| Project | .cs files | Depends on | NuGet of note |
-|---|---:|---|---|
-| `SPTarkov.Common` | 22 | — | SemanticVersioning, ZLinq |
-| `SPTarkov.DI` | 3 | — | MS.Extensions.DependencyInjection.Abstractions, Hosting.Abstractions |
-| `SPTarkov.Reflection` | 8 | `SPTarkov.DI` | HarmonyX |
-| `SPTarkov.Server.Core` | 855 | `SPTarkov.Common`, `SPTarkov.DI` | HarmonyX, FastCloner, System.IO.Hashing, MessagePack |
-| `SPTarkov.Server.Web` | 50 | `SPTarkov.Server.Core` | MudBlazor, Argon2Sharp |
-| `SPTarkov.Server.Assets` | 0 | — | — |
-
-(`.cs` only, `obj/`+`bin/` excluded; Web also has 34 `.razor` components. One of Core's files is the
-build-generated `Utils/ProgramStatics.Generated.cs`.)
+| Component | Responsibility | Interacts With |
+|-----------|-----------------|------------------|
+| `SPTarkov.Common` | Framework-agnostic primitives: logging front end, semver, generic extensions | `rust/spt-native` (log P/Invokes), `rust/spectre-facade`; consumed by Core and Web |
+| `SPTarkov.DI` | The whole attribute-driven container: `[Injectable]`, assembly scan, registration | Core, `.Reflection`, the host's `RegisterSptServicesAsync` |
+| `SPTarkov.Reflection` | Runtime method patching for mods, over HarmonyX | Mod assemblies, the host — *not* Core |
+| `SPTarkov.Server.Core` | All game logic — 855 of the 938 `.cs` files here | `.Common`, `.DI`, `rust/spt-native`; consumed by `.Web` and the host |
+| `SPTarkov.Server.Web` | Blazor Server admin panel (MudBlazor), served by the same Kestrel host | `.Server.Core`, mod `IModBlazorMetadata` implementations |
+| `SPTarkov.Server.Assets` | Content only: `SPT_Data/` plus `looseLoot.7z` | The host build, `DatabaseImporter`, `gen_checks` |
 
 ---
 
-## SPTarkov.Common
+## 3. Low Level Design
+
+### SPTarkov.Common
 
 Framework-agnostic primitives. No project references at all, so it structurally cannot see a game
 type — no `MongoId`, no `Item`, no config record. Logging, semver, generic extensions.
@@ -54,13 +71,14 @@ this project's config. It is the front end only: `AddSptLogger` hands the raw co
 `rust/spt-native`, which owns filters, level gate, formatting and the console/file sinks.
 
 Common also *emits* `Spectre.Console.Ansi` — the facade `rust/spectre-facade` builds so compiled
-4.1.2 mods can still bind `Spectre.Console.Color`, frozen into `ISptLogger<T>`, `SptLogMessage`,
-`ClientLogRequest` and `Watermark.Draw`. Its `BuildSpectreFacade` target shells out to `cargo`, so
+4.1.2 mods can still bind `Spectre.Console.Color`, frozen into signatures like `ISptLogger<T>`,
+`SptLogMessage`, `ClientLogRequest`, `Watermark.Draw` and `ProgramStatics.BUILD_TEXT_COLOR` — every one
+of them takes or returns a colour it never renders. Its `BuildSpectreFacade` target shells out to `cargo`, so
 **Common needs the Rust toolchain too**, not just Core. `<Reference>` items are not transitive, so
 each of the five projects naming `Color` carries its own: Common, Core, `Testing/UnitTests` and the
 two `Tools/` generators.
 
-## SPTarkov.DI
+### SPTarkov.DI
 
 Three files — the whole attribute-driven container.
 
@@ -76,7 +94,7 @@ Three files — the whole attribute-driven container.
 The lifecycle interfaces (`IOnLoad`, `IOnUpdate`, `IOnDIConstruct`) live in **Core**'s `DI/` folder,
 not here — this project knows nothing about server startup.
 
-## SPTarkov.Reflection
+### SPTarkov.Reflection
 
 Runtime method patching for mods, over HarmonyX.
 
@@ -84,14 +102,14 @@ Runtime method patching for mods, over HarmonyX.
   `PatchManager`, `PatchException`, `Attributes.cs` (`[PatchPrefix]`, `[PatchPostfix]`, …).
 - `CodeWrapper/` — `Code`, `CodeWithLabel`, `CodeGenerator`: IL emit helpers for transpilers.
 
-## SPTarkov.Server.Core
+### SPTarkov.Server.Core
 
 All game logic — 855 of the 938 `.cs` files under `Libraries/`. Referenced by
 `SPTarkov.Server.Web` and by the host; references only `SPTarkov.Common` and `SPTarkov.DI`.
 
 → **[`SPTarkov.Server.Core/ARCHITECTURE.md`](SPTarkov.Server.Core/ARCHITECTURE.md)**.
 
-## SPTarkov.Server.Web
+### SPTarkov.Server.Web
 
 Blazor Server admin panel (MudBlazor), served by the same Kestrel host.
 
@@ -115,7 +133,7 @@ only *minimal-API* routes in the solution — but not the only traffic outside t
 same method calls `MapRazorComponents<App>()` and `MapControllers()`, so every admin-panel page and
 mod MVC controller is routed by ASP.NET too.
 
-## SPTarkov.Server.Assets
+### SPTarkov.Server.Assets
 
 Content project, no code — just the `.csproj` and the payload. Ships `SPT_Data/` (`configs/`,
 `database/`, `images/`, generated `checks.dat`) plus `looseLoot.7z`, unpacked by
@@ -128,3 +146,27 @@ hash verification.
 ARCHITECTURE.md).
 
 Excluded from the knowledge graph by `.graphifyignore` (~all JSON data, not code).
+
+---
+
+## 4. Integration Points
+
+| External System | Integration Type | Notes |
+|-------------------|-------------------|-------|
+| `rust/spt-native` (cdylib) | Sync FFI, C ABI | Two P/Invoke sites: Common's `Native/NativeMethods.cs` for the log exports, Core's `Native/` for everything else. Common cannot reference Core, hence the twin |
+| `rust/spectre-facade` | Build-time codegen | Emits `Spectre.Console.Ansi.dll` via `BuildSpectreFacade` in `SPTarkov.Common.csproj`; **Common needs `cargo` on `PATH`** |
+| `SPT_Data/` on disk | Batch, build + startup | `.Assets` ships it; `gen_checks` hashes it on Release; `DatabaseImporter` reads and verifies it |
+| Mod assemblies | Reflective load | `[Injectable]` scan (`.DI`), HarmonyX patches (`.Reflection`), `BaseLogHandler` subclasses (`.Common`), `IModBlazorMetadata` pages and MVC controllers (`.Web`) |
+| Browser (admin panel) | Async, Blazor Server circuit | `.Web` over the shared Kestrel host; `AuthService` login, Argon2id hashing |
+| `sptLogger[.Development].json` | Config read at startup | Bound to `.Common`'s `SptLoggerConfiguration`, then handed to Rust as raw bytes |
+
+---
+
+# Relationship to Other Framework Components
+
+| Component | Responsibility |
+|-----------|-----------------|
+| [`SPTarkov.Server.Core/ARCHITECTURE.md`](SPTarkov.Server.Core/ARCHITECTURE.md) | Everything internal to Core (91% of the files here): layers, routing, item events, config loading, model conventions |
+| [root `ARCHITECTURE.md`](../ARCHITECTURE.md) | Behaviour spanning `Libraries/` + `SPTarkov.Server/` + `rust/` |
+| [`SPTarkov.Server/ARCHITECTURE.md`](../SPTarkov.Server/ARCHITECTURE.md) | The host that starts these projects up and registers them |
+| [`rust/ARCHITECTURE.md`](../rust/ARCHITECTURE.md) | The crate behind both `Native/` folders, and the Spectre facade emitter |

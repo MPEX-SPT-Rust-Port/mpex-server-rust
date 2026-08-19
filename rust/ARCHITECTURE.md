@@ -1,37 +1,51 @@
-# Architecture — `rust/`
+# **rust** Architecture
 
-A Cargo workspace with two members.
+## 1. Overview Summary
 
-`spt-native` is the port, built as a `cdylib` (plus `rlib`, so the tests can link it). It is a **port of C#
-server logic**, not a new subsystem: every module stands in for a named `SPTarkov.Server.Core` file and is
-expected to produce byte-identical output. The C# side of the boundary is
-`Libraries/SPTarkov.Server.Core/Native/` — `NativeMethods.cs`, `SptNative.cs` and the per-family payload
-projections under `BaseClass/`, `Bot/`, `Db/`, `Loot/`, `Ragfair/`, `RepeatableQuests/`, `ScavCase/` —
-**except the log pipeline**, whose P/Invoke lives in a different assembly:
+A Cargo workspace with three members. `spt-native` is the port and everything below is about it unless
+noted: built as a `cdylib` (plus `rlib`, so the tests can link it), it is a **port of C# server logic**, not a
+new subsystem — every module stands in for a named `SPTarkov.Server.Core` file and is expected to produce
+byte-identical output. `spectre-facade` emits a stub assembly that holds a frozen mod ABI, and `mpex-server`
+is the shipped launcher that hosts the CLR. Build coupling and cross-RID rules live in
+[CLAUDE.md](../CLAUDE.md); the boundary as seen from C# is in [ARCHITECTURE.md](../ARCHITECTURE.md) under
+*Native Rust layer*.
+
+| Language | Lines of Code | File Count |
+|-----------|-----------------|-----------|
+| `Rust` (whole workspace) | `55,278` | `65` |
+| ↳ `spt-native/src/` | `53,338` | `55` |
+| ↳ `spt-native/tests/` | `1,326` | `7` |
+| ↳ `spectre-facade` | `522` | `2` |
+| ↳ `mpex-server` | `92` | `1` |
+
+Inline tests included, `src/` splits: `bot/` ~32%, `loot/` ~23%, `ragfair/` ~15%, `quest/` ~12%,
+`scav_case/` ~4%. `bot_equipment_mod_generator.rs` alone is 4.2k.
+
+---
+
+## 2. High Level Design
+
+| Component | Responsibility | Interacts With |
+|-----------|-----------------|------------------|
+| `spt-native` | The port: generation families, resident DB, database verification, the log pipeline. `cdylib` + `rlib` | `Libraries/SPTarkov.Server.Core/Native/` for everything but the log exports, which come from `Libraries/SPTarkov.Common/Native/NativeMethods.cs` |
+| `spectre-facade` | Emits a facade `Spectre.Console.Ansi.dll` exposing only `Spectre.Console.Color` | Built by `BuildSpectreFacade` in `SPTarkov.Common.csproj`; referenced by five C# projects |
+| `mpex-server` | Shipped launcher: hosts the CLR via netcorehost and `run_app`s the published server assembly, argv forwarded | The published `SPT.Server` assembly; `Containerfile.release`'s entrypoint. **Must not depend on `spt-native`** |
+
+`spectre-facade` has nothing to do with the port. It is a ~520-line `dotnetdll` program, needed because the
+frozen 4.1.2 mod surface has `Spectre.Console.Color` baked into `ISptLogger<T>`, `SptLogMessage`,
+`ClientLogRequest` and `Watermark.Draw`, and a compiled mod's typeref can only be satisfied by an assembly of
+that name. Built on every build, but incrementally. Its own header covers the fidelity gaps.
+
+`mpex-server`'s split-brain rule is load-bearing and stated in its `Cargo.toml`: it must **not** depend on
+`spt-native`. The resident DB's statics live in the cdylib the CLR loads; linking the rlib into the launcher
+would create a second, divergent copy.
+
+The C# side of the `spt-native` boundary is `Libraries/SPTarkov.Server.Core/Native/` — `NativeMethods.cs`,
+`SptNative.cs` and the per-family payload projections under `BaseClass/`, `Bot/`, `Db/`, `Loot/`, `Ragfair/`,
+`RepeatableQuests/`, `ScavCase/` — **except the log pipeline**, whose P/Invoke lives in a different assembly:
 `Libraries/SPTarkov.Common/Native/NativeMethods.cs` and `Common/Logger/SPTLoggerDispatcher.cs`.
 
-`spectre-facade` has nothing to do with the port. It is a ~520-line `dotnetdll` program that emits a facade
-`Spectre.Console.Ansi.dll` exposing only `Spectre.Console.Color`, because the frozen 4.1.2 mod surface has that
-type baked into `ISptLogger<T>`, `SptLogMessage`, `ClientLogRequest` and `Watermark.Draw`, and a compiled mod's
-typeref can only be satisfied by an assembly of that name. Built by `BuildSpectreFacade` in
-`SPTarkov.Common.csproj` on every build, but incrementally. Its own header covers the fidelity gaps.
-Everything below is about `spt-native`.
-
-Build coupling and cross-RID rules live in [CLAUDE.md](../CLAUDE.md); the boundary as seen from C# is in
-[ARCHITECTURE.md](../ARCHITECTURE.md) under *Native Rust layer*.
-
-Toolchain is pinned in `rust-toolchain.toml` (1.97.1, edition 2024) and `Cargo.lock` is committed.
-Dependencies: `serde`/`serde_json` (with `preserve_order`, so untyped maps keep C# `Dictionary` insertion
-order), `rmp-serde` (the ragfair MessagePack envelope), `indexmap`, `rand`/`rand_xoshiro`, `rayon`, `tokio`,
-`walkdir`, `xxhash-rust`, `base64`, `regex-lite` (the `sptLogger.json` filter patterns — deliberately -lite, so
-.NET-only syntax degrades to never-match), plus `tempfile` as the only dev-dependency. `.cargo/config.toml`
-pins `-C target-cpu=x86-64-v3` on both x64 targets, so the built library will not run on pre-AVX2 hardware, and
-the mold linker on Linux. Both profiles use one codegen unit; release adds fat LTO.
-
-~52k lines across the 55 files of `src/`, inline tests included: `bot/` ~33%, `loot/` ~23%, `ragfair/` ~15%,
-`quest/` ~12%, `scav_case/` ~4%. `bot_equipment_mod_generator.rs` alone is 4.2k.
-
-## Layout
+### `spt-native` module map
 
 | Path | Role |
 |---|---|
@@ -51,16 +65,7 @@ the mold linker on Linux. Both profiles use one codegen unit; release adds fat L
 | `src/quest/` | One repeatable quest of any of the four types, its rewards, and the mutated quest-type pool |
 | `src/scav_case/` | One scav case craft's rewards: the pools, the per-rarity picks, the money/ammo/preset arms |
 | `src/base_class.rs` | The whole `ItemBaseClassService` cache in one call, over `loot/item_helper.rs`'s `ItemBaseClassCache` |
-| `src/linked_items.rs` | The whole `RagfairLinkedItemService` table in one call: the bidirectional slot/chamber/cartridge walk plus the revolver cylinder case |
-
-## FFI boundary (`ffi.rs`)
-
-Twenty-three `extern "C"` exports: two trivial (`spt_native_abi_version`, `spt_buf_free`), thirteen taking a
-UTF-8 JSON generation request, `spt_verify_database` taking a directory path, `spt_db_publish` taking the
-resident-DB publish envelope, `spt_locales_set` taking the resolved server-locale table as JSON, and five
-for the log pipeline (`spt_logger_init`, `spt_logger_reinit`, `spt_log_emit`, `spt_logger_close`,
-`spt_log_set_tap` — see *The log pipeline*). The fifteen generation/verify/publish exports hand back a
-heap buffer the caller releases with `spt_buf_free`.
+| `src/linked_items.rs` | The whole `RagfairLinkedItemService` table in one call: the bidirectional slot/chamber/cartridge walk plus the revolver camora-ammo edge case |
 
 ```
 C# SptNative → spt_generate_* (JSON in)
@@ -70,51 +75,51 @@ C# SptNative → spt_generate_* (JSON in)
   → serde out the result, or the failure message, into an out-buffer
 ```
 
-- `run_generator_with` is the shared body of the thirteen generation exports and `spt_db_publish`; ten reach it through
-  `run_generator`, the JSON-response-plus-`LootError` wrapper. Ragfair calls it directly to frame its response
-  rather than emit one JSON document; quest and scav case do so for their own error types.
-  `spt_verify_database` is separate because it blocks on the tokio runtime.
-- Status codes: `STATUS_OK` 0, `STATUS_BAD_ARGS` 1 (null pointer, bad UTF-8, unparseable JSON), `STATUS_PANIC`
-  2 (message in the out-buffer since ABI 18), `STATUS_ERROR` 3, `STATUS_STALE_EPOCH` 4 (the resident-DB
-  riders only: ragfair, quest, base-class, linked-items, the six loot exports, and scav case). **Quest and scav case never return 2**: they catch the generator's panic themselves and report it as
-  3 carrying the message, because those families port a C#-sanctioned throw as a panic — a generation failure,
-  not a library bug. The cost is that a real port bug in those two also arrives as 3, indistinguishable from a
-  sanctioned failure. Deliberate.
+---
+
+## 3. Low Level Design
+
+### Toolchain and dependencies
+
+Toolchain is pinned in `rust-toolchain.toml` (1.97.1, edition 2024) and `Cargo.lock` is committed.
+Dependencies: `serde`/`serde_json` (with `preserve_order`, so untyped maps keep C# `Dictionary` insertion
+order), `rmp-serde` (the ragfair MessagePack envelope), `indexmap`, `rand`/`rand_xoshiro`, `rayon`, `tokio`,
+`walkdir`, `xxhash-rust`, `base64`, `regex-lite` (the `sptLogger.json` filter patterns — deliberately -lite, so
+.NET-only syntax degrades to never-match), plus `tempfile` as its only dev-dependency. `.cargo/config.toml`
+pins `-C target-cpu=x86-64-v3` on both x64 targets, so the built library will not run on pre-AVX2 hardware, and
+the mold linker on Linux. Release is `opt-level = 3` with fat LTO, one codegen unit and stripped symbols; dev
+trades that for build time — `opt-level = 1`, sixteen codegen units, line-tables-only debug info.
+
+### FFI boundary (`ffi.rs`)
+
+Twenty-three `extern "C"` exports: two trivial (`spt_native_abi_version`, `spt_buf_free`), thirteen taking a
+UTF-8 JSON generation request, `spt_verify_database` taking a directory path, `spt_db_publish` taking the
+resident-DB publish envelope, `spt_locales_set` taking the resolved server-locale table as JSON, and five
+for the log pipeline (`spt_logger_init`, `spt_logger_reinit`, `spt_log_emit`, `spt_logger_close`,
+`spt_log_set_tap` — see *The log pipeline*). The fifteen generation/verify/publish exports hand back a
+heap buffer on success, which the caller releases with `spt_buf_free`.
+
+- `run_generator_with` is the shared body of every generation export and `spt_db_publish` — parse, `catch_unwind`,
+  encode — so a new export is a thin wrapper over it, generic in its error type and response encoding.
+  `spt_verify_database` is the one that stands apart, because it blocks on the tokio runtime.
+- Status codes: `STATUS_OK` 0, `STATUS_BAD_ARGS` 1, `STATUS_PANIC` 2, `STATUS_ERROR` 3, `STATUS_STALE_EPOCH` 4
+  (the resident-DB riders only). **Quest and scav case never return 2**: they catch the generator's panic
+  themselves and report it as 3 carrying the message, because those families port a C#-sanctioned throw as a
+  panic — a generation failure, not a library bug. The cost is that a real port bug in those two also arrives
+  as 3, indistinguishable from a sanctioned failure. Deliberate.
 - **Seven families ride the resident DB: ragfair, the repeatable quest, the two startup one-shots
-  (base-class cache, linked-item table), the loot pair — location loot and reward loot — and the
-  scav case.** `spt_db_publish` (called by C#'s
-  `DbPublisher` whenever `DatabaseMutationStamp` has moved) makes the templates, traders, globals,
-  locations and hideout roots resident in `db.rs` — every root optional, an absent one keeping the resident copy, and
-  the epoch bumping on full and partial publishes alike; a bad schema or a failed view derivation aborts
-  before the swap, leaving the previous resident DB intact. It derives ragfair's and quest's views at publish
-  time — the quest views
-  share `items`/`handbookPrices`/`fleaPrices` with ragfair's through one `Arc`; the quest-own views
-  (`quest/views.rs`) derive off the same publish. The locations root carries `Base` + `AllExtracts` plus
-  (flip #4) the three statics lifts — `staticLoot`, `staticContainers`, `statics`, serialized from each
-  `LazyLoad.Value` so registered transformers are applied; `looseLoot` and `staticAmmo` never serialize —
-  keyed by the locations' `JsonPropertyName` strings (a null `AllExtracts` ships as `[]`). Ragfair, quest
-  and the six loot requests (`spt_generate_static_containers`, `spt_generate_dynamic_loot`,
-  `spt_create_random_loot`, `spt_create_forced_loot`, `spt_get_sealed_weapon_case_loot`,
-  `spt_get_random_loot_container_loot` — flip #4, ABI 25) arrive as `{epoch, viewsOverride?, varying}`
-  and borrow those views: location loot borrows the ragfair `items` view and `defaultPresetsByTpl` plus
-  its map's statics off the locations root, and the reward exports map per export onto `defaultPresets`
-  (random), `defaultPresetsByTplKey` (forced — the one view derivation flip #4 added), and
-  `defaultPresetsByTpl` + `presetsByTpl`/its key domain (sealed / container). Loose loot and
-  `staticAmmoDist` deliberately ride each call's varying block instead (RUST-ROADMAP.md flip #4 ledger:
-  the 549 MiB decision; the frozen public-signature parameter). The scav case request
-  (`spt_generate_scav_case_rewards` — flip #5, ABI 26) arrives the same way and borrows ragfair's
-  `items`/`handbookPrices`/`defaultPresetsByTpl`; its recipe views derive at request time from the
-  hideout root — `production.scavRecipes` only, the flip's one root addition (see *src/scav_case/*).
-  The one-shot requests
-  (`spt_build_item_base_class_cache`, `spt_build_ragfair_linked_item_table` — flip #3, ABI 24) arrive as
-  `{epoch, viewsOverride?}` — no varying block, the whole pre-flip payload was invariant — and derive
-  their walk input from the resident templates root at request time, deliberately **not** from the ragfair
-  items view, which drops props-less templates and keeps only the first `Filters` group per slot — both
-  fatal to these walks. An epoch the store does not hold
-  returns `STATUS_STALE_EPOCH` and the C# caller force-publishes and retries once. An ineligible caller
-  (mods loaded without trust, or the kill switch) sends `viewsOverride` with `epoch: 0` instead — a
-  documented wire contract, not runtime-enforced — used for that call only, never made resident. The
-  resident roots are the only request data held across calls (ABI 26).
+  (base-class cache, linked-item table), the loot pair — location loot and reward loot — and the scav
+  case.** `spt_db_publish` (called by C#'s `DbPublisher` whenever `DatabaseMutationStamp` has moved) makes
+  the templates, traders, globals, locations and hideout roots resident in `db.rs` and derives the ragfair
+  and quest views off them. Every root is optional — an absent one keeps the resident copy — and the epoch
+  bumps on full and partial publishes alike; a bad schema or a failed derivation aborts before the swap, so
+  the previous resident DB survives. A rider's request then names an epoch and borrows those views instead
+  of carrying them; only what genuinely varies per call still crosses the boundary. The resident roots are
+  the only request data held across calls. Two traps: an epoch the store does not hold returns
+  `STATUS_STALE_EPOCH`, and the C# caller force-publishes and retries once; an ineligible caller (mods
+  loaded without trust, or the kill switch) instead sends the views inline with `epoch: 0`, a wire contract
+  that is documented, not runtime-enforced. Which views each family borrows, and why loose loot and
+  `staticAmmoDist` deliberately stayed per-call, is in RUST-ROADMAP.md's flip ledgers.
 - **A buffer is written on failure too** — the parse error, the `LootError` message, or the panic text.
   Ownership is decided by the out-pointer being non-null, never by the status code. `spt_verify_database`'s
   free-on-success-only shape must not be copied into the generators.
@@ -125,12 +130,11 @@ C# SptNative → spt_generate_* (JSON in)
 Adding an export means bumping `ABI_VERSION` and `SptNative.ExpectedAbiVersion` together; a test in `ffi.rs`
 asserts the constant so the bump can't be forgotten.
 
-## `src/verify.rs`
+### `src/verify.rs`
 
-`checks.dat` is base64-wrapped JSON (`Path`/`Hash` pairs) written at Release build time by `generate` in this
-same module, via the `gen_checks` bin (invoked by `PreBuildHashFile` in `SPTarkov.Server.Assets.csproj`).
-Hashing fans out over the runtime through a `JoinSet`, semaphore-capped at `MAX_CONCURRENT_HASHES` (32), producing a
-`VerifyReport { ok, failures, checked }`. Three properties are load-bearing:
+`checks.dat` is a path/hash manifest written at Release build time by `generate` in this same module, via the
+`gen_checks` bin (invoked by `PreBuildHashFile` in `SPTarkov.Server.Assets.csproj`). Hashing fans out over the
+tokio runtime under a concurrency cap. Three properties are load-bearing:
 
 - **Scope comes from the manifest, not the tree.** Only the top-level `SPT_Data` roots the manifest names
   (`configs/`, `database/`) are walked; the build relocates unhashed artifacts into the output `SPT_Data` and
@@ -139,9 +143,10 @@ Hashing fans out over the runtime through a `JoinSet`, semaphore-capped at `MAX_
   so a deletion (or a symlink the walk skips) can't pass.
 - **Empty manifest fails closed** rather than verifying nothing.
 
-## The log pipeline (`src/logger.rs`, `src/log_sink.rs`)
+### The log pipeline (`src/logger.rs`, `src/log_sink.rs`)
 
-The one ported family with **no legacy path**: C# no longer has log handlers at all. `spt_logger_init` parses
+The one ported family with **no legacy path**: C# no longer ships a log handler of its own — `ILogHandler`
+and `BaseLogHandler` survive only for mods to implement, and nothing built-in does. `spt_logger_init` parses
 the raw `sptLogger.json` bytes once per process; `SPTLoggerDispatcher.Log` then hands each line's fields across
 `spt_log_emit`, and the crate owns filter matching, the level gate, per-target format expansion and the sinks.
 
@@ -154,18 +159,16 @@ the raw `sptLogger.json` bytes once per process; `SPTLoggerDispatcher.Log` then 
   over a bounded channel that drops lines rather than growing without limit. `log_sink.rs` owns rotation and
   the archive cap together, so the cap is enforced at the rotation rather than on a timer.
 - **`spt_logger_reinit` swaps the config in place** without touching the init count — C# calls it from
-  `SPTLoggerDispatcher.ReloadConfiguration()` after a mod mutates `SptLoggerConfiguration.Loggers`. New sinks
-  open under the pipeline lock (a same-path target reopens in append mode rather than cascading the archives
-  again), the entry list swaps, and the old sinks flush and join after.
+  `SPTLoggerDispatcher.ReloadConfiguration()` after a mod mutates `SptLoggerConfiguration.Loggers`. A
+  same-path target reopens in append mode rather than cascading the archives again.
 - **Mod-facing `ILogHandler`s are fed from two legs**: the dispatcher fans C#-originated lines out itself, and
-  `spt_log_set_tap`'s callback (null clears) delivers the Rust-originated ones.
+  `spt_log_set_tap`'s callback delivers the Rust-originated ones.
 - **The generator families feed the pipeline from the inside**, not over `spt_log_emit`. `diag.rs` renders a
-  locale-keyed diagnostic against the table C# pushes once over `spt_locales_set` after the database import — a
-  startup snapshot; a missing table or key leaves the key itself as the text — then hands the line to the
-  logger through `ffi::emit_pipeline`. Those lines carry a process-local per-thread counter as `%tid%` and the
-  Rust thread name (usually empty) as `%tname%`.
+  locale-keyed diagnostic against the table C# pushes once over `spt_locales_set` after the database import —
+  a startup snapshot, so a missing table or key leaves the key itself as the text — then hands the line
+  straight to the logger.
 
-## `src/loot/`
+### `src/loot/`
 
 | Module | Stands in for | What it does |
 |---|---|---|
@@ -179,16 +182,14 @@ the raw `sptLogger.json` bytes once per process; `SPTLoggerDispatcher.Log` then 
 | `math_util.rs` | `Utils/MathUtil.cs` | Linear interpolation and range mapping |
 | `models.rs` | `Models/…` | Wire types (see *Conventions*) |
 
-Since flip #4 both generators resolve their DB-derived views off the resident DB (or the request's
-`viewsOverride` — see *FFI boundary*); the family has no `views.rs` of its own — it borrows
-`ragfair/views.rs`'s `RagfairDbViews` and the locations root's statics lifts. The service/config-backed
-fields — `config`, `seasonal`, `lootableItemBlacklist`, `moneyTpls`, the reward blacklists/sets, sealed's
-`linkedItems` — plus `looseLoot` and `staticAmmoDist` ride each request's varying block.
+Since flip #4 both generators resolve their DB-derived views off the resident DB (see *FFI boundary*); the
+family has no `views.rs` of its own, borrowing `ragfair/views.rs`'s instead. The service- and config-backed
+fields still ride each request.
 
-## `src/bot/`
+### `src/bot/`
 
-`mod.rs` defines `BotContext<'a>` — the read-only views (items, presets, blacklists, durability config,
-equipment filters…) one generation run borrows, plus its `DiagSink`. The bot family's analog of `LootContext`.
+`mod.rs` defines `BotContext<'a>` — the read-only views one generation run borrows, plus its `DiagSink`. The
+bot family's analog of `LootContext`.
 
 | Module | Stands in for | What it does |
 |---|---|---|
@@ -206,11 +207,10 @@ equipment filters…) one generation run borrows, plus its `DiagSink`. The bot f
 | `exhaustable_array.rs` | `Utils/Collections/ExhaustableArray.cs` | Draw-without-replacement |
 | `models.rs` | `Models/…` | Wire types |
 
-## `src/ragfair/`
+### `src/ragfair/`
 
-`mod.rs` defines `RagfairContext<'a>` — the items view, presets, handbook and flea price tables, resolved
-trader prices and the `dynamic` config block one batch borrows, plus its `DiagSink`. One native call generates
-a whole batch of offers, not one offer.
+`mod.rs` defines `RagfairContext<'a>` — the read-only views and config one batch borrows, plus its
+`DiagSink`. One native call generates a whole batch of offers, not one offer.
 
 | Module | Stands in for | What it does |
 |---|---|---|
@@ -231,19 +231,17 @@ Two crate-internal facts:
   built once per generator instance and never invalidated; here it is rebuilt on every call, which makes the
   native path *fresher* than legacy for runtime-added items.
 
-## `src/quest/`
+### `src/quest/`
 
-`mod.rs` defines `QuestContext<'a>` — the items view, base-class cache, price tables, the reward and seasonal
-blacklists, boss items and spawns, extracts and location ids, the quest templates and the levelled Completion
-white/blacklists, plus its `DiagSink`. Every DB-derived view is borrowed off the resident DB's publish-derived
-views (or the request's `viewsOverride` — see *FFI boundary*); the service/config-backed fields ride the
-request's varying block. One native call generates **one** quest of one type.
+`mod.rs` defines `QuestContext<'a>` — the read-only views one quest borrows, plus its `DiagSink`. Every
+DB-derived view comes off the resident DB (see *FFI boundary*); the service- and config-backed fields ride
+the request. One native call generates **one** quest of one type.
 
 `generate_repeatable_quest` stands in for the type switch of
-`RepeatableQuestController.PickAndGenerateRandomRepeatableQuest` (`:390-397`): it resolves the epoch's views,
-installs the seed guard, dispatches on the requested type, and returns `QuestNativeResponse { quest, pool }` — the quest
-**and** the type pool the generator mutated on the way, which rides back either way. A `None` quest is a normal
-outcome (exhausted pool, or a generator that gave up and logged why), not a failure.
+`RepeatableQuestController.PickAndGenerateRandomRepeatableQuest`: it resolves the views, installs the seed
+guard, and dispatches on the requested type. Two things to know before touching it — the mutated quest-type
+pool rides back alongside the quest whether or not one was generated, and a `None` quest is a normal outcome
+(exhausted pool, or a generator that gave up and logged why), not a failure.
 
 | Module | Stands in for | What it does |
 |---|---|---|
@@ -256,46 +254,34 @@ outcome (exhausted pool, or a generator that gave up and logged why), not a fail
 | `views.rs` | — | Publish-time derivation of the quest views from the resident roots in `src/db.rs`, sharing the items/price views with `ragfair/views.rs` through one `Arc` (see *FFI boundary*) |
 | `models.rs` | `Models/Spt/Repeatable/…`, `Models/…` | Wire types |
 
-## `src/scav_case/`
+### `src/scav_case/`
 
-Since flip #5 the request splits as the loot family's — `{epoch, viewsOverride?, varying}` — and the
-`mod.rs` resolver picks the database half: the resident arm borrows the shared ragfair views
-(`items`/`handbookPrices`/`defaultPresetsByTpl`) and derives its recipe views from the hideout root at
-request time — a filter over a handful of recipes that keeps the C# skip-a-malformed-recipe semantics
-and maps the root's capitalized `Common`/`Rare`/`Superrare` onto the view's lowercase names — while the
-override arm is the pre-flip C#-built bundle, field-for-field unchanged. Still the one family with **no
-context type**: the resolved views and the varying block pass by reference alongside the `DiagSink`
-rather than projected into a borrowed struct, because a craft reads few enough members that the extra
-type would earn nothing. It is also the one family whose `mod.rs` carries a `//!` header — it holds the
-entry point, and it states the family's citation convention: a bare `` `:N` `` is a line of the 4.1.2 body
-the port was written against, which now lives on in the C# file as `GenerateLegacy` about 131 lines below
-where the citation points. Citations naming a file are current. One native call generates **one** craft's
-rewards.
+Since flip #5 this family rides the resident DB like the loot pair, `mod.rs` resolving the views and
+deriving its recipe views from the hideout root per request. It is the one family with **no context
+type** — a craft reads few enough members that the borrowed struct the others use would earn nothing —
+and the one whose `mod.rs` carries a `//!` header, because it holds the entry point. Read that header
+first: it states the family's citation convention, and the bare `` `:N` `` line numbers do **not** point
+where they look like they do in today's C# file. One native call generates **one** craft's rewards.
 
 | Module | Stands in for | What it does |
 |---|---|---|
-| `mod.rs` | `Generators/ScavCaseRewardGenerator.cs` (entry) | `generate_scav_case_rewards` — resolves the epoch's views (a stale epoch answers before any draw), installs the seed guard and `catch_unwind`s the generator, so the dictionary-index throws come back as `ScavCaseError` rather than `STATUS_PANIC` (see *Conventions*) |
+| `mod.rs` | `Generators/ScavCaseRewardGenerator.cs` (entry) | `generate_scav_case_rewards` — resolves the views, installs the seed guard, and catches the generator's panics so a C#-sanctioned throw comes back as an error rather than `STATUS_PANIC` (see *Conventions*) |
 | `generator.rs` | `Generators/ScavCaseRewardGenerator.cs` | The craft: the reward pool (rebuilt per request, not cached on an instance), the per-rarity counts and price bands, the picks, and the money/ammo/preset arms |
 | `models.rs` | — | Request/response envelopes only; the DB/EFT types they carry are `loot::models`' |
 
-## Conventions
+### Conventions
 
 These are what keep the port correct; break one and output silently diverges from C#.
 
 - **Every ported module names its C# source in its `//!` header**, with a line range where the port is a slice
-  of a larger file. (`lib.rs`, `ffi.rs`, `runtime.rs`, `verify.rs` and the `mod.rs` of every family except
-  `scav_case` have no C# counterpart and no header. `db.rs` is the one module that has a header naming no C#
-  source — there is no C# resident DB; it cites the epoch-protocol spec instead.) Read that header before
-  changing anything.
+  of a larger file. Read that header before changing anything. (The modules with no C# counterpart — the
+  infrastructure, `db.rs`, and every family `mod.rs` but `scav_case`'s — say so or carry no header at all.)
 - **Deviations are marked `Deviation:`, at the scope they apply to** — module header, item doc, or the line
-  itself. Grep the bare form: the bot family bolds it, the loot family does not, and ragfair, quest and scav
-  case currently record none. Only `bot_inventory_generator.rs` and `bot_weapon_generator.rs` also collect
-  theirs under a module-level `# Deviations` heading.
-- **RNG draw order is a contract.** The bot family states it up front — nine of its modules open with an
-  ordered list ("*RNG calls, in C# source order — the parity contract*"), including draws C# consumes and
-  discards. `level_generator.rs` is the exception: a two-function slice, so its draws are documented inline
-  the way the loot family does it. The loot family documents each draw at its call site against the C# line,
-  as do the draw primitives themselves. Adding, removing or reordering a draw desynchronises the whole
+  itself. Grep the bare form; the bolding is inconsistent between families.
+- **RNG draw order is a contract.** The bot family states it up front: its generator modules open with an
+  ordered list of their draws in C# source order, including the ones C# consumes and discards. The loot
+  family, the two-function `level_generator.rs`, and the draw primitives themselves document each draw at
+  its call site against the C# line instead. Adding, removing or reordering a draw desynchronises the whole
   sequence, so a "harmless" early-out that skips a roll is a bug.
 - **The generator families log for themselves, and have one rule for throws.** C# `ISptLogger` calls become
   `Diagnostic` values pushed onto the run's `diag::DiagSink`, rendered and emitted as they happen under the
@@ -306,13 +292,11 @@ These are what keep the port correct; break one and output silently diverges fro
   at the throw site and catches it at the family entry point. Scav case does both — a `ScavCaseError` where the
   C# throw is reachable through a guard, a caught panic where the C# throws out of a dictionary index.
   Panicking is safe here: every export runs inside `catch_unwind`, so nothing unwinds past the boundary.
-- **Wire models come in six families** — one `models.rs` per generator directory, plus `db/models.rs`, whose
-  publish roots are `#[serde(flatten)]` supersets throughout so a root stays full-fidelity no matter how
-  little of it Rust reads. (`base_class.rs` and `linked_items.rs` have no `models.rs`; their one
-  request/response pair each is declared in the module.) DB/EFT models mirror C#
-  records field-for-field, pinned to the exact `JsonPropertyName`, each with a `#[serde(flatten)] extra` map so
-  mod-added fields survive the round trip — the counterpart to the `[JsonExtensionData]` that `Tools/Ceciler`
-  injects. Request/response envelopes are a fresh contract: plain camelCase, no passthrough map.
+- **Wire models live in a `models.rs` per generator directory**, plus `db/models.rs` for the publish roots.
+  (`base_class.rs` and `linked_items.rs` declare their one request/response pair inline instead.) The rule
+  when adding one: a model mirroring a C# record must carry a `#[serde(flatten)]` catch-all, or mod-added
+  fields silently vanish on the round trip — it is the counterpart to the `[JsonExtensionData]` that
+  `Tools/Ceciler` injects C#-side. Request/response envelopes are a fresh contract and need no such map.
 - **One C# RNG lifetime can span two native calls.** Each generator entry point (not `ffi.rs`) opens the run by
   mapping the request's optional seed through `TestSeedGuard::install`. `generate_dynamic_loot` is the
   exception: it uses `TestSeedGuard::resume`, picking up the thread-local stream the preceding
@@ -322,27 +306,19 @@ These are what keep the port correct; break one and output silently diverges fro
 - **Caches become per-call derivation.** C# DI singletons keyed by bot id or built over the whole database
   (`BotEquipmentModPoolService`, `BotInventoryContainerService`) are recomputed per call or handed across the
   boundary by the caller. The unit is one bot, not one raid: the batch export hoists the views every bot in
-  the wave shares (`SharedBotViewsWire`) and still derives the rest per bot, each with its own seed guard.
-- **The bot batch request is `{shared, bots[]}`, and the slice is down to three members.** `BotSliceWire` is
-  `botId` + `testSeed` + `details`; the template and the two loot views it used to carry moved onto
-  `SharedBotViewsWire.templateVariants`, one entry per *level band* rather than per bot (`levelMin`,
-  `levelMax`, `template`, `lootPools`, `handbookPrices` — ascending, contiguous, covering the wave's range).
-  Alongside them rides `levelGeneration` (`levelMin`/`levelMax`/`expTable`), present iff the wave is PMC.
-  Each bot's rayon task opens with its seed guard, then `level_generator::generate_bot_level` — the *first*
-  seeded draw, matching where the C# prelude does it — writes the drawn level over `details.bot_level` (the
-  caller sends 0), picks the first variant covering it, and clones that variant's three members. Non-PMC
-  draws nothing and takes the constant `(1, 0)`, so non-PMC seeded streams are unchanged. The drawn `level`
-  and `exp` ride back on `BotInventoryResult`; both are omitted from the single-bot response, whose request
-  and reply shapes are untouched (it keeps C# level generation and C# filtering).
-  **The batch reply is `{bots: [{result?|error?}]}`**, one envelope per slice in request order with exactly
-  one member set. A bot that fails carries its message there instead of failing the export — the wave
-  survives it, the way `BotController.TryGenerateSingleBot` skips a failed bot with one Critical log. The
-  export itself never returns `STATUS_ERROR`: only a malformed request or a panic (rayon re-raises a
-  worker's) reaches the status codes above.
+  the wave shares and still derives the rest per bot, each with its own seed guard.
+- **The batch export is one wave per call, and the shared half is keyed by level band.** Everything the
+  wave's bots have in common — templates, loot pools, handbook prices — rides once, one entry per level
+  band rather than per bot; each bot's rayon task draws its own level *first* (matching where the C#
+  prelude does it), then picks the band covering it. Non-PMC waves draw nothing there, so their seeded
+  streams are unchanged. The single-bot export is untouched by all this: it keeps C# level generation and
+  C# filtering. A failed bot carries its message in its own reply slot rather than failing the export —
+  the wave survives it, the way `BotController.TryGenerateSingleBot` skips a bot with one Critical log — so
+  the batch export never returns `STATUS_ERROR`, only bad-args or a panic.
 
-## Tests
+### Tests
 
-Almost all tests are inline `#[cfg(test)]` modules (~750 of them). Three kinds:
+Almost all tests are inline `#[cfg(test)]` modules (~770 of them). Three kinds:
 
 - **Parity fixtures** — replay a C# scenario and assert the exact item list.
 - **Seeded-RNG tests** — an optional seed on every request envelope (`testSeed`, spelled `seed` on the quest
@@ -353,16 +329,41 @@ Almost all tests are inline `#[cfg(test)]` modules (~750 of them). Three kinds:
   failure, generation failure and null arguments. `spt_generate_bot_inventory_batch` is the one export with no
   transport test of its own.
 
-Seven `tests/` targets: `completion_whitelist_baseclass.rs`, a timing-and-equivalence guard for the
-Completion whitelist filter's base-class lookups (runs against the real shipped `items.json`, so it needs
-`scripts/decompress-assets.sh` to have run); `phase0_publish_spike.rs` (`#[ignore]`d, the Phase 0 publish
-measurements); `phase1_ragfair_views.rs` / `phase1_quest_views.rs` / `flip3_oneshot_views.rs`
-(`#[ignore]`d), the Rust halves of the
-three views-equivalence harness pairs — each parses an envelope its C# twin (`RagfairViewsEquivalenceTests` /
-`QuestViewsEquivalenceTests` / `OneShotViewsEquivalenceTests`) wrote to `$TMPDIR` and asserts the
-Rust-derived views (for flip #3, the resident-derived walk inputs) equivalent to the C#-built ones; and
-`flip4_loot_resident.rs` / `flip5_scavcase_resident.rs`, self-contained resident-arm integration tests —
-each publishes a minimal DB and proves an `{epoch}` send generates identically to the same data sent as
-`viewsOverride`.
+Seven `tests/` targets, in three groups. `completion_whitelist_baseclass.rs` guards the Completion
+whitelist filter's base-class lookups against the real shipped `items.json`, so it needs
+`scripts/decompress-assets.sh` to have run. `phase1_ragfair_views.rs`, `phase1_quest_views.rs`,
+`flip3_oneshot_views.rs` and `phase0_publish_spike.rs` are `#[ignore]`d halves of C#-paired harnesses —
+each replays a fixture its twin under `Testing/UnitTests` wrote to `$TMPDIR`, so running one alone proves
+nothing. `flip4_loot_resident.rs` and `flip5_scavcase_resident.rs` are self-contained: each
+publishes a minimal DB and proves a resident-epoch send generates identically to the same data sent inline.
 
-Run with `cd rust && cargo test && cargo fmt --check && cargo clippy --all-targets -- -D warnings`.
+Run with `cd rust && cargo test && cargo fmt --check && cargo clippy --all-targets -- -D warnings`. That is
+workspace-wide, so it also picks up the other two members' handful of inline tests — `mpex-server`'s three
+over the server-assembly probe, `spectre-facade`'s two.
+
+---
+
+## 4. Integration Points
+
+| External System | Integration Type | Notes |
+|-------------------|-------------------|-------|
+| `SPTarkov.Server.Core` | Sync FFI, C ABI | `Native/NativeMethods.cs` + `SptNative.cs` and the per-family projections. Twenty-three exports; `ABI_VERSION` must equal `SptNative.ExpectedAbiVersion` |
+| `SPTarkov.Common` | Sync FFI, C ABI | The five log exports only, from a second `Native/NativeMethods.cs` — Common cannot reference Core |
+| `SPT_Data/` on disk | Batch, async over tokio | `spt_verify_database` hashes `configs/` + `database/` with XXH3-128; `gen_checks` writes `checks.dat` on Release builds |
+| `sptLogger.json` | Config bytes over FFI | Parsed once per process by `spt_logger_init`; filters use `regex-lite`, so .NET-only syntax degrades to never-match |
+| Log files on disk | Async, background thread per sink | `log_sink.rs`: bounded channel that drops rather than grows; rotation and archive cap enforced together |
+| .NET CLR (`mpex-server`) | Process host | netcorehost `run_app`s the published server assembly with argv forwarded; libnethost comes from NuGet at build time via the `nethost-download` feature |
+| MSBuild | Build-time shell-out | `BuildSptNative` (Core) and `BuildSpectreFacade` (Common) invoke `cargo`, so **`cargo` on `PATH` is a hard build dependency** |
+
+---
+
+# Relationship to Other Framework Components
+
+| Component | Responsibility |
+|-----------|-----------------|
+| [root `ARCHITECTURE.md`](../ARCHITECTURE.md) | The boundary as seen from C#, under *Native Rust layer* |
+| [`Libraries/SPTarkov.Server.Core/ARCHITECTURE.md`](../Libraries/SPTarkov.Server.Core/ARCHITECTURE.md) | `Native/`, the eleven dual-path classes, the `ForceLegacy*` config flags |
+| [`Libraries/ARCHITECTURE.md`](../Libraries/ARCHITECTURE.md) | `SPTarkov.Common`'s logging front end and the Spectre facade reference chain |
+| [`CLAUDE.md`](../CLAUDE.md) | Build coupling, cross-RID rules, the ABI-bump requirement |
+| [`RUST-ROADMAP.md`](../RUST-ROADMAP.md) | Port status, exceptions in force, known divergences, the flip ledgers cited above |
+| [`BENCHMARK.md`](../BENCHMARK.md) | Native vs legacy timings — every measurement lives there |

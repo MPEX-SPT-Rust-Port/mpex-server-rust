@@ -1,35 +1,31 @@
-# Architecture
+# **mpex-server-rust** Architecture
 
-How the SPT server is put together — a map, not a manual. For build/run commands see
-[CLAUDE.md](CLAUDE.md).
+## 1. Overview Summary
 
-Detail lives in the per-directory documents:
+How the SPT server is put together — a map, not a manual. A .NET solution hosting the Escape from Tarkov
+private server, with the hot generation paths ported to a Rust `cdylib` called over C ABI. One executable host
+brings up logging, configs, mods and the JSON database, then hands every HTTP request to a single catch-all
+middleware that routes it through declarative routers to callbacks, controllers and the logic layers. For
+build/run commands see [CLAUDE.md](CLAUDE.md).
 
-| Document | Covers |
-|---|---|
-| [`SPTarkov.Server/ARCHITECTURE.md`](SPTarkov.Server/ARCHITECTURE.md) | The executable host: startup sequence, mod loader, web pipeline hookup. No game logic. |
-| [`Libraries/ARCHITECTURE.md`](Libraries/ARCHITECTURE.md) | Which of the six library projects owns what, and what they depend on. |
-| [`Libraries/SPTarkov.Server.Core/ARCHITECTURE.md`](Libraries/SPTarkov.Server.Core/ARCHITECTURE.md) | Everything inside Core (~91% of the code): folder map, dispatch mechanics, item events, configs, models. |
-| [`rust/ARCHITECTURE.md`](rust/ARCHITECTURE.md) | Inside the `spt-native` crate: modules, FFI boundary, porting conventions, tests. |
-| [`RUST-ROADMAP.md`](RUST-ROADMAP.md) | Rust port status: what works, what flips to legacy, known divergences, roadmap. |
-| [`BENCHMARK.md`](BENCHMARK.md) | Native vs legacy timings. Every measurement lives there; none are repeated elsewhere. |
+---
 
-## Solution layout
+## 2. High Level Design
 
-| Project | Role |
-|---|---|
-| `SPTarkov.Server` | Executable host: `Program.cs`, mod-loading bootstrap, the single catch-all HTTP middleware |
-| `Libraries/SPTarkov.Server.Core` | All game logic — everything below lives here unless noted |
-| `Libraries/SPTarkov.Server.Web` | Blazor Server admin panel (MudBlazor) |
-| `Libraries/SPTarkov.Server.Assets` | `SPT_Data/`: configs, JSON database, images; the largest files ship compressed as `looseLoot.7z` |
-| `Libraries/SPTarkov.DI` | Attribute-driven DI container: `[Injectable]`, `DependencyInjectionHandler` |
-| `Libraries/SPTarkov.Common` | Shared primitives and the logging front end (`SptLogger`, `SPTLoggerDispatcher`) |
-| `Libraries/SPTarkov.Reflection` | Runtime method patching for mods (`AbstractPatch`, `PatchManager`) |
-| `rust/` | Two-member Cargo workspace: the `spt-native` cdylib called over C ABI, and `spectre-facade`, which emits the stub `Spectre.Console.Ansi` assembly `SPTarkov.Common` builds and four other projects reference |
-| `Tools/Ceciler` + `Patches/Ceciler.JsonExtensionData` | Mono.Cecil IL rewriter run on Release builds, and the patch assembly it applies |
-| `Tools/MongoIdTplGenerator`, `Tools/JsonExtensionDataGenerator`, `Tools/HideoutCraftQuestIdGenerator` | Dev-time one-shot generators |
-| `Testing/UnitTests` | NUnit suite |
-| `Testing/TestMod`, `Testing/TestMod2` | Reference mod implementations |
+| Component | Responsibility | Interacts With |
+|-----------|-----------------|------------------|
+| `SPTarkov.Server` | Executable host: `Program.cs`, mod-loading bootstrap, the single catch-all HTTP middleware | Everything; owns startup order and Kestrel |
+| `Libraries/SPTarkov.Server.Core` | All game logic — everything below lives here unless noted | `.Common`, `.DI`, `rust/spt-native` |
+| `Libraries/SPTarkov.Server.Web` | Blazor Server admin panel (MudBlazor) | `.Server.Core`, the shared Kestrel host |
+| `Libraries/SPTarkov.Server.Assets` | `SPT_Data/`: configs, JSON database, images; the largest files ship compressed as `looseLoot.7z` | The host build (copies to output), `DatabaseImporter` |
+| `Libraries/SPTarkov.DI` | Attribute-driven DI container: `[Injectable]`, `DependencyInjectionHandler` | Core, `.Reflection`, the host |
+| `Libraries/SPTarkov.Common` | Shared primitives and the logging front end (`SptLogger`, `SPTLoggerDispatcher`) | `rust/spt-native` (log exports), Core |
+| `Libraries/SPTarkov.Reflection` | Runtime method patching for mods (`AbstractPatch`, `PatchManager`) | Mods, the host (not Core) |
+| `rust/` | Three-member Cargo workspace: the `spt-native` cdylib called over C ABI, `mpex-server`, the CLR-hosting launcher shipped builds run, and `spectre-facade`, which emits the stub `Spectre.Console.Ansi` assembly `SPTarkov.Common` builds and four other projects reference | Core's `Native/`, Common's `Native/`, the published server assembly |
+| `Tools/Ceciler` + `Patches/Ceciler.JsonExtensionData` | Mono.Cecil IL rewriter run on Release builds, and the patch assembly it applies | `SPTarkov.Server.Core.dll` post-compile |
+| `Tools/MongoIdTplGenerator`, `Tools/JsonExtensionDataGenerator`, `Tools/HideoutCraftQuestIdGenerator` | Dev-time one-shot generators, run by hand and committed | Core's `Models/Enums/`, Core's `Models/` tree, and `SPT_Data/database/hideout/production.json` respectively |
+| `Testing/UnitTests` | NUnit suite | Every project |
+| `Testing/TestMod`, `Testing/TestMod2` | Reference mod implementations | The mod loader |
 
 Folder map inside `SPTarkov.Server.Core`: `Callbacks/` (HTTP entry per domain), `Controllers/`
 (orchestration), `Services/`, `Helpers/`, `Generators/` (logic, grouped by domain), `Routers/`
@@ -39,7 +35,7 @@ migrations), `Models/` (`Eft/` mirrors client contracts, `Spt/` is server-intern
 primitives), `DI/` (lifecycle interfaces + router base classes), `Native/` (the `spt-native` P/Invoke
 wrapper), `Utils/`, `Constants/`, `Extensions/`, `Exceptions/`.
 
-## Request pipeline
+### Request pipeline
 
 ASP.NET Core, but **no MVC controllers and no attribute routing**. `Program.cs` installs one
 catch-all middleware that hands every request to `HttpServer.HandleRequestAsync`:
@@ -67,32 +63,7 @@ and profile-download routes (`SPTarkov.Server.Web/SPTWeb.cs`). They do not bypas
 `HandleRequestAsync` first; no `IHttpListener` claims them, `next` runs, and routing dispatches them
 from there. Same path the Blazor panel takes.
 
-## Core abstractions
-
-- `MongoId` — 24-hex-char id for every item, template and profile key; the single most-referenced
-  type in Core.
-- `PmcData` — the player character: inventory, quests, hideout, stats, skills.
-- `Item` — one inventory item instance (template id, location, upd state).
-- `ItemEventRouterResponse` — the accumulated client-sync diff from item-event actions.
-- `Models/Spt/Config/*` — one `BaseConfig` subclass per file in `SPT_Data/configs/`, mapped by
-  `ConfigTypes` and loaded by `ConfigLoader`.
-
-JSON is System.Text.Json with custom converters in `Utils/Json/` (`ListOrT`, `StringOrInt`,
-`DictionaryOrList`, `LazyLoad` for deferred loading of huge database files).
-
-## Dependency injection and lifecycle
-
-Classes opt in with `[Injectable]`; `DependencyInjectionHandler` registers each type against itself,
-its interfaces and its base types. `ProgramHelpers.RegisterSptServicesAsync` is the single place
-services get registered, and `DependencyInjectionValidationTests` rebuilds that exact container
-(mods on and off) so a bad registration fails the test run, not a launch.
-
-Lifecycle interfaces in `DI/`: `IOnLoad` (startup, ordered by `OnLoadOrder`; anything below
-`GameCallbacks` runs before Kestrel binds, which is what lets mods mutate `HttpConfig`), `IOnUpdate`
-(polled every 5 s by `SPTStartupHostedService`), `IOnDIConstruct` (static hook letting a mod add
-registrations).
-
-## Startup order
+### Startup order
 
 `ProgramStatics.Initialize` → early logger → `ConfigLoader` → throwaway "early" provider →
 `ModLoader` (validate, prepatch, load assemblies) → `DatabaseImporter` (hash-verified outside DEBUG)
@@ -109,7 +80,36 @@ netcorehost and `run_app`s the published server assembly with argv forwarded —
 FFI boundary, and mod contract are unchanged, and dev builds still run the `SPT.Server`
 executable directly. `Containerfile.release`'s entrypoint is `/app/mpex-server`.
 
-## Persistence
+---
+
+## 3. Low Level Design
+
+### Core abstractions
+
+- `MongoId` — 24-hex-char id for every item, template and profile key; the single most-referenced
+  type in Core.
+- `PmcData` — the player character: inventory, quests, hideout, stats, skills.
+- `Item` — one inventory item instance (template id, location, upd state).
+- `ItemEventRouterResponse` — the accumulated client-sync diff from item-event actions.
+- `Models/Spt/Config/*` — one `BaseConfig` subclass per file in `SPT_Data/configs/`, mapped by
+  `ConfigTypes` and loaded by `ConfigLoader`.
+
+JSON is System.Text.Json with custom converters in `Utils/Json/` (`ListOrT`, `StringOrInt`,
+`DictionaryOrList`, `LazyLoad` for deferred loading of huge database files).
+
+### Dependency injection and lifecycle
+
+Classes opt in with `[Injectable]`; `DependencyInjectionHandler` registers each type against itself,
+its interfaces and its base types. `ProgramHelpers.RegisterSptServicesAsync` is the single place
+services get registered, and `DependencyInjectionValidationTests` rebuilds that exact container
+(mods on and off) so a bad registration fails the test run, not a launch.
+
+Lifecycle interfaces in `DI/`: `IOnLoad` (startup, ordered by `OnLoadOrder`; anything below
+`GameCallbacks` runs before Kestrel binds, which is what lets mods mutate `HttpConfig`), `IOnUpdate`
+(polled every 5 s by `SPTStartupHostedService`), `IOnDIConstruct` (static hook letting a mod add
+registrations).
+
+### Persistence
 
 `Servers/SaveServer.cs` owns the on-disk JSON profiles in `user/profiles/`. `SaveCallbacks` loads
 every profile at startup and saves on the `CoreConfig.ProfileSaveIntervalInSeconds` interval;
@@ -119,7 +119,7 @@ Old profile data is patched two ways on load: `SaveLoadRouter` subclasses (alway
 fixes) and versioned `IProfileMigration` implementations under `Migration/`, orchestrated by
 `ProfileMigrationService`. `ProfileFixerService` repairs known corruption beyond that.
 
-## WebSockets and notifications
+### WebSockets and notifications
 
 `Servers/WebSocketServer.cs` accepts upgrades and dispatches to `IWebSocketConnectionHandler`
 implementations; `SptWebSocketConnectionHandler` tracks live per-session sockets.
@@ -127,13 +127,13 @@ implementations; `SptWebSocketConnectionHandler` tracks live per-session sockets
 NPC/system mail on top. Payload types live in `Models/Eft/Ws/`; the message-handler seam in
 `Servers/Ws/Message/`.
 
-## Admin panel
+### Admin panel
 
 `SPTarkov.Server.Web`, a Blazor Server app served by the same host: profile editing, live config
 editing, database browsing, MongoId tools, all behind `AuthService` login. See
 [`Libraries/ARCHITECTURE.md`](Libraries/ARCHITECTURE.md) for the page and component breakdown.
 
-## Mods
+### Mods
 
 A mod DLL in `user/mods/` implements exactly one `IModMetadata` (GUID, semver, `SptVersion` range,
 dependencies, incompatibilities) plus any number of `[Injectable]` classes.
@@ -148,7 +148,7 @@ call site goes through an interface or a `virtual` member.
 `HasPrepatcher = true` opts into enum prepatching from `user/patchers/{ModGuid}`. Runtime method
 patching uses `SPTarkov.Reflection` (`AbstractPatch`/`PatchManager`).
 
-## Build-time code generation and data integrity
+### Build-time code generation and data integrity
 
 Two non-obvious steps run during build, both in `SPTarkov.Server.Core.csproj`:
 
@@ -157,24 +157,25 @@ Two non-obvious steps run during build, both in `SPTarkov.Server.Core.csproj`:
 - On Release/publish, `Tools/Ceciler` rewrites the compiled `SPTarkov.Server.Core.dll` with
   Mono.Cecil, injecting a `[JsonExtensionData]` property into every type under `Models` so unknown
   client JSON round-trips instead of being dropped. Release binaries therefore differ structurally
-  from Debug ones. No unit test covers the rewrite.
+  from Debug ones. No test asserts the rewrite itself; the native tests only pin the `#[serde(flatten)]
+  extra` contract that mirrors it.
 
 `SPTarkov.Server.Assets` hashes `SPT_Data` into `checks.dat` on Release builds, which
 `DatabaseImporter` verifies at startup outside DEBUG. The format is a contract shared with
 `rust/spt-native/src/verify.rs`; scope is manifest-driven and exact in both directions over
 `configs/` and `database/`, so deletions and swaps are caught, while `images/` is unverified.
 
-## Native Rust layer
+### Native Rust layer
 
 `rust/spt-native` is a `cdylib` called over C ABI from `Libraries/SPTarkov.Server.Core/Native/`
 (`NativeMethods.cs`, `SptNative.cs`) — and, for the log exports, from the twin
 `Libraries/SPTarkov.Common/Native/NativeMethods.cs`, because `SPTarkov.Common` cannot reference
 Server.Core. It owns database hash verification, the ported generation paths (location loot, reward
 loot, whole-bot inventory, dynamic ragfair offers, repeatable quests, scav case rewards), the item
-base-class cache build, the ragfair linked-item table, the resident DB the ragfair and
-repeatable-quest paths read from, and the whole log pipeline. Twenty-three
-exports, JSON in / JSON out — except the ragfair response, a framed MessagePack envelope, and the
-log exports — with `spt_native_abi_version` handshaking against `SptNative.ExpectedAbiVersion`.
+base-class cache build, the ragfair linked-item table, the resident DB every ported family but bots
+reads from, and the whole log pipeline. Twenty-three exports, JSON in / JSON out — except the
+ragfair response, a framed MessagePack envelope, and the log exports — with
+`spt_native_abi_version` handshaking against `SptNative.ExpectedAbiVersion`.
 
 Every ported *class* keeps its complete 4.1.2 C# implementation as a **legacy path**, taken
 automatically when a mod hooks it or forced by config, so a Rust cutover never removes a mod's
@@ -186,13 +187,13 @@ with mod `ILogHandler`s fanned out from the dispatcher (resolve it from DI and c
 by contract: a broken library or config produces one stderr notice and logging stays off rather than
 stopping the server.
 
-Payloads are projected from the live database on every call, except the ragfair and repeatable-quest
-requests, which carry no call-invariant half at all: `DbPublisher` re-publishes the
-templates/traders/globals/locations roots into the native resident DB when `DatabaseMutationStamp`
-has moved, and each call carries just an epoch (a stale epoch self-heals by force-publish and one
-retry). Because a mod writing an injected table directly never reaches the stamp's bump sites, the
-resident path is gated on no mods being loaded, with opt-in and kill-switch flags per family; an
-ineligible caller ships the full views with every call instead.
+Only the bot family still projects its payload from the live database on every call. Every other
+family carries no call-invariant half at all: `DbPublisher` re-publishes the
+templates/traders/globals/locations/hideout roots into the native resident DB when
+`DatabaseMutationStamp` has moved, and each call carries just an epoch (a stale epoch self-heals by
+force-publish and one retry). Because a mod writing an injected table directly never reaches the
+stamp's bump sites, the resident path is gated on no mods being loaded, with opt-in and kill-switch
+flags per family; an ineligible caller ships the full views with every call instead.
 
 Native is not uniformly faster — several families are slower than the C# they replace and stay the
 default anyway, each with a force-legacy flag. The argument per family is in
@@ -204,6 +205,30 @@ targets are mapped: `Build.props` holds one entry (`linux-x64` → `x86_64-unkno
 Linux-only `PropertyGroup`, so from a Windows host nothing maps and the guard in
 `SPTarkov.Server.csproj` fails the build rather than shipping a host-triple library.
 
-→ [`rust/ARCHITECTURE.md`](rust/ARCHITECTURE.md) for the crate internals and the FFI contract.
-→ [`RUST-ROADMAP.md`](RUST-ROADMAP.md) § *Exceptions in force* for what flips each family to legacy,
-and § *Broken / known divergences* for the mod-facing limits.
+---
+
+## 4. Integration Points
+
+| External System | Integration Type | Notes |
+|-------------------|-------------------|-------|
+| Escape from Tarkov game client | Sync HTTP + async WebSocket | Every `/client/*` route; zlib both ways, responses wrapped in the `data`/`err`/`errmsg` envelope. `Models/Eft/` mirrors its wire contracts |
+| `rust/spt-native` (cdylib) | Sync FFI, C ABI | Twenty-three exports; JSON in/out except the MessagePack ragfair response and the log exports. `spt_native_abi_version` handshakes `SptNative.ExpectedAbiVersion` |
+| `SPT_Data/` on disk | Batch read at startup | `configs/` via `ConfigLoader`, `database/` via `DatabaseImporter`, hash-verified against `checks.dat` outside DEBUG |
+| `user/profiles/` | Async read/write | `SaveServer` owns the JSON profiles; interval saves plus `BackupService` timers |
+| `user/mods/`, `user/patchers/` | Reflective assembly load | Third-party DLLs: `[Injectable]` registrations, `IOnDIConstruct` hooks, HarmonyX patches, enum prepatchers |
+| Kestrel / HTTPS | Async, network | HTTPS-only with a self-generated certificate; the same host serves the game API, the admin panel and `/health` |
+| `.NET` CLR (shipped builds) | Process host | `rust/mpex-server` hosts the CLR via netcorehost and `run_app`s the published assembly; `Containerfile.release` entrypoint |
+
+---
+
+# Relationship to Other Framework Components
+
+| Component | Responsibility |
+|-----------|-----------------|
+| [`SPTarkov.Server/ARCHITECTURE.md`](SPTarkov.Server/ARCHITECTURE.md) | The executable host: startup sequence, mod loader, web pipeline hookup. No game logic. |
+| [`Libraries/ARCHITECTURE.md`](Libraries/ARCHITECTURE.md) | Which of the six library projects owns what, and what they depend on. |
+| [`Libraries/SPTarkov.Server.Core/ARCHITECTURE.md`](Libraries/SPTarkov.Server.Core/ARCHITECTURE.md) | Everything inside Core (~91% of the `.cs` files under `Libraries/`): folder map, dispatch mechanics, item events, configs, models. |
+| [`rust/ARCHITECTURE.md`](rust/ARCHITECTURE.md) | Inside the Cargo workspace: `spt-native`'s modules, FFI boundary, porting conventions and tests, plus the `mpex-server` launcher and its no-`spt-native` rule. |
+| [`RUST-ROADMAP.md`](RUST-ROADMAP.md) | Rust port status: what works, what flips to legacy, known divergences, roadmap. |
+| [`BENCHMARK.md`](BENCHMARK.md) | Native vs legacy timings. Every measurement lives there; none are repeated elsewhere. |
+| [`CLAUDE.md`](CLAUDE.md) | Build/run commands, style rules, cross-RID and toolchain requirements. |
