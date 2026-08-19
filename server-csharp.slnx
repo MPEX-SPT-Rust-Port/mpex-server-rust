@@ -6,11 +6,13 @@
     <Project Path="Libraries/SPTarkov.Server.Assets/SPTarkov.Server.Assets.csproj" />
     <Project Path="Libraries/SPTarkov.Server.Core/SPTarkov.Server.Core.csproj">
       <BuildDependency Project="Patches/Ceciler.JsonExtensionData/Ceciler.JsonExtensionData.csproj" />
+      <BuildDependency Project="Patches/Ceciler.WriteBarriers/Ceciler.WriteBarriers.csproj" />
     </Project>
     <Project Path="Libraries/SPTarkov.Server.Web/SPTarkov.Server.Web.csproj" />
   </Folder>
   <Folder Name="/Patches/">
     <Project Path="Patches/Ceciler.JsonExtensionData/Ceciler.JsonExtensionData.csproj" />
+    <Project Path="Patches/Ceciler.WriteBarriers/Ceciler.WriteBarriers.csproj" />
   </Folder>
   <Folder Name="/Testing/">
     <Project Path="Testing/TestMod/TestMod.csproj" />
