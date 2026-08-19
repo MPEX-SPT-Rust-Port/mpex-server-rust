@@ -4,9 +4,12 @@ members = ["spt-native", "mpex-server", "spectre-facade"]
 
 [profile.release]
 lto = "fat"
+opt-level = 3
 codegen-units = 1
-debug = "line-tables-only"
+debug = false
+strip = true
 
 [profile.dev]
-codegen-units = 1
+opt-level = 1
+codegen-units = 16
 debug = "line-tables-only"
