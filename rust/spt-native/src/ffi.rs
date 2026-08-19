@@ -1,4 +1,5 @@
 use std::any::Any;
+use std::io::Write;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -12,7 +13,7 @@ use crate::base_class::{self, BaseClassRequest, BaseClassResponse};
 use crate::bot::bot_inventory_generator::{generate_inventory, generate_inventory_batch};
 use crate::diag::DiagSink;
 use crate::linked_items::{self, LinkedItemsRequest, LinkedItemsResponse};
-use crate::logger::{LogLevel, LogRecord, Logger};
+use crate::logger::{ConsoleMessage, LogLevel, LogRecord, Logger, compile_format, render};
 use crate::loot::item_helper::{LootEpochError, LootError};
 use crate::loot::location_loot_generator::{generate_dynamic_loot, generate_static_containers};
 use crate::loot::loot_generator::{
@@ -676,6 +677,40 @@ fn logger_guard() -> std::sync::MutexGuard<'static, (usize, Option<Logger>)> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// A clone of the running pipeline's console channel, if it has one. Cloned under the lock and
+/// used outside it, so a blocking Raw send never holds LOGGER against emitters.
+fn console_sender() -> Option<std::sync::mpsc::SyncSender<ConsoleMessage>> {
+    logger_guard().1.as_ref().and_then(Logger::console_sender)
+}
+
+/// Raw bytes to the terminal: through the console sink's queue when one is running (total order
+/// with log lines, blocking — a prompt must not drop), straight to stdout otherwise (before
+/// init, after close, no console target configured, or the sink just closed under us).
+pub(crate) fn console_write_stdout(bytes: Vec<u8>) {
+    let bytes = match console_sender() {
+        Some(sender) => match sender.send(ConsoleMessage::Raw(bytes)) {
+            Ok(()) => return,
+            Err(std::sync::mpsc::SendError(ConsoleMessage::Raw(bytes))) => bytes,
+            Err(_) => return,
+        },
+        None => bytes,
+    };
+    let mut out = std::io::stdout();
+    let _ = out.write_all(&bytes);
+    let _ = out.flush();
+}
+
+/// Drain barrier before a stdin read: everything queued before this call is on the terminal when
+/// it returns. Without a running console sink there is nothing queued to wait for.
+fn console_flush() {
+    if let Some(sender) = console_sender() {
+        let (ack_sender, ack_receiver) = std::sync::mpsc::sync_channel::<()>(1);
+        if sender.send(ConsoleMessage::Flush(ack_sender)).is_ok() {
+            let _ = ack_receiver.recv();
+        }
+    }
+}
+
 /// The C# callback receiving Rust-originated log lines, so mod-registered ILogHandlers see the
 /// full stream and not only what crossed spt_log_emit. Spans are category, message, thread
 /// name; scalars are level, tid, unix-millis. Buffers are valid only for the call.
@@ -774,6 +809,7 @@ pub unsafe extern "C" fn spt_logger_init(
     let bytes = unsafe { std::slice::from_raw_parts(config_ptr, config_len) };
 
     match catch_unwind(AssertUnwindSafe(|| {
+        crate::console::init_terminal();
         let mut guard = logger_guard();
         if guard.1.is_some() {
             guard.0 += 1;
@@ -978,6 +1014,237 @@ pub unsafe extern "C" fn spt_log_set_tap(tap: Option<LogTap>) -> i32 {
     }
 }
 
+/// Verbatim byte passthrough from C#'s redirected Console.Out/Error — the raw write sites that
+/// live outside the log pipeline. stdout bytes queue behind the console sink (never dropped,
+/// ordered against log lines); stderr bytes write directly, because the stderr path is the
+/// failure channel of last resort and must not depend on a possibly-broken pipeline.
+///
+/// # Safety
+/// `bytes_ptr` must point to `bytes_len` readable bytes unless `bytes_len` is 0. The bytes are
+/// copied before return.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn spt_console_write(
+    bytes_ptr: *const u8,
+    bytes_len: usize,
+    to_stderr: i32,
+) -> i32 {
+    let bytes: &[u8] = if bytes_len == 0 {
+        &[]
+    } else if bytes_ptr.is_null() {
+        return STATUS_BAD_ARGS;
+    } else {
+        unsafe { std::slice::from_raw_parts(bytes_ptr, bytes_len) }
+    };
+
+    match catch_unwind(AssertUnwindSafe(|| {
+        if to_stderr != 0 {
+            let mut err = std::io::stderr();
+            let _ = err.write_all(bytes);
+            let _ = err.flush();
+        } else {
+            console_write_stdout(bytes.to_vec());
+        }
+    })) {
+        Ok(()) => STATUS_OK,
+        Err(_) => STATUS_PANIC,
+    }
+}
+
+/// Flushes the console queue, then reads one line from stdin — C#'s Console.ReadLine, with the
+/// prompt guaranteed visible first. EOF answers STATUS_OK with a null buffer (C#'s null); note an
+/// empty line may also surface as a null buffer, which every current caller ignores anyway. On a
+/// read error the error text is in the buffer with STATUS_ERROR.
+///
+/// # Safety
+/// `out_ptr` and `out_len` must be valid for writes. A returned buffer is released with
+/// `spt_buf_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn spt_console_read_line(out_ptr: *mut *mut u8, out_len: *mut usize) -> i32 {
+    if out_ptr.is_null() || out_len.is_null() {
+        return STATUS_BAD_ARGS;
+    }
+
+    unsafe {
+        *out_ptr = std::ptr::null_mut();
+        *out_len = 0;
+    }
+
+    match catch_unwind(AssertUnwindSafe(|| {
+        console_flush();
+        let mut line = String::new();
+        match std::io::stdin().read_line(&mut line) {
+            Ok(0) => Ok(Option::None),
+            Ok(_) => Ok(Some(crate::console::strip_line_ending(line))),
+            Err(error) => Err(error.to_string()),
+        }
+    })) {
+        Ok(Ok(Option::None)) => STATUS_OK,
+        Ok(Ok(Some(line))) => {
+            if !line.is_empty() {
+                unsafe { write_buffer(line.into_bytes(), out_ptr, out_len) };
+            }
+            STATUS_OK
+        }
+        Ok(Err(error)) => {
+            unsafe { write_buffer(error.into_bytes(), out_ptr, out_len) };
+            STATUS_ERROR
+        }
+        Err(payload) => {
+            unsafe { write_buffer(panic_message(payload).into_bytes(), out_ptr, out_len) };
+            STATUS_PANIC
+        }
+    }
+}
+
+/// C#'s `Console.Title`. Windows sets it through the console API; elsewhere an OSC 0 escape is
+/// queued behind the console sink when stdout is a terminal, and silently skipped when not.
+///
+/// # Safety
+/// `title_ptr` must point to `title_len` readable bytes of UTF-8 unless `title_len` is 0.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn spt_console_set_title(title_ptr: *const u8, title_len: usize) -> i32 {
+    let title = if title_len == 0 {
+        ""
+    } else if title_ptr.is_null() {
+        return STATUS_BAD_ARGS;
+    } else {
+        match std::str::from_utf8(unsafe { std::slice::from_raw_parts(title_ptr, title_len) }) {
+            Ok(title) => title,
+            Err(_) => return STATUS_BAD_ARGS,
+        }
+    };
+
+    match catch_unwind(AssertUnwindSafe(|| {
+        if let Some(bytes) = crate::console::set_title(title) {
+            console_write_stdout(bytes);
+        }
+    })) {
+        Ok(()) => STATUS_OK,
+        Err(_) => STATUS_PANIC,
+    }
+}
+
+/// C#'s `Console.Clear()`, tty-gated like its `IsOutputRedirected` guard was: a clear escape
+/// queued behind the console sink, or nothing when stdout is not a terminal.
+///
+/// # Safety
+/// No pointer arguments; marked unsafe only for symmetry with the export family.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn spt_console_clear() -> i32 {
+    match catch_unwind(AssertUnwindSafe(|| {
+        if let Some(bytes) = crate::console::clear() {
+            console_write_stdout(bytes);
+        }
+    })) {
+        Ok(()) => STATUS_OK,
+        Err(_) => STATUS_PANIC,
+    }
+}
+
+/// The `IsLogEnabled` gate against the *applied* configuration. NOT a STATUS_* export — the
+/// return is tri-state: 1 the level is admitted by some target, 0 it is not, -1 there is no
+/// running pipeline (or the level is not a LogLevel), in which case the C# side falls back to
+/// its own configuration object so handler-only fan-out keeps working.
+#[unsafe(no_mangle)]
+pub extern "C" fn spt_log_enabled(level: i32) -> i32 {
+    let Some(level) = LogLevel::from_i32(level) else {
+        return -1;
+    };
+
+    match catch_unwind(AssertUnwindSafe(|| {
+        logger_guard()
+            .1
+            .as_ref()
+            .map(|logger| logger.enabled(level))
+    })) {
+        Ok(Some(true)) => 1,
+        Ok(Some(false)) => 0,
+        Ok(None) | Err(_) => -1,
+    }
+}
+
+/// Renders one line with the pipeline's token expansion — the body of C#'s
+/// `BaseLogHandler.FormatMessage`, minus the exception append, which stays on the C# side (it is
+/// a plain concat and the Exception object never crosses the boundary). Stateless: works with or
+/// without a running pipeline.
+///
+/// # Safety
+/// Each pointer must point to its length in readable UTF-8 bytes, unless the length is 0.
+/// `out_ptr`/`out_len` must be valid for writes; a returned buffer is released with
+/// `spt_buf_free`.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn spt_log_format(
+    format_ptr: *const u8,
+    format_len: usize,
+    message_ptr: *const u8,
+    message_len: usize,
+    logger_ptr: *const u8,
+    logger_len: usize,
+    thread_name_ptr: *const u8,
+    thread_name_len: usize,
+    level: i32,
+    tid: i32,
+    unix_millis: i64,
+    out_ptr: *mut *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    if out_ptr.is_null() || out_len.is_null() {
+        return STATUS_BAD_ARGS;
+    }
+
+    unsafe {
+        *out_ptr = std::ptr::null_mut();
+        *out_len = 0;
+    }
+
+    fn as_str<'a>(ptr: *const u8, len: usize) -> Option<&'a str> {
+        if len == 0 {
+            return Some("");
+        }
+        if ptr.is_null() {
+            return None;
+        }
+        std::str::from_utf8(unsafe { std::slice::from_raw_parts(ptr, len) }).ok()
+    }
+
+    let (Some(format), Some(message), Some(logger), Some(thread_name)) = (
+        as_str(format_ptr, format_len),
+        as_str(message_ptr, message_len),
+        as_str(logger_ptr, logger_len),
+        as_str(thread_name_ptr, thread_name_len),
+    ) else {
+        return STATUS_BAD_ARGS;
+    };
+
+    let Some(level) = LogLevel::from_i32(level) else {
+        return STATUS_BAD_ARGS;
+    };
+
+    let record = LogRecord {
+        category: logger,
+        message,
+        exception: "",
+        thread_name,
+        level,
+        tid,
+        unix_millis,
+    };
+
+    match catch_unwind(AssertUnwindSafe(|| {
+        render(&compile_format(format), &record).into_bytes()
+    })) {
+        Ok(bytes) => {
+            unsafe { write_buffer(bytes, out_ptr, out_len) };
+            STATUS_OK
+        }
+        Err(payload) => {
+            unsafe { write_buffer(panic_message(payload).into_bytes(), out_ptr, out_len) };
+            STATUS_PANIC
+        }
+    }
+}
+
 /// Stores the resolved server-locale table generator diagnostics render against. Overwrites any
 /// previous table — the prepatch host pushing twice is harmless. On `STATUS_ERROR` the parse-error
 /// text is in the out-buffer and the previously stored table (if any) is untouched; generator
@@ -1065,7 +1332,7 @@ mod tests {
         assert_eq!(spt_native_abi_version(), crate::ABI_VERSION);
         assert_eq!(
             crate::ABI_VERSION,
-            27,
+            28,
             "bump SptNative.ExpectedAbiVersion too"
         );
     }
@@ -2400,6 +2667,9 @@ mod tests {
         let status = emit("Cat", "dropped", "", "main");
         assert_eq!(status, STATUS_OK);
 
+        // The IsLogEnabled gate has no pipeline to ask yet.
+        assert_eq!(spt_log_enabled(2), -1);
+
         // Reinit before init: an error naming the missing init, pipeline stays down.
         let status =
             unsafe { spt_logger_reinit(config.as_ptr(), config.len(), &mut out_ptr, &mut out_len) };
@@ -2426,6 +2696,11 @@ mod tests {
         let status =
             unsafe { spt_logger_init(config.as_ptr(), config.len(), &mut out_ptr, &mut out_len) };
         assert_eq!(status, STATUS_OK);
+
+        // The gate answers from the applied config: Information on, Debug off, junk level unknown.
+        assert_eq!(spt_log_enabled(2), 1);
+        assert_eq!(spt_log_enabled(1), 0);
+        assert_eq!(spt_log_enabled(99), -1);
 
         assert_eq!(emit("Cat", "hello", "", "main"), STATUS_OK);
 
@@ -2595,6 +2870,7 @@ mod tests {
         assert_eq!(unsafe { spt_logger_close() }, STATUS_OK);
         assert_eq!(unsafe { spt_logger_close() }, STATUS_OK);
         assert_eq!(emit("Cat", "after teardown", "", "main"), STATUS_OK);
+        assert_eq!(spt_log_enabled(2), -1);
 
         // Generators in other tests emit their diagnostics through the same process-global
         // pipeline, so only this test's own lines can be asserted on.
@@ -2646,5 +2922,109 @@ mod tests {
                 0,
             )
         }
+    }
+
+    /// spt_log_format is stateless — no pipeline init needed.
+    #[test]
+    fn log_format_renders_with_the_pipeline_token_expansion() {
+        fn format(format: &str, message: &str) -> (i32, Option<String>) {
+            let logger = "SPTarkov.Server.Core.Utils.App";
+            let thread_name = "main";
+            let mut out_ptr: *mut u8 = std::ptr::null_mut();
+            let mut out_len: usize = 0;
+            let status = unsafe {
+                spt_log_format(
+                    format.as_ptr(),
+                    format.len(),
+                    message.as_ptr(),
+                    message.len(),
+                    logger.as_ptr(),
+                    logger.len(),
+                    thread_name.as_ptr(),
+                    thread_name.len(),
+                    2,                 // Information
+                    7,                 // tid
+                    1_786_900_205_123, // 2026-08-16 17:10:05.123 UTC
+                    &mut out_ptr,
+                    &mut out_len,
+                )
+            };
+            if status != STATUS_OK || out_ptr.is_null() {
+                return (status, None);
+            }
+            let text =
+                String::from_utf8(unsafe { std::slice::from_raw_parts(out_ptr, out_len) }.to_vec())
+                    .unwrap();
+            unsafe { spt_buf_free(out_ptr, out_len) };
+            (status, Some(text))
+        }
+
+        let (status, line) = format("[%date% %time%][%level%][%loggerShort%] %message%", "hi");
+        assert_eq!(status, STATUS_OK);
+        assert_eq!(
+            line.unwrap(),
+            "[2026-08-16 17:10:05.123][Information][App] hi"
+        );
+
+        // A brace-bearing format renders literally — the CompositeFormat throw is gone, an
+        // accepted divergence.
+        let (status, line) = format("{%message%}", "x");
+        assert_eq!(status, STATUS_OK);
+        assert_eq!(line.unwrap(), "{x}");
+
+        let mut out_ptr: *mut u8 = std::ptr::null_mut();
+        let mut out_len: usize = 0;
+        let status = unsafe {
+            spt_log_format(
+                std::ptr::null(),
+                3, // null with non-zero len
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                2,
+                7,
+                0,
+                &mut out_ptr,
+                &mut out_len,
+            )
+        };
+        assert_eq!(status, STATUS_BAD_ARGS);
+    }
+
+    #[test]
+    fn console_exports_validate_and_survive_without_a_pipeline() {
+        // Null bytes with a non-zero length are rejected; everything else is best-effort OK
+        // (the writes land on the test harness's captured stdout, which is fine).
+        assert_eq!(
+            unsafe { spt_console_write(std::ptr::null(), 5, 0) },
+            STATUS_BAD_ARGS
+        );
+        assert_eq!(
+            unsafe { spt_console_write(std::ptr::null(), 0, 0) },
+            STATUS_OK
+        );
+        let bytes = b"ffi console test stdout\n";
+        assert_eq!(
+            unsafe { spt_console_write(bytes.as_ptr(), bytes.len(), 0) },
+            STATUS_OK
+        );
+        assert_eq!(
+            unsafe { spt_console_write(bytes.as_ptr(), bytes.len(), 1) },
+            STATUS_OK
+        );
+
+        let title = "t";
+        assert_eq!(
+            unsafe { spt_console_set_title(title.as_ptr(), title.len()) },
+            STATUS_OK
+        );
+        assert_eq!(
+            unsafe { spt_console_set_title(std::ptr::null(), 1) },
+            STATUS_BAD_ARGS
+        );
+        assert_eq!(unsafe { spt_console_clear() }, STATUS_OK);
     }
 }

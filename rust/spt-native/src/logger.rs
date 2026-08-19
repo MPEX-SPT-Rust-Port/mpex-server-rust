@@ -379,9 +379,6 @@ type ConsoleWriter = Box<dyn Write + Send>;
 /// flushes and acks, so a stdin read can wait until everything queued before it is visible. Its ack
 /// channel must have capacity >= 1, never a rendezvous channel: on capacity 0 a requester that gave
 /// up while still holding its `Receiver` alive would park the writer thread inside `ack.send`.
-// `Raw` and `Flush` are constructed by the FFI console entry points, which land in a later commit;
-// until then only tests build them.
-#[allow(dead_code)]
 pub(crate) enum ConsoleMessage {
     Line(Vec<u8>),
     Raw(Vec<u8>),
@@ -564,8 +561,6 @@ impl Logger {
     /// channel connected, so the sink's `worker.join()` waits on a `recv` that never disconnects and
     /// wedges shutdown and reconfigure. A clone that outlives its `Logger` is also useless — every
     /// `send` fails once the writer is gone, so raw writes would silently vanish.
-    // The FFI caller lands in a later commit; until then this is reachable only from tests.
-    #[allow(dead_code)]
     pub(crate) fn console_sender(&self) -> Option<SyncSender<ConsoleMessage>> {
         self.entries.iter().find_map(|entry| match &entry.sink {
             Sink::Console(sink) => sink.sender.clone(),
