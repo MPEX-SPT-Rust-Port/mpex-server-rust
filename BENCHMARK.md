@@ -130,7 +130,8 @@ The delta is smaller than the run-to-run spread of either configuration (base al
 the initial import) are not needed and were not implemented.
 
 Steady state is gated by `WriteBarrierChurnTests` — a publish must not dirty the stamp it just read,
-and a settled ragfair pass must not force a republish. Both pass on Release.
+a native response decode must not move it, and a settled ragfair pass must not force a republish. All
+three pass on Release.
 
 **Denylist entries added by the churn guard: none.** The two churning paths the guard and the
 existing suite found share one cause, and it is not a database write:
@@ -145,6 +146,31 @@ writes convey no freshness — the same argument the publish projection's suppre
 Denying the types instead would have meant denying the whole quest-template and loose-loot subgraph,
 which is precisely the coverage the barriers exist for. With the suppression in place the loot perf
 gate reads 328.59 ms mean over 10 runs (bar 929.83 ms) and the full Release suite is green.
+
+**The suppression is itself a blind spot**, narrower than the six denylist entries it replaced but
+not the absence of one: a genuine database write on a thread inside a decode callback's extent is
+invisible to the barriers. Nothing does that today — `JsonSerializer.Deserialize` allocates the graph
+it fills — and `WriteBarrierChurnTests.ANativeResponseDecodeDoesNotMoveTheStamp` pins the invariant
+directly so narrowing the scope fails by name rather than as a perf regression. Task 7's ledger
+records the scope, not "no blind spots".
+
+**One confirmed churn path is deliberately left unmitigated: `LocationController.cs:44`**
+(`mapBase.Loot = []`, inside the `client/locations` loop over every map). `LocationBase` is reachable
+from `LocationTable`, so the setter is barriered: every `client/locations` request moves the stamp
+once per map and taxes the next native call a full five-root republish (~733–745 ms, the forced-publish
+figure under § Scav case rewards). Frequency is once per client menu load, not per raid, so it is a
+latency spike on an already-slow request rather than steady-state churn — but it is real and no test
+observes it, because the loot perf gate calls `LocationLootGenerator` directly and never enters the
+controller. It is not deniable the way the decode was: it is a write *into* the live database, so
+`LocationBase` would have to be denied outright (losing map-base coverage) or the controller taught
+to build its response off a copy. Left for Task 6's risk assessment rather than fixed blind.
+
+The plan's third named candidate, `TraderAssortHelper.cs:179-185` (three writes per trader resupply),
+needs no guard: `ResetExpiredTrader` only runs when a trader's assorts have actually expired — hours
+apart on the 5 s `IOnUpdate` tick — and a resupply genuinely changes data the resident views derive
+from, so the republish it buys is a correct freshness signal, not churn. The plan's fourth,
+`RagfairServerHelper.cs:61` / `RagfairOfferGenerator.cs:504` (`CanSellOnRagfair = false`), converges
+because the flip is one-way; `ASteadyStateRagfairPassConvergesToNoRepublish` is the pin for that.
 
 The three pre-existing denylist entries and their reasons live in `WriteBarriersPatch._denied`
 (`Item`, `BotBase`, `PmcDataRepeatableQuest` — all live per-request state).
