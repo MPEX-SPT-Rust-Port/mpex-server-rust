@@ -30,6 +30,11 @@
   <PropertyGroup Condition="$([MSBuild]::IsOSPlatform('Linux'))">
     <SptNativeTargetTriple Condition="'$(SptNativeRid)' == 'linux-x64'">x86_64-unknown-linux-gnu</SptNativeTargetTriple>
   </PropertyGroup>
+  <PropertyGroup>
+    <CargoProfile Condition="'$(Configuration)' == 'Release'">release</CargoProfile>
+    <CargoProfile Condition="'$(CargoProfile)' == ''">debug</CargoProfile>
+    <CargoProfileFlag Condition="'$(CargoProfile)' == 'release'">--release</CargoProfileFlag>
+  </PropertyGroup>
   <!--
       Spectre.Console.Ansi is a facade emitted by rust/spectre-facade, not the real package. It exists
       only so compiled 4.1.2 mods can still bind Spectre.Console.Color, which is frozen into

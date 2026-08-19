@@ -62,9 +62,6 @@
     />
   </Target>
   <PropertyGroup>
-    <CargoProfile Condition="'$(Configuration)' == 'Release'">release</CargoProfile>
-    <CargoProfile Condition="'$(CargoProfile)' == ''">debug</CargoProfile>
-    <CargoProfileFlag Condition="'$(CargoProfile)' == 'release'">--release</CargoProfileFlag>
     <SptNativeDir>$(MSBuildProjectDirectory)/../../rust</SptNativeDir>
     <SptNativeLibName Condition="$([MSBuild]::IsOSPlatform('Windows'))">spt_native.dll</SptNativeLibName>
     <SptNativeLibName Condition="$([MSBuild]::IsOSPlatform('OSX'))">libspt_native.dylib</SptNativeLibName>
