@@ -105,11 +105,19 @@ impl FfiFailure for QuestError {
 
 impl FfiFailure for ScavCaseError {
     fn status(&self) -> i32 {
-        STATUS_ERROR
+        match self {
+            ScavCaseError::Failed(_) => STATUS_ERROR,
+            ScavCaseError::StaleEpoch => STATUS_STALE_EPOCH,
+        }
     }
 
     fn into_message(self) -> String {
-        self.message
+        match self {
+            ScavCaseError::Failed(message) => message,
+            ScavCaseError::StaleEpoch => {
+                "resident DB epoch mismatch; republish and retry".to_string()
+            }
+        }
     }
 }
 
@@ -1968,12 +1976,13 @@ mod tests {
     }
 
     /// A scav case craft off the generator's own synthetic table, seeded so the reward list is the
-    /// one its end-to-end KAT pins.
+    /// one its end-to-end KAT pins — an epoch-0 override send.
     fn scav_case_request() -> Vec<u8> {
-        let mut request = crate::scav_case::generator::tests::container_request_json();
-        request["testSeed"] = serde_json::json!(42);
+        let mut flat = crate::scav_case::generator::tests::container_request_json();
+        flat["testSeed"] = serde_json::json!(42);
 
-        serde_json::to_vec(&request).expect("request serializes")
+        serde_json::to_vec(&crate::scav_case::generator::tests::envelope(flat))
+            .expect("request serializes")
     }
 
     #[test]
@@ -2009,7 +2018,7 @@ mod tests {
         // `FirstOrDefault` (`:54`) answers null for a recipe id the table does not hold, which the
         // C# then NREs dereferencing — reported here as an error naming the recipe.
         let mut request: serde_json::Value = serde_json::from_slice(&scav_case_request()).unwrap();
-        request["recipeId"] = serde_json::json!("ffffffffffffffffffffffff");
+        request["varying"]["recipeId"] = serde_json::json!("ffffffffffffffffffffffff");
 
         let (status, out) = call_generate(
             spt_generate_scav_case_rewards,
@@ -2020,6 +2029,27 @@ mod tests {
         assert_eq!(
             String::from_utf8(out).unwrap(),
             "No scav case recipe found with id: ffffffffffffffffffffffff"
+        );
+    }
+
+    #[test]
+    fn a_stale_scav_case_epoch_returns_status_4() {
+        // No viewsOverride and an epoch the store can never hold (u64::MAX is unreachable —
+        // epochs count up from 1). The varying block is the fixture's, so the JSON fully parses
+        // and the epoch check in resolve_scav_case_views is what answers.
+        let mut request: serde_json::Value = serde_json::from_slice(&scav_case_request()).unwrap();
+        request["epoch"] = serde_json::json!(u64::MAX);
+        request.as_object_mut().unwrap().remove("viewsOverride");
+
+        let (status, out) = call_generate(
+            spt_generate_scav_case_rewards,
+            &serde_json::to_vec(&request).unwrap(),
+        );
+
+        assert_eq!(status, STATUS_STALE_EPOCH);
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "resident DB epoch mismatch; republish and retry"
         );
     }
 
