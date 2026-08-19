@@ -191,7 +191,8 @@ pub struct LocationsRoot {
 /// the two the repeatable-quest projection reads, plus the three statics the loot flip reads
 /// (published as each `LazyLoad.Value`, transformers applied — flip #4). `looseLoot` is
 /// deliberately NOT lifted (549 MiB resident; the per-call splice is retained until Phase 3) and
-/// `staticAmmo` stays a public-API parameter — both ride in `extra`.
+/// `staticAmmo` stays a public-API parameter — both would ride in `extra` if published, but the
+/// `DbPayloadProjection` (C#) publish deliberately omits them; only test fixtures land them there.
 #[derive(Debug, Deserialize)]
 pub struct LocationEntry {
     /// `Location.Base` (`Location.cs:12-13`). `Option` keeps the parse total — the table's

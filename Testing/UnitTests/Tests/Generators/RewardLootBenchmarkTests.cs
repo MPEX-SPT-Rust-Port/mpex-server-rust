@@ -11,9 +11,11 @@ namespace UnitTests.Tests.Generators;
 
 /// <summary>
 /// Head-to-head wall clock of the two reward loot paths on the same live database in one process,
-/// on the airdrop request the server actually generates. Unlike location loot, the native path here
-/// serialises the whole items view on every call - the ratio this prints is what that costs. Run in
-/// Release; the cargo dev profile makes Debug numbers meaningless.
+/// on the airdrop request the server actually generates. The native arm here is resident-DB
+/// eligible, so each call is an epoch send against the published database - the C#-built views
+/// override rides along only on ineligible sends - and the ratio this prints is that resident
+/// path against the legacy C#. Run in Release; the cargo dev profile makes Debug numbers
+/// meaningless.
 /// </summary>
 [TestFixture]
 [Explicit("benchmark, run on demand in Release")]

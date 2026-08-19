@@ -436,8 +436,9 @@ public class LocationLootGenerator(
     /// <summary>
     /// The database half, for ineligible sends only. With a map, the statics ride along (the
     /// static-containers send); without one they are omitted (the dynamic send). The LazyLoad
-    /// reads preserve today's semantics: a null StaticContainers/StaticLoot on the map throws
-    /// here, exactly where the old request builder threw.
+    /// reads keep a null StaticContainers/StaticLoot on a real map throwing here, as the old
+    /// request builder did; an unknown locationId (null map) used to NRE in C# and now surfaces
+    /// as a named native error instead.
     /// </summary>
     private LootViewsOverride BuildViewsOverride(Location? mapData)
     {

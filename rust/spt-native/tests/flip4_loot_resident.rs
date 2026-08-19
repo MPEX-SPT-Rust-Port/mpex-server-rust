@@ -286,6 +286,9 @@ fn a_resident_send_matches_the_override_send_and_a_wrong_epoch_is_stale() {
         String::from_utf8_lossy(&resident_sealed)
     );
 
+    // This override `itemsView` (3 entries) is a strict subset of the resident derived view (~9);
+    // byte-equality holds only because `rewardTypeLimits: {}` keeps the items-view-iterating
+    // reward pool cold — widen it in this fixture and the two arms iterate different pools.
     let override_sealed_request = format!(
         r#"{{"epoch":0,"viewsOverride":{{
             "itemsView":{{
