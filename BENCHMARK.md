@@ -97,6 +97,58 @@ total and locales is the worst root at 629.1 ms warm projection; a locales-only 
 ≈861 ms (629.1 projection + 232.3 typed parse; ≈0.97–1.01 s with a byte-proportional assembly
 share and the copy estimate), straddles the ~1 s bar, and every other root is far cheaper.
 
+## Phase 2 — write barriers
+
+Phase 2 branch — 2026-08-19. `Patches/Ceciler.WriteBarriers` prepends `WriteBarrier.Bump()` to the
+property setters of every DB model type reachable from the five roots `DbPublisher` publishes, so a
+mod writing game data dirties the resident DB with no hand-written call. Two costs to price: the
+barriers fire on every non-`init` setter during `SPT_Data` deserialization (startup), and any
+production path that writes into a published root on every pass buys a full five-root republish on
+the next native call (steady state).
+
+| measure | value |
+|---|---|
+| instrumented setters | 2891 |
+| startup, base (`5c94484`), median of 6 | 8.95 s |
+| startup, barriered, median of 6 | 9.37 s |
+| startup delta | **+0.42 s** (bar: ~2 s) |
+
+Startup is time from process start to the first `/health` answer, which is after `DatabaseImporter`
+— everything below `GameCallbacks` runs before Kestrel binds. Two sets of three runs per
+configuration, `SPT.Server` launched from its own Release output directory, base built into a
+separate worktree:
+
+```
+                run 1   run 2   run 3  |  run 4   run 5   run 6   median
+base (5c94484)  10.109   7.737   9.217 |   8.156   8.685   9.215     8.95
+barriered        9.850   9.114   9.427 |   9.322   8.261   9.642     9.37
+```
+
+The delta is smaller than the run-to-run spread of either configuration (base alone covers
+7.74–10.11 s), so it is well under the ~2 s bar. `DatabaseMutationStamp.BumpGlobal` keeps its
+`Interlocked.Increment`; the planned fallbacks (a plain `_current++`, then an `Armed` flag set after
+the initial import) are not needed and were not implemented.
+
+Steady state is gated by `WriteBarrierChurnTests` — a publish must not dirty the stamp it just read,
+and a settled ragfair pass must not force a republish. Both pass on Release.
+
+**Denylist entries added by the churn guard: none.** The two churning paths the guard and the
+existing suite found share one cause, and it is not a database write:
+
+| churn source | diagnosis | fix |
+|---|---|---|
+| `LocationLootGeneratorTests.GenerateLocationLootBeatsTheCSharpBaseline` — 1910 ms/call vs a 929.83 ms bar | every `GenerateStaticContainers` response deserialized fresh `SpawnpointTemplate`s, whose setters are barriered because the type is reachable from `LocationTable` | `WriteBarrier.Suppress()` around the decode in `SptNative.DecodeResult` |
+| `RepeatableQuestPathDispatchTests.ASecondUnchangedPassSkipsTheRepublish` — one epoch per pass | every repeatable-quest response deserialized a fresh quest, whose condition types are barriered because they are reachable from `TemplateTable.Quests` | as above |
+
+Deserializing a native response cannot reach an object a published root already points at, so those
+writes convey no freshness — the same argument the publish projection's suppression scope rests on.
+Denying the types instead would have meant denying the whole quest-template and loose-loot subgraph,
+which is precisely the coverage the barriers exist for. With the suppression in place the loot perf
+gate reads 328.59 ms mean over 10 runs (bar 929.83 ms) and the full Release suite is green.
+
+The three pre-existing denylist entries and their reasons live in `WriteBarriersPatch._denied`
+(`Item`, `BotBase`, `PmcDataRepeatableQuest` — all live per-request state).
+
 ## Methodology
 
 - Both paths run in one process against one live shipped database; the fixture asserts `LastPathTaken`
