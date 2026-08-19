@@ -11,6 +11,7 @@ using SPTarkov.Server.Core.Models.Enums;
 using SPTarkov.Server.Core.Models.Spt.Config;
 using SPTarkov.Server.Core.Models.Spt.Tables;
 using SPTarkov.Server.Core.Services.Locales;
+using SPTarkov.Server.Core.Services.Server;
 using SPTarkov.Server.Core.Utils;
 
 namespace SPTarkov.Server.Core.Services.Ragfair;
@@ -33,6 +34,41 @@ public class RagfairPriceService(
 )
 {
     protected Dictionary<MongoId, double>? StaticPrices;
+
+    private readonly DatabaseMutationStamp? _databaseMutationStamp;
+
+    /// <summary>
+    ///     The constructor the container uses: the frozen 4.1.2 one plus the mutation stamp the flea
+    ///     base price rewrite bumps. Additive and apicompat-verified.
+    /// </summary>
+    public RagfairPriceService(
+        ISptLogger<RagfairPriceService> logger,
+        TemplateTable templateTable,
+        HideoutTable hideoutTable,
+        RandomUtil randomUtil,
+        HandbookHelper handbookHelper,
+        TraderHelper traderHelper,
+        PresetHelper presetHelper,
+        ItemHelper itemHelper,
+        ServerLocalisationService serverLocalisationService,
+        RagfairConfig ragfairConfig,
+        DatabaseMutationStamp databaseMutationStamp
+    )
+        : this(
+            logger,
+            templateTable,
+            hideoutTable,
+            randomUtil,
+            handbookHelper,
+            traderHelper,
+            presetHelper,
+            itemHelper,
+            serverLocalisationService,
+            ragfairConfig
+        )
+    {
+        _databaseMutationStamp = databaseMutationStamp;
+    }
 
     /// <summary>
     ///     Exposed so the native ragfair projection can resolve the per-template highest trader
@@ -106,6 +142,10 @@ public class RagfairPriceService(
 
             pricePool.AddOrUpdate(itemTpl, newBasePrice);
         }
+
+        // The prices dictionary is mutated through an extension method, so no write barrier sees it
+        // (Phase 2: barriers cover setters, not container operations)
+        _databaseMutationStamp?.Bump();
     }
 
     /// <summary>

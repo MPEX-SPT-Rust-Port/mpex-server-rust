@@ -15,7 +15,14 @@ internal static class ResidentDbDispatch
             return false;
         }
 
-        return loadedModCount == 0 || trustWithMods;
+        if (loadedModCount == 0)
+        {
+            return true;
+        }
+
+        // Trusting a mod means trusting the write barriers to see what it writes. A build Ceciler
+        // never rewrote has none, so the flag cannot vouch for anything there (Phase 2).
+        return trustWithMods && WriteBarrier.Installed;
     }
 
     /// <summary>

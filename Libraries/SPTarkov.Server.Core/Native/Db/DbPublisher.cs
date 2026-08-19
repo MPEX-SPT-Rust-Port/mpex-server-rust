@@ -56,16 +56,27 @@ public class DbPublisher(
 
     private void PublishLocked(long stamp)
     {
-        // HandbookHelper's first use lazily writes ItemConfig.HandbookPriceOverride entries INTO
-        // templateTable.Handbook (HydrateHandbookCache). Force that hydration before the templates
-        // root is serialized, or a publish that lands first would ship a handbook missing the
-        // overrides. IsCategory is the cheapest public read that touches the cache without
-        // mutating it.
-        handbookHelper.IsCategory(Money.ROUBLES);
+        // Everything from here to the end of the envelope build writes into the tables it is about
+        // to serialize - HandbookHelper's lazy hydration below, and DbPayloadProjection's
+        // LazyLoad.Value materialisation - so the barriers stay silent for the duration. Those
+        // writes are in this payload by construction; letting them bump would make every publish
+        // dirty the stamp it just read. The exception is any mod-registered LazyLoad transformer
+        // that runs during projection - a transformer writing outside the value it transforms is
+        // invisible for the same reason a decode callback's writes are.
+        using (WriteBarrier.Suppress())
+        {
+            // HandbookHelper's first use lazily writes ItemConfig.HandbookPriceOverride entries INTO
+            // templateTable.Handbook (HydrateHandbookCache). Force that hydration before the templates
+            // root is serialized, or a publish that lands first would ship a handbook missing the
+            // overrides. IsCategory is the cheapest public read that touches the cache without
+            // mutating it.
+            handbookHelper.IsCategory(Money.ROUBLES);
 
-        _currentEpoch = SptNative.DbPublish(
-            DbPayloadProjection.BuildPublishEnvelope(templateTable, tradersTable, globalTable, locationTable, hideoutTable)
-        );
+            _currentEpoch = SptNative.DbPublish(
+                DbPayloadProjection.BuildPublishEnvelope(templateTable, tradersTable, globalTable, locationTable, hideoutTable)
+            );
+        }
+
         _lastPublishedStamp = stamp;
     }
 }

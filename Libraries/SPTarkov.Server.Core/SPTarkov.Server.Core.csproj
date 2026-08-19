@@ -40,6 +40,19 @@
     </Reference>
   </ItemGroup>
   <Target Name="AfterEverythingDone" AfterTargets="PostBuildEvent">
+    <!-- Run WriteBarriers patch (Phase 2). Must precede the ExtensionData patch: it walks property
+         setters, and ExtensionData's is injected, not authored. Same Release/publish gate as its
+         sibling - a Debug build has no barriers, which ResidentDbDispatch.Eligible accounts for. -->
+    <Exec
+      ConsoleToMsBuild="true"
+      Condition="'$(IsPublish)' == 'true' or '$(Configuration)' == 'Release'"
+      Command="dotnet build -c &quot;$(Configuration)&quot; &quot;$(MSBuildProjectDirectory)/../../Patches/Ceciler.WriteBarriers/Ceciler.WriteBarriers.csproj&quot;"
+    />
+    <Exec
+      Condition="'$(IsPublish)' == 'true' or '$(Configuration)' == 'Release'"
+      ConsoleToMsBuild="true"
+      Command="dotnet &quot;$(MSBuildProjectDirectory)/../../Ceciler/Ceciler.Launcher.dll&quot; &quot;$(OutDir)SPTarkov.Server.Core.dll&quot; &quot;$(MSBuildProjectDirectory)/../../Patches/Ceciler.WriteBarriers/bin/$(Configuration)/$(TargetFramework)/Ceciler.WriteBarriers.dll&quot;"
+    />
     <!-- Run ExtensionData patch -->
     <Exec
       ConsoleToMsBuild="true"

@@ -56,22 +56,36 @@ public class ItemBaseClassResidentDbTests
     public void ModsLoadedWithoutTheTrustFlagForceTheViewsOverride()
     {
         var di = DI.GetInstance();
+        var itemConfig = di.GetService<ItemConfig>();
         // The gate only reads Count, so a placeholder element stands in for a real mod
         var modded = new ItemBaseClassNativeRequestBuilder(
             di.GetService<TemplateTable>(),
-            di.GetService<ItemConfig>(),
+            itemConfig,
             new SptMod[] { null! },
             di.GetService<DbPublisher>()
         );
 
-        modded.Send();
+        itemConfig.TrustNativeRequestCacheWithMods = false;
+        try
+        {
+            modded.Send();
 
-        Assert.That(modded.LastSendIncludedViewsOverride, Is.True, "a loaded mod without the trust flag disables residency");
+            Assert.That(modded.LastSendIncludedViewsOverride, Is.True, "a loaded mod without the trust flag disables residency");
+        }
+        finally
+        {
+            itemConfig.TrustNativeRequestCacheWithMods = true;
+        }
     }
 
     [Test]
     public void TheTrustFlagKeepsTheResidentPathLiveWithModsLoaded()
     {
+        if (!WriteBarrier.Installed)
+        {
+            Assert.Ignore("write barriers are Ceciler-injected in Release builds only");
+        }
+
         var di = DI.GetInstance();
         var itemConfig = di.GetService<ItemConfig>();
         var modded = new ItemBaseClassNativeRequestBuilder(
@@ -94,7 +108,7 @@ public class ItemBaseClassResidentDbTests
         }
         finally
         {
-            itemConfig.TrustNativeRequestCacheWithMods = false;
+            itemConfig.TrustNativeRequestCacheWithMods = true;
         }
     }
 

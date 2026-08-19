@@ -6,6 +6,7 @@ using SPTarkov.Server.Core.Models.Eft.Ragfair;
 using SPTarkov.Server.Core.Models.Enums;
 using SPTarkov.Server.Core.Native.BaseClass;
 using SPTarkov.Server.Core.Native.Bot;
+using SPTarkov.Server.Core.Native.Db;
 using SPTarkov.Server.Core.Native.Loot;
 using SPTarkov.Server.Core.Native.Ragfair;
 using SPTarkov.Server.Core.Native.RepeatableQuests;
@@ -366,7 +367,18 @@ public static class SptNative
         {
             if (status == StatusOk)
             {
-                return decode((nint)outPtr, checked((int)outLen));
+                // A response decode is `JsonSerializer.Deserialize` into objects that do not exist
+                // yet, but plenty of them are the same model types the published roots are made of -
+                // a repeatable quest carries Quest's condition types, a spawn point carries
+                // SpawnpointTemplate. Barriered, every native call would dirty the stamp it just
+                // read and pay a five-root republish on the next one. Nothing here can reach an
+                // object a published root already points at, so the writes convey no freshness.
+                // Scoped to the calling thread: the framed-offers decode fans out to worker threads,
+                // which carry no barriered types today (RagfairOffer holds Item, and Item is denied).
+                using (WriteBarrier.Suppress())
+                {
+                    return decode((nint)outPtr, checked((int)outLen));
+                }
             }
 
             var message = outPtr == null ? "no message" : Encoding.UTF8.GetString(outPtr, checked((int)outLen));

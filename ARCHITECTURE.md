@@ -155,10 +155,18 @@ Two non-obvious steps run during build, both in `SPTarkov.Server.Core.csproj`:
 - `GenerateProgramStatics` writes `Utils/ProgramStatics.Generated.cs` from MSBuild properties
   (defaults in `Build.props`). Never edit it.
 - On Release/publish, `Tools/Ceciler` rewrites the compiled `SPTarkov.Server.Core.dll` with
-  Mono.Cecil, injecting a `[JsonExtensionData]` property into every type under `Models` so unknown
-  client JSON round-trips instead of being dropped. Release binaries therefore differ structurally
-  from Debug ones. No test asserts the rewrite itself; the native tests only pin the `#[serde(flatten)]
-  extra` contract that mirrors it.
+  Mono.Cecil. Two patch assemblies run, in this order: `Patches/Ceciler.WriteBarriers` prepends a
+  stamp bump to the property setters of the model types reachable from the resident DB's published
+  roots (a mod's game-data write then republishes without a hand-written call), then
+  `Patches/Ceciler.JsonExtensionData` injects a `[JsonExtensionData]` property into every type under
+  `Models` so unknown client JSON round-trips instead of being dropped. Order matters: the barrier
+  patch walks authored setters, and `ExtensionData`'s is injected. Release binaries therefore differ
+  structurally from Debug ones, and `WriteBarrier.Installed` — false in source, rewritten to true by
+  the barrier patch — is how production code tells the two apart (`ResidentDbDispatch.Eligible`
+  refuses to trust the resident DB with mods loaded where it is false). No test asserts the
+  `ExtensionData` rewrite itself; the native tests only pin the `#[serde(flatten)] extra` contract
+  that mirrors it, while the barrier patch has its own Release-only fixtures in
+  `Testing/UnitTests/Tests/Native/WriteBarrier*Tests`.
 
 `SPTarkov.Server.Assets` hashes `SPT_Data` into `checks.dat` on Release builds, which
 `DatabaseImporter` verifies at startup outside DEBUG. The format is a contract shared with
@@ -191,9 +199,10 @@ Only the bot family still projects its payload from the live database on every c
 family carries no call-invariant half at all: `DbPublisher` re-publishes the
 templates/traders/globals/locations/hideout roots into the native resident DB when
 `DatabaseMutationStamp` has moved, and each call carries just an epoch (a stale epoch self-heals by
-force-publish and one retry). Because a mod writing an injected table directly never reaches the
-stamp's bump sites, the resident path is gated on no mods being loaded, with opt-in and kill-switch
-flags per family; an ineligible caller ships the full views with every call instead.
+force-publish and one retry). Since Phase 2 the stamp's bump sites are mostly Ceciler-injected
+setter barriers, so a modded server rides the resident path too — `TrustNativeRequestCacheWithMods`
+defaults on, honoured only where the barriers were actually injected (Release and publish), with a
+per-family kill switch beside it; an ineligible caller ships the full views with every call instead.
 
 Native is not uniformly faster — several families are slower than the C# they replace and stay the
 default anyway, each with a force-legacy flag. The argument per family is in
