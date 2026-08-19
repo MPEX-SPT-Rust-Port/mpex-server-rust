@@ -5,6 +5,7 @@ using SPTarkov.Server.Core.Models.Spt.Config;
 using SPTarkov.Server.Core.Models.Spt.Mod;
 using SPTarkov.Server.Core.Models.Spt.Tables;
 using SPTarkov.Server.Core.Services.Locales;
+using SPTarkov.Server.Core.Services.Server;
 
 namespace SPTarkov.Server.Core.Services.Modding.Custom;
 
@@ -16,6 +17,24 @@ public class CustomQuestService(
     QuestConfig questConfig
 )
 {
+    private readonly DatabaseMutationStamp? _databaseMutationStamp;
+
+    /// <summary>
+    ///     The constructor the container uses: the frozen 4.1.2 one plus the mutation stamp a custom
+    ///     quest's table write bumps. Additive and apicompat-verified.
+    /// </summary>
+    public CustomQuestService(
+        TemplateTable templateTable,
+        LocaleTable localeTable,
+        ServerLocalisationService serverLocalisationService,
+        QuestConfig questConfig,
+        DatabaseMutationStamp databaseMutationStamp
+    )
+        : this(templateTable, localeTable, serverLocalisationService, questConfig)
+    {
+        _databaseMutationStamp = databaseMutationStamp;
+    }
+
     /// <summary>
     ///     Create a new custom quest from a NewQuestDetails object.
     /// </summary>
@@ -32,6 +51,11 @@ public class CustomQuestService(
             result.Errors.Add(serverLocalisationService.GetText("custom-quest-service_quest_id_already_exists", quest.Id));
             return result;
         }
+
+        // The quest table is mutated through TryAdd, so no write barrier sees it (Phase 2: barriers
+        // cover setters, not container operations). Bumped here rather than on the way out so the
+        // early returns below cannot leave an added quest unannounced
+        _databaseMutationStamp?.Bump();
 
         var locales = newQuestDetails.Locales;
         if (locales.Count == 0)
