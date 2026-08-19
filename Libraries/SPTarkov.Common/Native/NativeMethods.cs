@@ -65,4 +65,38 @@ internal static partial class NativeMethods
 
     [LibraryImport(LibraryName, EntryPoint = "spt_buf_free")]
     internal static partial void BufFree(nint ptr, nuint len);
+
+    [LibraryImport(LibraryName, EntryPoint = "spt_console_write")]
+    internal static partial int ConsoleWrite(ReadOnlySpan<byte> bytes, nuint bytesLen, int toStdErr);
+
+    [LibraryImport(LibraryName, EntryPoint = "spt_console_read_line")]
+    internal static partial int ConsoleReadLine(out nint outPtr, out nuint outLen);
+
+    [LibraryImport(LibraryName, EntryPoint = "spt_console_set_title")]
+    internal static partial int ConsoleSetTitle(ReadOnlySpan<byte> titleUtf8, nuint titleLen);
+
+    [LibraryImport(LibraryName, EntryPoint = "spt_console_clear")]
+    internal static partial int ConsoleClear();
+
+    // Tri-state, not a status code: 1 enabled, 0 disabled, -1 no pipeline (fall back to the C#
+    // configuration object).
+    [LibraryImport(LibraryName, EntryPoint = "spt_log_enabled")]
+    internal static partial int LogEnabled(int level);
+
+    [LibraryImport(LibraryName, EntryPoint = "spt_log_format")]
+    internal static partial int LogFormat(
+        ReadOnlySpan<byte> formatUtf8,
+        nuint formatLen,
+        ReadOnlySpan<byte> messageUtf8,
+        nuint messageLen,
+        ReadOnlySpan<byte> loggerUtf8,
+        nuint loggerLen,
+        ReadOnlySpan<byte> threadNameUtf8,
+        nuint threadNameLen,
+        int level,
+        int threadId,
+        long unixMillis,
+        out nint outPtr,
+        out nuint outLen
+    );
 }
