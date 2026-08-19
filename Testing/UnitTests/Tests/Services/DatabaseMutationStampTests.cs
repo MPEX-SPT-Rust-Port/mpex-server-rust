@@ -24,7 +24,9 @@ public class DatabaseMutationStampTests
 
         stamp.Bump();
 
-        Assert.That(stamp.Current, Is.EqualTo(before + 1));
+        // The counter is process-global since Phase 2 (the injected barriers have no container to
+        // reach), so assert movement, never an exact value - the house rule for epochs applies here now
+        Assert.That(stamp.Current, Is.GreaterThan(before));
     }
 
     [Test]
