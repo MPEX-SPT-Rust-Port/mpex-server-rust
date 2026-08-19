@@ -35,7 +35,7 @@ the mold linker on Linux. Both profiles use one codegen unit; release adds fat L
 
 | Path | Role |
 |---|---|
-| `src/lib.rs` | Module roots and `ABI_VERSION` (currently 26; must equal `SptNative.ExpectedAbiVersion`) |
+| `src/lib.rs` | Module roots and `ABI_VERSION` (currently 27; must equal `SptNative.ExpectedAbiVersion`) |
 | `src/ffi.rs` | The C-ABI surface. The **only** module containing `unsafe` |
 | `src/runtime.rs` | Process-wide multi-thread tokio runtime, `OnceLock`-built. Used only by `verify` |
 | `src/verify.rs` | Hashes `SPT_Data` with XXH3-128 and diffs it against `checks.dat` |
@@ -43,7 +43,7 @@ the mold linker on Linux. Both profiles use one codegen unit; release adds fat L
 | `src/logger.rs` | The log pipeline: `sptLogger.json`, filters, level gates, per-target formatting — and the console sink |
 | `src/log_sink.rs` | The file sink alone: where a formatted line lands on disk, with its rotation and archiving |
 | `src/diag.rs` | The generator families' way into that pipeline: the locale table, the render, and `DiagSink` |
-| `src/db.rs` | The resident DB: the epoch-versioned store of published roots (templates, traders, globals, locations, hideout); a publish re-derives the ragfair and quest views |
+| `src/db.rs` | The resident DB: the epoch-versioned store of published roots (templates, traders, globals, locations, hideout); a publish re-derives the ragfair, quest and bot views |
 | `src/db/models.rs` | The publish envelope's wire types |
 | `src/loot/` | Location loot (static containers, loose loot) and reward loot (airdrops, cases, containers) |
 | `src/bot/` | One bot's entire inventory: equipment, mods, weapons, magazines, loot |
@@ -75,21 +75,32 @@ C# SptNative → spt_generate_* (JSON in)
   rather than emit one JSON document; quest and scav case do so for their own error types.
   `spt_verify_database` is separate because it blocks on the tokio runtime.
 - Status codes: `STATUS_OK` 0, `STATUS_BAD_ARGS` 1 (null pointer, bad UTF-8, unparseable JSON), `STATUS_PANIC`
-  2 (message in the out-buffer since ABI 18), `STATUS_ERROR` 3, `STATUS_STALE_EPOCH` 4 (the resident-DB
-  riders only: ragfair, quest, base-class, linked-items, the six loot exports, and scav case). **Quest and scav case never return 2**: they catch the generator's panic themselves and report it as
+  2 (message in the out-buffer since ABI 18), `STATUS_ERROR` 3, `STATUS_STALE_EPOCH` 4 — since flip #6
+  every one of the thirteen generation exports. **Quest and scav case never return 2**: they catch
+  the generator's panic themselves and report it as
   3 carrying the message, because those families port a C#-sanctioned throw as a panic — a generation failure,
   not a library bug. The cost is that a real port bug in those two also arrives as 3, indistinguishable from a
   sanctioned failure. Deliberate.
-- **Seven families ride the resident DB: ragfair, the repeatable quest, the two startup one-shots
-  (base-class cache, linked-item table), the loot pair — location loot and reward loot — and the
-  scav case.** `spt_db_publish` (called by C#'s
+- **Every family rides the resident DB (Phase 1 complete, flip #6/ABI 27): ragfair, the repeatable
+  quest, the two startup one-shots (base-class cache, linked-item table), the loot pair — location
+  loot and reward loot — the scav case, and the bot family's two exports.** `spt_db_publish` (called by C#'s
   `DbPublisher` whenever `DatabaseMutationStamp` has moved) makes the templates, traders, globals,
   locations and hideout roots resident in `db.rs` — every root optional, an absent one keeping the resident copy, and
   the epoch bumping on full and partial publishes alike; a bad schema or a failed view derivation aborts
-  before the swap, leaving the previous resident DB intact. It derives ragfair's and quest's views at publish
-  time — the quest views
+  before the swap, leaving the previous resident DB intact. It derives ragfair's, quest's and the bot
+  family's views at publish
+  time, in that order, because the later gates take the earlier one's output: `ragfair_views` needs
+  templates + traders + globals, `quest_views` needs templates + globals + locations + the finished
+  `ragfair_views`, `bot_views` needs templates + globals + `ragfair_views`. A gate that is not met
+  leaves that entry `None` and the families reading it answer `STATUS_STALE_EPOCH`. The quest views
   share `items`/`handbookPrices`/`fleaPrices` with ragfair's through one `Arc`; the quest-own views
-  (`quest/views.rs`) derive off the same publish. The locations root carries `Base` + `AllExtracts` plus
+  (`quest/views.rs`) derive off the same publish. `BotDbViews` (`bot/views.rs`) holds the whole
+  `RagfairDbViews` by `Arc` the same way and adds exactly two derivations of its own —
+  `default_preset_ids_by_tpl` (ragfair's `default_presets_by_tpl` re-keyed to each preset's own id)
+  and `exp_table` (`globals.config.exp.level.exp_table[].exp`). The mod-pool slot order is
+  deliberately **not** a view: it is the enumeration order of a live C# `ConcurrentDictionary`, not a
+  function of the database, so it rides the varying block on both arms.
+  The locations root carries `Base` + `AllExtracts` plus
   (flip #4) the three statics lifts — `staticLoot`, `staticContainers`, `statics`, serialized from each
   `LazyLoad.Value` so registered transformers are applied; `looseLoot` and `staticAmmo` never serialize —
   keyed by the locations' `JsonPropertyName` strings (a null `AllExtracts` ships as `[]`). Ragfair, quest
@@ -105,7 +116,15 @@ C# SptNative → spt_generate_* (JSON in)
   (`spt_generate_scav_case_rewards` — flip #5, ABI 26) arrives the same way and borrows ragfair's
   `items`/`handbookPrices`/`defaultPresetsByTpl`; its recipe views derive at request time from the
   hideout root — `production.scavRecipes` only, the flip's one root addition (see *src/scav_case/*).
-  The one-shot requests
+  The two bot requests (`spt_generate_bot_inventory`, `spt_generate_bot_inventory_batch` — flip #6,
+  ABI 27) arrive as `{epoch, viewsOverride?, shared, …}` — single-bot adding `bot`, `template` and
+  `lootPools`, the batch adding `bots[]` and carrying its templates as `shared.templateVariants`
+  instead — and borrow `BotDbViews`: ragfair's `items` and `itemPresets` through the embedded `Arc`,
+  the bot-own `defaultPresetIdsByTpl` and `expTable`, and ragfair's `handbookPrices`. One
+  `resolve_bot_views` serves both, so a stale epoch answers identically before either draws. The
+  filtered `template`/`lootPools` are permanently varying — they are the C# caller's own product
+  (`BotEquipmentFilterService` + `BotLootCacheService`, run per level band), not a database view —
+  as is `modPoolSlotOrder`, live `BotEquipmentModPoolService` state. The one-shot requests
   (`spt_build_item_base_class_cache`, `spt_build_ragfair_linked_item_table` — flip #3, ABI 24) arrive as
   `{epoch, viewsOverride?}` — no varying block, the whole pre-flip payload was invariant — and derive
   their walk input from the resident templates root at request time, deliberately **not** from the ragfair
@@ -114,7 +133,7 @@ C# SptNative → spt_generate_* (JSON in)
   returns `STATUS_STALE_EPOCH` and the C# caller force-publishes and retries once. An ineligible caller
   (mods loaded without trust, or the kill switch) sends `viewsOverride` with `epoch: 0` instead — a
   documented wire contract, not runtime-enforced — used for that call only, never made resident. The
-  resident roots are the only request data held across calls (ABI 26).
+  resident roots are the only request data held across calls (ABI 27).
 - **A buffer is written on failure too** — the parse error, the `LootError` message, or the panic text.
   Ownership is decided by the out-pointer being non-null, never by the status code. `spt_verify_database`'s
   free-on-success-only shape must not be copied into the generators.
@@ -189,6 +208,8 @@ fields — `config`, `seasonal`, `lootableItemBlacklist`, `moneyTpls`, the rewar
 
 `mod.rs` defines `BotContext<'a>` — the read-only views (items, presets, blacklists, durability config,
 equipment filters…) one generation run borrows, plus its `DiagSink`. The bot family's analog of `LootContext`.
+It also owns `BotViews`, the two-arm enum every DB-derived read goes through (`Resident(Arc<BotDbViews>)`
+or `Override(Box<BotViewsWire>)`), and `resolve_bot_views`, shared by both exports — see *FFI boundary*.
 
 | Module | Stands in for | What it does |
 |---|---|---|
@@ -201,9 +222,10 @@ equipment filters…) one generation run borrows, plus its `DiagSink`. The bot f
 | `bot_weapon_generator_helper.rs` | `Helpers/Bot/BotWeaponGeneratorHelper.cs` | Magazine and bullet counts, magazine+ammo item pairs |
 | `inventory_mag_gen.rs` | `Generators/Weapons/*` | The four `IInventoryMagGen` strategies, collapsed into one enum with a fixed dispatch order |
 | `durability_limits_helper.rs` | `Helpers/Bot/DurabilityLimitsHelper.cs` | Weapon/armor durability rolls |
-| `mod_pool_service.rs` | `Services/Bot/BotEquipmentModPoolService.cs` | Slot mod pools, derived per call instead of cached, drawn in the projected C# enumeration order (`modPoolSlotOrder`) |
+| `mod_pool_service.rs` | `Services/Bot/BotEquipmentModPoolService.cs` | Slot mod pools, derived per call instead of cached, drawn in the projected C# enumeration order (`modPoolSlotOrder`, on the varying block — see `views.rs`) |
 | `repair_service.rs` | `Services/Commerce/RepairService.cs` | Only `AddBuff`, the one slice bot generation reaches |
 | `exhaustable_array.rs` | `Utils/Collections/ExhaustableArray.cs` | Draw-without-replacement |
+| `views.rs` | — | Publish-time derivation of `BotDbViews` from the resident roots in `src/db.rs`, embedding `RagfairDbViews` by `Arc` (see *FFI boundary*) |
 | `models.rs` | `Models/…` | Wire types |
 
 ## `src/ragfair/`

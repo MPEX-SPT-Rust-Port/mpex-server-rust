@@ -8,7 +8,7 @@ runs them. There are no `cargo bench` targets.
 |---|---|
 | `LootBenchmarkTests.cs` | location loot — elapsed time per call, allocation, peak RSS |
 | `RewardLootBenchmarkTests.cs` | airdrop loot — elapsed time per call |
-| `BotBenchmarkTests.cs` | one bot's inventory — elapsed time per bot, payload projection timed separately |
+| `BotBenchmarkTests.cs` | one bot's inventory — elapsed time per bot, the resident arm's payload projection timed separately |
 | `RagfairBenchmarkTests.cs` | a dynamic flea offer pass — elapsed time per pass, views-override projection and forced publish timed separately |
 | `RepeatableQuestBenchmarkTests.cs` | one repeatable quest of each type — elapsed time per quest, publish cold/warm and views-override projection timed separately |
 | `ScavCaseBenchmarkTests.cs` | one scav case of each shipped recipe — elapsed time per call, publish cold/warm and the override projections timed separately |
@@ -252,6 +252,58 @@ while the native totals held, so the phase split recorded then — `BuildRequest
 21.6 ms, Rust deserialise 14.9 ms, Rust generation 2.9 ms, FFI + result deserialise ~1.4 ms — no
 longer adds up and has not been re-measured.
 
+`9011794` — 2026-08-19, post resident-DB flip (phase 1 flip #6, ABI 27). Same fixture shape and
+workload. The native arm now rides the resident DB: `DbPublisher.EnsureCurrent` publishes the five
+roots once (absorbed in warmup — this flip added no root) and every timed call sends
+`{epoch, shared, bot, template, lootPools}`. What left the wire is the whole database half — the
+items table, the `ItemPresets` map, the default-preset ids and the loot pools' handbook prices —
+which now lives on the resident `BotDbViews`: the ragfair views by `Arc`, plus two bot-own
+derivations at publish (`defaultPresetIdsByTpl`, `expTable`). What still crosses per call is the
+shared varying block (config, blacklists, the equipment filters, and the mod-pool slot order —
+live `BotEquipmentModPoolService` state, not a database view, so it rides both arms), the bot's
+slice, and the caller's pre-filtered `template`/`lootPools`. `BuildRequest` therefore times the
+*resident* arm's projection now — the ineligible arm's extra cost is `BuildViewsOverride` on top of
+it.
+
+| Role | Path | median | median (2nd run) | mean | min | max |
+|---|---|---|---|---|---|---|
+| assault | native (rust, resident db) | **13.19 ms** | 13.07 ms | 14.04 ms | 12.57 ms | 18.14 ms |
+| assault | legacy (C# 4.1.2) | 2.19 ms | 2.47 ms | 2.69 ms | 0.66 ms | 8.07 ms |
+| assault | `BuildRequest` (resident arm) | 6.06 ms | 6.01 ms | 6.16 ms | 4.47 ms | 9.33 ms |
+| usec | native (rust, resident db) | **14.24 ms** | 15.41 ms | 14.14 ms | 9.72 ms | 20.00 ms |
+| usec | legacy (C# 4.1.2) | 1.38 ms | 1.50 ms | 2.61 ms | 0.99 ms | 17.56 ms |
+| usec | `BuildRequest` (resident arm) | 7.69 ms | 8.03 ms | 8.47 ms | 3.47 ms | 20.51 ms |
+
+Speedup: **0.17x** assault (0.19x), **0.10x** usec (0.10x), against the pre-flip **0.02x** for both.
+Projection share of the native median: **46.0%** (assault), **54.0%** (usec); 46.0% / 52.1% on the
+second invocation. Against the pre-flip `06825b3` medians the native arm shed 77.1 ms of 90.32
+(assault, **6.85x**) and 41.7 ms of 55.98 (usec, **3.93x**) — the flip's claim, and the largest
+*absolute* per-call saving Phase 1 produced (scav case's 23.4x is the bigger ratio, off a 39 ms
+base). The projection itself fell 17.46 → 6.06 ms (assault, 2.88x)
+and 15.82 → 7.69 ms (usec, 2.06x); it is now roughly half the native call rather than a fifth,
+because the part that shrank is the part it used to dominate. The remaining ~13-14 ms is the
+varying block's build and serialise, the template and loot-pool projection, the FFI round trip and
+the native generation, unsplit by this fixture — bots stay slower than the ~1.4-2.5 ms of legacy
+C#, and `BotConfig.ForceLegacyBotGeneration` remains the opt-out. Legacy drifted up against its own
+pre-flip reading (1.99 → 2.19 assault, 1.29 → 1.38 usec) on unchanged code, which is the noise bar
+these medians are read against.
+
+Wire volume, one `pmcUSEC` bot: **589,344 bytes (0.56 MiB)** on the eligible arm against
+**4,208,129 bytes (4.01 MiB)** with the views override — **7.1x**. Of what remains, the mod-pool
+slot order is 26,428 bytes (25.8 KiB), the single largest member still crossing per call and the
+one the Phase 2/4 carve-out is holding. (Measured once off
+`BotPayloadProjection.BuildRequest(...)` serialised with and without
+`BuildViewsOverride`; no committed fixture reports it — `BotPayloadSizeTests` pins the *override*
+arm's budget by design, since that is the wire a regression would inflate.)
+
+Forced publish, the first eligible send's cost, never averaged into the medians above: **732.90 –
+745.08 ms** median across the five recipes of `ScavCaseBenchmarkTests`' publish-cold arm (cold −
+warm: 731.30 – 743.23 ms), against flip #5's 733.68 – 744.80 ms on the same fixture. Unchanged
+within noise: this flip added no root, and `BotDbViews`' derivation is an `IndexMap` re-key plus one
+`Select` over the exp table. No bot fixture has a publish arm — both bot fixtures absorb the publish
+in warmup — so the number is read off the scav case fixture, which republishes all five roots per
+timed run.
+
 ### Batched wave
 
 `ae325d8` — 2026-08-18, after the level fold (ABI 22). `BotBatchTests.WaveCostPerBot`, medians of 5
@@ -283,6 +335,43 @@ shared block is now effectively **100%** of the request, where before the fold i
 one segment, one copy of everything, the same bytes as before the fold. Its timing still moves run to
 run like every other row here (42.72 → 46.76 ms across the two dates, against unchanged-code arms
 that drifted as much) - the construction claim is not a claim that the number holds.
+
+`9011794` — 2026-08-19, post resident-DB flip (phase 1 flip #6, ABI 27). Same fixture shape and
+workload. **All three arms still send the views override** (`epoch: 0`): what `WaveCostPerBot`
+exists to measure is batch-vs-per-bot equivalence, not residency, so it holds the database half
+constant on both sides of the comparison — the resident/override equivalence gate is
+`BotResidentDbTests`. Read this table as the *ineligible* (modded, untrusted) server's wave cost,
+and the single-bot block above as the eligible one.
+
+| wave | serial per-bot | `.AsParallel()` per-bot | batched (rayon) | batched vs parallel |
+|---|---|---|---|---|
+| 45 | 46.34 / 46.50 ms | 13.97 / 14.33 ms | **1.85 / 1.65 ms** | 7.55x / 8.70x |
+| 20 | 47.03 / 47.49 ms | 13.55 / 12.96 ms | **3.72 / 2.86 ms** | 3.64x / 4.53x |
+| 10 | 46.44 / 46.52 ms | 13.08 / 12.94 ms | **5.33 / 5.10 ms** | 2.45x / 2.54x |
+| 5 | 46.47 / 46.22 ms | 14.06 / 14.46 ms | **10.34 / 10.68 ms** | 1.36x / 1.35x |
+| 1 | 44.31 / 41.63 ms | 43.91 / 45.01 ms | **49.13 / 48.52 ms** | 0.89x / 0.93x |
+
+All figures ms per bot; request bytes per bot unchanged at 3.81 MiB single-bot against 0.08 (wave
+45), 0.19 (20), 0.38 (10), 0.76 (5) MiB batched — the override arm's wire did not move, because
+every member the flip touched was renamed or re-parented, not added or dropped: the database half
+became `viewsOverride`, the rest became `SharedBotVarying`, and `modPoolSlotOrder` went with it.
+Every column here is within `ae325d8`'s spread on unchanged code, which is what the flip predicts
+for this fixture.
+
+The eligible wave's wire is the number this table cannot show, measured off the same projection as
+the single-bot figure above (`pmcUSEC`, one level band):
+
+| wave | resident per-bot | views-override per-bot |
+|---|---|---|
+| 45 | **13,341 B (0.013 MiB)** | 93,758 B (0.089 MiB) |
+| 20 | **29,707 B (0.028 MiB)** | 210,647 B (0.201 MiB) |
+| 10 | **59,167 B (0.056 MiB)** | 421,046 B (0.402 MiB) |
+| 5 | **118,087 B (0.113 MiB)** | 841,844 B (0.803 MiB) |
+| 1 | **589,444 B (0.562 MiB)** | 4,208,229 B (4.013 MiB) |
+
+A flat **7.0-7.1x** across every wave size, which is what "the shared block is effectively 100% of
+the request" implies: the flip shrank that block, and the slice was already noise. At wave 45 an
+eligible server crosses 13 KB per bot where the pre-flip wire crossed 94 KB.
 
 ## Ragfair offer generation
 
