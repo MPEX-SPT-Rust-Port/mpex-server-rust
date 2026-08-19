@@ -90,12 +90,12 @@ entry and the inherited `ValueType.ToString()`. Scope is `Color` only — mods t
   case) per generator instance and effectively never invalidates; Rust re-derives per call
   (override sends only since flips #1/#5 — the eligible path is fresh-per-publish; see the flip
   ledgers).
-- **An un-stamped table mutation is invisible to ragfair and the repeatable quests** — the
-  resident-DB families read roots republished only when `DatabaseMutationStamp` moves, and the
+- **An un-stamped table mutation is invisible to the resident-DB families** — they
+  read roots republished only when `DatabaseMutationStamp` moves, and the
   stamp is bumped from five sites only (`SeasonalEventService.UpdateGlobalEvents`,
   `ItemFilterService`'s two blacklist `Add*` methods, `CustomItemService`'s two `Create*`
   methods, plus the `CanSellOnRagfair` replay bump). A mod writing an injected table's
-  dictionaries directly bumps nothing, so its edits do not reach either family until some other
+  dictionaries directly bumps nothing, so its edits do not reach any resident family until some other
   stamped mutation forces a publish. By design — the mods-off eligibility gate carries the weight
   until Phase 2 (guideline 3, and the *Flip #1/#2 ledgers*).
 - **The item base-class and linked-item cache *keys* differ** — legacy stores under `item.Id`
@@ -450,7 +450,7 @@ only (`ScavCaseRewardGenerator`, `HideoutController`) and no lazy writer into
 delta for the flip (`git diff --stat a9a224f..ed0144d -- Libraries/SPTarkov.Server.Core/Native/`):
 +110/−30 lines across 5 files — growth like flips #3/#4, because the pre-flip payload *was* the
 per-call projection, which survives intact: `BuildViewsOverride()` is the ineligible arm, and
-`Build(recipeId, testSeed)` survives as a three-line epoch-0 composition for the protected
+`Build(recipeId, testSeed)` survives as a three-line epoch-0 composition for the public
 benchmark seam; what was added is the `{epoch, viewsOverride?, varying}` split and the hideout
 projection in `DbPayloadProjection`.
 
