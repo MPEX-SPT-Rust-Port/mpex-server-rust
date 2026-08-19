@@ -133,10 +133,12 @@ Seven `ForceLegacy*` flags are the Rust-port escape hatches, one per dual-path f
 `RagfairConfig.ForceLegacyRagfairGeneration`, `RagfairConfig.ForceLegacyRagfairLinkedItemBuild`,
 `QuestConfig.ForceLegacyRepeatableQuestGeneration`, `ScavCaseConfig.ForceLegacyScavCaseGeneration`
 and `ItemConfig.ForceLegacyItemBaseClassHydration`. Narrower knobs:
-`BotConfig.ForcePerBotGeneration` (unbatch waves without leaving native) and, on the five configs
+`BotConfig.ForcePerBotGeneration` (unbatch waves without leaving native) and, on the six configs
 backing the resident-DB families (`LocationConfig`, `ItemConfig`, `ScavCaseConfig`, `QuestConfig`,
-`RagfairConfig`), `TrustNativeRequestCacheWithMods` / `DisableNativeRequestCache` — the names are
-legacy, they now gate resident-DB eligibility rather than a request cache.
+`RagfairConfig`, `BotConfig`), `TrustNativeRequestCacheWithMods` / `DisableNativeRequestCache` —
+the names are legacy, they now gate resident-DB eligibility rather than a request cache. Since
+Phase 2 `TrustNativeRequestCacheWithMods` defaults **on**, and is honoured only in a build carrying
+the Ceciler write barriers (Release or publish, never Debug).
 
 ### JSON layer (`Utils/Json/`, 23 files)
 
