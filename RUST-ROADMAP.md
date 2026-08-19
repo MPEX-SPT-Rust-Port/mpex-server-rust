@@ -399,7 +399,7 @@ written against, not the current file.
    Then Phase 2 (Ceciler write barriers, which retires the mods-off eligibility gate and flips
    `TrustNativeRequestCacheWithMods` default-on), Phase 3 (Rust loads `SPT_Data`), Phase 4
    (configs join the resident set, closing the runtime-config ceiling flip #1's ledger records),
-   Phase 5 (profile persistence) and Phase 6 (process inversion: a `spt-server` bin crate hosts
+   Phase 5 (profile persistence) and Phase 6 (process inversion: an `mpex-server` bin crate hosts
    the CLR via `netcorehost`, making Rust the executable). Phase 6a — a thin `run_app` bootstrap
    that must **not** link `spt-native` (the spec's split-brain rule) — is independent of every
    other phase and can land any time; 6b (the delegate-loader shim flip, where the resident DB's
