@@ -39,7 +39,7 @@ pub struct ScavCaseRequest {
     pub reward_item_blacklist: HashSet<String>,
     /// `itemFilterService.IsBossItem` (`:124,179`).
     pub boss_items: HashSet<String>,
-    /// Test-only, as [`crate::loot::models::RewardLootDb::test_seed`].
+    /// Test-only, as [`crate::loot::models::RewardLootVarying::test_seed`].
     pub test_seed: Option<u64>,
 }
 

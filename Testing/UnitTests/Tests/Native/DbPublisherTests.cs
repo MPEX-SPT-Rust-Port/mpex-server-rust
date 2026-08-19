@@ -31,7 +31,7 @@ public class DbPublisherTests
     }
 
     [Test]
-    public void BuildPublishEnvelopeCarriesTheBaseOnlyLocationsRoot()
+    public void BuildPublishEnvelopeCarriesTheStaticsBearingLocationsRoot()
     {
         var di = DI.GetInstance();
         var locationTable = di.GetService<LocationTable>();
@@ -48,21 +48,27 @@ public class DbPublisherTests
 
         // A known map serializes under its wire key with its own base — the raw-table key the
         // Rust quest derives look up.
-        var factoryBase = locations.GetProperty("factory4_day").GetProperty("base");
+        var factory = locations.GetProperty("factory4_day");
         Assert.That(
-            factoryBase.GetProperty("Id").GetString(),
+            factory.GetProperty("base").GetProperty("Id").GetString(),
             Is.EqualTo(locationTable.GetLocation("factory4_day")!.Base.Id),
             "factory4_day base must round-trip the table's own LocationBase"
         );
 
-        // Base + AllExtracts only, by construction: LazyLoad members (looseLoot, staticLoot,
-        // staticContainers) must never serialize, and no entry may carry anything else.
+        // Flip #4: a loot-bearing entry carries the three statics the loot family reads.
+        Assert.That(factory.GetProperty("staticLoot").ValueKind, Is.EqualTo(JsonValueKind.Object));
+        Assert.That(factory.GetProperty("staticContainers").ValueKind, Is.EqualTo(JsonValueKind.Object));
+        Assert.That(factory.GetProperty("statics").ValueKind, Is.EqualTo(JsonValueKind.Object));
+
+        // Base + AllExtracts + the three statics, by construction: looseLoot must never serialize
+        // (549 MiB resident was rejected), staticAmmo stays a per-call parameter, and no entry may
+        // carry anything else.
         foreach (var location in locations.EnumerateObject())
         {
             Assert.That(
                 location.Value.EnumerateObject().Select(member => member.Name),
-                Is.EquivalentTo(new[] { "base", "allExtracts" }),
-                $"locations[{location.Name}] must carry base + allExtracts only"
+                Is.EquivalentTo(new[] { "base", "allExtracts", "staticLoot", "staticContainers", "statics" }),
+                $"locations[{location.Name}] must carry base + allExtracts + the three statics only"
             );
         }
     }

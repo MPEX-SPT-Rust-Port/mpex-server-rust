@@ -9,11 +9,15 @@
 //! carries `#[serde(default)]`: a partial or junk root (the store tests publish `{"a":1}`)
 //! deserializes with empty containers and derivation stays total over it.
 
+use std::collections::HashMap;
+
 use indexmap::{IndexMap, IndexSet};
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::loot::models::Item;
+use crate::loot::models::{
+    Item, SpawnpointTemplate, StaticContainer, StaticContainerData, StaticForced, StaticLootDetails,
+};
 use crate::quest::models::{LevelledItemFilter, RepeatableTemplates};
 
 /// `{"schema":1,"roots":{...}}` — the envelope `DbPayloadProjection` (C#) writes.
@@ -183,8 +187,12 @@ pub struct LocationsRoot {
     pub locations: IndexMap<String, LocationEntry>,
 }
 
-/// One value of the locations dictionary root — `Models/Eft/Common/Location.cs`. Only the two
-/// members the repeatable-quest projection reads are typed; the loot members ride in `extra`.
+/// One value of the locations dictionary root — `Models/Eft/Common/Location.cs`. Typed members:
+/// the two the repeatable-quest projection reads, plus the three statics the loot flip reads
+/// (published as each `LazyLoad.Value`, transformers applied — flip #4). `looseLoot` is
+/// deliberately NOT lifted (549 MiB resident; the per-call splice is retained until Phase 3) and
+/// `staticAmmo` stays a public-API parameter — both would ride in `extra` if published, but the
+/// `DbPayloadProjection` (C#) publish deliberately omits them; only test fixtures land them there.
 #[derive(Debug, Deserialize)]
 pub struct LocationEntry {
     /// `Location.Base` (`Location.cs:12-13`). `Option` keeps the parse total — the table's
@@ -194,6 +202,29 @@ pub struct LocationEntry {
     /// what `BuildExtractsByLocation` projects (`RepeatableQuestNativeRequestBuilder.cs:231`).
     #[serde(rename = "allExtracts", default)]
     pub all_extracts: Vec<ExitSourceView>,
+    /// `Location.StaticLoot` (`Location.cs:24-25`).
+    #[serde(rename = "staticLoot")]
+    pub static_loot: Option<HashMap<String, StaticLootDetails>>,
+    /// `Location.StaticContainers` (`Location.cs:30-31`).
+    #[serde(rename = "staticContainers")]
+    pub static_containers: Option<StaticContainerDetailsWire>,
+    /// `Location.Statics` (`Location.cs:39-40`).
+    #[serde(rename = "statics")]
+    pub statics: Option<StaticContainer>,
+    #[serde(flatten)]
+    pub extra: IndexMap<String, Value>,
+}
+
+/// `StaticContainerDetails` (`Location.cs:106-116`). All three `Option`: the C# members are
+/// nullable `IEnumerable`s and the generator logs a map-specific error per missing list.
+#[derive(Debug, Deserialize)]
+pub struct StaticContainerDetailsWire {
+    #[serde(rename = "staticWeapons")]
+    pub static_weapons: Option<Vec<SpawnpointTemplate>>,
+    #[serde(rename = "staticContainers")]
+    pub static_containers: Option<Vec<StaticContainerData>>,
+    #[serde(rename = "staticForced")]
+    pub static_forced: Option<Vec<StaticForced>>,
     #[serde(flatten)]
     pub extra: IndexMap<String, Value>,
 }
@@ -604,6 +635,38 @@ mod tests {
         assert!(base.extra.contains_key("OpenZones"));
         assert!(base.boss_location_spawn[0].extra.contains_key("BossChance"));
         assert!(exit.extra.contains_key("ExfiltrationTime"));
+    }
+
+    #[test]
+    fn location_entry_lifts_the_statics_and_keeps_loose_loot_in_extra() {
+        let root: LocationsRoot = serde_json::from_str(
+            r#"{"bigmap":{
+                "base": {"Id": "bigmap"},
+                "allExtracts": [],
+                "looseLoot": {"spawnpointCount": {"mean": 1.0}},
+                "staticLoot": {"tpl1": {"itemcountDistribution": [], "itemDistribution": []}},
+                "staticContainers": {"staticWeapons": [], "staticContainers": [], "staticForced": []},
+                "statics": {"containersGroups": {}, "containers": {}},
+                "staticAmmo": {}
+            }}"#,
+        )
+        .unwrap();
+
+        let entry = &root.locations["bigmap"];
+        assert!(entry.static_loot.as_ref().unwrap().contains_key("tpl1"));
+        assert!(
+            entry
+                .static_containers
+                .as_ref()
+                .unwrap()
+                .static_weapons
+                .is_some()
+        );
+        assert!(entry.statics.is_some());
+        // looseLoot is deliberately NOT lifted (flip #4 decision: per-call splice retained) —
+        // it still rides extra, as does staticAmmo (public-API parameter, stays varying).
+        assert!(entry.extra.contains_key("looseLoot"));
+        assert!(entry.extra.contains_key("staticAmmo"));
     }
 
     #[test]

@@ -9,7 +9,8 @@ namespace SPTarkov.Server.Core.Native.Db;
 
 /// <summary>
 /// The full-table publish envelope of <c>spt_db_publish</c> — the roots the resident DB holds
-/// (templates, traders, globals, and the Base-only locations root). Serialized with the server's
+/// (templates, traders, globals, and a locations root of Base + AllExtracts + the three statics
+/// the loot flip reads; looseLoot and staticAmmo never serialize). Serialized with the server's
 /// shared options so the models' <c>JsonPropertyName</c>s stay the wire authority, exactly like
 /// the per-family payloads before it.
 /// </summary>
@@ -51,16 +52,29 @@ internal static class DbPayloadProjection
             writer.WriteStartObject();
             foreach (var (propertyName, location) in locationTable.GetDictionary())
             {
-                // Base + AllExtracts only, by construction — the LazyLoad members (looseLoot,
-                // staticLoot, staticContainers) must never serialize. A null Base still ships as
-                // "base": null (the Rust model tolerates it; the derives skip it), while a null
-                // AllExtracts collapses to [] — the Rust Vec rejects an explicit null.
+                // Base + AllExtracts + the three statics, by construction. A null Base still
+                // ships as "base": null (the Rust model tolerates it; the derives skip it), while
+                // a null AllExtracts collapses to [] — the Rust Vec rejects an explicit null.
                 writer.WritePropertyName(_locationWireKeysByProperty[propertyName]);
                 writer.WriteStartObject();
                 writer.WritePropertyName("base");
                 writer.WriteRawValue(JsonSerializer.SerializeToUtf8Bytes(location?.Base, options), skipInputValidation: true);
                 writer.WritePropertyName("allExtracts");
                 writer.WriteRawValue(JsonSerializer.SerializeToUtf8Bytes(location?.AllExtracts ?? [], options), skipInputValidation: true);
+                // Flip #4: the three statics the loot family reads, serialized as each
+                // LazyLoad.Value so registered transformers (ReduceStaticItemWeight, seasonal)
+                // are applied — the same data the per-call path read. looseLoot must still
+                // never serialize (549 MiB resident was rejected; the per-call splice stays
+                // until Phase 3), and staticAmmo stays a per-call parameter.
+                writer.WritePropertyName("staticLoot");
+                writer.WriteRawValue(JsonSerializer.SerializeToUtf8Bytes(location?.StaticLoot?.Value, options), skipInputValidation: true);
+                writer.WritePropertyName("staticContainers");
+                writer.WriteRawValue(
+                    JsonSerializer.SerializeToUtf8Bytes(location?.StaticContainers?.Value, options),
+                    skipInputValidation: true
+                );
+                writer.WritePropertyName("statics");
+                writer.WriteRawValue(JsonSerializer.SerializeToUtf8Bytes(location?.Statics, options), skipInputValidation: true);
                 writer.WriteEndObject();
             }
             writer.WriteEndObject();

@@ -17,23 +17,13 @@ namespace SPTarkov.Server.Core.Native.Loot;
 /// <see cref="JsonIgnoreCondition.WhenWritingNull"/>, so a null member is omitted and Rust reads it
 /// back as <c>None</c>.
 /// </summary>
-public record LootCommon
+public record LootVarying
 {
     /// <summary>
     /// Lowercased by the caller.
     /// </summary>
     [JsonPropertyName("locationId")]
     public required string LocationId { get; set; }
-
-    /// <summary>
-    /// The slice of every <c>TemplateItem</c> the generator reads, keyed by tpl. Templates without
-    /// props have no representation here and must be left out.
-    /// </summary>
-    [JsonPropertyName("itemsView")]
-    public required Dictionary<MongoId, ItemView> ItemsView { get; set; }
-
-    [JsonPropertyName("defaultPresets")]
-    public required Dictionary<MongoId, PresetView> DefaultPresets { get; set; }
 
     [JsonPropertyName("moneyTpls")]
     public required List<MongoId> MoneyTpls { get; set; }
@@ -493,8 +483,24 @@ public record CounterState
     public required Dictionary<MongoId, int> TrackedCounts { get; set; }
 }
 
-public record StaticContainersRequest : LootCommon
+/// <summary>
+/// The distrust fallback (spec § Exports): the C#-built database half, used for this call only and
+/// never made resident. Present iff the caller is ineligible for residency. The statics members
+/// ride on static-container sends and are omitted on dynamic sends, mirroring the two old
+/// envelopes.
+/// </summary>
+public record LootViewsOverride
 {
+    /// <summary>
+    /// The slice of every <c>TemplateItem</c> the generator reads, keyed by tpl. Templates without
+    /// props have no representation here and must be left out.
+    /// </summary>
+    [JsonPropertyName("itemsView")]
+    public required Dictionary<MongoId, ItemView> ItemsView { get; set; }
+
+    [JsonPropertyName("defaultPresets")]
+    public required Dictionary<MongoId, PresetView> DefaultPresets { get; set; }
+
     /// <summary>
     /// Null when the map's <c>StaticContainerDetails</c> is missing the list; the native side logs a
     /// map-specific error for each, so an empty list is not a substitute.
@@ -511,17 +517,58 @@ public record StaticContainersRequest : LootCommon
     public IEnumerable<StaticForced>? StaticForced { get; set; }
 
     [JsonPropertyName("staticLootDist")]
-    public required Dictionary<MongoId, StaticLootDetails> StaticLootDist { get; set; }
+    public Dictionary<MongoId, StaticLootDetails>? StaticLootDist { get; set; }
 
     [JsonPropertyName("statics")]
     public StaticContainer? Statics { get; set; }
 }
 
-public record DynamicLootRequest : LootCommon
+public record StaticContainersRequest
 {
     /// <summary>
-    /// Either a <see cref="Models.Eft.Common.LooseLoot"/> - assign one directly, it converts - or the
-    /// raw JSON of a location's <c>looseLoot.json</c>. Same wire shape either way.
+    ///     Resident-DB epoch this request was built against; 0 with <see cref="ViewsOverride"/>
+    ///     present (spec § Exports).
+    /// </summary>
+    [JsonPropertyName("epoch")]
+    public required ulong Epoch { get; set; }
+
+    /// <summary>
+    ///     The distrust fallback (spec § Exports): the C#-built view bundle, used for this call
+    ///     only and never made resident. Present iff the caller is ineligible for residency.
+    /// </summary>
+    [JsonPropertyName("viewsOverride")]
+    public LootViewsOverride? ViewsOverride { get; set; }
+
+    [JsonPropertyName("varying")]
+    public required LootVarying Varying { get; set; }
+}
+
+public record DynamicLootRequest
+{
+    /// <summary>
+    ///     Resident-DB epoch this request was built against; 0 with <see cref="ViewsOverride"/>
+    ///     present (spec § Exports).
+    /// </summary>
+    [JsonPropertyName("epoch")]
+    public required ulong Epoch { get; set; }
+
+    /// <summary>
+    ///     The distrust fallback (spec § Exports): the C#-built view bundle, used for this call
+    ///     only and never made resident. Present iff the caller is ineligible for residency.
+    /// </summary>
+    [JsonPropertyName("viewsOverride")]
+    public LootViewsOverride? ViewsOverride { get; set; }
+
+    [JsonPropertyName("varying")]
+    public required DynamicLootVarying Varying { get; set; }
+}
+
+public record DynamicLootVarying : LootVarying
+{
+    /// <summary>
+    ///     The caller's loot data, so any transformer or patch applied to it is honoured. Either a
+    ///     <see cref="Models.Eft.Common.LooseLoot"/> - assign one directly, it converts - or the
+    ///     raw JSON of a location's <c>looseLoot.json</c>. Same wire shape either way.
     /// </summary>
     [JsonPropertyName("looseLoot")]
     public required LooseLootPayload LooseLoot { get; set; }

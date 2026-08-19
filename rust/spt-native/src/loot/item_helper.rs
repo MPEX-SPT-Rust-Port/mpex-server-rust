@@ -835,7 +835,10 @@ pub fn set_found_in_raid(items_view: &IndexMap<String, ItemView>, items: &mut [I
 pub struct LootContext<'a> {
     pub items_view: &'a IndexMap<String, ItemView>,
     pub static_ammo_dist: &'a HashMap<String, Vec<StaticAmmoDetails>>,
-    pub default_presets: &'a HashMap<String, PresetView>,
+    /// `IndexMap` for the same reason as [`Self::items_view`]: looked up by key, never iterated,
+    /// so the map type is not draw-order-bearing — and the resident arm borrows it straight off
+    /// `RagfairDbViews.default_presets_by_tpl`.
+    pub default_presets: &'a IndexMap<String, PresetView>,
     pub money_tpls: &'a [String],
     pub lootable_item_blacklist: &'a HashSet<String>,
     pub config: &'a LootConfigView,
@@ -857,6 +860,20 @@ impl LootError {
         Self {
             message: message.into(),
         }
+    }
+}
+
+/// A flipped loot export's failure: the family's fatal error, or an epoch the resident DB no
+/// longer holds (status 4; C# republishes and retries once).
+#[derive(Debug)]
+pub enum LootEpochError {
+    Loot(LootError),
+    StaleEpoch,
+}
+
+impl From<LootError> for LootEpochError {
+    fn from(error: LootError) -> Self {
+        Self::Loot(error)
     }
 }
 
@@ -2346,7 +2363,7 @@ mod tests {
     ) -> LootContext<'a> {
         // The assembly functions read neither presets, money, blacklist, config nor season, so
         // those members are stubbed and the fixtures stay about ammo.
-        static PRESETS: LazyLock<HashMap<String, PresetView>> = LazyLock::new(HashMap::new);
+        static PRESETS: LazyLock<IndexMap<String, PresetView>> = LazyLock::new(IndexMap::new);
         static MONEY_TPLS: LazyLock<Vec<String>> = LazyLock::new(Vec::new);
         static BLACKLIST: LazyLock<HashSet<String>> = LazyLock::new(HashSet::new);
         static CONFIG: LazyLock<LootConfigView> = LazyLock::new(LootConfigView::default);

@@ -41,17 +41,24 @@ public class LootGeneratorNativeTests
     {
         var request = new CreateForcedLootRequest
         {
-            ItemsView = BuildItemsView(),
-            DefaultPresets = [],
-            DefaultPresetsByTpl = [],
-            GlobalBlacklist = [],
-            ConfigBlacklist = [],
-            RewardItemBlacklist = [],
-            RewardBaseTypeBlacklist = [],
-            BossItems = [],
-            InactiveSeasonalItems = [],
-            TestSeed = 42,
-            ForcedLoot = new Dictionary<MongoId, MinMax<int>> { [_stackableTpl] = new MinMax<int>(2, 2) },
+            Epoch = 0,
+            ViewsOverride = new RewardViewsOverride
+            {
+                ItemsView = BuildItemsView(),
+                DefaultPresets = [],
+                DefaultPresetsByTpl = [],
+            },
+            Varying = new CreateForcedLootVarying
+            {
+                GlobalBlacklist = [],
+                ConfigBlacklist = [],
+                RewardItemBlacklist = [],
+                RewardBaseTypeBlacklist = [],
+                BossItems = [],
+                InactiveSeasonalItems = [],
+                TestSeed = 42,
+                ForcedLoot = new Dictionary<MongoId, MinMax<int>> { [_stackableTpl] = new MinMax<int>(2, 2) },
+            },
         };
 
         var result = SptNative.CreateForcedLoot(request);
@@ -78,17 +85,24 @@ public class LootGeneratorNativeTests
     {
         var request = new CreateRandomLootRequest
         {
-            ItemsView = BuildItemsView(),
-            DefaultPresets = [],
-            DefaultPresetsByTpl = [],
-            GlobalBlacklist = [],
-            ConfigBlacklist = [],
-            RewardItemBlacklist = [],
-            RewardBaseTypeBlacklist = [],
-            BossItems = [],
-            InactiveSeasonalItems = [],
-            TestSeed = 42,
-            LootRequest = new LootRequest { WeaponCrateCount = new MinMax<int>(1, 1), ItemLimits = [] },
+            Epoch = 0,
+            ViewsOverride = new RewardViewsOverride
+            {
+                ItemsView = BuildItemsView(),
+                DefaultPresets = [],
+                DefaultPresetsByTpl = [],
+            },
+            Varying = new CreateRandomLootVarying
+            {
+                GlobalBlacklist = [],
+                ConfigBlacklist = [],
+                RewardItemBlacklist = [],
+                RewardBaseTypeBlacklist = [],
+                BossItems = [],
+                InactiveSeasonalItems = [],
+                TestSeed = 42,
+                LootRequest = new LootRequest { WeaponCrateCount = new MinMax<int>(1, 1), ItemLimits = [] },
+            },
         };
 
         var error = Assert.Throws<InvalidOperationException>(() => SptNative.CreateRandomLoot(request));
