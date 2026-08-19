@@ -65,6 +65,25 @@
       Text="SptNativeRid ($(SptNativeRid)) does not match RuntimeIdentifier ($(RuntimeIdentifier)): spt_native would be cross-compiled for a different platform than the publish output."
     />
   </Target>
+  <!-- Phase 6a: ship the Rust launcher beside the app. It is built by BuildSptNative's workspace
+       `cargo build` (SPTarkov.Server.Core.csproj); this target only places it in the publish
+       output. Path logic mirrors SptNativeLibPath: cross-RID builds write under target/<triple>/. -->
+  <PropertyGroup>
+    <MpexServerLauncherName Condition="$([MSBuild]::IsOSPlatform('Windows'))">mpex-server.exe</MpexServerLauncherName>
+    <MpexServerLauncherName Condition="'$(MpexServerLauncherName)' == ''">mpex-server</MpexServerLauncherName>
+    <MpexServerLauncherPath Condition="'$(SptNativeTargetTriple)' == ''"
+      >$(MSBuildProjectDirectory)/../rust/target/$(CargoProfile)/$(MpexServerLauncherName)</MpexServerLauncherPath>
+    <MpexServerLauncherPath Condition="'$(SptNativeTargetTriple)' != ''"
+      >$(MSBuildProjectDirectory)/../rust/target/$(SptNativeTargetTriple)/$(CargoProfile)/$(MpexServerLauncherName)</MpexServerLauncherPath>
+  </PropertyGroup>
+  <Target Name="IncludeMpexServerLauncher" AfterTargets="ComputeFilesToPublish">
+    <ItemGroup>
+      <ResolvedFileToPublish Include="$(MpexServerLauncherPath)">
+        <RelativePath>$(MpexServerLauncherName)</RelativePath>
+        <CopyToPublishDirectory>Always</CopyToPublishDirectory>
+      </ResolvedFileToPublish>
+    </ItemGroup>
+  </Target>
   <Target Name="RelocateSatelliteAssemblies" AfterTargets="ResolveAssemblyReferences">
     <ItemGroup>
       <_RelocatedSatelliteCulture
