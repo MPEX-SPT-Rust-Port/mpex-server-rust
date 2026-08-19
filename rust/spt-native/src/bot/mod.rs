@@ -29,8 +29,9 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 /// The database half of a bot request. The resident arm is the published [`BotDbViews`] — the
-/// items and preset views it shares with ragfair plus the three bot-only derivations; the
-/// override arm is the same six views on the wire.
+/// items and preset views it shares with ragfair plus the bot-only derivations; the
+/// override arm is the same views on the wire. The mod-pool slot order is not a view — it is
+/// process-local C# service state, so it rides the shared varying block on every send.
 pub enum BotViews {
     Override(Box<BotViewsWire>),
     Resident(Arc<BotDbViews>),
@@ -56,13 +57,6 @@ impl BotViews {
         match self {
             Self::Override(wire) => &wire.default_presets_by_tpl,
             Self::Resident(views) => &views.default_preset_ids_by_tpl,
-        }
-    }
-
-    pub(crate) fn mod_pool_slot_order(&self) -> &IndexMap<String, Vec<usize>> {
-        match self {
-            Self::Override(wire) => &wire.mod_pool_slot_order,
-            Self::Resident(views) => &views.mod_pool_slot_order,
         }
     }
 
@@ -161,8 +155,9 @@ pub struct BotContext<'a> {
     pub secure_container_ammo_stack_count: i32,
     /// `modPoolSlotOrder` — the C# `BotEquipmentModPoolService` pools' slot-name enumeration
     /// order per template, as indices into that template's `slots`. Only order crosses the wire;
-    /// membership is still derived by [`crate::bot::mod_pool_service`]. Missing entry = database
-    /// order.
+    /// membership is still derived by [`crate::bot::mod_pool_service`]. Rides the shared varying
+    /// block on every send (it is live C# service state, not database data). Missing entry =
+    /// database order.
     pub mod_pool_slot_order: &'a IndexMap<String, Vec<usize>>,
     pub diagnostics: DiagSink,
 }

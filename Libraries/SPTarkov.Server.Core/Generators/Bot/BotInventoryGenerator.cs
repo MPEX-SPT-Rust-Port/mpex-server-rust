@@ -18,8 +18,10 @@ using SPTarkov.Server.Core.Models.Eft.Match;
 using SPTarkov.Server.Core.Models.Enums;
 using SPTarkov.Server.Core.Models.Spt.Bots;
 using SPTarkov.Server.Core.Models.Spt.Config;
+using SPTarkov.Server.Core.Models.Spt.Mod;
 using SPTarkov.Server.Core.Native;
 using SPTarkov.Server.Core.Native.Bot;
+using SPTarkov.Server.Core.Native.Db;
 using SPTarkov.Server.Core.Services;
 using SPTarkov.Server.Core.Services.Bot;
 using SPTarkov.Server.Core.Services.Locales;
@@ -61,6 +63,61 @@ public class BotInventoryGenerator(
     PmcConfig pmcConfig
 )
 {
+    private readonly IReadOnlyList<SptMod>? _loadedMods;
+    private readonly DbPublisher? _dbPublisher;
+
+    /// <summary>
+    ///     The constructor the container uses: the frozen 4.1.2 primary constructor plus the
+    ///     epoch-protocol services. Additive and apicompat-verified; without them, every native
+    ///     send carries the views override.
+    /// </summary>
+    public BotInventoryGenerator(
+        ISptLogger<BotInventoryGenerator> logger,
+        RandomUtil randomUtil,
+        ProfileActivityService profileActivityService,
+        BotWeaponGenerator botWeaponGenerator,
+        BotLootGenerator botLootGenerator,
+        BotGeneratorHelper botGeneratorHelper,
+        ProfileHelper profileHelper,
+        BotHelper botHelper,
+        WeightedRandomHelper weightedRandomHelper,
+        ItemHelper itemHelper,
+        WeatherHelper weatherHelper,
+        ServerLocalisationService serverLocalisationService,
+        BotEquipmentFilterService botEquipmentFilterService,
+        BotEquipmentModPoolService botEquipmentModPoolService,
+        BotEquipmentModGenerator botEquipmentModGenerator,
+        BotInventoryContainerService botInventoryContainerService,
+        BotConfig botConfig,
+        PmcConfig pmcConfig,
+        IReadOnlyList<SptMod> loadedMods,
+        DbPublisher dbPublisher
+    )
+        : this(
+            logger,
+            randomUtil,
+            profileActivityService,
+            botWeaponGenerator,
+            botLootGenerator,
+            botGeneratorHelper,
+            profileHelper,
+            botHelper,
+            weightedRandomHelper,
+            itemHelper,
+            weatherHelper,
+            serverLocalisationService,
+            botEquipmentFilterService,
+            botEquipmentModPoolService,
+            botEquipmentModGenerator,
+            botInventoryContainerService,
+            botConfig,
+            pmcConfig
+        )
+    {
+        _loadedMods = loadedMods;
+        _dbPublisher = dbPublisher;
+    }
+
     // Slots handled individually inside `GenerateAndAddEquipmentToBot`
     private static readonly FrozenSet<EquipmentSlots> _equipmentSlotsWithInventory =
     [
@@ -93,10 +150,31 @@ public class BotInventoryGenerator(
     internal LootGenerationPath LastPathTaken { get; private set; }
 
     /// <summary>
-    ///     Test-only seed forwarded as <see cref="GenerateBotInventoryRequest.TestSeed"/> on every
-    ///     native request.
+    ///     Test-only seed forwarded as <see cref="BotSlice.TestSeed"/> on every native request.
     /// </summary>
     internal ulong? NativeTestSeed { get; set; }
+
+    /// <summary>
+    ///     Whether the most recent native send carried the C#-built views override rather than
+    ///     naming a resident-DB epoch. Test seam.
+    /// </summary>
+    internal bool LastSendIncludedViewsOverride { get; private set; }
+
+    /// <summary>
+    ///     Whether an override-less send off the resident DB is ever allowed: the services exist,
+    ///     the kill switch is off, and either no mods are loaded or the user vouched their mods
+    ///     don't write tables directly. A generator built without the epoch-protocol services has
+    ///     neither and always sends the override.
+    /// </summary>
+    private bool ResidentDbEligible()
+    {
+        return ResidentDbDispatch.Eligible(
+            _dbPublisher,
+            _loadedMods?.Count,
+            botConfig.DisableNativeRequestCache,
+            botConfig.TrustNativeRequestCacheWithMods
+        );
+    }
 
     /// <summary>
     ///     The 4.1.2 members a mod can Harmony-patch, across the four classes the native path
@@ -211,30 +289,51 @@ public class BotInventoryGenerator(
 
         LastPathTaken = LootGenerationPath.Native;
 
-        var result = SptNative.GenerateBotInventory(
-            BotPayloadProjection.BuildRequest(
-                botId,
-                sessionId,
-                botJsonTemplate,
-                botGenerationDetails,
-                NativeTestSeed,
-                profileHelper,
-                profileActivityService,
-                weatherHelper,
-                botGeneratorHelper,
-                botEquipmentFilterService,
-                botEquipmentModPoolService,
-                botLootGenerator.BotLootCacheService,
+        var request = BotPayloadProjection.BuildRequest(
+            botId,
+            sessionId,
+            botJsonTemplate,
+            botGenerationDetails,
+            NativeTestSeed,
+            profileHelper,
+            profileActivityService,
+            weatherHelper,
+            botGeneratorHelper,
+            botEquipmentFilterService,
+            botEquipmentModPoolService,
+            botLootGenerator.BotLootCacheService,
+            botEquipmentModGenerator.ItemFilterService,
+            itemHelper,
+            botConfig,
+            pmcConfig,
+            botWeaponGenerator.RepairConfig
+        );
+
+        BotInventoryResult result;
+        if (!ResidentDbEligible())
+        {
+            LastSendIncludedViewsOverride = true;
+            request.ViewsOverride = BotPayloadProjection.BuildViewsOverride(
                 botEquipmentModGenerator.PresetHelper,
-                botEquipmentModGenerator.ItemFilterService,
                 botLootGenerator.HandbookHelper,
                 itemHelper,
                 botWeaponGenerator.GlobalTable,
-                botConfig,
-                pmcConfig,
-                botWeaponGenerator.RepairConfig
-            )
-        );
+                [request.LootPools]
+            );
+            result = SptNative.GenerateBotInventory(request);
+        }
+        else
+        {
+            result = ResidentDbDispatch.Send(
+                _dbPublisher!,
+                epoch =>
+                {
+                    request.Epoch = epoch;
+                    return SptNative.GenerateBotInventory(request);
+                }
+            );
+            LastSendIncludedViewsOverride = false;
+        }
 
         // The cache is state the native side kept to itself; when the caller wants it afterwards the
         // grids have to be put back. Legacy clears it instead when the flag is set, and there is

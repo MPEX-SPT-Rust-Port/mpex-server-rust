@@ -599,11 +599,6 @@ pub struct BotViewsWire {
     /// Keyed by tpl, valued by the default preset's own id - resolve through
     /// [`Self::item_presets`], which is the map `PresetHelper` resolves every default out of.
     pub default_presets_by_tpl: IndexMap<String, String>,
-    /// The C# `BotEquipmentModPoolService` pools' slot-name enumeration order per template, as
-    /// indices into that template's projected `slots` array. `#[serde(default)]` so an absent
-    /// field means database order — today's behavior.
-    #[serde(default)]
-    pub mod_pool_slot_order: IndexMap<String, Vec<usize>>,
     /// `HandbookHelper.GetTemplatePrice` per tpl (`BotPayloadProjection.BuildHandbookPrices`,
     /// `:295-311`) — a tpl missing from the map prices at 0, which is what `GetTemplatePrice`
     /// returns for a tpl the handbook does not know.
@@ -697,6 +692,13 @@ pub struct SharedBotVaryingWire {
     /// differ and each path has to use its own.
     pub weapon_mod_equipment_blacklist: EquipmentFilterDetails,
     pub config_blacklist: std::collections::HashSet<String>,
+    /// The C# `BotEquipmentModPoolService` pools' slot-name enumeration order per template, as
+    /// indices into that template's projected `slots` array. On the *varying* block rather than
+    /// the views: the order is an emergent artifact of the live C# service's
+    /// `ConcurrentDictionary` (process-local bucket layout, not derivable from the database), so
+    /// it rides every send. `#[serde(default)]` so an absent field means database order.
+    #[serde(default)]
+    pub mod_pool_slot_order: IndexMap<String, Vec<usize>>,
     /// The wave's level-draw inputs. Present iff the wave is PMC: every other bot takes the
     /// constant `(1, 0)` without drawing (`BotLevelGenerator.cs:23-26`), so there is nothing to
     /// send. A PMC slice that arrives without it is an error envelope, never a panic.
@@ -836,7 +838,6 @@ mod tests {
             "items":{"aaaaaaaaaaaaaaaaaaaaaab5":{"parent":"aaaaaaaaaaaaaaaaaaaaaab6","width":2,"height":1}},
             "itemPresets":{"p1":{"id":"p1","items":[]},"p2":{"id":"p2","items":[]}},
             "defaultPresetsByTpl":{"aaaaaaaaaaaaaaaaaaaaaab2":"p2"},
-            "modPoolSlotOrder":{},
             "handbookPrices":{"aaaaaaaaaaaaaaaaaaaaaab4":12500.5},
             "expTable":[10]},
         "bot":{"botId":"bbbbbbbbbbbbbbbbbbbbbbbb",
@@ -886,7 +887,8 @@ mod tests {
         "repairKitWeapon":{"rarityWeight":{},"bonusTypeWeight":{},"Common":{},"Rare":{}},
         "equipmentBlacklist":{"equipment":{"Headwear":["aaaaaaaaaaaaaaaaaaaaaaa9"]}},
         "weaponModEquipmentBlacklist":{},
-        "configBlacklist":["aaaaaaaaaaaaaaaaaaaaaab3"]},
+        "configBlacklist":["aaaaaaaaaaaaaaaaaaaaaab3"],
+        "modPoolSlotOrder":{"aaaaaaaaaaaaaaaaaaaaaaa5":[1,0]}},
         "lootPools":{"backpackLoot":{"aaaaaaaaaaaaaaaaaaaaaab1":4}}
     }"#;
 
@@ -1049,6 +1051,11 @@ mod tests {
                 .config_blacklist
                 .contains("aaaaaaaaaaaaaaaaaaaaaab3")
         );
+        // The mod-pool slot order rides the varying block, not the views.
+        assert_eq!(
+            parsed.shared.mod_pool_slot_order["aaaaaaaaaaaaaaaaaaaaaaa5"],
+            vec![1, 0]
+        );
 
         let views = parsed.views_override.as_ref().unwrap();
         assert_eq!(views.item_presets["p1"].id.as_deref(), Some("p1"));
@@ -1158,21 +1165,25 @@ mod tests {
             views.default_presets_by_tpl["aaaaaaaaaaaaaaaaaaaaaab2"],
             "p2"
         );
-        assert!(views.mod_pool_slot_order.is_empty());
         assert_eq!(views.handbook_prices["aaaaaaaaaaaaaaaaaaaaaab4"], 12500.5);
         assert_eq!(views.exp_table, vec![10]);
 
-        // The three view members a C# override send may omit parse to their empty defaults.
+        // The view members a C# override send may omit parse to their empty defaults, and so
+        // does the varying block's slot order.
         let mut json = batch_request_json(None);
         let views = json["viewsOverride"].as_object_mut().unwrap();
-        for key in ["modPoolSlotOrder", "handbookPrices", "expTable"] {
+        for key in ["handbookPrices", "expTable"] {
             views.remove(key);
         }
+        json["shared"]
+            .as_object_mut()
+            .unwrap()
+            .remove("modPoolSlotOrder");
         let parsed: GenerateBotInventoryBatchRequest = serde_json::from_value(json).unwrap();
         let views = parsed.views_override.as_ref().unwrap();
-        assert!(views.mod_pool_slot_order.is_empty());
         assert!(views.handbook_prices.is_empty());
         assert!(views.exp_table.is_empty());
+        assert!(parsed.shared.mod_pool_slot_order.is_empty());
     }
 
     #[test]

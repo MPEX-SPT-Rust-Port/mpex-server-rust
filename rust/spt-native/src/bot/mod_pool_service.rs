@@ -49,9 +49,8 @@ pub fn get_mods_for_gear_slot(
     gear_slot_pool(ctx.items, item_tpl, ctx.mod_pool_slot_order.get(item_tpl))
 }
 
-/// [`get_mods_for_gear_slot`] against bare views — the publish-time slot-order derivation
-/// (`bot::views::build_mod_pool_slot_order`) runs before any [`BotContext`] exists and with no
-/// projected order.
+/// [`get_mods_for_gear_slot`] against bare views, for callers with no [`BotContext`] or no
+/// projected order (`None` = database order).
 pub(crate) fn gear_slot_pool(
     items: &IndexMap<String, ItemView>,
     item_tpl: &str,

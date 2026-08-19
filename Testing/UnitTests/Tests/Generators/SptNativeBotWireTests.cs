@@ -69,14 +69,19 @@ public class SptNativeBotWireTests
             di.GetService<BotEquipmentFilterService>(),
             di.GetService<BotEquipmentModPoolService>(),
             di.GetService<BotLootCacheService>(),
-            di.GetService<PresetHelper>(),
             di.GetService<ItemFilterService>(),
-            di.GetService<HandbookHelper>(),
             di.GetService<ItemHelper>(),
-            di.GetService<GlobalTable>(),
             di.GetService<BotConfig>(),
             di.GetService<PmcConfig>(),
             di.GetService<RepairConfig>()
+        );
+        // The override send (epoch 0), which is the arm whose wire this fixture pins
+        _request.ViewsOverride = BotPayloadProjection.BuildViewsOverride(
+            di.GetService<PresetHelper>(),
+            di.GetService<HandbookHelper>(),
+            di.GetService<ItemHelper>(),
+            di.GetService<GlobalTable>(),
+            [_request.LootPools]
         );
     }
 
@@ -123,7 +128,7 @@ public class SptNativeBotWireTests
     public void ItemViewCarriesTheBotProjections()
     {
         // AK-74N: a weapon with chambers, a magazine slot and a reload mode
-        var weapon = _request.Items[new MongoId("5644bd2b4bdc2d3b4c8b4572")];
+        var weapon = _request.ViewsOverride!.Items[new MongoId("5644bd2b4bdc2d3b4c8b4572")];
         Assert.That(weapon.WeapClass, Is.Not.Null);
         Assert.That(weapon.ReloadMode, Is.EqualTo("ExternalMagazine"));
         Assert.That(weapon.Chambers, Is.Not.Null.And.Not.Empty);
@@ -131,7 +136,7 @@ public class SptNativeBotWireTests
         Assert.That(weapon.MaxDurability, Is.Not.Null);
 
         // 6B3TM armour rig: a container, so it has grids
-        var rig = _request.Items[new MongoId("545cdae64bdc2d39198b4568")];
+        var rig = _request.ViewsOverride!.Items[new MongoId("545cdae64bdc2d39198b4568")];
         Assert.That(rig.Grids, Is.Not.Null.And.Not.Empty);
         Assert.That(rig.Grids![0].CellsH, Is.Not.Null);
     }
@@ -147,11 +152,11 @@ public class SptNativeBotWireTests
         // AK-74N again: a weapon whose pool holds several named slots, so it must carry an order
         var weaponTpl = new MongoId("5644bd2b4bdc2d3b4c8b4572");
 
-        Assert.That(_request.ModPoolSlotOrder, Is.Not.Empty);
-        Assert.That(_request.ModPoolSlotOrder.ContainsKey(weaponTpl), Is.True);
+        Assert.That(_request.Shared.ModPoolSlotOrder, Is.Not.Empty);
+        Assert.That(_request.Shared.ModPoolSlotOrder.ContainsKey(weaponTpl), Is.True);
 
-        var indices = _request.ModPoolSlotOrder[weaponTpl];
-        var slots = _request.Items[weaponTpl].Slots!;
+        var indices = _request.Shared.ModPoolSlotOrder[weaponTpl];
+        var slots = _request.ViewsOverride!.Items[weaponTpl].Slots!;
         Assert.That(indices, Has.Count.GreaterThanOrEqualTo(2));
         Assert.That(indices, Is.Unique);
         Assert.That(indices, Is.All.InRange(0, slots.Count - 1));
@@ -169,17 +174,17 @@ public class SptNativeBotWireTests
     [Test]
     public void RequestCarriesTheResolvedConfigAndPoolSlices()
     {
-        Assert.That(_request.GeneratingPlayerLevel, Is.EqualTo(1));
-        Assert.That(_request.TestSeed, Is.EqualTo(TestSeed));
-        Assert.That(_request.Equipment, Does.ContainKey("assault"));
-        Assert.That(_request.Bosses, Is.Not.Empty);
-        Assert.That(_request.ItemPresets, Is.Not.Empty);
-        Assert.That(_request.DefaultPresetsByTpl, Is.Not.Empty);
+        Assert.That(_request.Shared.GeneratingPlayerLevel, Is.EqualTo(1));
+        Assert.That(_request.Bot.TestSeed, Is.EqualTo(TestSeed));
+        Assert.That(_request.Shared.Equipment, Does.ContainKey("assault"));
+        Assert.That(_request.Shared.Bosses, Is.Not.Empty);
+        Assert.That(_request.ViewsOverride!.ItemPresets, Is.Not.Empty);
+        Assert.That(_request.ViewsOverride.DefaultPresetsByTpl, Is.Not.Empty);
         // The defaults ride as ids, so every one has to resolve against the only preset map sent
-        Assert.That(_request.DefaultPresetsByTpl.Values, Is.SubsetOf(_request.ItemPresets.Keys));
-        Assert.That(_request.ConfigBlacklist, Is.Not.Empty);
+        Assert.That(_request.ViewsOverride.DefaultPresetsByTpl.Values, Is.SubsetOf(_request.ViewsOverride.ItemPresets.Keys));
+        Assert.That(_request.Shared.ConfigBlacklist, Is.Not.Empty);
         Assert.That(_request.LootPools.BackpackLoot, Is.Not.Empty);
         // Every pool tpl has to be priceable, or the running rouble total silently reads 0
-        Assert.That(_request.HandbookPrices.Keys, Is.SupersetOf(_request.LootPools.BackpackLoot.Keys));
+        Assert.That(_request.ViewsOverride.HandbookPrices.Keys, Is.SupersetOf(_request.LootPools.BackpackLoot.Keys));
     }
 }

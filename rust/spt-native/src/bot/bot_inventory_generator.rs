@@ -371,6 +371,7 @@ fn generate_prepared(
         equipment_blacklist,
         weapon_mod_equipment_blacklist,
         config_blacklist,
+        mod_pool_slot_order,
         ..
     } = shared;
 
@@ -383,7 +384,7 @@ fn generate_prepared(
 
     let mut ctx = BotContext {
         items: views.items(),
-        mod_pool_slot_order: views.mod_pool_slot_order(),
+        mod_pool_slot_order,
         bosses,
         durability,
         equipment,

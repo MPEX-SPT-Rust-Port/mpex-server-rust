@@ -186,6 +186,10 @@ public class BotBenchmarkTests
         return timings;
     }
 
+    /// <summary>
+    /// The resident-arm projection - what the production eligible path rebuilds per bot now that
+    /// the database views live on the resident DB rather than the request.
+    /// </summary>
     private GenerateBotInventoryRequest BuildRequest(BotType template, BotGenerationDetails details)
     {
         return BotPayloadProjection.BuildRequest(
@@ -201,11 +205,8 @@ public class BotBenchmarkTests
             _botEquipmentFilterService,
             _botEquipmentModPoolService,
             _botLootGenerator.BotLootCacheService,
-            _botEquipmentModGenerator.PresetHelper,
             _botEquipmentModGenerator.ItemFilterService,
-            _botLootGenerator.HandbookHelper,
             _itemHelper,
-            _botWeaponGenerator.GlobalTable,
             _botConfig,
             _pmcConfig,
             _botWeaponGenerator.RepairConfig

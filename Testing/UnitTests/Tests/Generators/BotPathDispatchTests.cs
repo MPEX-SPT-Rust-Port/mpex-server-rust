@@ -229,7 +229,9 @@ public class BotPathDispatchTests
 
     private static object Construct(Type type, params object[] substitutes)
     {
-        var constructor = type.GetConstructors().Single();
+        // The container's own choice: the longest constructor (flip #6 added the epoch-protocol
+        // overload beside the frozen 4.1.2 constructor)
+        var constructor = type.GetConstructors().MaxBy(candidate => candidate.GetParameters().Length)!;
         var arguments = constructor
             .GetParameters()
             .Select(parameter =>

@@ -212,10 +212,11 @@ fn view_items() -> Value {
     })
 }
 
-/// The override's six views, value-identical to what the publish below derives: the items view,
+/// The override's views, value-identical to what the publish below derives: the items view,
 /// the presets map (globals key domain, map order), the default re-keyed to the preset's own id,
-/// the rifle's non-identity slot order, a handbook price per items-table key (0.0 for a handbook
-/// miss), and the three exp bands.
+/// a handbook price per items-table key (0.0 for a handbook miss), and the three exp bands.
+/// The rifle's non-identity slot order is not a view — it rides the shared varying block on
+/// both arms ([`shared`]).
 fn views_override() -> Value {
     json!({
         "items": view_items(),
@@ -225,7 +226,6 @@ fn views_override() -> Value {
             "p2": {"items": preset_p2_items(), "id": "p2", "name": "rifle_alt"},
         },
         "defaultPresetsByTpl": {RIFLE_TPL: "p1"},
-        "modPoolSlotOrder": {RIFLE_TPL: [1, 2]},
         "handbookPrices": {
             WEAPON: 0.0, MAGAZINE: 0.0, AMMO: 0.0,
             HEADWEAR_TPL: 0.0, EARPIECE_TPL: 0.0, FACE_COVER_TPL: 0.0, ARMOR_TPL: 0.0,
@@ -322,6 +322,9 @@ fn shared() -> Value {
         "equipmentBlacklist": {},
         "weaponModEquipmentBlacklist": {},
         "configBlacklist": [],
+        // The rifle's non-identity slot order, shared verbatim by both arms - live C# service
+        // state, so it rides every send rather than the views
+        "modPoolSlotOrder": {RIFLE_TPL: [1, 2]},
     })
 }
 

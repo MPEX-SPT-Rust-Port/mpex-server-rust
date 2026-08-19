@@ -11,12 +11,15 @@ use std::sync::Arc;
 
 use indexmap::IndexMap;
 
-use crate::bot::mod_pool_service::{gear_slot_pool, weapon_slot_pool};
 use crate::db::models::{GlobalsRoot, TemplatesRoot};
 use crate::ragfair::views::RagfairDbViews;
 
 /// The bot-family database views derived at publish — only what the resident roots determine
-/// lives here; the config and per-request members keep crossing per call.
+/// lives here; the config and per-request members keep crossing per call. The mod-pool slot
+/// order is deliberately absent: it is an emergent artifact of the live C#
+/// `BotEquipmentModPoolService`'s `ConcurrentDictionary` (process-local bucket layout, not
+/// derivable from the database), so it rides every send on the shared varying block instead
+/// ([`crate::bot::models::SharedBotVaryingWire::mod_pool_slot_order`]).
 #[derive(Debug)]
 pub struct BotDbViews {
     /// The views the bot family shares with ragfair (`items`, `item_presets`,
@@ -26,8 +29,6 @@ pub struct BotDbViews {
     /// [`RagfairDbViews::default_presets_by_tpl`] re-keyed to each view's preset id
     /// (C# `ToDefaultPresetIds`, `BotPayloadProjection.cs:392-395`).
     pub default_preset_ids_by_tpl: IndexMap<String, String>,
-    /// [`build_mod_pool_slot_order`].
-    pub mod_pool_slot_order: IndexMap<String, Vec<usize>>,
     /// `globals.config.exp.level.exp_table[].exp` (`BotWaveBatcher.cs:179-186`).
     pub exp_table: Vec<i32>,
 }
@@ -35,17 +36,12 @@ pub struct BotDbViews {
 /// Derived at publish once templates + globals + ragfair views are resident.
 /// - default_preset_ids_by_tpl: re-key of ragfair.default_presets_by_tpl to each
 ///   view's preset id (C# ToDefaultPresetIds, BotPayloadProjection.cs:392-395).
-/// - mod_pool_slot_order: 1:1 port of BuildModPoolSlotOrder
-///   (BotPayloadProjection.cs:322-369) — a pure walk over templates.items reading
-///   only each item's Properties.Slots (content contract: mod_pool_service.rs:1-31).
-///   Port the C# loop body exactly, enumeration order included; the Task 5 identity
-///   test over the real database is the equivalence gate.
 /// - exp_table: globals.config.exp.level.exp_table[].exp (BotWaveBatcher.cs:179-186).
 ///
 /// Total over empty roots; kept `Result`-shaped so a future hard failure aborts the publish the
 /// way ragfair's does.
 pub fn derive(
-    templates: &TemplatesRoot,
+    _templates: &TemplatesRoot,
     globals: &GlobalsRoot,
     ragfair: &Arc<RagfairDbViews>,
 ) -> Result<BotDbViews, String> {
@@ -57,8 +53,6 @@ pub fn derive(
         .iter()
         .map(|(tpl, preset)| (tpl.clone(), preset.id.clone().unwrap_or_default()))
         .collect();
-
-    let mod_pool_slot_order = build_mod_pool_slot_order(templates, ragfair);
 
     // BotWaveBatcher.cs:179-186: `expTable.Select(entry => entry.Experience)`.
     let exp_table = globals
@@ -73,63 +67,8 @@ pub fn derive(
     Ok(BotDbViews {
         ragfair: Arc::clone(ragfair),
         default_preset_ids_by_tpl,
-        mod_pool_slot_order,
         exp_table,
     })
-}
-
-/// `BotPayloadProjection.BuildModPoolSlotOrder` (`BotPayloadProjection.cs:322-369`) — the mod
-/// pools' slot-name enumeration order per template, as indices into that template's slots. The
-/// C# ran it against `BotEquipmentModPoolService`'s cached pools; here the pools are
-/// [`crate::bot::mod_pool_service`]'s on-demand derivations over the ragfair items view (the
-/// `BuildItemsView` projection the C# service's inputs round-trip through), in database order
-/// with no projected order applied — the Task 5 identity test over the real database is the
-/// gate that the C# pools enumerate the same way.
-fn build_mod_pool_slot_order(
-    templates: &TemplatesRoot,
-    ragfair: &RagfairDbViews,
-) -> IndexMap<String, Vec<usize>> {
-    let mut order = IndexMap::new();
-
-    // foreach (var (tpl, template) in templates) — itemHelper.TemplateTable.Items
-    // (BotPayloadProjection.cs:116), insertion order.
-    for (tpl, template) in &templates.items {
-        let mut pool = gear_slot_pool(&ragfair.items, tpl, None);
-        if pool.is_empty() {
-            pool = weapon_slot_pool(&ragfair.items, tpl, None);
-        }
-
-        // Order cannot matter below two slot names, and a pool that size subsumes the
-        // "template has two or more slots" check
-        if pool.len() < 2 {
-            continue;
-        }
-
-        // C# materialises `Properties.Slots` (an IEnumerable) to index it; `slots` here indexes
-        // the same array the projected `slots` view is a 1:1 Select of.
-        let Some(slots) = template
-            .properties
-            .as_ref()
-            .and_then(|properties| properties.slots.as_deref())
-        else {
-            continue;
-        };
-
-        let mut indices = Vec::with_capacity(pool.len());
-        for slot_name in pool.keys() {
-            // First occurrence, matching the GetOrAdd merge of same-named slots
-            if let Some(index) = slots
-                .iter()
-                .position(|slot| slot.name.as_deref() == Some(slot_name.as_str()))
-            {
-                indices.push(index);
-            }
-        }
-
-        order.insert(tpl.clone(), indices);
-    }
-
-    order
 }
 
 #[cfg(test)]
@@ -183,7 +122,7 @@ mod tests {
     }
 
     #[test]
-    fn derive_builds_the_slot_order_the_preset_ids_and_the_exp_table() {
+    fn derive_builds_the_preset_ids_and_the_exp_table() {
         let templates = fixture_templates();
         let globals = fixture_globals();
         let ragfair = Arc::new(
@@ -192,15 +131,6 @@ mod tests {
         );
 
         let views = derive(&templates, &globals, &ragfair).expect("bot views derive");
-
-        // BuildModPoolSlotOrder over the fixture, traced through the C# body: the nodes fail the
-        // pool's `_type == "Item"` half, the slotless mods pool empty (`pool.Count < 2` skips
-        // both), and the weapon's pool is [mod_magazine, mod_scope] — mod_stock's filter is
-        // empty and the duplicate mod_magazine merged — whose first-occurrence slot indices are
-        // 1 and 2 (0 is mod_stock; 3 is the merged duplicate).
-        let expected: IndexMap<String, Vec<usize>> =
-            IndexMap::from([(WEAPON_TPL.to_owned(), vec![1, 2])]);
-        assert_eq!(views.mod_pool_slot_order, expected);
 
         // ToDefaultPresetIds: the tpl keeps its key, the value becomes the preset's own id.
         let expected_ids: IndexMap<String, String> =
@@ -222,7 +152,6 @@ mod tests {
 
         let views = derive(&templates, &globals, &ragfair).expect("bot views derive");
 
-        assert!(views.mod_pool_slot_order.is_empty());
         assert!(views.default_preset_ids_by_tpl.is_empty());
         assert!(views.exp_table.is_empty());
     }

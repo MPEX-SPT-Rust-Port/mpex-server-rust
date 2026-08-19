@@ -231,7 +231,7 @@ public class BotBatchTests
 
     private GenerateBotInventoryRequest BuildSingleRequest((BotType Template, BotGenerationDetails Details) botCase, ulong? testSeed)
     {
-        return BotPayloadProjection.BuildRequest(
+        var request = BotPayloadProjection.BuildRequest(
             new MongoId(),
             _sessionId,
             botCase.Template,
@@ -244,14 +244,29 @@ public class BotBatchTests
             _botEquipmentFilterService,
             _botEquipmentModPoolService,
             _botLootGenerator.BotLootCacheService,
-            _botEquipmentModGenerator.PresetHelper,
             _botEquipmentModGenerator.ItemFilterService,
-            _botLootGenerator.HandbookHelper,
             _itemHelper,
-            _botWeaponGenerator.GlobalTable,
             _botConfig,
             _pmcConfig,
             _botWeaponGenerator.RepairConfig
+        );
+        request.ViewsOverride = BuildViewsOverride([request.LootPools]);
+
+        return request;
+    }
+
+    /// <summary>
+    /// Both paths send the views override (epoch 0): what is under test is batch-vs-per-bot
+    /// equivalence, not residency - the resident/override equivalence gate is BotResidentDbTests.
+    /// </summary>
+    private BotViewsOverride BuildViewsOverride(IEnumerable<BotLootCache> lootPools)
+    {
+        return BotPayloadProjection.BuildViewsOverride(
+            _botEquipmentModGenerator.PresetHelper,
+            _botLootGenerator.HandbookHelper,
+            _itemHelper,
+            _botWeaponGenerator.GlobalTable,
+            lootPools
         );
     }
 
@@ -273,7 +288,9 @@ public class BotBatchTests
 
         return new GenerateBotInventoryBatchRequest
         {
-            Shared = BotPayloadProjection.BuildSharedViews(
+            Epoch = 0,
+            ViewsOverride = BuildViewsOverride([lootPools]),
+            Shared = BotPayloadProjection.BuildSharedVarying(
                 _sessionId,
                 Role,
                 _profileHelper,
@@ -282,10 +299,8 @@ public class BotBatchTests
                 _botGeneratorHelper,
                 _botEquipmentFilterService,
                 _botEquipmentModPoolService,
-                _botEquipmentModGenerator.PresetHelper,
                 _botEquipmentModGenerator.ItemFilterService,
                 _itemHelper,
-                _botWeaponGenerator.GlobalTable,
                 _botConfig,
                 _pmcConfig,
                 _botWeaponGenerator.RepairConfig,
@@ -299,7 +314,6 @@ public class BotBatchTests
                         LevelMax = 1,
                         Template = BotPayloadProjection.BuildTemplateView(waveCase.Template),
                         LootPools = lootPools,
-                        HandbookPrices = BotPayloadProjection.BuildHandbookPrices(lootPools, _botLootGenerator.HandbookHelper),
                     },
                 ]
             ),

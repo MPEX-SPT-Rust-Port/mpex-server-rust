@@ -39,14 +39,66 @@ internal static class BotPayloadProjection
         BotEquipmentFilterService botEquipmentFilterService,
         BotEquipmentModPoolService botEquipmentModPoolService,
         BotLootCacheService botLootCacheService,
-        PresetHelper presetHelper,
         ItemFilterService itemFilterService,
-        HandbookHelper handbookHelper,
         ItemHelper itemHelper,
-        GlobalTable globalTable,
         BotConfig botConfig,
         PmcConfig pmcConfig,
         RepairConfig repairConfig
+    )
+    {
+        return new GenerateBotInventoryRequest
+        {
+            // The dispatch site stamps the resident epoch on an eligible send; 0 rides with the
+            // views override
+            Epoch = 0,
+            Shared = BuildSharedVarying(
+                sessionId,
+                botGenerationDetails.RoleLowercase,
+                profileHelper,
+                profileActivityService,
+                weatherHelper,
+                botGeneratorHelper,
+                botEquipmentFilterService,
+                botEquipmentModPoolService,
+                itemFilterService,
+                itemHelper,
+                botConfig,
+                pmcConfig,
+                repairConfig,
+                // The single-bot path keeps C# level generation and C# filtering: no draw, no
+                // variant pick, so neither block rides the wire
+                levelGeneration: null,
+                templateVariants: null
+            ),
+            Bot = BuildBotSlice(botId, botGenerationDetails, testSeed),
+            Template = BuildTemplateView(botJsonTemplate),
+            LootPools = BuildLootPools(botLootCacheService, botJsonTemplate, botGenerationDetails, pmcConfig),
+        };
+    }
+
+    /// <summary>
+    /// The request members that do not vary between the bots of one wave, built once for the
+    /// whole wave. The role and player level are the wave's, which is what lets the equipment
+    /// blacklist ride here rather than per bot. The level inputs and the band variants are the
+    /// caller's - only it knows the wave's level range and the bands it splits into. The database
+    /// views live on <see cref="BuildViewsOverride"/> or the resident DB.
+    /// </summary>
+    internal static SharedBotVarying BuildSharedVarying(
+        MongoId sessionId,
+        string roleLowercase,
+        ProfileHelper profileHelper,
+        ProfileActivityService profileActivityService,
+        WeatherHelper weatherHelper,
+        BotGeneratorHelper botGeneratorHelper,
+        BotEquipmentFilterService botEquipmentFilterService,
+        BotEquipmentModPoolService botEquipmentModPoolService,
+        ItemFilterService itemFilterService,
+        ItemHelper itemHelper,
+        BotConfig botConfig,
+        PmcConfig pmcConfig,
+        RepairConfig repairConfig,
+        LevelGenerationView? levelGeneration,
+        List<BotTemplateVariantView>? templateVariants
     )
     {
         // BotInventoryGenerator.cs:260 - the `?? 1` is what a session with no profile lands on, and
@@ -56,37 +108,14 @@ internal static class BotPayloadProjection
         // BotEquipmentModGenerator.cs:546 defaults the very same level to 0 instead, which matches
         // no levelRange, so the weapon-mod path gets a blacklist of its own
         var weaponModPlayerLevel = pmcProfile?.Info?.Level ?? 0;
-        var equipmentRole = botGeneratorHelper.GetBotEquipmentRole(botGenerationDetails.RoleLowercase);
+        var equipmentRole = botGeneratorHelper.GetBotEquipmentRole(roleLowercase);
 
         // BotInventoryGenerator.cs:192-196 - no raid means day
         var raidConfig = profileActivityService.GetProfileActivityRaidData(sessionId)?.RaidConfiguration;
         var isNightTime = raidConfig is not null && weatherHelper.IsNightTime(raidConfig.TimeVariant, raidConfig.Location!);
 
-        // `GetPreset(id)` reads the same map `ItemPresets` is, and every default preset is one of
-        // its entries, so this is the only projection of it that goes on the wire
-        var presets = ToPresetViews(globalTable.ItemPresets);
-        var lootPools = BuildLootPools(botLootCacheService, botJsonTemplate, botGenerationDetails, pmcConfig);
-
-        return new GenerateBotInventoryRequest
+        return new SharedBotVarying
         {
-            BotId = botId,
-            TestSeed = testSeed,
-            Details = new BotGenerationDetailsView
-            {
-                Role = botGenerationDetails.Role,
-                RoleLowercase = botGenerationDetails.RoleLowercase,
-                Side = botGenerationDetails.Side,
-                BotLevel = botGenerationDetails.BotLevel,
-                IsPmc = botGenerationDetails.IsPmc,
-                IsPlayerScav = botGenerationDetails.IsPlayerScav,
-                GameVersion = botGenerationDetails.GameVersion,
-                Location = botGenerationDetails.Location,
-                // Interpolated into log lines only, so an unset difficulty is the empty string
-                // rather than a member Rust would fail to find
-                BotDifficulty = botGenerationDetails.BotDifficulty ?? string.Empty,
-                ClearBotContainerCacheAfterGeneration = botGenerationDetails.ClearBotContainerCacheAfterGeneration,
-            },
-            Template = BuildTemplateView(botJsonTemplate),
             GeneratingPlayerLevel = generatingPlayerLevel,
             IsNightTime = isNightTime,
             // A null entry is a role the legacy path would have thrown on; dropping it makes the
@@ -107,79 +136,38 @@ internal static class BotPayloadProjection
                 botEquipmentFilterService.GetBotEquipmentBlacklist(equipmentRole, generatingPlayerLevel) ?? new EquipmentFilterDetails(),
             WeaponModEquipmentBlacklist =
                 botEquipmentFilterService.GetBotEquipmentBlacklist(equipmentRole, weaponModPlayerLevel) ?? new EquipmentFilterDetails(),
-            LootPools = lootPools,
-            ItemPresets = presets,
-            DefaultPresetsByTpl = ToDefaultPresetIds(presetHelper.GetDefaultPresetByTpl()),
             ConfigBlacklist = itemFilterService.GetBlacklistedItems(),
-            HandbookPrices = BuildHandbookPrices(lootPools, handbookHelper),
-            Items = PayloadProjection.BuildItemsView(itemHelper.TemplateTable.Items),
+            // Live service state, not a database view: the enumeration order of the pool
+            // service's ConcurrentDictionary is process-local, so it rides every send
             ModPoolSlotOrder = BuildModPoolSlotOrder(botEquipmentModPoolService, itemHelper.TemplateTable.Items),
+            LevelGeneration = levelGeneration,
+            TemplateVariants = templateVariants,
         };
     }
 
     /// <summary>
-    /// The request members that do not vary between the bots of one wave, built once for the
-    /// whole wave. The role and player level are the wave's, which is what lets the equipment
-    /// blacklist ride here rather than per bot. The level inputs and the band variants are the
-    /// caller's - only it knows the wave's level range and the bands it splits into.
+    /// The database half of a request, for the ineligible arm: the views an eligible send reads
+    /// off the resident DB instead, built from the same services the old flat request read.
+    /// <paramref name="lootPools"/> is every pool the send can draw from - one cache on the
+    /// single-bot request, one per level-band variant on the batch - and prices as their union.
     /// </summary>
-    internal static SharedBotViews BuildSharedViews(
-        MongoId sessionId,
-        string roleLowercase,
-        ProfileHelper profileHelper,
-        ProfileActivityService profileActivityService,
-        WeatherHelper weatherHelper,
-        BotGeneratorHelper botGeneratorHelper,
-        BotEquipmentFilterService botEquipmentFilterService,
-        BotEquipmentModPoolService botEquipmentModPoolService,
+    internal static BotViewsOverride BuildViewsOverride(
         PresetHelper presetHelper,
-        ItemFilterService itemFilterService,
+        HandbookHelper handbookHelper,
         ItemHelper itemHelper,
         GlobalTable globalTable,
-        BotConfig botConfig,
-        PmcConfig pmcConfig,
-        RepairConfig repairConfig,
-        LevelGenerationView? levelGeneration,
-        List<BotTemplateVariantView> templateVariants
+        IEnumerable<BotLootCache> lootPools
     )
     {
-        var pmcProfile = profileHelper.GetPmcProfile(sessionId);
-        var generatingPlayerLevel = pmcProfile?.Info?.Level ?? 1;
-        var weaponModPlayerLevel = pmcProfile?.Info?.Level ?? 0;
-        var equipmentRole = botGeneratorHelper.GetBotEquipmentRole(roleLowercase);
-
-        var raidConfig = profileActivityService.GetProfileActivityRaidData(sessionId)?.RaidConfiguration;
-        var isNightTime = raidConfig is not null && weatherHelper.IsNightTime(raidConfig.TimeVariant, raidConfig.Location!);
-
-        var presets = ToPresetViews(globalTable.ItemPresets);
-
-        return new SharedBotViews
+        return new BotViewsOverride
         {
-            GeneratingPlayerLevel = generatingPlayerLevel,
-            IsNightTime = isNightTime,
-            Equipment = botConfig.Equipment.Where(role => role.Value is not null).ToDictionary(role => role.Key, role => role.Value!),
-            Bosses = botConfig.Bosses,
-            Durability = botConfig.Durability,
-            ItemSpawnLimits = botConfig.ItemSpawnLimits,
-            WalletLoot = botConfig.WalletLoot,
-            CurrencyStackSize = botConfig.CurrencyStackSize,
-            SecureContainerAmmoStackCount = botConfig.SecureContainerAmmoStackCount,
-            DisableLootOnBotTypes = botConfig.DisableLootOnBotTypes,
-            LowProfileGasBlockTpls = botConfig.LowProfileGasBlockTpls,
-            LootItemResourceRandomization = botConfig.LootItemResourceRandomization,
-            PmcConfig = pmcConfig,
-            RepairKitWeapon = repairConfig.RepairKit.Weapon,
-            EquipmentBlacklist =
-                botEquipmentFilterService.GetBotEquipmentBlacklist(equipmentRole, generatingPlayerLevel) ?? new EquipmentFilterDetails(),
-            WeaponModEquipmentBlacklist =
-                botEquipmentFilterService.GetBotEquipmentBlacklist(equipmentRole, weaponModPlayerLevel) ?? new EquipmentFilterDetails(),
-            ItemPresets = presets,
-            DefaultPresetsByTpl = ToDefaultPresetIds(presetHelper.GetDefaultPresetByTpl()),
-            ConfigBlacklist = itemFilterService.GetBlacklistedItems(),
             Items = PayloadProjection.BuildItemsView(itemHelper.TemplateTable.Items),
-            ModPoolSlotOrder = BuildModPoolSlotOrder(botEquipmentModPoolService, itemHelper.TemplateTable.Items),
-            LevelGeneration = levelGeneration,
-            TemplateVariants = templateVariants,
+            // `GetPreset(id)` reads the same map `ItemPresets` is, and every default preset is one
+            // of its entries, so this is the only projection of it that goes on the wire
+            ItemPresets = ToPresetViews(globalTable.ItemPresets),
+            DefaultPresetsByTpl = ToDefaultPresetIds(presetHelper.GetDefaultPresetByTpl()),
+            HandbookPrices = BuildHandbookPrices(lootPools, handbookHelper),
+            ExpTable = [.. globalTable.Configuration.Exp.Level.ExperienceTable.Select(entry => entry.Experience)],
         };
     }
 
@@ -290,13 +278,14 @@ internal static class BotPayloadProjection
 
     /// <summary>
     /// <c>HandbookHelper.GetTemplatePrice</c> for every tpl that can be drawn out of a loot pool -
-    /// the only tpls the native running-total ever prices.
+    /// the only tpls the native running-total ever prices. The union over every cache is
+    /// collision-safe: a tpl in two pools maps to the same <c>GetTemplatePrice</c> value in both.
     /// </summary>
-    internal static Dictionary<MongoId, double> BuildHandbookPrices(BotLootCache lootPools, HandbookHelper handbookHelper)
+    internal static Dictionary<MongoId, double> BuildHandbookPrices(IEnumerable<BotLootCache> lootPools, HandbookHelper handbookHelper)
     {
         var prices = new Dictionary<MongoId, double>();
 
-        foreach (var pool in EnumeratePools(lootPools))
+        foreach (var pool in lootPools.SelectMany(EnumeratePools))
         {
             foreach (var tpl in pool.Keys)
             {
