@@ -164,8 +164,10 @@ public class LootGenerator(
     }
 
     /// <summary>
-    ///     The database views an override send carries, built fresh per call so a mod that swaps an
-    ///     item or blacklists one at runtime is picked up.
+    ///     The database views an override send carries, plus the four <c>ItemConfig</c> sets the
+    ///     resident arm reads off the configs root's <c>spt-item</c> stem, built fresh per call so a
+    ///     mod that swaps an item or blacklists one at runtime is picked up. All four reward exports
+    ///     flow through here, so the sets have one build site.
     /// </summary>
     /// <param name="defaultPresets">
     ///     <c>PresetHelper.GetDefaultPresets().Values</c>, order preserved - only random loot draws
@@ -186,6 +188,10 @@ public class LootGenerator(
             ItemsView = PayloadProjection.BuildItemsView(templateTable.Items),
             DefaultPresets = defaultPresets,
             DefaultPresetsByTpl = defaultPresetsByTpl,
+            ConfigBlacklist = itemFilterService.GetBlacklistedItems(),
+            RewardItemBlacklist = itemFilterService.GetItemRewardBlacklist(),
+            RewardBaseTypeBlacklist = itemFilterService.GetItemRewardBaseTypeBlacklist(),
+            BossItems = itemFilterService.GetBossItems(),
         };
     }
 
@@ -223,10 +229,6 @@ public class LootGenerator(
         var varying = new CreateRandomLootVarying
         {
             GlobalBlacklist = itemFilterService.GetItemBlacklistCache(),
-            ConfigBlacklist = itemFilterService.GetBlacklistedItems(),
-            RewardItemBlacklist = itemFilterService.GetItemRewardBlacklist(),
-            RewardBaseTypeBlacklist = itemFilterService.GetItemRewardBaseTypeBlacklist(),
-            BossItems = itemFilterService.GetBossItems(),
             InactiveSeasonalItems = seasonalEventService.GetInactiveSeasonalEventItems(),
             TestSeed = NativeTestSeed,
             LootRequest = options,
@@ -375,10 +377,6 @@ public class LootGenerator(
         var varying = new CreateForcedLootVarying
         {
             GlobalBlacklist = itemFilterService.GetItemBlacklistCache(),
-            ConfigBlacklist = itemFilterService.GetBlacklistedItems(),
-            RewardItemBlacklist = itemFilterService.GetItemRewardBlacklist(),
-            RewardBaseTypeBlacklist = itemFilterService.GetItemRewardBaseTypeBlacklist(),
-            BossItems = itemFilterService.GetBossItems(),
             InactiveSeasonalItems = seasonalEventService.GetInactiveSeasonalEventItems(),
             TestSeed = NativeTestSeed,
             ForcedLoot = forcedLootToAdd,
@@ -743,10 +741,6 @@ public class LootGenerator(
         var varying = new SealedWeaponCaseVarying
         {
             GlobalBlacklist = itemFilterService.GetItemBlacklistCache(),
-            ConfigBlacklist = itemFilterService.GetBlacklistedItems(),
-            RewardItemBlacklist = itemFilterService.GetItemRewardBlacklist(),
-            RewardBaseTypeBlacklist = itemFilterService.GetItemRewardBaseTypeBlacklist(),
-            BossItems = itemFilterService.GetBossItems(),
             InactiveSeasonalItems = seasonalEventService.GetInactiveSeasonalEventItems(),
             TestSeed = NativeTestSeed,
             ContainerSettings = containerSettings,
@@ -999,10 +993,6 @@ public class LootGenerator(
         var varying = new RandomLootContainerVarying
         {
             GlobalBlacklist = itemFilterService.GetItemBlacklistCache(),
-            ConfigBlacklist = itemFilterService.GetBlacklistedItems(),
-            RewardItemBlacklist = itemFilterService.GetItemRewardBlacklist(),
-            RewardBaseTypeBlacklist = itemFilterService.GetItemRewardBaseTypeBlacklist(),
-            BossItems = itemFilterService.GetBossItems(),
             InactiveSeasonalItems = seasonalEventService.GetInactiveSeasonalEventItems(),
             TestSeed = NativeTestSeed,
             RewardDetails = rewardContainerDetails,

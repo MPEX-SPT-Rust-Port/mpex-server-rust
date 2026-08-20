@@ -46,15 +46,16 @@ public class SptNativeRagfairWireTests
                 di.GetService<HandbookHelper>(),
                 di.GetService<TraderHelper>(),
                 di.GetService<PresetHelper>(),
-                di.GetService<ItemHelper>()
+                di.GetService<ItemHelper>(),
+                _ragfairConfig,
+                di.GetService<ItemFilterService>(),
+                di.GetService<InventoryConfig>()
             ),
             0,
             null,
             di.GetService<TimeUtil>().GetTimeStamp(),
             0,
             TestSeed,
-            _ragfairConfig,
-            di.GetService<ItemFilterService>(),
             di.GetService<SeasonalEventService>(),
             di.GetService<BotTable>(),
             di.GetService<BotConfig>()
@@ -76,7 +77,7 @@ public class SptNativeRagfairWireTests
             Assert.That(_request.ViewsOverride!.PresetsByTpl, Is.Not.Empty);
             Assert.That(_request.Varying.PmcNamesUsec, Is.Not.Empty);
             Assert.That(_request.Varying.PmcNamesBear, Is.Not.Empty);
-            Assert.That(_request.Varying.ConfigBlacklist, Is.Not.Empty);
+            Assert.That(_request.ViewsOverride!.ConfigBlacklist, Is.Not.Empty);
             Assert.That(_request.Varying.SeasonalItemTplBlacklist, Is.Not.Empty);
             Assert.That(_request.Varying.ExpiredOffers, Is.Null);
         });
@@ -103,7 +104,7 @@ public class SptNativeRagfairWireTests
 
         // dynamic.condition and dynamic.offerItemCount are the two config maps the native side
         // iterates by key; a numeric key here would break the baseclass match and the offer count
-        foreach (var entry in json["varying"]!["dynamic"]!["condition"]!.AsObject())
+        foreach (var entry in viewsOverride["dynamic"]!["condition"]!.AsObject())
         {
             Assert.That(new MongoId(entry.Key).IsEmpty, Is.False, $"condition key '{entry.Key}' is not a tpl");
         }
@@ -161,8 +162,6 @@ public class SptNativeRagfairWireTests
             timestamp: 1_700_000_000,
             offerCounterStart: 0,
             testSeed: 1234,
-            _ragfairConfig,
-            di.GetService<ItemFilterService>(),
             di.GetService<SeasonalEventService>(),
             di.GetService<BotTable>(),
             di.GetService<BotConfig>()
@@ -179,7 +178,7 @@ public class SptNativeRagfairWireTests
     public void AModAddedConfigFieldSurvivesTheRoundTrip()
     {
         var json = JsonNode.Parse(JsonSerializer.Serialize(_request, JsonUtil.JsonSerializerOptionsNoIndent))!.AsObject();
-        json["varying"]!["dynamic"]!["modAddedField"] = "kept";
+        json["viewsOverride"]!["dynamic"]!["modAddedField"] = "kept";
 
         // No assertion on the value coming back - the native result carries offers, not the config;
         // this asserts only that an unknown key does not fail the parse.

@@ -5,7 +5,6 @@ using SPTarkov.Server.Core.Generators.Bot;
 using SPTarkov.Server.Core.Generators.Loot;
 using SPTarkov.Server.Core.Generators.Weapons;
 using SPTarkov.Server.Core.Helpers;
-using SPTarkov.Server.Core.Helpers.Bot;
 using SPTarkov.Server.Core.Helpers.InRaid;
 using SPTarkov.Server.Core.Helpers.Items;
 using SPTarkov.Server.Core.Helpers.Profile;
@@ -47,7 +46,6 @@ public class BotResidentDbTests
     private BotWeaponGenerator _botWeaponGenerator = default!;
     private BotLootGenerator _botLootGenerator = default!;
     private BotEquipmentModGenerator _botEquipmentModGenerator = default!;
-    private BotGeneratorHelper _botGeneratorHelper = default!;
     private ProfileHelper _profileHelper = default!;
     private ItemHelper _itemHelper = default!;
     private WeatherHelper _weatherHelper = default!;
@@ -73,7 +71,6 @@ public class BotResidentDbTests
         _botWeaponGenerator = di.GetService<BotWeaponGenerator>();
         _botLootGenerator = di.GetService<BotLootGenerator>();
         _botEquipmentModGenerator = di.GetService<BotEquipmentModGenerator>();
-        _botGeneratorHelper = di.GetService<BotGeneratorHelper>();
         _profileHelper = di.GetService<ProfileHelper>();
         _itemHelper = di.GetService<ItemHelper>();
         _weatherHelper = di.GetService<WeatherHelper>();
@@ -298,6 +295,10 @@ public class BotResidentDbTests
                 _botLootGenerator.HandbookHelper,
                 _itemHelper,
                 _botWeaponGenerator.GlobalTable,
+                _botEquipmentModGenerator.ItemFilterService,
+                _botConfig,
+                _pmcConfig,
+                _botWeaponGenerator.RepairConfig,
                 request.Shared.TemplateVariants!.Select(variant => variant.LootPools)
             );
             var overrideResult = SptNative.GenerateBotInventoryBatch(request);
@@ -335,18 +336,12 @@ public class BotResidentDbTests
             Epoch = 0,
             Shared = BotPayloadProjection.BuildSharedVarying(
                 _sessionId,
-                details.RoleLowercase,
                 _profileHelper,
                 _profileActivityService,
                 _weatherHelper,
-                _botGeneratorHelper,
-                _botEquipmentFilterService,
                 _botEquipmentModPoolService,
-                _botEquipmentModGenerator.ItemFilterService,
                 _itemHelper,
                 _botConfig,
-                _pmcConfig,
-                _botWeaponGenerator.RepairConfig,
                 isPmc ? new LevelGenerationView { LevelMin = 1, LevelMax = levelMax } : null,
                 [
                     new BotTemplateVariantView

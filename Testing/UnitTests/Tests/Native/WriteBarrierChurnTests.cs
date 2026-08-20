@@ -11,7 +11,7 @@ namespace UnitTests.Tests.Native;
 
 /// <summary>
 /// The other half of Phase 2's bargain. Barriers are only worth having if a steady-state workload
-/// does not dirty the stamp, because a dirty stamp costs a full five-root republish on the next
+/// does not dirty the stamp, because a dirty stamp costs a full six-root republish on the next
 /// native call. Each test runs a representative workload twice and asserts the second pass needed
 /// no republish - i.e. the workload's own writes are either absent, converged, or suppressed.
 ///
@@ -99,7 +99,7 @@ public class WriteBarrierChurnTests
     /// than through the republish it would otherwise cost. A static-containers response deserializes
     /// hundreds of SpawnpointTemplates, whose setters are barriered because LocationTable reaches the
     /// type - so without the scope one native call moves the stamp once per decoded property and
-    /// every call after it pays a five-root republish. Narrowing or removing that scope has to fail
+    /// every call after it pays a six-root republish. Narrowing or removing that scope has to fail
     /// here by name, not turn up as a perf regression in LocationLootGeneratorTests.
     /// </summary>
     [Test]
@@ -140,6 +140,52 @@ public class WriteBarrierChurnTests
         }
         finally
         {
+            ragfairConfig.TrustNativeRequestCacheWithMods = trusted;
+        }
+    }
+
+    /// <summary>
+    /// The configs root's side of the bargain (Phase 4). A config edit has to cost exactly one
+    /// republish, not one per pass: the barrier fires on the write, the next native call pays for it,
+    /// and the workload that reads the new value must not keep dirtying the stamp afterwards.
+    /// RunIntervalSeconds is deliberately a property the generation path never reads - the subject
+    /// here is the barrier's churn, not the config's effect.
+    /// </summary>
+    [Test]
+    public void AConfigWriteCostsExactlyOneRepublish()
+    {
+        var ragfairConfig = DI.GetInstance().GetService<RagfairConfig>();
+        var trusted = ragfairConfig.TrustNativeRequestCacheWithMods;
+        var interval = ragfairConfig.RunIntervalSeconds;
+        ragfairConfig.TrustNativeRequestCacheWithMods = true;
+        _generator.NativeTestSeed = 424242;
+
+        try
+        {
+            // Same settling as the sibling test - the first pass may legitimately flip
+            // CanSellOnRagfair, and this test can only measure a settled baseline.
+            GenerateOnePass();
+            _publisher.EnsureCurrent();
+            var settled = _publisher.EnsureCurrent();
+
+            ragfairConfig.RunIntervalSeconds = interval + 1;
+            var afterWrite = _publisher.EnsureCurrent();
+
+            GenerateOnePass();
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(afterWrite, Is.GreaterThan(settled), "a config write must dirty the stamp and force one republish");
+                Assert.That(
+                    _publisher.EnsureCurrent(),
+                    Is.EqualTo(afterWrite),
+                    "the config write must converge - one republish, not one per pass"
+                );
+            });
+        }
+        finally
+        {
+            ragfairConfig.RunIntervalSeconds = interval;
             ragfairConfig.TrustNativeRequestCacheWithMods = trusted;
         }
     }

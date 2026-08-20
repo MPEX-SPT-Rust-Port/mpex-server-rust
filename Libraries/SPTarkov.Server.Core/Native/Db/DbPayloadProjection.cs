@@ -2,6 +2,7 @@ using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using SPTarkov.Server.Core.Models.Eft.Common;
+using SPTarkov.Server.Core.Models.Spt.Config;
 using SPTarkov.Server.Core.Models.Spt.Tables;
 using SPTarkov.Server.Core.Utils;
 
@@ -10,8 +11,9 @@ namespace SPTarkov.Server.Core.Native.Db;
 /// <summary>
 /// The full-table publish envelope of <c>spt_db_publish</c> — the roots the resident DB holds
 /// (templates, traders, globals, a locations root of Base + AllExtracts + the three statics
-/// the loot flip reads — looseLoot and staticAmmo never serialize — and a hideout root of
-/// production.scavRecipes only). Serialized with the server's shared options so the models'
+/// the loot flip reads — looseLoot and staticAmmo never serialize — a hideout root of
+/// production.scavRecipes only, and a configs root of every loaded config keyed by its
+/// <c>Kind</c>). Serialized with the server's shared options so the models'
 /// <c>JsonPropertyName</c>s stay the wire authority, exactly like the per-family payloads
 /// before it.
 /// </summary>
@@ -32,7 +34,8 @@ internal static class DbPayloadProjection
         TradersTable tradersTable,
         GlobalTable globalTable,
         LocationTable locationTable,
-        HideoutTable hideoutTable
+        HideoutTable hideoutTable,
+        IReadOnlyDictionary<Type, BaseConfig> configs
     )
     {
         var options = JsonUtil.JsonSerializerOptionsNoIndent ?? throw new InvalidOperationException("JsonUtil has not been built yet.");
@@ -93,6 +96,17 @@ internal static class DbPayloadProjection
                 skipInputValidation: true
             );
             writer.WriteEndObject();
+            writer.WriteEndObject();
+            // Phase 4: every loaded config, keyed by its self-declared kind. Serialized with the
+            // shared options so the records' JsonPropertyNames stay the wire authority;
+            // runtime-type overload so each BaseConfig serializes as its concrete record.
+            writer.WritePropertyName("configs");
+            writer.WriteStartObject();
+            foreach (var (configType, config) in configs)
+            {
+                writer.WritePropertyName(config.Kind);
+                writer.WriteRawValue(JsonSerializer.SerializeToUtf8Bytes(config, configType, options), skipInputValidation: true);
+            }
             writer.WriteEndObject();
             writer.WriteEndObject();
             writer.WriteEndObject();

@@ -3,8 +3,10 @@ using NUnit.Framework;
 using SPTarkov.Server.Core.Helpers.Items;
 using SPTarkov.Server.Core.Helpers.Profile;
 using SPTarkov.Server.Core.Helpers.Traders;
+using SPTarkov.Server.Core.Models.Spt.Config;
 using SPTarkov.Server.Core.Models.Spt.Tables;
 using SPTarkov.Server.Core.Native.Ragfair;
+using SPTarkov.Server.Core.Services.Items;
 using SPTarkov.Server.Core.Utils;
 
 namespace UnitTests.Tests.Utils;
@@ -35,7 +37,10 @@ public class RagfairViewsEquivalenceTests
             di.GetService<HandbookHelper>(),
             di.GetService<TraderHelper>(),
             di.GetService<PresetHelper>(),
-            di.GetService<ItemHelper>()
+            di.GetService<ItemHelper>(),
+            di.GetService<RagfairConfig>(),
+            di.GetService<ItemFilterService>(),
+            di.GetService<InventoryConfig>()
         );
 
         var rootsPath = Path.Combine(Path.GetTempPath(), "spt-phase1-ragfair-roots.json");
@@ -61,8 +66,9 @@ public class RagfairViewsEquivalenceTests
             writer.WriteEndObject();
         }
 
-        // Exactly the eight views the resident DB derives natively - the views override carries
-        // them and nothing else
+        // Exactly the eight views the resident DB derives natively. The override carries three more
+        // members since the Phase 4 ragfair flip, but those come off the configs root, not this
+        // derivation
         var viewsPath = Path.Combine(Path.GetTempPath(), "spt-phase1-ragfair-views-expected.json");
         var expectedViews = new (string Name, byte[] Bytes)[]
         {

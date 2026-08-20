@@ -1,7 +1,8 @@
-//! Resident-arm integration for the scav case flip (#5): publish a minimal four-root DB —
-//! templates/traders/globals plus the hideout root carrying the scav recipes — then prove a
-//! `{epoch}` send generates identically to the same data sent as `viewsOverride`, and that a
-//! wrong epoch is a stale error, not a wrong answer.
+//! Resident-arm integration for the scav case flip (#5): publish a minimal five-root DB —
+//! templates/traders/globals, the hideout root carrying the scav recipes, and the configs root
+//! carrying the `spt-scavcase`/`spt-item` stems — then prove a `{epoch}` send generates
+//! identically to the same data sent as `viewsOverride`, and that a wrong epoch is a stale error,
+//! not a wrong answer.
 //!
 //! Its own process (integration tests build their own binary), so the process-global store races
 //! with nothing; the whole protocol lives in one `#[test]` fn, sequential, to keep it that way.
@@ -88,8 +89,9 @@ fn preset_p2_items() -> String {
     format!(r#"[{{"_id":"root_p2","_tpl":"{WEAPON_TPL}"}}]"#)
 }
 
-/// Every `ScavCaseVarying` member, shared verbatim by both sends, `testSeed` included so both
-/// arms replay one draw stream.
+/// The scav case config, shared verbatim by the publish's `spt-scavcase` stem and the override
+/// bundle's `config` member — byte-equal generation off the two arms is the gate that the resident
+/// resolve and the override parse read the same values out of it.
 ///
 /// The chances are 100/100 with both `allowMultiple*` caps on, so every draw arm fires on a fixed
 /// schedule rather than by seed luck: each rarity's first pick is money, its second is ammo, and
@@ -97,39 +99,55 @@ fn preset_p2_items() -> String {
 /// exactly the weapon, making the third common pick the default-preset expansion. The recipe's
 /// counts (common 3, rare 1, superrare 0) therefore exercise the money, ammo, plain-item, and
 /// preset arms in one send.
+fn config() -> String {
+    // `kind` and `ammoRewardBlacklist` are members the view does not bind — carried here so both
+    // arms prove they ride past rather than failing the parse.
+    r#"{
+        "kind":"spt-scavcase",
+        "rewardItemValueRangeRub":{"common":{"min":40000.0,"max":60000.0},
+            "rare":{"min":0.0,"max":100000.0},"superrare":{"min":0.0,"max":0.0}},
+        "moneyRewards":{"moneyRewardChancePercent":100,
+            "rubCount":{"common":{"min":1000,"max":1000},"rare":{"min":1111,"max":1111},
+                "superrare":{"min":1,"max":1}},
+            "usdCount":{"common":{"min":2000,"max":2000},"rare":{"min":2222,"max":2222},
+                "superrare":{"min":1,"max":1}},
+            "eurCount":{"common":{"min":3000,"max":3000},"rare":{"min":3333,"max":3333},
+                "superrare":{"min":1,"max":1}},
+            "gpCount":{"common":{"min":4000,"max":4000},"rare":{"min":4444,"max":4444},
+                "superrare":{"min":1,"max":1}}},
+        "ammoRewards":{"ammoRewardChancePercent":100,"ammoRewardBlacklist":{},
+            "ammoRewardValueRangeRub":{"common":{"min":0.0,"max":80.0}},
+            "minStackSize":30},
+        "rewardItemParentBlacklist":[],"rewardItemBlacklist":[],
+        "allowMultipleMoneyRewardsPerRarity":false,
+        "allowMultipleAmmoRewardsPerRarity":false,
+        "allowBossItemsAsRewards":true}"#
+        .to_owned()
+}
+
+/// `ItemFilterService.GetItemRewardBlacklist()`/`GetBossItems()`, which are `ItemConfig`'s own two
+/// sets verbatim — shared by the publish's `spt-item` stem and the override bundle. Both hold a tpl
+/// the fixture's items view does not, so neither arm's reward pool changes.
+const REWARD_BLACKLISTED: &str = "scav_reward_blacklisted";
+const BOSS_ITEM: &str = "scav_boss_item";
+
+/// Every `ScavCaseVarying` member, shared verbatim by both sends, `testSeed` included so both
+/// arms replay one draw stream. Config-backed members moved out of here to [`config`] and the
+/// `spt-item` stem; what is left is the per-call id, the service-state sets and the seed.
 fn varying() -> String {
     format!(
-        r#""recipeId":"{RECIPE_ID}",
-        "config":{{
-            "rewardItemValueRangeRub":{{"common":{{"min":40000.0,"max":60000.0}},
-                "rare":{{"min":0.0,"max":100000.0}},"superrare":{{"min":0.0,"max":0.0}}}},
-            "moneyRewards":{{"moneyRewardChancePercent":100,
-                "rubCount":{{"common":{{"min":1000,"max":1000}},"rare":{{"min":1111,"max":1111}},
-                    "superrare":{{"min":1,"max":1}}}},
-                "usdCount":{{"common":{{"min":2000,"max":2000}},"rare":{{"min":2222,"max":2222}},
-                    "superrare":{{"min":1,"max":1}}}},
-                "eurCount":{{"common":{{"min":3000,"max":3000}},"rare":{{"min":3333,"max":3333}},
-                    "superrare":{{"min":1,"max":1}}}},
-                "gpCount":{{"common":{{"min":4000,"max":4000}},"rare":{{"min":4444,"max":4444}},
-                    "superrare":{{"min":1,"max":1}}}}}},
-            "ammoRewards":{{"ammoRewardChancePercent":100,
-                "ammoRewardValueRangeRub":{{"common":{{"min":0.0,"max":80.0}}}},
-                "minStackSize":30}},
-            "rewardItemParentBlacklist":[],"rewardItemBlacklist":[],
-            "allowMultipleMoneyRewardsPerRarity":false,
-            "allowMultipleAmmoRewardsPerRarity":false,
-            "allowBossItemsAsRewards":true}},
-        "inactiveSeasonalItems":[],"globalBlacklist":[],"rewardItemBlacklist":[],
-        "bossItems":[],"testSeed":42"#
+        r#""recipeId":"{RECIPE_ID}","inactiveSeasonalItems":[],"globalBlacklist":[],"testSeed":42"#
     )
 }
 
 #[test]
 fn a_resident_send_matches_the_override_send_and_a_wrong_epoch_is_stale() {
-    // (1) A four-root publish: templates whose derived items view is exactly the override's
+    // (1) A five-root publish: templates whose derived items view is exactly the override's
     // below, empty traders (the ragfair derive is total over them), globals carrying the weapon's
-    // two presets, and a hideout root with two scav recipes — one complete, one missing its
-    // `Rare` band, which the derivation must drop rather than error on.
+    // two presets, a hideout root with two scav recipes — one complete, one missing its
+    // `Rare` band, which the derivation must drop rather than error on — and a configs root
+    // carrying the two stems the family's config-backed inputs come out of, `kind` members and
+    // all, as the C# projection writes them.
     let publish = format!(
         r#"{{"schema":1,"roots":{{
             "templates":{{"items":{{
@@ -158,10 +176,19 @@ fn a_resident_send_matches_the_override_send_and_a_wrong_epoch_is_stale() {
                     "Rare":{{"min":1,"max":1}},"Superrare":{{"min":0,"max":0}}}}}},
                 {{"_id":"recipe_missing_rare","endProducts":{{"Common":{{"min":1,"max":1}},
                     "Superrare":{{"min":0,"max":0}}}}}}
-            ]}}}}
+            ]}}}},
+            "configs":{{
+                "spt-scavcase":{config},
+                "spt-item":{{"kind":"spt-item","blacklist":[],
+                    "rewardItemBlacklist":["{REWARD_BLACKLISTED}"],
+                    "rewardItemTypeBlacklist":[],"bossItems":["{BOSS_ITEM}"],
+                    "handbookPriceOverride":{{}}}},
+                "spt-core":{{"kind":"spt-core"}}
+            }}
         }}}}"#,
         p1_items = preset_p1_items(),
         p2_items = preset_p2_items(),
+        config = config(),
     );
 
     // (2) Publish through the FFI and read back the epoch.
@@ -215,9 +242,12 @@ fn a_resident_send_matches_the_override_send_and_a_wrong_epoch_is_stale() {
                 "{AMMO_TPL}":50.0,"{WEAPON_TPL}":50000.0
             }},
             "defaultPresetsByTpl":{{"{WEAPON_TPL}":{{"items":{p1_items},"id":"p1",
-                "name":"weapon_default","encyclopedia":"{WEAPON_TPL}"}}}}
+                "name":"weapon_default","encyclopedia":"{WEAPON_TPL}"}}}},
+            "config":{config},
+            "rewardItemBlacklist":["{REWARD_BLACKLISTED}"],"bossItems":["{BOSS_ITEM}"]
         }},"varying":{{{varying}}}}}"#,
         p1_items = preset_p1_items(),
+        config = config(),
         varying = varying(),
     );
     let (status, override_send) = call(spt_generate_scav_case_rewards, override_request.as_bytes());

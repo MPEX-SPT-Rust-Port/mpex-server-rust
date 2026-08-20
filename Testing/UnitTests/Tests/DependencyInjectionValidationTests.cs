@@ -48,6 +48,8 @@ public class DependencyInjectionValidationTests
             builder.Services.AddSingleton(configEntry.Key, configEntry.Value);
         }
 
+        builder.Services.AddSingleton(configuration);
+
         // The database tables come from the importer at runtime. Validation only walks constructors,
         // it never invokes factories, so stubs are enough and we avoid loading the whole database.
         AddDatabaseTableStubs(builder.Services);

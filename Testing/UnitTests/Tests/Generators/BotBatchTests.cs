@@ -5,7 +5,6 @@ using SPTarkov.Server.Core.Generators.Bot;
 using SPTarkov.Server.Core.Generators.Loot;
 using SPTarkov.Server.Core.Generators.Weapons;
 using SPTarkov.Server.Core.Helpers;
-using SPTarkov.Server.Core.Helpers.Bot;
 using SPTarkov.Server.Core.Helpers.InRaid;
 using SPTarkov.Server.Core.Helpers.Items;
 using SPTarkov.Server.Core.Helpers.Profile;
@@ -45,7 +44,6 @@ public class BotBatchTests
     private BotWeaponGenerator _botWeaponGenerator = default!;
     private BotLootGenerator _botLootGenerator = default!;
     private BotEquipmentModGenerator _botEquipmentModGenerator = default!;
-    private BotGeneratorHelper _botGeneratorHelper = default!;
     private ProfileHelper _profileHelper = default!;
     private ItemHelper _itemHelper = default!;
     private WeatherHelper _weatherHelper = default!;
@@ -67,7 +65,6 @@ public class BotBatchTests
         _botWeaponGenerator = di.GetService<BotWeaponGenerator>();
         _botLootGenerator = di.GetService<BotLootGenerator>();
         _botEquipmentModGenerator = di.GetService<BotEquipmentModGenerator>();
-        _botGeneratorHelper = di.GetService<BotGeneratorHelper>();
         _profileHelper = di.GetService<ProfileHelper>();
         _itemHelper = di.GetService<ItemHelper>();
         _weatherHelper = di.GetService<WeatherHelper>();
@@ -240,15 +237,11 @@ public class BotBatchTests
             _profileHelper,
             _profileActivityService,
             _weatherHelper,
-            _botGeneratorHelper,
-            _botEquipmentFilterService,
             _botEquipmentModPoolService,
             _botLootGenerator.BotLootCacheService,
-            _botEquipmentModGenerator.ItemFilterService,
             _itemHelper,
             _botConfig,
-            _pmcConfig,
-            _botWeaponGenerator.RepairConfig
+            _pmcConfig
         );
         request.ViewsOverride = BuildViewsOverride([request.LootPools]);
 
@@ -266,6 +259,10 @@ public class BotBatchTests
             _botLootGenerator.HandbookHelper,
             _itemHelper,
             _botWeaponGenerator.GlobalTable,
+            _botEquipmentModGenerator.ItemFilterService,
+            _botConfig,
+            _pmcConfig,
+            _botWeaponGenerator.RepairConfig,
             lootPools
         );
     }
@@ -292,18 +289,12 @@ public class BotBatchTests
             ViewsOverride = BuildViewsOverride([lootPools]),
             Shared = BotPayloadProjection.BuildSharedVarying(
                 _sessionId,
-                Role,
                 _profileHelper,
                 _profileActivityService,
                 _weatherHelper,
-                _botGeneratorHelper,
-                _botEquipmentFilterService,
                 _botEquipmentModPoolService,
-                _botEquipmentModGenerator.ItemFilterService,
                 _itemHelper,
                 _botConfig,
-                _pmcConfig,
-                _botWeaponGenerator.RepairConfig,
                 // Non-PMC: the native side takes the constant level 1 without drawing, so the wave
                 // ships no level inputs and its one band is [1, 1]
                 null,

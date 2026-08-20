@@ -1,5 +1,4 @@
 using SPTarkov.Server.Core.Generators.Bot;
-using SPTarkov.Server.Core.Helpers.Bot;
 using SPTarkov.Server.Core.Helpers.InRaid;
 using SPTarkov.Server.Core.Helpers.Items;
 using SPTarkov.Server.Core.Helpers.Profile;
@@ -35,15 +34,11 @@ internal static class BotPayloadProjection
         ProfileHelper profileHelper,
         ProfileActivityService profileActivityService,
         WeatherHelper weatherHelper,
-        BotGeneratorHelper botGeneratorHelper,
-        BotEquipmentFilterService botEquipmentFilterService,
         BotEquipmentModPoolService botEquipmentModPoolService,
         BotLootCacheService botLootCacheService,
-        ItemFilterService itemFilterService,
         ItemHelper itemHelper,
         BotConfig botConfig,
-        PmcConfig pmcConfig,
-        RepairConfig repairConfig
+        PmcConfig pmcConfig
     )
     {
         return new GenerateBotInventoryRequest
@@ -53,18 +48,12 @@ internal static class BotPayloadProjection
             Epoch = 0,
             Shared = BuildSharedVarying(
                 sessionId,
-                botGenerationDetails.RoleLowercase,
                 profileHelper,
                 profileActivityService,
                 weatherHelper,
-                botGeneratorHelper,
-                botEquipmentFilterService,
                 botEquipmentModPoolService,
-                itemFilterService,
                 itemHelper,
                 botConfig,
-                pmcConfig,
-                repairConfig,
                 // The single-bot path keeps C# level generation and C# filtering: no draw, no
                 // variant pick, so neither block rides the wire
                 levelGeneration: null,
@@ -78,37 +67,28 @@ internal static class BotPayloadProjection
 
     /// <summary>
     /// The request members that do not vary between the bots of one wave, built once for the
-    /// whole wave. The role and player level are the wave's, which is what lets the equipment
-    /// blacklist ride here rather than per bot. The level inputs and the band variants are the
-    /// caller's - only it knows the wave's level range and the bands it splits into. The database
-    /// views live on <see cref="BuildViewsOverride"/> or the resident DB.
+    /// whole wave: live C# process state plus <c>BotConfig.Equipment</c>, which a runtime writer
+    /// keeps off the resident DB. The level inputs and the band variants are the caller's - only it
+    /// knows the wave's level range and the bands it splits into. Every other config slice, and
+    /// every database view, lives on <see cref="BuildViewsOverride"/> or the resident DB.
     /// </summary>
     internal static SharedBotVarying BuildSharedVarying(
         MongoId sessionId,
-        string roleLowercase,
         ProfileHelper profileHelper,
         ProfileActivityService profileActivityService,
         WeatherHelper weatherHelper,
-        BotGeneratorHelper botGeneratorHelper,
-        BotEquipmentFilterService botEquipmentFilterService,
         BotEquipmentModPoolService botEquipmentModPoolService,
-        ItemFilterService itemFilterService,
         ItemHelper itemHelper,
         BotConfig botConfig,
-        PmcConfig pmcConfig,
-        RepairConfig repairConfig,
         LevelGenerationView? levelGeneration,
         List<BotTemplateVariantView>? templateVariants
     )
     {
-        // BotInventoryGenerator.cs:260 - the `?? 1` is what a session with no profile lands on, and
-        // it is the level the equipment blacklist is resolved with at :583
+        // Raw, not defaulted: the equipment path's `?? 1` (BotInventoryGenerator.cs:614 and its six
+        // siblings, effective at :937-939) and the weapon-mod path's `?? 0`
+        // (BotEquipmentModGenerator.cs:546) are applied natively, where both blacklist bands are now
+        // picked out of Equipment
         var pmcProfile = profileHelper.GetPmcProfile(sessionId);
-        var generatingPlayerLevel = pmcProfile?.Info?.Level ?? 1;
-        // BotEquipmentModGenerator.cs:546 defaults the very same level to 0 instead, which matches
-        // no levelRange, so the weapon-mod path gets a blacklist of its own
-        var weaponModPlayerLevel = pmcProfile?.Info?.Level ?? 0;
-        var equipmentRole = botGeneratorHelper.GetBotEquipmentRole(roleLowercase);
 
         // BotInventoryGenerator.cs:192-196 - no raid means day
         var raidConfig = profileActivityService.GetProfileActivityRaidData(sessionId)?.RaidConfiguration;
@@ -116,27 +96,11 @@ internal static class BotPayloadProjection
 
         return new SharedBotVarying
         {
-            GeneratingPlayerLevel = generatingPlayerLevel,
+            GeneratingPlayerLevel = pmcProfile?.Info?.Level,
             IsNightTime = isNightTime,
             // A null entry is a role the legacy path would have thrown on; dropping it makes the
             // native side take its "no equipment filters for role" exit instead
             Equipment = botConfig.Equipment.Where(role => role.Value is not null).ToDictionary(role => role.Key, role => role.Value!),
-            Bosses = botConfig.Bosses,
-            Durability = botConfig.Durability,
-            ItemSpawnLimits = botConfig.ItemSpawnLimits,
-            WalletLoot = botConfig.WalletLoot,
-            CurrencyStackSize = botConfig.CurrencyStackSize,
-            SecureContainerAmmoStackCount = botConfig.SecureContainerAmmoStackCount,
-            DisableLootOnBotTypes = botConfig.DisableLootOnBotTypes,
-            LowProfileGasBlockTpls = botConfig.LowProfileGasBlockTpls,
-            LootItemResourceRandomization = botConfig.LootItemResourceRandomization,
-            PmcConfig = pmcConfig,
-            RepairKitWeapon = repairConfig.RepairKit.Weapon,
-            EquipmentBlacklist =
-                botEquipmentFilterService.GetBotEquipmentBlacklist(equipmentRole, generatingPlayerLevel) ?? new EquipmentFilterDetails(),
-            WeaponModEquipmentBlacklist =
-                botEquipmentFilterService.GetBotEquipmentBlacklist(equipmentRole, weaponModPlayerLevel) ?? new EquipmentFilterDetails(),
-            ConfigBlacklist = itemFilterService.GetBlacklistedItems(),
             // Live service state, not a database view: the enumeration order of the pool
             // service's ConcurrentDictionary is process-local, so it rides every send
             ModPoolSlotOrder = BuildModPoolSlotOrder(botEquipmentModPoolService, itemHelper.TemplateTable.Items),
@@ -146,16 +110,21 @@ internal static class BotPayloadProjection
     }
 
     /// <summary>
-    /// The database half of a request, for the ineligible arm: the views an eligible send reads
-    /// off the resident DB instead, built from the same services the old flat request read.
-    /// <paramref name="lootPools"/> is every pool the send can draw from - one cache on the
-    /// single-bot request, one per level-band variant on the batch - and prices as their union.
+    /// The database half of a request, for the ineligible arm: the views and config slices an
+    /// eligible send reads off the resident DB instead, built from the same services and config
+    /// singletons the old flat request read. <paramref name="lootPools"/> is every pool the send can
+    /// draw from - one cache on the single-bot request, one per level-band variant on the batch -
+    /// and prices as their union.
     /// </summary>
     internal static BotViewsOverride BuildViewsOverride(
         PresetHelper presetHelper,
         HandbookHelper handbookHelper,
         ItemHelper itemHelper,
         GlobalTable globalTable,
+        ItemFilterService itemFilterService,
+        BotConfig botConfig,
+        PmcConfig pmcConfig,
+        RepairConfig repairConfig,
         IEnumerable<BotLootCache> lootPools
     )
     {
@@ -168,6 +137,18 @@ internal static class BotPayloadProjection
             DefaultPresetsByTpl = ToDefaultPresetIds(presetHelper.GetDefaultPresetByTpl()),
             HandbookPrices = BuildHandbookPrices(lootPools, handbookHelper),
             ExpTable = [.. globalTable.Configuration.Exp.Level.ExperienceTable.Select(entry => entry.Experience)],
+            Bosses = botConfig.Bosses,
+            Durability = botConfig.Durability,
+            ItemSpawnLimits = botConfig.ItemSpawnLimits,
+            WalletLoot = botConfig.WalletLoot,
+            CurrencyStackSize = botConfig.CurrencyStackSize,
+            SecureContainerAmmoStackCount = botConfig.SecureContainerAmmoStackCount,
+            DisableLootOnBotTypes = botConfig.DisableLootOnBotTypes,
+            LowProfileGasBlockTpls = botConfig.LowProfileGasBlockTpls,
+            LootItemResourceRandomization = botConfig.LootItemResourceRandomization,
+            PmcConfig = pmcConfig,
+            RepairKitWeapon = repairConfig.RepairKit.Weapon,
+            ConfigBlacklist = itemFilterService.GetBlacklistedItems(),
         };
     }
 

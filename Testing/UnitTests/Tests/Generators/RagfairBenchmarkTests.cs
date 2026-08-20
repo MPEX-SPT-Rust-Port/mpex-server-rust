@@ -51,6 +51,7 @@ public class RagfairBenchmarkTests
     private TraderHelper _traderHelper = default!;
     private PresetHelper _presetHelper = default!;
     private ItemFilterService _itemFilterService = default!;
+    private InventoryConfig _inventoryConfig = default!;
     private SeasonalEventService _seasonalEventService = default!;
     private BotTable _botTable = default!;
     private ItemHelper _itemHelper = default!;
@@ -88,6 +89,7 @@ public class RagfairBenchmarkTests
         _traderHelper = di.GetService<TraderHelper>();
         _presetHelper = di.GetService<PresetHelper>();
         _itemFilterService = di.GetService<ItemFilterService>();
+        _inventoryConfig = di.GetService<InventoryConfig>();
         _seasonalEventService = di.GetService<SeasonalEventService>();
         _botTable = di.GetService<BotTable>();
         _itemHelper = di.GetService<ItemHelper>();
@@ -287,14 +289,21 @@ public class RagfairBenchmarkTests
     private GenerateDynamicOffersRequest BuildRequest(List<List<Item>>? expiredOffers)
     {
         return RagfairPayloadProjection.BuildRequest(
-            RagfairPayloadProjection.BuildViewsOverride(_templateTable, _handbookHelper, _traderHelper, _presetHelper, _itemHelper),
+            RagfairPayloadProjection.BuildViewsOverride(
+                _templateTable,
+                _handbookHelper,
+                _traderHelper,
+                _presetHelper,
+                _itemHelper,
+                _ragfairConfig,
+                _itemFilterService,
+                _inventoryConfig
+            ),
             0,
             expiredOffers,
             _timeUtil.GetTimeStamp(),
             0,
             null,
-            _ragfairConfig,
-            _itemFilterService,
             _seasonalEventService,
             _botTable,
             _botConfig

@@ -231,6 +231,10 @@ public class BotWaveBatcher(
                     handbookHelper,
                     itemHelper,
                     globalTable,
+                    itemFilterService,
+                    botConfig,
+                    pmcConfig,
+                    repairConfig,
                     variants.Select(variant => variant.LootPools)
                 );
                 batchResult = SptNative.GenerateBotInventoryBatch(request);
@@ -456,18 +460,12 @@ public class BotWaveBatcher(
             Epoch = 0,
             Shared = BotPayloadProjection.BuildSharedVarying(
                 sessionId,
-                waveDetails.Role.ToLowerInvariant(),
                 profileHelper,
                 profileActivityService,
                 weatherHelper,
-                botGeneratorHelper,
-                botEquipmentFilterService,
                 botEquipmentModPoolService,
-                itemFilterService,
                 itemHelper,
                 botConfig,
-                pmcConfig,
-                repairConfig,
                 levelGeneration,
                 [
                     .. variants.Select(variant => new BotTemplateVariantView

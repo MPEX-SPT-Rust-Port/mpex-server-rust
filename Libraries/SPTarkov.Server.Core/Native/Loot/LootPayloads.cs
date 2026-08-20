@@ -34,8 +34,20 @@ public record LootVarying
     [JsonPropertyName("staticAmmoDist")]
     public required Dictionary<string, List<StaticAmmoDetails>> StaticAmmoDist { get; set; }
 
-    [JsonPropertyName("config")]
-    public required LootConfigView Config { get; set; }
+    /// <summary>
+    /// <c>MultiplierForLocation(LocationConfig.StaticLootMultiplier, locationId)</c> off the
+    /// <b>live</b> config. Per-call rather than resident, unlike the rest of
+    /// <see cref="LootConfigView"/>: <c>RaidTimeAdjustmentService.AdjustLootMultipliers</c> scales
+    /// every entry of that dictionary in place through the indexer for a shortened scav raid, and
+    /// puts it back after generation - no property setter fires, so the write barriers never see it
+    /// and a resident snapshot would hand the raid unadjusted PMC-density loot.
+    /// </summary>
+    [JsonPropertyName("staticLootMultiplier")]
+    public required double StaticLootMultiplier { get; set; }
+
+    /// <inheritdoc cref="StaticLootMultiplier"/>
+    [JsonPropertyName("looseLootMultiplier")]
+    public required double LooseLootMultiplier { get; set; }
 
     [JsonPropertyName("seasonal")]
     public required SeasonalView Seasonal { get; set; }
@@ -384,7 +396,11 @@ public record PresetView
 }
 
 /// <summary>
-/// Every config value the generator reads, resolved for one location by the caller.
+/// Every config value the generator reads, resolved for one location. Built by the caller for a
+/// views-override send only; the resident arm resolves the same view natively off the
+/// <c>spt-location</c> config stem (<c>resolve_loot_config_view</c>) - except the two multipliers,
+/// which that resolve copies out of <see cref="LootVarying"/> because they are adjusted per raid
+/// (see <see cref="LootVarying.StaticLootMultiplier"/>).
 /// </summary>
 public record LootConfigView
 {
@@ -428,14 +444,14 @@ public record LootConfigView
     public required double MinFillStaticMagazinePercent { get; set; }
 
     /// <summary>
-    /// Resolved for this location by the caller.
+    /// Read on the override arm only - the resident arm fills this from
+    /// <see cref="LootVarying.StaticLootMultiplier"/>, the same value from the same C# call, because
+    /// this one is adjusted per raid and a resident read would miss the adjustment.
     /// </summary>
     [JsonPropertyName("staticLootMultiplier")]
     public required double StaticLootMultiplier { get; set; }
 
-    /// <summary>
-    /// Resolved for this location by the caller.
-    /// </summary>
+    /// <inheritdoc cref="StaticLootMultiplier"/>
     [JsonPropertyName("looseLootMultiplier")]
     public required double LooseLootMultiplier { get; set; }
 
@@ -452,6 +468,10 @@ public record LootConfigView
     public required HashSet<string> LooseLootBlacklist { get; set; }
 }
 
+/// <summary>
+/// The three <c>SeasonalEventService</c> answers the generator reads. <c>ChristmasContainerIds</c>
+/// is config rather than service state, so it rides <see cref="LootViewsOverride"/> instead.
+/// </summary>
 public record SeasonalView
 {
     [JsonPropertyName("seasonalEventActive")]
@@ -462,12 +482,6 @@ public record SeasonalView
 
     [JsonPropertyName("inactiveSeasonalItems")]
     public required HashSet<MongoId> InactiveSeasonalItems { get; set; }
-
-    /// <summary>
-    /// Spawn point ids, not tpls.
-    /// </summary>
-    [JsonPropertyName("christmasContainerIds")]
-    public required HashSet<string> ChristmasContainerIds { get; set; }
 }
 
 /// <summary>
@@ -484,10 +498,10 @@ public record CounterState
 }
 
 /// <summary>
-/// The distrust fallback (spec § Exports): the C#-built database half, used for this call only and
-/// never made resident. Present iff the caller is ineligible for residency. The statics members
-/// ride on static-container sends and are omitted on dynamic sends, mirroring the two old
-/// envelopes.
+/// The distrust fallback (spec § Exports): the C#-built database half plus the two config-backed
+/// members the resident arm resolves off the configs root, used for this call only and never made
+/// resident. Present iff the caller is ineligible for residency. The statics members ride on
+/// static-container sends and are omitted on dynamic sends, mirroring the two old envelopes.
 /// </summary>
 public record LootViewsOverride
 {
@@ -500,6 +514,21 @@ public record LootViewsOverride
 
     [JsonPropertyName("defaultPresets")]
     public required Dictionary<MongoId, PresetView> DefaultPresets { get; set; }
+
+    /// <summary>
+    /// <c>LocationConfig</c> resolved for this send's location; the resident arm builds the same
+    /// view from the <c>spt-location</c> stem, the request's <c>locationId</c> and - for the two
+    /// multipliers only - the request's own copies of them.
+    /// </summary>
+    [JsonPropertyName("config")]
+    public required LootConfigView Config { get; set; }
+
+    /// <summary>
+    /// <c>SeasonalEventConfig.ChristmasContainerIds</c> - spawn point ids, not tpls. The resident
+    /// arm reads it off the <c>spt-seasonalevents</c> stem.
+    /// </summary>
+    [JsonPropertyName("christmasContainerIds")]
+    public required HashSet<string> ChristmasContainerIds { get; set; }
 
     /// <summary>
     /// Null when the map's <c>StaticContainerDetails</c> is missing the list; the native side logs a

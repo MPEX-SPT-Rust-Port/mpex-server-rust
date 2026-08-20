@@ -1424,7 +1424,7 @@ mod tests {
         assert_eq!(spt_native_abi_version(), crate::ABI_VERSION);
         assert_eq!(
             crate::ABI_VERSION,
-            29,
+            30,
             "bump SptNative.ExpectedAbiVersion too"
         );
     }
@@ -1476,6 +1476,16 @@ mod tests {
     const VARYING_JSON: &str = r#"
         "locationId":"bigmap",
         "moneyTpls":[],"staticAmmoDist":{},
+        "staticLootMultiplier":1,"looseLootMultiplier":1,
+        "seasonal":{"seasonalEventActive":false,"christmasEventEnabled":false,
+            "inactiveSeasonalItems":[]},
+        "lootableItemBlacklist":[],"counter":{"maxCounts":{},"trackedCounts":{}}
+    "#;
+
+    /// The four `LootViewsWire` members every override send carries.
+    const VIEWS_JSON: &str = r#"
+        "itemsView":{"111111111111111111111111":{"width":1,"height":1,"gridCellsH":2,"gridCellsV":2}},
+        "defaultPresets":{},
         "config":{"containerRandomisationEnabled":false,"locationInRandomisationMaps":false,
             "containerTypesToNotRandomise":[],"containerGroupMinSizeMultiplier":1,
             "containerGroupMaxSizeMultiplier":1,"allowDuplicateItemsInStaticContainers":true,
@@ -1484,15 +1494,7 @@ mod tests {
             "minFillLooseMagazinePercent":0,"minFillStaticMagazinePercent":0,
             "staticLootMultiplier":1,"looseLootMultiplier":1,"modSpawnChancePercent":{},
             "looseLootBlacklist":[]},
-        "seasonal":{"seasonalEventActive":false,"christmasEventEnabled":false,
-            "inactiveSeasonalItems":[],"christmasContainerIds":[]},
-        "lootableItemBlacklist":[],"counter":{"maxCounts":{},"trackedCounts":{}}
-    "#;
-
-    /// The two `LootViewsWire` members every override send carries.
-    const VIEWS_JSON: &str = r#"
-        "itemsView":{"111111111111111111111111":{"width":1,"height":1,"gridCellsH":2,"gridCellsV":2}},
-        "defaultPresets":{}
+        "christmasContainerIds":[]
     "#;
 
     type Export = unsafe extern "C" fn(*const u8, usize, *mut *mut u8, *mut usize) -> i32;
@@ -1668,16 +1670,15 @@ mod tests {
 
     /// The `RewardViewsWire` members every override reward send carries; sealed adds
     /// `presetsByTpl` and container adds `presetTpls` beside these.
-    const REWARD_VIEWS_JSON: &str =
-        r#""itemsView":{},"defaultPresets":[],"defaultPresetsByTpl":{}"#;
+    const REWARD_VIEWS_JSON: &str = r#"
+        "itemsView":{},"defaultPresets":[],"defaultPresetsByTpl":{},
+        "configBlacklist":[],"rewardItemBlacklist":[],
+        "rewardBaseTypeBlacklist":[],"bossItems":[]
+    "#;
 
     /// Every required `RewardLootVarying` member, spliced beside each request's per-export
     /// varying members below.
-    const REWARD_VARYING_JSON: &str = r#"
-        "globalBlacklist":[],"configBlacklist":[],
-        "rewardItemBlacklist":[],"rewardBaseTypeBlacklist":[],
-        "bossItems":[],"inactiveSeasonalItems":[]
-    "#;
+    const REWARD_VARYING_JSON: &str = r#""globalBlacklist":[],"inactiveSeasonalItems":[]"#;
 
     #[test]
     fn random_loot_roundtrips_result_json() {
@@ -1784,7 +1785,28 @@ mod tests {
         format!(
             r#"{{
             "epoch":0,
-            "viewsOverride":{{"items":{{}},"itemPresets":{{}},"defaultPresetsByTpl":{{}}}},
+            "viewsOverride":{{"items":{{}},"itemPresets":{{}},"defaultPresetsByTpl":{{}},
+            "bosses":[],
+            "durability":{{
+                "default":{{"armor":{{"maxDelta":10,"minDelta":0,"minLimitPercent":15}},
+                    "weapon":{{"lowestMax":60,"highestMax":100,"maxDelta":10,"minDelta":0,
+                        "minLimitPercent":15}}}},
+                "botDurabilities":{{}},
+                "pmc":{{"armor":{{"lowestMaxPercent":90,"highestMaxPercent":100,"maxDelta":10,
+                        "minDelta":0,"minLimitPercent":15}},
+                    "weapon":{{"lowestMax":95,"highestMax":100,"maxDelta":5,"minDelta":0,
+                        "minLimitPercent":15}}}}}},
+            "itemSpawnLimits":{{}},
+            "walletLoot":{{"chancePercent":0}},
+            "currencyStackSize":{{}},
+            "secureContainerAmmoStackCount":0,
+            "disableLootOnBotTypes":[],
+            "lowProfileGasBlockTpls":[],
+            "lootItemResourceRandomization":{{}},
+            "pmcConfig":{{}},
+            "repairKitWeapon":{{"rarityWeight":{{}},"bonusTypeWeight":{{}},"Common":{{}},
+                "Rare":{{}}}},
+            "configBlacklist":[]}},
             "bot":{{
                 "botId":"bbbbbbbbbbbbbbbbbbbbbbbb",
                 "details":{{"role":"assault","roleLowercase":"assault","side":"Savage","botLevel":15,
@@ -1808,30 +1830,7 @@ mod tests {
             "shared":{{
             "generatingPlayerLevel":20,
             "isNightTime":false,
-            "equipment":{{}},
-            "bosses":[],
-            "durability":{{
-                "default":{{"armor":{{"maxDelta":10,"minDelta":0,"minLimitPercent":15}},
-                    "weapon":{{"lowestMax":60,"highestMax":100,"maxDelta":10,"minDelta":0,
-                        "minLimitPercent":15}}}},
-                "botDurabilities":{{}},
-                "pmc":{{"armor":{{"lowestMaxPercent":90,"highestMaxPercent":100,"maxDelta":10,
-                        "minDelta":0,"minLimitPercent":15}},
-                    "weapon":{{"lowestMax":95,"highestMax":100,"maxDelta":5,"minDelta":0,
-                        "minLimitPercent":15}}}}}},
-            "itemSpawnLimits":{{}},
-            "walletLoot":{{"chancePercent":0}},
-            "currencyStackSize":{{}},
-            "secureContainerAmmoStackCount":0,
-            "disableLootOnBotTypes":[],
-            "lowProfileGasBlockTpls":[],
-            "lootItemResourceRandomization":{{}},
-            "pmcConfig":{{}},
-            "repairKitWeapon":{{"rarityWeight":{{}},"bonusTypeWeight":{{}},"Common":{{}},
-                "Rare":{{}}}},
-            "equipmentBlacklist":{{}},
-            "weaponModEquipmentBlacklist":{{}},
-            "configBlacklist":[]
+            "equipment":{{}}
             }}
         }}"#
         )
@@ -1938,40 +1937,51 @@ mod tests {
         )
     }
 
-    /// Every member of the views override, braces included. The two price tables always know
-    /// `SELLABLE_TPL`, which only matters when the items view carries it.
-    fn ragfair_views_override(items: &str) -> String {
+    /// Every member of the views override, braces included — the three config-backed members
+    /// (Task 6) alongside the database views. The two price tables always know `SELLABLE_TPL`, which
+    /// only matters when the items view carries it.
+    fn ragfair_views_override(items: &str, offer_item_count: &str) -> String {
+        let dynamic = ragfair_dynamic(offer_item_count);
         format!(
-            r#"{{"itemPresets":{{}},"defaultPresets":[],"defaultPresetsByTpl":{{}},
+            r#"{{"dynamic":{dynamic},"configBlacklist":[],"customMoneyTpls":[],
+            "itemPresets":{{}},"defaultPresets":[],"defaultPresetsByTpl":{{}},
             "presetsByTpl":{{}},
             "fleaPrices":{{"{SELLABLE_TPL}":25000}},"handbookPrices":{{"{SELLABLE_TPL}":20000}},
             "highestTraderPrices":{{"{SELLABLE_TPL}":12000}},"items":{items}}}"#
         )
     }
 
-    /// The varying half, config and service state included (spec § C# driver carve-out). Starts with
+    /// The varying half: the service state Decision 10 keeps off the resident DB. Starts with
     /// `timestamp` so the expired-pass test can splice `expiredOffers` in front of it.
-    fn ragfair_varying(offer_item_count: &str) -> String {
-        let dynamic = ragfair_dynamic(offer_item_count);
-        format!(
-            r#""varying":{{"timestamp":1700000000,"offerCounterStart":0,
-            "dynamic":{dynamic},"configBlacklist":[],
+    fn ragfair_varying() -> String {
+        r#""varying":{"timestamp":1700000000,"offerCounterStart":0,
             "seasonalEventActive":false,"seasonalItemTplBlacklist":[],
-            "pmcNamesUsec":["Deagle"],"pmcNamesBear":["Kirill"]}}"#
-        )
+            "pmcNamesUsec":["Deagle"],"pmcNamesBear":["Kirill"]}"#
+            .to_owned()
     }
 
     /// Every required `GenerateDynamicOffersRequest` member, views override included.
     fn ragfair_request_with(items: &str, offer_item_count: &str) -> String {
-        let varying = ragfair_varying(offer_item_count);
-        let views_override = ragfair_views_override(items);
+        let varying = ragfair_varying();
+        let views_override = ragfair_views_override(items, offer_item_count);
         format!(r#"{{"epoch":0,{varying},"viewsOverride":{views_override}}}"#)
     }
 
     /// The minimal override-less request naming `epoch` — the resident-DB half of the protocol.
     fn ragfair_request_at_epoch(epoch: u64) -> String {
-        let varying = ragfair_varying(r#"{"default":{"min":2,"max":5}}"#);
+        let varying = ragfair_varying();
         format!(r#"{{"epoch":{epoch},{varying}}}"#)
+    }
+
+    /// The `configs` root an override-less ragfair request needs resident: the two stems the family
+    /// requires, each in the shape `DbPayloadProjection` writes (`kind` included, so the parse has
+    /// to ignore it).
+    fn ragfair_configs_root() -> String {
+        let dynamic = ragfair_dynamic(r#"{"default":{"min":2,"max":5}}"#);
+        format!(
+            r#""configs":{{"spt-ragfair":{{"kind":"spt-ragfair","dynamic":{dynamic}}},
+            "spt-item":{{"kind":"spt-item","blacklist":[]}}}}"#
+        )
     }
 
     /// The one tpl the offer path would accept, were it in the items view.
@@ -2126,10 +2136,16 @@ mod tests {
         assert_eq!(status, STATUS_STALE_EPOCH);
 
         // Publish the mini roots (junk roots parse as empty typed containers, so the empty
-        // ragfair views derive) and name the returned epoch: the request generates
+        // ragfair views derive) plus the configs root the override-less arm reads its config half
+        // off, and name the returned epoch: the request generates
+        let configs = ragfair_configs_root();
         let (status, out) = call_generate(
             spt_db_publish,
-            br#"{"schema":1,"roots":{"templates":{"a":1},"traders":{"b":2},"globals":{"c":3}}}"#,
+            format!(
+                r#"{{"schema":1,"roots":{{"templates":{{"a":1}},"traders":{{"b":2}},
+                "globals":{{"c":3}},{configs}}}}}"#
+            )
+            .as_bytes(),
         );
         assert_eq!(status, STATUS_OK);
         let epoch = serde_json::from_slice::<serde_json::Value>(&out).unwrap()["epoch"]
@@ -2156,6 +2172,46 @@ mod tests {
         // The distrust fallback: a views override at epoch 0 never reads the resident DB
         let (status, _) = call_generate(spt_generate_dynamic_offers, ragfair_request().as_bytes());
         assert_eq!(status, STATUS_OK);
+
+        // Last, because it moves the resident epoch: a configs root that *is* resident but carries
+        // no stem this family reads is a per-call failure naming the stem, not the stale-epoch
+        // answer a missing root gets — a republish would not fix a stem the publish never carried
+        let (status, out) = call_generate(
+            spt_db_publish,
+            br#"{"schema":1,"roots":{"configs":{"spt-core":{"kind":"spt-core"}}}}"#,
+        );
+        assert_eq!(status, STATUS_OK);
+        let stemless = serde_json::from_slice::<serde_json::Value>(&out).unwrap()["epoch"]
+            .as_u64()
+            .unwrap();
+        let (status, out) = call_generate(
+            spt_generate_dynamic_offers,
+            ragfair_request_at_epoch(stemless).as_bytes(),
+        );
+        assert_eq!(status, STATUS_ERROR);
+        assert!(
+            String::from_utf8(out).unwrap().contains("spt-ragfair"),
+            "the stem-missing error must name the stem"
+        );
+    }
+
+    /// The `configs` member of a publish envelope carrying the two stems the repeatable-quest
+    /// family reads, with the same values `views_override_value()` sends on the override arm — so
+    /// a resident generation and an override one see byte-identical config-backed inputs.
+    fn quest_configs_root() -> String {
+        let views = crate::quest::models::tests::views_override_value();
+        let quest_stem = serde_json::json!({
+            "kind": "spt-quest",
+            "repeatableQuestTemplateIds": views["repeatableQuestTemplateIds"],
+            "locationIdMap": views["locationIdMap"],
+        });
+        let item_stem = serde_json::json!({
+            "kind": "spt-item",
+            "rewardItemBlacklist": views["rewardItemBlacklist"],
+            "bossItems": views["bossItems"],
+        });
+
+        format!(r#""configs":{{"spt-quest":{quest_stem},"spt-item":{item_stem}}}"#)
     }
 
     /// A repeatable-quest request at `epoch`, with the views override sent or omitted, off the
@@ -2232,10 +2288,16 @@ mod tests {
         assert_eq!(status, STATUS_STALE_EPOCH);
 
         // Publish the mini roots (junk roots parse as empty typed containers, so the empty quest
-        // views derive) and name the returned epoch: the request generates
+        // views derive) plus the configs root the override-less arm reads its config-backed
+        // members off, and name the returned epoch: the request generates
+        let configs = quest_configs_root();
         let (status, out) = call_generate(
             spt_db_publish,
-            br#"{"schema":1,"roots":{"templates":{"a":1},"traders":{"b":2},"globals":{"c":3},"locations":{"factory4_day":{}}}}"#,
+            format!(
+                r#"{{"schema":1,"roots":{{"templates":{{"a":1}},"traders":{{"b":2}},
+                "globals":{{"c":3}},"locations":{{"factory4_day":{{}}}},{configs}}}}}"#
+            )
+            .as_bytes(),
         );
         assert_eq!(status, STATUS_OK);
         let epoch = serde_json::from_slice::<serde_json::Value>(&out).unwrap()["epoch"]
@@ -2263,6 +2325,27 @@ mod tests {
         let (status, _) =
             call_generate(spt_generate_repeatable_quest, &quest_request(0, true, None));
         assert_eq!(status, STATUS_OK);
+
+        // Last, because it moves the resident epoch: a configs root that *is* resident but carries
+        // no stem this family reads is a per-call failure naming the stem, not the stale-epoch
+        // answer a missing root gets — a republish would not fix a stem the publish never carried
+        let (status, out) = call_generate(
+            spt_db_publish,
+            br#"{"schema":1,"roots":{"configs":{"spt-core":{"kind":"spt-core"}}}}"#,
+        );
+        assert_eq!(status, STATUS_OK);
+        let stemless = serde_json::from_slice::<serde_json::Value>(&out).unwrap()["epoch"]
+            .as_u64()
+            .unwrap();
+        let (status, out) = call_generate(
+            spt_generate_repeatable_quest,
+            &quest_request(stemless, false, None),
+        );
+        assert_eq!(status, STATUS_ERROR);
+        assert!(
+            String::from_utf8(out).unwrap().contains("spt-quest"),
+            "the stem-missing error must name the stem"
+        );
     }
 
     #[test]
@@ -2311,8 +2394,10 @@ mod tests {
                 "globals":{{"ItemPresets":{{"preset1":{{"_id":"preset1","_name":"default",
                     "_items":[{{"_id":"aaaaaaaaaaaaaaaaaaaaaaaa","_tpl":"bbbbbbbbbbbbbbbbbbbbbbbb"}}],
                     "_encyclopedia":"bbbbbbbbbbbbbbbbbbbbbbbb"}}}}}},
-                "locations":{{}}
-            }}}}"#
+                "locations":{{}},
+                {configs}
+            }}}}"#,
+            configs = quest_configs_root()
         );
 
         let (status, out) = call_generate(spt_db_publish, request.as_bytes());
@@ -2327,6 +2412,12 @@ mod tests {
         let _guard = db_lock();
         let epoch = publish_quest_roots();
         let request = quest_request(epoch, false, Some(42));
+        // Since flip #7 the template ids and the location map ride the resident configs root, not
+        // the request, so the masking's "ids the caller already knew" set has to cover the root
+        // too — otherwise a regression that swapped the drawn template id would be blanked as a
+        // mint on both sides and never show.
+        let known = |request: &[u8]| [request, quest_configs_root().as_bytes()].concat();
+        let known_request = known(&request);
 
         let (first_status, first) = call_generate(spt_generate_repeatable_quest, &request);
         let (second_status, second) = call_generate(spt_generate_repeatable_quest, &request);
@@ -2339,25 +2430,25 @@ mod tests {
             "the fixture request generates a quest"
         );
         assert!(response["pool"]["types"].is_array());
-        // The ids a draw can move — the trader the quest is minted for, and the tpls it hands over
-        // — come off the request, so the masking leaves them in the compared bytes.
+        // The ids a draw can move — the trader the quest is minted for, the template it was cloned
+        // from, and the tpls it hands over — are all known, so the masking leaves them in the
+        // compared bytes.
+        let masked = mask_minted_ids(&first, &known_request);
         assert!(
-            mask_minted_ids(&first, &request).contains("54cb50c76803fa8b248b4571"),
+            masked.contains("54cb50c76803fa8b248b4571"),
             "the request's own ids must survive the masking"
         );
-        assert_eq!(
-            mask_minted_ids(&first, &request),
-            mask_minted_ids(&second, &request)
+        assert!(
+            masked.contains("616052ea3054fc0e2c24ce6e"),
+            "the configs root's template id must survive the masking"
         );
+        assert_eq!(masked, mask_minted_ids(&second, &known_request));
 
         // …and the masking has teeth: another seed draws a different quest.
         let other_request = quest_request(epoch, false, Some(7));
         let (status, other) = call_generate(spt_generate_repeatable_quest, &other_request);
         assert_eq!(status, STATUS_OK);
-        assert_ne!(
-            mask_minted_ids(&first, &request),
-            mask_minted_ids(&other, &other_request)
-        );
+        assert_ne!(masked, mask_minted_ids(&other, &known(&other_request)));
     }
 
     /// A scav case craft off the generator's own synthetic table, seeded so the reward list is the

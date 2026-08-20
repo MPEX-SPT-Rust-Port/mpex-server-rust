@@ -1,6 +1,7 @@
 using System.Text.Json;
 using NUnit.Framework;
 using SPTarkov.Server.Core.Helpers.Items;
+using SPTarkov.Server.Core.Models.Spt.Config;
 using SPTarkov.Server.Core.Models.Spt.Tables;
 using SPTarkov.Server.Core.Native.Db;
 using SPTarkov.Server.Core.Native.RepeatableQuests;
@@ -41,12 +42,13 @@ public class QuestViewsEquivalenceTests
                 di.GetService<TradersTable>(),
                 di.GetService<GlobalTable>(),
                 di.GetService<LocationTable>(),
-                di.GetService<HideoutTable>()
+                di.GetService<HideoutTable>(),
+                di.GetService<IReadOnlyDictionary<Type, BaseConfig>>()
             )
         );
 
-        // Exactly the ten views the resident DB derives natively - the views override carries
-        // them and nothing else
+        // Exactly the ten views the resident DB derives natively. The override carries four more
+        // members since flip #7, but those come off the configs root, not this derivation
         var viewsPath = Path.Combine(Path.GetTempPath(), "spt-phase1-quest-views-expected.json");
         var expectedViews = new (string Name, byte[] Bytes)[]
         {

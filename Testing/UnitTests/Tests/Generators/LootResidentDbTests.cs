@@ -195,6 +195,58 @@ public class LootResidentDbTests
         LootJsonAssert.AssertEqual(resident, overrideSend, "resident send vs views-override send", Seed);
     }
 
+    /// <summary>
+    /// The one config value a resident send may not read off the published snapshot:
+    /// <c>RaidTimeAdjustmentService.AdjustLootMultipliers</c> scales the loot multipliers in place
+    /// through the dictionary indexer for a shortened scav raid, which fires no property setter, so
+    /// no write barrier sees it and the mutation stamp never moves. The generator resolves them per
+    /// call into the varying block instead; a regression to resolving them off the resident
+    /// <c>spt-location</c> stem would hand a scav raid unadjusted PMC-density loot, and nothing else
+    /// in the suite would notice.
+    /// </summary>
+    [Test]
+    public void AnInPlaceLootMultiplierAdjustmentReachesAResidentSend()
+    {
+        var original = _locationConfig.LooseLootMultiplier["bigmap"];
+        var atFullDensity = CountSpawnpointsOffTheResidentDb();
+
+        // Exactly the write RaidTimeAdjustmentService makes: an indexer assignment, no setter
+        _locationConfig.LooseLootMultiplier["bigmap"] = original * 0.1;
+        int atReducedDensity;
+        try
+        {
+            atReducedDensity = CountSpawnpointsOffTheResidentDb();
+        }
+        finally
+        {
+            _locationConfig.LooseLootMultiplier["bigmap"] = original;
+        }
+
+        Assert.That(atReducedDensity, Is.LessThan(atFullDensity), "the in-place loot multiplier adjustment never reached the native side");
+    }
+
+    /// <summary>
+    /// One seeded generation of bigmap, asserted to have gone out as a resident send, counted.
+    /// </summary>
+    private int CountSpawnpointsOffTheResidentDb()
+    {
+        _generator.NativeTestSeed = Seed;
+        try
+        {
+            var spawnpoints = _generator.GenerateLocationLoot("bigmap");
+
+            Assert.That(_generator.LastPathTaken, Is.EqualTo(LootGenerationPath.Native), "generation did not take the native path");
+            Assert.That(_generator.LastSendIncludedViewsOverride, Is.False, "an override send would prove nothing about the resident arm");
+            Assert.That(spawnpoints, Is.Not.Empty, "the native path generated no loot for bigmap");
+
+            return spawnpoints.Count;
+        }
+        finally
+        {
+            _generator.NativeTestSeed = null;
+        }
+    }
+
     private static LocationLootGenerator BuildWithFrozenConstructor(DI di)
     {
         return Build(di, FindConstructor(smallest: true), null);

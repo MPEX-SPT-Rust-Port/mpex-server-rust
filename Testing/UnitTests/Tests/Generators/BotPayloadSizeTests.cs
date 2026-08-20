@@ -4,7 +4,6 @@ using SPTarkov.Server.Core.Generators.Bot;
 using SPTarkov.Server.Core.Generators.Loot;
 using SPTarkov.Server.Core.Generators.Weapons;
 using SPTarkov.Server.Core.Helpers;
-using SPTarkov.Server.Core.Helpers.Bot;
 using SPTarkov.Server.Core.Helpers.InRaid;
 using SPTarkov.Server.Core.Helpers.Items;
 using SPTarkov.Server.Core.Helpers.Profile;
@@ -35,7 +34,6 @@ public class BotPayloadSizeTests
     private BotWeaponGenerator _botWeaponGenerator = default!;
     private BotLootGenerator _botLootGenerator = default!;
     private BotEquipmentModGenerator _botEquipmentModGenerator = default!;
-    private BotGeneratorHelper _botGeneratorHelper = default!;
     private ProfileHelper _profileHelper = default!;
     private ItemHelper _itemHelper = default!;
     private WeatherHelper _weatherHelper = default!;
@@ -57,7 +55,6 @@ public class BotPayloadSizeTests
         _botWeaponGenerator = di.GetService<BotWeaponGenerator>();
         _botLootGenerator = di.GetService<BotLootGenerator>();
         _botEquipmentModGenerator = di.GetService<BotEquipmentModGenerator>();
-        _botGeneratorHelper = di.GetService<BotGeneratorHelper>();
         _profileHelper = di.GetService<ProfileHelper>();
         _itemHelper = di.GetService<ItemHelper>();
         _weatherHelper = di.GetService<WeatherHelper>();
@@ -261,18 +258,12 @@ public class BotPayloadSizeTests
             ViewsOverride = BuildViewsOverride([lootPools]),
             Shared = BotPayloadProjection.BuildSharedVarying(
                 _sessionId,
-                details.RoleLowercase,
                 _profileHelper,
                 _profileActivityService,
                 _weatherHelper,
-                _botGeneratorHelper,
-                _botEquipmentFilterService,
                 _botEquipmentModPoolService,
-                _botEquipmentModGenerator.ItemFilterService,
                 _itemHelper,
                 _botConfig,
-                _pmcConfig,
-                _botWeaponGenerator.RepairConfig,
                 // A PMC wave draws its levels natively, so it carries the draw's inputs once
                 new LevelGenerationView { LevelMin = 1, LevelMax = expTable.Length },
                 [
@@ -296,6 +287,10 @@ public class BotPayloadSizeTests
             _botLootGenerator.HandbookHelper,
             _itemHelper,
             _botWeaponGenerator.GlobalTable,
+            _botEquipmentModGenerator.ItemFilterService,
+            _botConfig,
+            _pmcConfig,
+            _botWeaponGenerator.RepairConfig,
             lootPools
         );
     }
@@ -325,15 +320,11 @@ public class BotPayloadSizeTests
             _profileHelper,
             _profileActivityService,
             _weatherHelper,
-            _botGeneratorHelper,
-            _botEquipmentFilterService,
             _botEquipmentModPoolService,
             _botLootGenerator.BotLootCacheService,
-            _botEquipmentModGenerator.ItemFilterService,
             _itemHelper,
             _botConfig,
-            _pmcConfig,
-            _botWeaponGenerator.RepairConfig
+            _pmcConfig
         );
         request.ViewsOverride = BuildViewsOverride([request.LootPools]);
 

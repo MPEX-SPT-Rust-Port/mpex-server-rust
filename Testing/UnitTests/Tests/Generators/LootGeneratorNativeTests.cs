@@ -47,14 +47,14 @@ public class LootGeneratorNativeTests
                 ItemsView = BuildItemsView(),
                 DefaultPresets = [],
                 DefaultPresetsByTpl = [],
-            },
-            Varying = new CreateForcedLootVarying
-            {
-                GlobalBlacklist = [],
                 ConfigBlacklist = [],
                 RewardItemBlacklist = [],
                 RewardBaseTypeBlacklist = [],
                 BossItems = [],
+            },
+            Varying = new CreateForcedLootVarying
+            {
+                GlobalBlacklist = [],
                 InactiveSeasonalItems = [],
                 TestSeed = 42,
                 ForcedLoot = new Dictionary<MongoId, MinMax<int>> { [_stackableTpl] = new MinMax<int>(2, 2) },
@@ -91,14 +91,14 @@ public class LootGeneratorNativeTests
                 ItemsView = BuildItemsView(),
                 DefaultPresets = [],
                 DefaultPresetsByTpl = [],
-            },
-            Varying = new CreateRandomLootVarying
-            {
-                GlobalBlacklist = [],
                 ConfigBlacklist = [],
                 RewardItemBlacklist = [],
                 RewardBaseTypeBlacklist = [],
                 BossItems = [],
+            },
+            Varying = new CreateRandomLootVarying
+            {
+                GlobalBlacklist = [],
                 InactiveSeasonalItems = [],
                 TestSeed = 42,
                 LootRequest = new LootRequest { WeaponCrateCount = new MinMax<int>(1, 1), ItemLimits = [] },

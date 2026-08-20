@@ -13,15 +13,16 @@ use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 
-use indexmap::IndexMap;
+use indexmap::{IndexMap, IndexSet};
 
-use crate::db::models::HideoutRoot;
+use crate::db::models::{ConfigsRoot, HideoutRoot, ItemConfigLift};
 use crate::diag::DiagSink;
 use crate::loot::models::{ItemView, PresetView};
 use crate::loot::random_util::TestSeedGuard;
 use crate::ragfair::views::RagfairDbViews;
 use crate::scav_case::models::{
-    EndProductsView, ScavCaseResponse, ScavCaseRewardsRequest, ScavCaseViewsWire, ScavRecipeView,
+    EndProductsView, ScavCaseConfigView, ScavCaseResponse, ScavCaseRewardsRequest,
+    ScavCaseViewsWire, ScavRecipeView,
 };
 
 /// What a scav case pass can fail with: the message of a C#-sanctioned throw carried back to the
@@ -41,7 +42,8 @@ impl ScavCaseError {
 
 /// The database half of a scav case request. The resident arm is the shared ragfair views — the
 /// items view, handbook prices and default-preset map are the same projections the C# override
-/// builder reads — plus the recipe views derived from the hideout root at request time.
+/// builder reads — plus the recipe views derived from the hideout root at request time and the two
+/// configs-root stems the family's config-backed inputs come out of.
 pub enum ScavCaseViews {
     Override(Box<ScavCaseViewsWire>),
     Resident {
@@ -49,6 +51,9 @@ pub enum ScavCaseViews {
         /// Derived at request time from the hideout root: recipes with all three end-product
         /// bands present, raw wire names mapped to the view.
         recipes: Vec<ScavRecipeView>,
+        /// The resident configs root. [`resolve_scav_case_views`] has already proved both stems
+        /// this family reads are present, so the accessors below cannot miss one.
+        configs: Arc<ConfigsRoot>,
     },
 }
 
@@ -57,6 +62,30 @@ impl ScavCaseViews {
         match self {
             Self::Override(wire) => &wire.scav_recipes,
             Self::Resident { recipes, .. } => recipes,
+        }
+    }
+
+    pub(crate) fn config(&self) -> &ScavCaseConfigView {
+        match self {
+            Self::Override(wire) => &wire.config,
+            Self::Resident { configs, .. } => configs
+                .scavcase
+                .as_ref()
+                .expect("resolve_scav_case_views proved the spt-scavcase stem present"),
+        }
+    }
+
+    pub(crate) fn reward_item_blacklist(&self) -> &IndexSet<String> {
+        match self {
+            Self::Override(wire) => &wire.reward_item_blacklist,
+            Self::Resident { configs, .. } => &item_config(configs).reward_item_blacklist,
+        }
+    }
+
+    pub(crate) fn boss_items(&self) -> &IndexSet<String> {
+        match self {
+            Self::Override(wire) => &wire.boss_items,
+            Self::Resident { configs, .. } => &item_config(configs).boss_items,
         }
     }
 
@@ -82,6 +111,14 @@ impl ScavCaseViews {
     }
 }
 
+/// The `spt-item` stem, present because [`resolve_scav_case_views`] refused the request without it.
+fn item_config(configs: &ConfigsRoot) -> &ItemConfigLift {
+    configs
+        .item
+        .as_ref()
+        .expect("resolve_scav_case_views proved the spt-item stem present")
+}
+
 /// The two map types the static-price view arrives in: the wire override's `HashMap`, the
 /// resident ragfair views' `IndexMap` (`handbook_prices`). The generator only ever keys into it,
 /// so the map type cannot change any draw.
@@ -101,8 +138,12 @@ impl StaticPrices<'_> {
 }
 
 /// The override arm resolves without consulting the process-global store; the resident arm needs
-/// the named epoch resident with both the ragfair views and the hideout root, as
+/// the named epoch resident with the ragfair views, the hideout root and the configs root, as
 /// [`crate::loot::loot_generator::resolve_reward_views`] needs its views.
+///
+/// A missing root is a stale epoch — the publish never carried it, so a republish is the fix. A
+/// configs root that *is* resident but has no stem this family reads is a different failure and
+/// gets a different answer: an error naming the stem, per call, rather than a silent default.
 pub fn resolve_scav_case_views(
     epoch: u64,
     views_override: Option<Box<ScavCaseViewsWire>>,
@@ -119,7 +160,19 @@ pub fn resolve_scav_case_views(
             let recipes =
                 derive_recipe_views(db.hideout.as_ref().ok_or(ScavCaseError::StaleEpoch)?);
 
-            Ok(ScavCaseViews::Resident { ragfair, recipes })
+            let configs = db.configs.clone().ok_or(ScavCaseError::StaleEpoch)?;
+            if configs.scavcase.is_none() {
+                return Err(ScavCaseError::new("configs root has no spt-scavcase stem"));
+            }
+            if configs.item.is_none() {
+                return Err(ScavCaseError::new("configs root has no spt-item stem"));
+            }
+
+            Ok(ScavCaseViews::Resident {
+                ragfair,
+                recipes,
+                configs,
+            })
         }
     }
 }
@@ -281,5 +334,96 @@ mod tests {
         assert_eq!(recipes[0].id, "aaaaaaaaaaaaaaaaaaaaaaaa");
         assert_eq!(recipes[0].end_products.superrare.max, 6);
         assert_eq!(recipes[1].id, "");
+    }
+
+    /// The scav case config as the `spt-scavcase` stem carries it — the shipped record's shape, the
+    /// `kind` it always ships with included, so the parse has to ignore it.
+    fn scavcase_stem() -> serde_json::Value {
+        json!({
+            "kind": "spt-scavcase",
+            "rewardItemValueRangeRub": {"common": {"min": 0.0, "max": 100.0}},
+            "moneyRewards": {"moneyRewardChancePercent": 7,
+                "rubCount": {"common": {"min": 1, "max": 1}, "rare": {"min": 1, "max": 1},
+                    "superrare": {"min": 1, "max": 1}},
+                "usdCount": {"common": {"min": 1, "max": 1}, "rare": {"min": 1, "max": 1},
+                    "superrare": {"min": 1, "max": 1}},
+                "eurCount": {"common": {"min": 1, "max": 1}, "rare": {"min": 1, "max": 1},
+                    "superrare": {"min": 1, "max": 1}},
+                "gpCount": {"common": {"min": 1, "max": 1}, "rare": {"min": 1, "max": 1},
+                    "superrare": {"min": 1, "max": 1}}},
+            "ammoRewards": {"ammoRewardChancePercent": 0, "ammoRewardBlacklist": {},
+                "ammoRewardValueRangeRub": {}, "minStackSize": 30},
+            "rewardItemParentBlacklist": [],
+            "rewardItemBlacklist": ["config_blacklisted"],
+            "allowMultipleMoneyRewardsPerRarity": false,
+            "allowMultipleAmmoRewardsPerRarity": false,
+            "allowBossItemsAsRewards": false
+        })
+    }
+
+    /// Publishes the three roots the ragfair derive needs plus a hideout root and whatever configs
+    /// root the caller hands in, and answers the epoch.
+    fn publish_with_configs(configs: serde_json::Value) -> u64 {
+        crate::db::publish(
+            serde_json::from_value(json!({
+                "schema": 1,
+                "roots": {
+                    "templates": {}, "traders": {}, "globals": {},
+                    "hideout": {"production": {"scavRecipes": []}},
+                    "configs": configs
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap()
+    }
+
+    /// The resident arm's config-backed inputs come out of the two configs-root stems, and a
+    /// resident configs root missing one is a per-call failure that names it — never a silent
+    /// default, and never the stale-epoch answer a *missing root* gets (a republish would not fix
+    /// a stem the publish does not carry).
+    #[test]
+    fn a_resident_resolve_reads_the_config_stems_and_names_a_missing_one() {
+        let _guard = crate::db::tests::DB_TEST_LOCK.lock().unwrap();
+        crate::db::clear();
+
+        // spt-item present, spt-scavcase absent
+        let epoch = publish_with_configs(json!({"spt-item": {"bossItems": ["boss_tpl"]}}));
+        let Err(ScavCaseError::Failed(message)) = resolve_scav_case_views(epoch, None) else {
+            panic!("expected a failure naming the absent stem");
+        };
+        assert!(message.contains("spt-scavcase"), "{message}");
+
+        // the mirror image: spt-scavcase present, spt-item absent
+        let epoch = publish_with_configs(json!({"spt-scavcase": scavcase_stem()}));
+        let Err(ScavCaseError::Failed(message)) = resolve_scav_case_views(epoch, None) else {
+            panic!("expected a failure naming the absent stem");
+        };
+        assert!(message.contains("spt-item"), "{message}");
+
+        // both present: the accessors read the stems' own values
+        let epoch = publish_with_configs(json!({
+            "spt-scavcase": scavcase_stem(),
+            "spt-item": {"kind": "spt-item", "rewardItemBlacklist": ["reward_blacklisted"],
+                "bossItems": ["boss_tpl"]}
+        }));
+        let views = resolve_scav_case_views(epoch, None).unwrap();
+
+        assert_eq!(views.config().money_rewards.money_reward_chance_percent, 7);
+        assert!(
+            views
+                .config()
+                .reward_item_blacklist
+                .contains("config_blacklisted")
+        );
+        assert!(views.reward_item_blacklist().contains("reward_blacklisted"));
+        assert!(views.boss_items().contains("boss_tpl"));
+
+        // A configs root that never arrived is stale, not a stem failure
+        crate::db::clear();
+        assert!(matches!(
+            resolve_scav_case_views(epoch, None),
+            Err(ScavCaseError::StaleEpoch)
+        ));
     }
 }

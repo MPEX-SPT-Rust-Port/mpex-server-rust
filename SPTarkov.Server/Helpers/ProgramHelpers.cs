@@ -46,6 +46,10 @@ public static class ProgramHelpers
             builder.Services.AddSingleton(configEntry.Key, configEntry.Value);
         }
 
+        // The whole map too, for consumers that project every config rather than reading one
+        // (DbPublisher's configs root).
+        builder.Services.AddSingleton(configuration);
+
         if (databaseTables == null)
         {
             if (localeTable is not null)

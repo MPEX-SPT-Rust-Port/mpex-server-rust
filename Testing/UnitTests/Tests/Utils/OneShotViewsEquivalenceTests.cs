@@ -2,6 +2,7 @@ using System.Text.Json;
 using NUnit.Framework;
 using SPTarkov.Server.Core.Helpers.Profile;
 using SPTarkov.Server.Core.Models.Enums;
+using SPTarkov.Server.Core.Models.Spt.Config;
 using SPTarkov.Server.Core.Models.Spt.Tables;
 using SPTarkov.Server.Core.Native.BaseClass;
 using SPTarkov.Server.Core.Native.Db;
@@ -35,7 +36,8 @@ public class OneShotViewsEquivalenceTests
                 di.GetService<TradersTable>(),
                 di.GetService<GlobalTable>(),
                 di.GetService<LocationTable>(),
-                di.GetService<HideoutTable>()
+                di.GetService<HideoutTable>(),
+                di.GetService<IReadOnlyDictionary<Type, BaseConfig>>()
             )
         );
 

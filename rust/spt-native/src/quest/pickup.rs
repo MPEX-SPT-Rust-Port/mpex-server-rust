@@ -168,20 +168,18 @@ mod tests {
         let templates = json(TEMPLATES_PATH);
 
         value["repeatableQuestTemplates"]["Pickup"] = templates["templates"]["Pickup"].clone();
+        value["repeatableQuestTemplateIds"]["scav"]["Pickup"] =
+            serde_json::json!("628f588ebb558574b2260fe5");
 
         QuestViews::Override(Box::new(
             serde_json::from_value(value).expect("fixture views parse"),
         ))
     }
 
-    /// The fixture varying half with the Pickup scav template id spliced in.
+    /// The fixture varying half. The Pickup scav template id rides the views override since
+    /// flip #7.
     fn varying() -> QuestVaryingRequest {
-        let mut value = varying_value();
-
-        value["repeatableQuestTemplateIds"]["scav"]["Pickup"] =
-            serde_json::json!("628f588ebb558574b2260fe5");
-
-        serde_json::from_value(value).expect("fixture varying parses")
+        serde_json::from_value(varying_value()).expect("fixture varying parses")
     }
 
     /// Pickup draws nothing from the pool, so any pool does.

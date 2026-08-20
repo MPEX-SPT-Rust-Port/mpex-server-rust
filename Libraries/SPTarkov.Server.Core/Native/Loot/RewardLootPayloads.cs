@@ -13,11 +13,12 @@ namespace SPTarkov.Server.Core.Native.Loot;
 /// member, members Rust declares as <c>Option&lt;T&gt;</c> nullable and everything else
 /// <c>required</c>.
 ///
-/// The distrust fallback for the four reward exports: the C#-built database half, present iff the
-/// caller is ineligible for residency. <see cref="PresetsByTpl"/> rides only on sealed-case sends
-/// and <see cref="PresetTpls"/> only on reward-container sends, mirroring the old per-envelope
-/// members. <see cref="ItemsView"/> and <see cref="DefaultPresetsByTpl"/> are drawn from in
-/// iteration order and must be built in the order the C# generator would have walked them.
+/// The distrust fallback for the four reward exports: the C#-built database half plus the four
+/// <c>ItemConfig</c> sets the resident arm reads off the configs root's <c>spt-item</c> stem,
+/// present iff the caller is ineligible for residency. <see cref="PresetsByTpl"/> rides only on
+/// sealed-case sends and <see cref="PresetTpls"/> only on reward-container sends, mirroring the old
+/// per-envelope members. <see cref="ItemsView"/> and <see cref="DefaultPresetsByTpl"/> are drawn
+/// from in iteration order and must be built in the order the C# generator would have walked them.
 /// </summary>
 public record RewardViewsOverride
 {
@@ -55,49 +56,55 @@ public record RewardViewsOverride
     /// </summary>
     [JsonPropertyName("presetTpls")]
     public HashSet<MongoId>? PresetTpls { get; set; }
-}
-
-/// <summary>
-/// The per-call half every reward export carries: the service-backed blacklists/sets (a mod can
-/// extend them at runtime) and the test seed.
-/// </summary>
-public record RewardLootVarying
-{
-    /// <summary>
-    /// The blacklist the sealed container filters test: <c>ItemFilterService.IsItemBlacklisted</c>'s
-    /// backing cache, which mods extend at runtime through <c>AddItemToBlacklistCache</c>.
-    /// </summary>
-    [JsonPropertyName("globalBlacklist")]
-    public required HashSet<MongoId> GlobalBlacklist { get; set; }
 
     /// <summary>
     /// The blacklist the reward pool unions in: <c>ItemFilterService.GetBlacklistedItems()</c>, which
-    /// is <c>config/item.json</c>'s list itself and not the cache <see cref="GlobalBlacklist"/> holds.
-    /// The two are equal until a mod adds to the cache.
+    /// is <c>config/item.json</c>'s list itself and not the cache
+    /// <see cref="RewardLootVarying.GlobalBlacklist"/> holds. The two are equal until a mod adds to
+    /// the cache, which is exactly why one is config-backed and the other stays varying.
     /// </summary>
     [JsonPropertyName("configBlacklist")]
     public required HashSet<MongoId> ConfigBlacklist { get; set; }
 
     /// <summary>
-    /// <c>ItemFilterService.GetItemRewardBlacklist()</c>.
+    /// <c>ItemFilterService.GetItemRewardBlacklist()</c> - <c>ItemConfig.RewardItemBlacklist</c>.
     /// </summary>
     [JsonPropertyName("rewardItemBlacklist")]
     public required HashSet<MongoId> RewardItemBlacklist { get; set; }
 
     /// <summary>
-    /// <c>ItemFilterService.GetItemRewardBaseTypeBlacklist()</c>.
+    /// <c>ItemFilterService.GetItemRewardBaseTypeBlacklist()</c> -
+    /// <c>ItemConfig.RewardItemTypeBlacklist</c>.
     /// </summary>
     [JsonPropertyName("rewardBaseTypeBlacklist")]
     public required HashSet<MongoId> RewardBaseTypeBlacklist { get; set; }
 
     /// <summary>
-    /// <c>ItemFilterService.GetBossItems()</c>.
+    /// <c>ItemFilterService.GetBossItems()</c> - <c>ItemConfig.BossItems</c>.
     /// </summary>
     [JsonPropertyName("bossItems")]
     public required HashSet<MongoId> BossItems { get; set; }
+}
+
+/// <summary>
+/// The per-call half every reward export carries: the service-backed blacklists/sets (a mod can
+/// extend them at runtime) and the test seed. The four config-backed sets that used to ride beside
+/// them live on <see cref="RewardViewsOverride"/> now.
+/// </summary>
+public record RewardLootVarying
+{
+    /// <summary>
+    /// The blacklist the sealed container filters test: <c>ItemFilterService.IsItemBlacklisted</c>'s
+    /// backing cache, which mods extend at runtime through <c>AddItemToBlacklistCache</c>. Stays
+    /// varying where <see cref="RewardViewsOverride.ConfigBlacklist"/> did not, precisely because it
+    /// is that mutable cache and not the config value.
+    /// </summary>
+    [JsonPropertyName("globalBlacklist")]
+    public required HashSet<MongoId> GlobalBlacklist { get; set; }
 
     /// <summary>
-    /// <c>SeasonalEventService.GetInactiveSeasonalEventItems()</c>.
+    /// <c>SeasonalEventService.GetInactiveSeasonalEventItems()</c> - a service's own cache, so it
+    /// rides every send.
     /// </summary>
     [JsonPropertyName("inactiveSeasonalItems")]
     public required HashSet<MongoId> InactiveSeasonalItems { get; set; }

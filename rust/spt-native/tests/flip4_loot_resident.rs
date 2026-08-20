@@ -1,14 +1,20 @@
-//! Resident-arm integration: publish a minimal four-root DB with per-map statics and weapon
-//! presets, then prove a `{epoch}` send generates identically to the same data sent as
-//! `viewsOverride` — for location loot and for the reward family's sealed case — and that a
+//! Resident-arm integration: publish a minimal five-root DB with per-map statics, weapon presets
+//! and the three config stems the two families read (`spt-item`, `spt-location`,
+//! `spt-seasonalevents`), then prove a `{epoch}` send generates identically to the same data sent
+//! as `viewsOverride` — for location loot and for the reward family's sealed case — and that a
 //! wrong epoch is a stale error, not a wrong answer.
+//!
+//! Location loot is sent for two maps, because the resident arm resolves the config view per
+//! location: `bigmap` has an entry in every map-keyed member of the `spt-location` config,
+//! `factory4_day` in none of them, so between them they cover both sides of all three of
+//! `BuildConfigView`'s per-location resolutions.
 //!
 //! Its own process (integration tests build their own binary), so the process-global store races
 //! with nothing; the whole protocol lives in one `#[test]` fn, sequential, to keep it that way.
 
 use spt_native::ffi::{
-    STATUS_OK, STATUS_STALE_EPOCH, spt_buf_free, spt_db_publish, spt_generate_static_containers,
-    spt_get_sealed_weapon_case_loot,
+    STATUS_OK, STATUS_STALE_EPOCH, spt_buf_free, spt_db_publish, spt_generate_dynamic_loot,
+    spt_generate_static_containers, spt_get_sealed_weapon_case_loot,
 };
 use spt_native::loot::item_helper::{MONEY, WEAPON};
 
@@ -16,6 +22,12 @@ use spt_native::loot::item_helper::{MONEY, WEAPON};
 const ITEM_NODE: &str = "54009119af1c881c07000029";
 const CONTAINER_TPL: &str = "111111111111111111111111";
 const MONEY_TPL: &str = "333333333333333333333333";
+
+/// A guaranteed container that only the `spt-seasonalevents` stem's christmas list keeps out — so
+/// a resident arm that failed to read that stem spawns it and fails the byte comparison.
+const XMAS_CONTAINER_ID: &str = "xmas1";
+/// The loose loot spawn point `bigmap` blacklists and `factory4_day` does not.
+const LOOSE_POINT_ID: &str = "f4d_point";
 
 // The sealed-case tpls are deliberately non-hex so `strip_mongo_ids` leaves them visible — a
 // draw that diverged between the two arms would then fail the byte comparison.
@@ -85,13 +97,15 @@ fn loot_dist() -> String {
     )
 }
 
-/// The `staticContainers` list, shared verbatim by both arms.
+/// The `staticContainers` list, shared verbatim by both arms. The christmas container is
+/// guaranteed, so only the seasonal filter can keep it out of a result.
 fn containers_json() -> String {
     format!(
-        "[{},{},{}]",
+        "[{},{},{},{}]",
         container("c1", "aaaaaaaaaaaaaaaaaaaaaaa1", 1.0),
         container("r1", "aaaaaaaaaaaaaaaaaaaaaaa2", 0.5),
         container("r2", "aaaaaaaaaaaaaaaaaaaaaaa3", 0.5),
+        container(XMAS_CONTAINER_ID, "aaaaaaaaaaaaaaaaaaaaaaa4", 1.0),
     )
 }
 
@@ -130,11 +144,11 @@ fn preset_views_json() -> String {
 
 /// Every `SealedWeaponCaseVarying` member, shared verbatim by both sealed arms: a single-entry
 /// weapon weight (no draw), a mod reward count with a real range (draws), and a seed so both
-/// arms replay one stream.
+/// arms replay one stream. The four `ItemConfig` sets are not here — they ride the resident
+/// configs root on one arm and [`reward_item_config_json`] on the other.
 fn sealed_varying() -> String {
     format!(
-        r#""globalBlacklist":[],"configBlacklist":[],"rewardItemBlacklist":[],
-        "rewardBaseTypeBlacklist":[],"bossItems":[],"inactiveSeasonalItems":[],"testSeed":7,
+        r#""globalBlacklist":[],"inactiveSeasonalItems":[],"testSeed":7,
         "containerSettings":{{"weaponRewardWeight":{{"{WEAPON_TPL}":1}},"defaultPresetsOnly":false,
             "weaponModRewardLimits":{{"{MISC_NODE}":{{"min":1,"max":2}}}},"rewardTypeLimits":{{}},
             "ammoBoxWhitelist":[],"allowBossItems":false}},
@@ -142,31 +156,131 @@ fn sealed_varying() -> String {
     )
 }
 
+/// The four `ItemConfig` sets on the override arm, byte-identical to what the publish's
+/// `spt-item` stem carries below — all four empty, so no filter fires on either arm.
+fn reward_item_config_json() -> &'static str {
+    r#""configBlacklist":[],"rewardItemBlacklist":[],
+        "rewardBaseTypeBlacklist":[],"bossItems":[]"#
+}
+
 /// Every `LootVarying` member of the sends below, `testSeed` included so both arms replay one
-/// draw stream.
-fn varying() -> String {
+/// draw stream. The rest of the config view and the christmas container ids are not here — they
+/// ride the resident configs root on one arm and [`config_view_json`] on the other; the two
+/// multipliers are, because C# resolves those against the live raid-adjusted config on both arms
+/// and the values must match what [`config_view_json`] puts in the override's view.
+fn varying(location_id: &str, test_seed: u64) -> String {
+    let multiplier = multiplier_for(location_id);
+
     format!(
-        r#""locationId":"bigmap","moneyTpls":["{MONEY_TPL}"],"staticAmmoDist":{{}},
-        "config":{{"containerRandomisationEnabled":true,"locationInRandomisationMaps":true,
-            "containerTypesToNotRandomise":[],"containerGroupMinSizeMultiplier":1,
-            "containerGroupMaxSizeMultiplier":1,"allowDuplicateItemsInStaticContainers":true,
-            "tplsToStripChildItemsFrom":[],"fitLootIntoContainerAttempts":3,
-            "magazineLootHasAmmoChancePercent":0,"staticMagazineLootHasAmmoChancePercent":0,
-            "minFillLooseMagazinePercent":0,"minFillStaticMagazinePercent":0,
-            "staticLootMultiplier":1,"looseLootMultiplier":1,"modSpawnChancePercent":{{}},
-            "looseLootBlacklist":[]}},
+        r#""locationId":"{location_id}","moneyTpls":["{MONEY_TPL}"],"staticAmmoDist":{{}},
+        "staticLootMultiplier":{multiplier},"looseLootMultiplier":{multiplier},
         "seasonal":{{"seasonalEventActive":false,"christmasEventEnabled":false,
-            "inactiveSeasonalItems":[],"christmasContainerIds":[]}},
+            "inactiveSeasonalItems":[]}},
         "lootableItemBlacklist":[],"counter":{{"maxCounts":{{}},"trackedCounts":{{}}}},
-        "testSeed":42"#
+        "testSeed":{test_seed}"#
+    )
+}
+
+/// What `MultiplierForLocation` answers for each fixture location, C#-side: `bigmap` has its own
+/// entry in the config, `factory4_day` falls back to `"default"`. Both arms are handed this same
+/// resolved number, so it is the one config value the byte comparison cannot police — the live-data
+/// C# gates (`LootParityTests`, `LootResidentDbTests`) cover the resolution itself.
+fn multiplier_for(location_id: &str) -> &'static str {
+    if location_id == "bigmap" { "1" } else { "2" }
+}
+
+/// The seed the static sends replay. Every static send `install`s a fresh stream from it, so the
+/// order they run in cannot shift one arm's draws relative to the other's.
+const STATIC_SEED: u64 = 42;
+
+/// The seed the dynamic pair replays — deliberately *not* [`STATIC_SEED`]. A dynamic send
+/// `resume`s the stream a preceding static send of the same seed parked (that is what keeps one
+/// raid on one stream), so on 42 the first of the two dynamic sends would carry on from the last
+/// static send and the second would start fresh: two different streams for the same request.
+const DYNAMIC_SEED: u64 = 99;
+
+/// The `spt-location` stem the publish carries: `bigmap` has an entry in both map-keyed members the
+/// resident arm resolves per location, `factory4_day` in neither. Every scalar is a value the
+/// generator reads, so a lift that dropped one shows up as a diverging draw. The two multiplier maps
+/// are deliberately absent: the lift no longer declares them (they are adjusted per raid and ride
+/// the request instead), and a publish carrying them would only prove they are ignored.
+fn location_config_stem() -> String {
+    format!(
+        r#"{{"kind":"spt-location",
+        "containerRandomisationSettings":{{"enabled":true,"maps":{{"bigmap":true}},
+            "containerTypesToNotRandomise":[],"containerGroupMinSizeMultiplier":1,
+            "containerGroupMaxSizeMultiplier":1}},
+        "allowDuplicateItemsInStaticContainers":true,"tplsToStripChildItemsFrom":[],
+        "fitLootIntoContainerAttempts":3,"magazineLootHasAmmoChancePercent":0,
+        "staticMagazineLootHasAmmoChancePercent":0,"minFillLooseMagazinePercent":0,
+        "minFillStaticMagazinePercent":0,
+        "equipmentLootSettings":{{"modSpawnChancePercent":{{}}}},
+        "looseLootBlacklist":{{"bigmap":["{LOOSE_POINT_ID}"]}}}}"#
+    )
+}
+
+/// `LocationLootGenerator.BuildConfigView(locationId)` as the C# projects it, for the override arm.
+/// The two locations differ in the two members the resident resolution has to get right — `bigmap`
+/// is in `maps` and has its own blacklist, `factory4_day` is in neither — plus the multiplier, which
+/// is C#-resolved on both arms and so must equal what [`varying`] sends.
+fn config_view_json(location_id: &str) -> String {
+    let multiplier = multiplier_for(location_id);
+    let (in_maps, blacklist) = match location_id {
+        "bigmap" => ("true", format!(r#"["{LOOSE_POINT_ID}"]"#)),
+        _ => ("false", "[]".to_owned()),
+    };
+
+    format!(
+        r#"{{"containerRandomisationEnabled":true,"locationInRandomisationMaps":{in_maps},
+        "containerTypesToNotRandomise":[],"containerGroupMinSizeMultiplier":1,
+        "containerGroupMaxSizeMultiplier":1,"allowDuplicateItemsInStaticContainers":true,
+        "tplsToStripChildItemsFrom":[],"fitLootIntoContainerAttempts":3,
+        "magazineLootHasAmmoChancePercent":0,"staticMagazineLootHasAmmoChancePercent":0,
+        "minFillLooseMagazinePercent":0,"minFillStaticMagazinePercent":0,
+        "staticLootMultiplier":{multiplier},"looseLootMultiplier":{multiplier},
+        "modSpawnChancePercent":{{}},"looseLootBlacklist":{blacklist}}}"#
+    )
+}
+
+/// The `itemsView` + `defaultPresets` + config-backed members every location-loot override
+/// carries, resolved for `location_id`.
+fn loot_views_json(location_id: &str) -> String {
+    format!(
+        r#""itemsView":{{
+            "{ITEM_NODE}":{{}},
+            "{MONEY}":{{"parent":"{ITEM_NODE}"}},
+            "{CONTAINER_TPL}":{{"parent":"{ITEM_NODE}","width":1,"height":1,
+                "gridCellsH":2,"gridCellsV":2}},
+            "{MONEY_TPL}":{{"parent":"{MONEY}","width":1,"height":1,
+                "stackMaxSize":500000,"stackMinRandom":100,"stackMaxRandom":200}}
+        }},
+        "defaultPresets":{{}},
+        "config":{config},
+        "christmasContainerIds":["{XMAS_CONTAINER_ID}"]"#,
+        config = config_view_json(location_id),
+    )
+}
+
+/// The loose loot `factory4_day`'s dynamic send generates from: one guaranteed point, whose
+/// template id is the one `bigmap` — and only `bigmap` — blacklists.
+fn loose_loot_json() -> String {
+    format!(
+        r#"{{"spawnpointCount":{{"mean":1,"std":0}},"spawnpointsForced":[],
+        "spawnpoints":[{{"locationId":"f4d_1","probability":1,
+            "template":{{"Id":"{LOOSE_POINT_ID}","Root":"aaaaaaaaaaaaaaaaaaaaaab1",
+                "Items":[{{"_id":"aaaaaaaaaaaaaaaaaaaaaab1","_tpl":"{MONEY_TPL}",
+                    "composedKey":"ck1"}}]}},
+            "itemDistribution":[{{"composedKey":{{"key":"ck1"}},"relativeProbability":1}}]}}]}}"#
     )
 }
 
 #[test]
 fn a_resident_send_matches_the_override_send_and_a_wrong_epoch_is_stale() {
-    // (1) A four-root publish: templates whose derived items view is exactly the override's
-    // below, empty traders/globals (the ragfair and quest derives are total over them), and a
-    // locations root carrying bigmap's statics.
+    // (1) A five-root publish: templates whose derived items view is exactly the override's
+    // below, empty traders/globals (the ragfair and quest derives are total over them), a
+    // locations root carrying two maps' statics, and a configs root carrying the `spt-item` stem
+    // (the four sets the reward family used to be handed per send) plus the `spt-location` and
+    // `spt-seasonalevents` stems the location-loot family resolves its config view out of.
     let publish = format!(
         r#"{{"schema":1,"roots":{{
             "templates":{{"items":{{
@@ -188,15 +302,27 @@ fn a_resident_send_matches_the_override_send_and_a_wrong_epoch_is_stale() {
                     "_items":{p1_items}}},
                 "p2":{{"_id":"p2","_name":"weapon_alt","_items":{p2_items}}}
             }}}},
-            "locations":{{"bigmap":{{"base":{{"Id":"bigmap"}},"allExtracts":[],
-                "staticLoot":{loot},
-                "staticContainers":{{"staticWeapons":[],"staticContainers":{containers},
-                    "staticForced":[]}},
-                "statics":{statics}}}}}
+            "locations":{{
+                "bigmap":{{"base":{{"Id":"bigmap"}},"allExtracts":[],
+                    "staticLoot":{loot},
+                    "staticContainers":{{"staticWeapons":[],"staticContainers":{containers},
+                        "staticForced":[]}},
+                    "statics":{statics}}},
+                "factory4_day":{{"base":{{"Id":"factory4_day"}},"allExtracts":[],
+                    "staticLoot":{loot},
+                    "staticContainers":{{"staticWeapons":[],"staticContainers":{containers},
+                        "staticForced":[]}},
+                    "statics":{statics}}}}},
+            "configs":{{"spt-item":{{"kind":"spt-item","blacklist":[],"rewardItemBlacklist":[],
+                "rewardItemTypeBlacklist":[],"bossItems":[]}},
+                "spt-location":{location_config},
+                "spt-seasonalevents":{{"kind":"spt-seasonalevents",
+                    "christmasContainerIds":["{XMAS_CONTAINER_ID}"]}}}}
         }}}}"#,
         loot = loot_dist(),
         containers = containers_json(),
         statics = statics_json(),
+        location_config = location_config_stem(),
         p1_items = preset_p1_items(),
         p2_items = preset_p2_items(),
     );
@@ -214,57 +340,106 @@ fn a_resident_send_matches_the_override_send_and_a_wrong_epoch_is_stale() {
         .as_u64()
         .expect("publish answers the epoch");
 
-    // (3) The resident send: no viewsOverride, just the published epoch.
-    let resident_request = format!(r#"{{"epoch":{epoch},"varying":{{{}}}}}"#, varying());
-    let (status, resident) = call(spt_generate_static_containers, resident_request.as_bytes());
+    // (3) The resident send, once per location: no viewsOverride, just the published epoch. Two
+    // locations because the config view is resolved per location on this arm — `bigmap` hits its
+    // own entry in all three map-keyed members, `factory4_day` hits none of them and takes the
+    // `"default"` multiplier, the not-randomised branch and an empty blacklist.
+    for location_id in ["bigmap", "factory4_day"] {
+        let resident_request = format!(
+            r#"{{"epoch":{epoch},"varying":{{{}}}}}"#,
+            varying(location_id, STATIC_SEED)
+        );
+        let (status, resident) = call(spt_generate_static_containers, resident_request.as_bytes());
+        assert_eq!(
+            status,
+            STATUS_OK,
+            "resident send for {location_id} failed: {}",
+            String::from_utf8_lossy(&resident)
+        );
+
+        // (4) The same varying with the equivalent viewsOverride at epoch 0: the itemsView members
+        // mirror what the publish's templates derive (location loot reads none of the members the
+        // full derive adds beyond these), the statics are the same bytes the locations root
+        // carries, and `config` is what `BuildConfigView(locationId)` would have projected.
+        let override_request = format!(
+            r#"{{"epoch":0,"viewsOverride":{{{views},
+                "staticWeapons":[],"staticContainers":{containers},"staticForced":[],
+                "staticLootDist":{loot},"statics":{statics}
+            }},"varying":{{{varying}}}}}"#,
+            views = loot_views_json(location_id),
+            loot = loot_dist(),
+            containers = containers_json(),
+            statics = statics_json(),
+            varying = varying(location_id, STATIC_SEED)
+        );
+        let (status, override_send) =
+            call(spt_generate_static_containers, override_request.as_bytes());
+        assert_eq!(
+            status,
+            STATUS_OK,
+            "override send for {location_id} failed: {}",
+            String::from_utf8_lossy(&override_send)
+        );
+
+        // The christmas container is guaranteed and both arms must have dropped it — otherwise the
+        // seasonal stem went unread on the resident arm and the comparison below is vacuous.
+        let resident = String::from_utf8(resident).unwrap();
+        assert!(
+            !resident.contains(XMAS_CONTAINER_ID),
+            "the christmas container survived: {resident}"
+        );
+
+        // The flip's promise: identical generation off either arm, minted ids aside.
+        assert_eq!(
+            strip_mongo_ids(&resident),
+            strip_mongo_ids(&String::from_utf8(override_send).unwrap()),
+            "resident and override diverged on {location_id}"
+        );
+    }
+
+    // (4b) The blacklist resolution is only observable on the dynamic path: `factory4_day` has no
+    // `looseLootBlacklist` entry, so the one point it generates from must survive — a resident arm
+    // that fell back to another map's list (or to the whole map) would drop it.
+    let dynamic_varying = format!(
+        r#"{}, "looseLoot":{}"#,
+        varying("factory4_day", DYNAMIC_SEED),
+        loose_loot_json()
+    );
+    let resident_dynamic = format!(r#"{{"epoch":{epoch},"varying":{{{dynamic_varying}}}}}"#);
+    let (status, resident_dynamic) = call(spt_generate_dynamic_loot, resident_dynamic.as_bytes());
     assert_eq!(
         status,
         STATUS_OK,
-        "resident send failed: {}",
-        String::from_utf8_lossy(&resident)
+        "resident dynamic send failed: {}",
+        String::from_utf8_lossy(&resident_dynamic)
     );
-
-    // (4) The same varying with the equivalent viewsOverride at epoch 0: the itemsView members
-    // mirror what the publish's templates derive (location loot reads none of the members the
-    // full derive adds beyond these), the statics are the same bytes the locations root carries.
-    let override_request = format!(
-        r#"{{"epoch":0,"viewsOverride":{{
-            "itemsView":{{
-                "{ITEM_NODE}":{{}},
-                "{MONEY}":{{"parent":"{ITEM_NODE}"}},
-                "{CONTAINER_TPL}":{{"parent":"{ITEM_NODE}","width":1,"height":1,
-                    "gridCellsH":2,"gridCellsV":2}},
-                "{MONEY_TPL}":{{"parent":"{MONEY}","width":1,"height":1,
-                    "stackMaxSize":500000,"stackMinRandom":100,"stackMaxRandom":200}}
-            }},
-            "defaultPresets":{{}},
-            "staticWeapons":[],"staticContainers":{containers},"staticForced":[],
-            "staticLootDist":{loot},"statics":{statics}
-        }},"varying":{{{varying}}}}}"#,
-        loot = loot_dist(),
-        containers = containers_json(),
-        statics = statics_json(),
-        varying = varying()
+    let override_dynamic = format!(
+        r#"{{"epoch":0,"viewsOverride":{{{views}}},"varying":{{{dynamic_varying}}}}}"#,
+        views = loot_views_json("factory4_day"),
     );
-    let (status, override_send) = call(spt_generate_static_containers, override_request.as_bytes());
+    let (status, override_dynamic) = call(spt_generate_dynamic_loot, override_dynamic.as_bytes());
     assert_eq!(
         status,
         STATUS_OK,
-        "override send failed: {}",
-        String::from_utf8_lossy(&override_send)
+        "override dynamic send failed: {}",
+        String::from_utf8_lossy(&override_dynamic)
     );
 
-    // The flip's promise: identical generation off either arm, minted ids aside.
+    let resident_dynamic = String::from_utf8(resident_dynamic).unwrap();
+    assert!(
+        resident_dynamic.contains(LOOSE_POINT_ID),
+        "the point bigmap blacklists was dropped for factory4_day: {resident_dynamic}"
+    );
     assert_eq!(
-        strip_mongo_ids(&String::from_utf8(resident).unwrap()),
-        strip_mongo_ids(&String::from_utf8(override_send).unwrap())
+        strip_mongo_ids(&resident_dynamic),
+        strip_mongo_ids(&String::from_utf8(override_dynamic).unwrap())
     );
 
     // (5) An epoch the store does not hold is stale, never a wrong answer.
     let stale_request = format!(
         r#"{{"epoch":{},"varying":{{{}}}}}"#,
         epoch + 1000,
-        varying()
+        varying("bigmap", STATIC_SEED)
     );
     let (status, out) = call(spt_generate_static_containers, stale_request.as_bytes());
     assert_eq!(status, STATUS_STALE_EPOCH);
@@ -297,9 +472,11 @@ fn a_resident_send_matches_the_override_send_and_a_wrong_epoch_is_stale() {
                 "{MOD_B_TPL}":{{"parent":"{MISC_NODE}"}}
             }},
             "defaultPresets":[],"defaultPresetsByTpl":{{}},
-            "presetsByTpl":{presets}
+            "presetsByTpl":{presets},
+            {item_config}
         }},"varying":{{{varying}}}}}"#,
         presets = preset_views_json(),
+        item_config = reward_item_config_json(),
         varying = sealed_varying(),
     );
     let (status, override_sealed) = call(

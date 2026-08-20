@@ -75,20 +75,6 @@ internal record RagfairVaryingFields
     [JsonPropertyName("expiredOffers")]
     public IEnumerable<List<Item>>? ExpiredOffers { get; set; }
 
-    /// <summary>
-    /// <c>RagfairConfig.Dynamic</c>, the live object - mods mutate it at runtime and the native side
-    /// has to see that. Moved off the old invariant slice (spec § C# driver carve-out): service/config state
-    /// with no resident home until Phases 2/4.
-    /// </summary>
-    [JsonPropertyName("dynamic")]
-    public required Dynamic Dynamic { get; set; }
-
-    /// <summary>
-    /// <c>ItemFilterService.GetBlacklistedItems()</c>.
-    /// </summary>
-    [JsonPropertyName("configBlacklist")]
-    public required HashSet<MongoId> ConfigBlacklist { get; set; }
-
     [JsonPropertyName("seasonalEventActive")]
     public required bool SeasonalEventActive { get; set; }
 
@@ -108,10 +94,33 @@ internal record RagfairVaryingFields
 
 /// <summary>
 /// The C#-built override of the eight database views the native side would otherwise read from its
-/// resident DB, sent by callers ineligible for residency.
+/// resident DB, plus the three config-backed inputs it would otherwise read off the resident
+/// <c>configs</c> root. Sent by callers ineligible for residency.
 /// </summary>
 internal record RagfairViewsOverride
 {
+    /// <summary>
+    /// <c>RagfairConfig.Dynamic</c>, the live object - mods mutate it at runtime and the native side
+    /// has to see that. Resident equivalent: the <c>spt-ragfair</c> stem's <c>dynamic</c>.
+    /// </summary>
+    [JsonPropertyName("dynamic")]
+    public required Dynamic Dynamic { get; set; }
+
+    /// <summary>
+    /// <c>ItemFilterService.GetBlacklistedItems()</c>, which returns <c>ItemConfig.Blacklist</c>
+    /// verbatim. Resident equivalent: the <c>spt-item</c> stem's <c>blacklist</c>.
+    /// </summary>
+    [JsonPropertyName("configBlacklist")]
+    public required HashSet<MongoId> ConfigBlacklist { get; set; }
+
+    /// <summary>
+    /// <c>InventoryConfig.CustomMoneyTpls</c> - the currencies <c>PaymentHelper.IsMoneyTpl</c>
+    /// unions onto the four <c>Money</c> constants. Resident equivalent: the <c>spt-inventory</c>
+    /// stem's <c>customMoneyTpls</c>.
+    /// </summary>
+    [JsonPropertyName("customMoneyTpls")]
+    public required List<MongoId> CustomMoneyTpls { get; set; }
+
     /// <summary>
     /// <c>GlobalTable.ItemPresets</c>, keyed by preset id. Scanned in order by the assort walk, so
     /// the insertion order of the source dictionary is the contract.

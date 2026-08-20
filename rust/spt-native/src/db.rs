@@ -12,7 +12,8 @@ use std::sync::{Arc, RwLock};
 
 use crate::bot::views::BotDbViews;
 use crate::db::models::{
-    GlobalsRoot, HideoutRoot, LocationsRoot, PublishRequest, TemplatesRoot, TradersRoot,
+    ConfigsRoot, GlobalsRoot, HideoutRoot, LocationsRoot, PublishRequest, TemplatesRoot,
+    TradersRoot,
 };
 use crate::quest::views::QuestDbViews;
 use crate::ragfair::views::RagfairDbViews;
@@ -24,6 +25,7 @@ pub struct ResidentDb {
     pub globals: Option<Arc<GlobalsRoot>>,
     pub locations: Option<Arc<LocationsRoot>>,
     pub hideout: Option<Arc<HideoutRoot>>,
+    pub configs: Option<Arc<ConfigsRoot>>,
     /// `Some` whenever all three source roots are resident — re-derived on every such publish,
     /// `None` otherwise.
     pub ragfair_views: Option<Arc<RagfairDbViews>>,
@@ -96,6 +98,11 @@ pub fn publish(request: PublishRequest) -> Result<u64, PublishError> {
         .hideout
         .map(Arc::new)
         .or_else(|| previous.and_then(|db| db.hideout.clone()));
+    let configs = request
+        .roots
+        .configs
+        .map(Arc::new)
+        .or_else(|| previous.and_then(|db| db.configs.clone()));
 
     // Derived before the swap: a derivation error aborts the publish and leaves the previous
     // resident DB fully intact. The derive runs under the write guard, so a panic in it must
@@ -158,6 +165,7 @@ pub fn publish(request: PublishRequest) -> Result<u64, PublishError> {
         globals,
         locations,
         hideout,
+        configs,
         ragfair_views,
         quest_views,
         bot_views,
@@ -270,6 +278,40 @@ mod store_tests {
         let epoch2 = publish(request(r#"{"schema":1,"roots":{}}"#)).unwrap();
         assert_eq!(epoch2, 2);
         assert!(current().unwrap().hideout.is_some());
+    }
+
+    #[test]
+    fn a_configs_root_publishes_and_survives_a_partial_republish() {
+        let _guard = tests::DB_TEST_LOCK.lock().unwrap();
+        clear();
+        // An unlifted kind, so the body rides `extra` raw — `spt-ragfair` and `spt-item` are
+        // typed stems now (Task 6) and a truncated body would fail the parse
+        let epoch = publish(request(
+            r#"{"schema":1,"roots":{"configs":{"spt-core":{"kind":"spt-core","profileSaveIntervalSeconds":15}}}}"#,
+        ))
+        .unwrap();
+        assert_eq!(epoch, 1);
+        let before = current().unwrap();
+        let core = &before.configs.as_ref().unwrap().extra["spt-core"];
+        assert_eq!(core["profileSaveIntervalSeconds"], 15);
+
+        // partial republish without the root keeps it resident, epoch still moves
+        let epoch2 = publish(request(r#"{"schema":1,"roots":{}}"#)).unwrap();
+        assert_eq!(epoch2, 2);
+        let after = current().unwrap();
+        assert!(Arc::ptr_eq(
+            before.configs.as_ref().unwrap(),
+            after.configs.as_ref().unwrap()
+        ));
+    }
+
+    #[test]
+    fn a_junk_configs_root_parses_total() {
+        let _guard = tests::DB_TEST_LOCK.lock().unwrap();
+        clear();
+        publish(request(r#"{"schema":1,"roots":{"configs":{"a":1}}}"#)).unwrap();
+        let db = current().unwrap();
+        assert_eq!(db.configs.as_ref().unwrap().extra["a"], 1);
     }
 
     #[test]

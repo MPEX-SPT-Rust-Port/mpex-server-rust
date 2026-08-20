@@ -83,8 +83,8 @@ internal record RepeatableQuestVaryingFields
     [JsonPropertyName("seed")]
     public ulong? Seed { get; set; }
 
-    // Moved off the old invariant slice: service/config state with no resident home until
-    // Phases 2/4. Wire names and value shapes are byte-identical to the old slice members.
+    // Service state with no resident home: both are a service's own mutable cache rather than a
+    // config value, so they stay varying past the Phase 4 config lift.
 
     /// <summary>
     ///     What <c>ItemFilterService.IsItemBlacklisted</c> answers from: the config/item.json
@@ -93,29 +93,8 @@ internal record RepeatableQuestVaryingFields
     [JsonPropertyName("itemBlacklist")]
     public required HashSet<MongoId> ItemBlacklist { get; set; }
 
-    [JsonPropertyName("rewardItemBlacklist")]
-    public required HashSet<MongoId> RewardItemBlacklist { get; set; }
-
-    [JsonPropertyName("bossItems")]
-    public required HashSet<MongoId> BossItems { get; set; }
-
     [JsonPropertyName("seasonalItemTplBlacklist")]
     public required HashSet<MongoId> SeasonalItemTplBlacklist { get; set; }
-
-    /// <summary>
-    ///     <c>QuestConfig.RepeatableQuestTemplates</c> - the template <b>ids</b> by player group,
-    ///     not the quest templates in the views override. Its per-group keys are PascalCase quest
-    ///     type names.
-    /// </summary>
-    [JsonPropertyName("repeatableQuestTemplateIds")]
-    public required RepeatableQuestTemplates RepeatableQuestTemplateIds { get; set; }
-
-    /// <summary>
-    ///     <c>QuestConfig.LocationIdMap</c>, keyed the way <c>GetQuestLocationByMapId</c> looks it
-    ///     up: by the raw <c>ELocationName</c> name, mixed case included.
-    /// </summary>
-    [JsonPropertyName("locationIdMap")]
-    public required Dictionary<string, string> LocationIdMap { get; set; }
 }
 
 /// <summary>
@@ -194,6 +173,37 @@ internal record QuestViewsOverride
     /// </summary>
     [JsonPropertyName("extractsByLocation")]
     public required Dictionary<string, List<ExitView>> ExtractsByLocation { get; set; }
+
+    // The config-backed members the resident arm reads off the configs root's spt-item and
+    // spt-quest stems instead (flip #7). Same wire names and values as the varying half carried.
+
+    /// <summary>
+    ///     <c>ItemFilterService.GetItemRewardBlacklist()</c>, which is
+    ///     <c>ItemConfig.RewardItemBlacklist</c> verbatim.
+    /// </summary>
+    [JsonPropertyName("rewardItemBlacklist")]
+    public required HashSet<MongoId> RewardItemBlacklist { get; set; }
+
+    /// <summary>
+    ///     <c>ItemFilterService.GetBossItems()</c>, which is <c>ItemConfig.BossItems</c> verbatim.
+    /// </summary>
+    [JsonPropertyName("bossItems")]
+    public required HashSet<MongoId> BossItems { get; set; }
+
+    /// <summary>
+    ///     <c>QuestConfig.RepeatableQuestTemplates</c> - the template <b>ids</b> by player group,
+    ///     not the quest templates <see cref="RepeatableQuestTemplates"/> carries. Its per-group
+    ///     keys are PascalCase quest type names.
+    /// </summary>
+    [JsonPropertyName("repeatableQuestTemplateIds")]
+    public required RepeatableQuestTemplates RepeatableQuestTemplateIds { get; set; }
+
+    /// <summary>
+    ///     <c>QuestConfig.LocationIdMap</c>, keyed the way <c>GetQuestLocationByMapId</c> looks it
+    ///     up: by the raw <c>ELocationName</c> name, mixed case included.
+    /// </summary>
+    [JsonPropertyName("locationIdMap")]
+    public required Dictionary<string, string> LocationIdMap { get; set; }
 }
 
 /// <summary>

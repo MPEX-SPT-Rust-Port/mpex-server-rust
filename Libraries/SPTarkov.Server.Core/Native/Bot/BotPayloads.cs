@@ -119,31 +119,9 @@ internal record BotViewsOverride
     /// </summary>
     [JsonPropertyName("expTable")]
     public required List<int> ExpTable { get; set; }
-}
 
-/// <summary>
-/// The request members that do not vary between the bots of one wave and are not database views -
-/// every config slice, the blacklist resolved from the wave's role and the player's level, and
-/// (as <see cref="TemplateVariants"/>) the templates and loot pools, which vary by level band
-/// rather than by bot. The database views live on <see cref="BotViewsOverride"/> or the resident
-/// DB. That leaves the per-bot slice at an id, a seed and the details, so this block is
-/// essentially the whole request - which is what makes batching worth anything. Measured in
-/// BENCHMARK.md's *Batched wave*.
-/// </summary>
-internal record SharedBotVarying
-{
-    /// <summary>
-    /// <c>pmcProfile?.Info?.Level ?? 1</c> (<c>BotInventoryGenerator.cs:260</c>). Unread natively -
-    /// it exists so the level <see cref="EquipmentBlacklist"/> was resolved with is on the wire.
-    /// </summary>
-    [JsonPropertyName("generatingPlayerLevel")]
-    public required int GeneratingPlayerLevel { get; set; }
-
-    [JsonPropertyName("isNightTime")]
-    public required bool IsNightTime { get; set; }
-
-    [JsonPropertyName("equipment")]
-    public required Dictionary<string, EquipmentFilters> Equipment { get; set; }
+    // The config slices an eligible send reads off the resident DB instead: the spt-bot stem
+    // (BotConfigLift), the spt-pmc and spt-repair stems, and ItemConfig.Blacklist.
 
     [JsonPropertyName("bosses")]
     public required List<string> Bosses { get; set; }
@@ -175,23 +153,59 @@ internal record SharedBotVarying
     [JsonPropertyName("pmcConfig")]
     public required PmcConfig PmcConfig { get; set; }
 
+    /// <summary>
+    /// <c>RepairConfig.RepairKit.Weapon</c> - the only <c>BonusSettings</c> bot generation passes.
+    /// </summary>
     [JsonPropertyName("repairKitWeapon")]
     public required BonusSettings RepairKitWeapon { get; set; }
 
-    [JsonPropertyName("equipmentBlacklist")]
-    public required EquipmentFilterDetails EquipmentBlacklist { get; set; }
-
     /// <summary>
-    /// The same call as <see cref="EquipmentBlacklist"/>, resolved the way the weapon-mod path
-    /// resolves it: <c>BotEquipmentModGenerator.cs:546</c> defaults the player level to <b>0</b>
-    /// where the equipment path defaults it to 1, and level 0 matches no <c>levelRange</c>, so the
-    /// two results differ. Legacy is internally inconsistent here and native has to be too.
+    /// <c>ItemFilterService.GetBlacklistedItems()</c>, i.e. <c>ItemConfig.Blacklist</c> verbatim -
+    /// <i>not</i> the runtime-augmented <c>ItemBlacklistCache</c>, which is what keeps this member
+    /// safe to resolve off a published snapshot.
     /// </summary>
-    [JsonPropertyName("weaponModEquipmentBlacklist")]
-    public required EquipmentFilterDetails WeaponModEquipmentBlacklist { get; set; }
-
     [JsonPropertyName("configBlacklist")]
     public required HashSet<MongoId> ConfigBlacklist { get; set; }
+}
+
+/// <summary>
+/// The request members that do not vary between the bots of one wave and are not database views:
+/// live C# process state (the player's level, the raid's daylight, the mod-pool slot order), the
+/// one config slice a runtime writer keeps out of the resident DB (<see cref="Equipment"/>), and
+/// (as <see cref="TemplateVariants"/>) the templates and loot pools, which vary by level band
+/// rather than by bot. Every other config slice, and every database view, lives on
+/// <see cref="BotViewsOverride"/> or the resident DB.
+/// </summary>
+internal record SharedBotVarying
+{
+    /// <summary>
+    /// <c>pmcProfile?.Info?.Level</c> <b>raw</b>, not pre-defaulted: the equipment path defaults an
+    /// absent level to 1 (written at <c>BotInventoryGenerator.cs:614</c> and its six siblings,
+    /// reaching the blacklist call as <c>GetValueOrDefault(1)</c> at <c>:937-939</c>) and the
+    /// weapon-mod path to <b>0</b> (<c>BotEquipmentModGenerator.cs:546</c>), and level 0 matches no
+    /// <c>levelRange</c> where level 1 may, so a pre-defaulted <c>1</c> could not tell "level 1 with
+    /// a profile" from "no profile" and would collapse that divergence. The native side applies both
+    /// defaults and picks both blacklist bands out of <see cref="Equipment"/> itself.
+    ///
+    /// <c>required</c> like every sibling, though it is nullable: a construction site that forgot it
+    /// would silently ship "no profile" and flip the weapon-mod list to the level-0 band.
+    /// </summary>
+    [JsonPropertyName("generatingPlayerLevel")]
+    public required int? GeneratingPlayerLevel { get; set; }
+
+    [JsonPropertyName("isNightTime")]
+    public required bool IsNightTime { get; set; }
+
+    /// <summary>
+    /// <c>BotConfig.Equipment</c> minus its null values. Deliberately <b>not</b> resident:
+    /// <see cref="BotInventoryGenerator.ReplayRandomisationClamps"/> writes the nighttime mod
+    /// chances back into <c>Equipment[role].Randomisation[band].EquipmentMods</c> through the
+    /// dictionary indexer after every native send, which trips no write barrier, so a published
+    /// copy would freeze at the config's on-disk values and diverge from the second bot of a
+    /// nighttime raid on.
+    /// </summary>
+    [JsonPropertyName("equipment")]
+    public required Dictionary<string, EquipmentFilters> Equipment { get; set; }
 
     /// <summary>
     /// <c>BotEquipmentModPoolService</c>'s pools' slot-name enumeration order per template, as

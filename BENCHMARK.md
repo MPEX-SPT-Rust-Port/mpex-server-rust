@@ -18,6 +18,7 @@ runs them. There are no `cargo bench` targets.
 | `RagfairViewsEquivalenceTests.cs` | phase 1 flip #1 — writes the 3-root publish envelope and C#-built expected ragfair views; paired with `rust/spt-native/tests/phase1_ragfair_views.rs` for the derivation-equivalence check |
 | `QuestViewsEquivalenceTests.cs` | phase 1 flip #2 — writes the 4-root publish envelope and C#-built expected quest views; paired with `rust/spt-native/tests/phase1_quest_views.rs` for the derivation-equivalence check |
 | `DatabaseImportBenchmarkTests.cs` | phase 3 fused SPT_Data load — startup import: verify, native fused load and the managed replica walk timed separately on both `DatabaseImporter` arms |
+| `DbPublishFixtureTests.cs` | phase 4 configs root — writes the projected configs root; paired with `rust/spt-native/tests/phase4_configs_root.rs` for the two-serializer parse check |
 
 ## Running them
 
@@ -267,6 +268,103 @@ loose-loot residency against a ~1 GB budget (405.2 MiB publish delta, § Phase 0
 ~60 MB transient envelope plus a full parse of it on top of the resident roots — no number was taken
 for either, in this fixture or any other. The gap is recorded, not closed.
 
+## Phase 4 — configs join the resident set
+
+`ecf856b` — 2026-08-20. Every loaded config publishes as a sixth root keyed by its `Kind`, and six
+families (scav case, ragfair, quest, reward loot, location loot, bots) now read their config data
+off it instead of off the per-call varying block. Two prices to re-take: the publish, which gained
+a root, and the bot wire, which lost the config half of its shared block.
+
+    dotnet test -c Release --filter "FullyQualifiedName~ScavCaseBenchmarkTests" --logger "console;verbosity=detailed"
+
+Two full invocations of that filter, medians and second-run medians, both ranges taken across the
+five shipped recipes:
+
+| measure | value (run 1) | value (run 2) |
+|---|---|---|
+| publish **cold** (stamp bumped per run) | 736.7 – 748.2 ms | 742.0 – 749.4 ms |
+| publish cost per send (cold − warm) | 735.2 – 746.4 ms | 740.5 – 747.5 ms |
+| five-root baseline, same fixture (`cecdd5c` / `9011794`) | 733.7 – 744.8 ms / 732.9 – 745.1 ms | 736.0 – 743.6 ms |
+| native, publish **warm** | 1.55 – 1.78 ms | 1.54 – 1.93 ms |
+| legacy (C# 4.1.2) | 0.41 – 1.53 ms | 0.42 – 1.39 ms |
+| `Build` (request only) | 14.00 ms | 13.49 ms |
+| `BuildViewsOverride` only | 6.45 ms | 6.46 ms |
+
+**The sixth root is free at this fixture's resolution.** The plan budgeted roughly Phase 0's configs
+row (67.7 ms warm projection, 0.7 MiB) on top of the 730–745 ms five-root publish; what the cold arm
+actually reads is 736.7–748.2 ms against flip #6's nearer 732.9–745.1 — **+3.1 to +3.8 ms** on the
+range endpoints, inside a per-recipe spread of 719–811 ms. So the spike's configs row does not
+predict the marginal price of the root in a real publish: 67.7 ms warm for 0.7 MiB, against globals'
+7.3 ms for the same 0.7 MiB, is a 9x gap at equal size that this publish does not reproduce.
+The gap is the spike fixture, not the projection: `DbPublishSpikeTests.cs:57-78` calls
+`ConfigLoader.Initialize(...)` *inside* the timed closure, so both its cold and warm configs figures
+pay a full 28-file disk read plus deserialize that no other root's closure pays.
+Nothing per-call moved for the root either: the warm arm holds at
+1.54–1.93 ms against flip #5's 1.58–1.88 ms.
+
+The bot wire has no committed fixture that reports bytes — `BotPayloadSizeTests` pins the *override*
+arm's budget by design — so it was measured with a throwaway Release probe over
+`BotPayloadProjection.BuildRequest` / `BuildSharedVarying`, serialised through
+`JsonUtil.JsonSerializerOptionsNoIndent`, one `pmcUSEC` bot and one level band, as the flip-6 figures
+were. The probe warms twice before reading (see the artifact note below).
+
+| measure | value | pre-phase (`9011794`) |
+|---|---|---|
+| eligible single-bot request | 451,223 B (0.43 MiB) | 589,344 B (0.56 MiB) |
+| views-override single-bot request | 4,152,813 B (3.96 MiB) | 4,208,129 B (4.01 MiB) |
+| override against eligible | 9.20x | 7.1x |
+| `shared` block, whole | 66,293 B | 204,414 B (implied) |
+| `shared.equipment` | 39,811 B | same projection, unchanged |
+| `shared.modPoolSlotOrder` | 26,428 B | 26,428 B |
+
+| wave | resident per-bot | pre-phase resident per-bot | resident per send | views-override per-bot |
+|---|---|---|---|---|
+| 45 | **10,272 B (0.010 MiB)** | 13,341 B | 462,235 B | 92,529 B |
+| 20 | **22,802 B (0.022 MiB)** | 29,707 B | 456,035 B | 207,881 B |
+| 10 | **45,356 B (0.043 MiB)** | 59,167 B | 453,555 B | 415,514 B |
+| 5 | **90,463 B (0.086 MiB)** | 118,087 B | 452,315 B | 830,781 B |
+| 1 | **451,323 B (0.430 MiB)** | 589,444 B | 451,323 B | 4,152,913 B |
+
+**The eligible wire shed 138,121 bytes (134.9 KiB) per send, a flat 23.0–23.4% at every wave size,
+and that number is the config half exactly.** The block lost fourteen of its twenty members — twelve
+config slices to the resident configs root, plus `equipmentBlacklist` and
+`weaponModEquipmentBlacklist`, which the native side now selects out of `equipment` itself — while
+the two sized members that survive are built by projections the flip did not touch
+(`modPoolSlotOrder` reads 26,428 B on both sides of it; `equipment`'s expression is character for
+character what `9011794` had). So the shared block's 204,414 → 66,293 B is the config half leaving
+and nothing else. At wave 45 an eligible server now crosses 10 KB per bot where it crossed 13 KB
+before the flip and 94 KB before residency.
+
+**What dominates the remaining wire is the caller's own block, not either varying member.** On a
+wave-45 send `templateVariants` — the per-level-band filtered template plus its loot pools — is
+384,685 B, **83.2%** of the 462,235-byte request, with the 45 bot slices at 11,161 B behind it. The
+plan predicted `modPoolSlotOrder` would be left dominant; it is third. Among the members that are
+genuinely varying process state, `equipment` (39,811 B) leads `modPoolSlotOrder` (26,428 B) — and led
+it at `9011794` as well, off the same projection expression, so the flip-6 block's "single largest
+member still crossing per call" was already wrong when written:
+`BotConfig.Equipment` was ruled to stay on the wire because `ReplayRandomisationClamps` writes the
+nighttime mod chances back into it after every send, so the largest config-shaped member is the one
+that did not move. Carving a varying `EquipmentMods` member out of an otherwise resident
+`Equipment` is the named upgrade path, and it is ledger material, not a measurement.
+
+**The ineligible arm did not move.** 4,152,813 B against the pre-phase 4,208,129 B is the same wire
+by construction — the config half moved from `shared` into `viewsOverride`, not off the send, so the
+ineligible total should be flat and is. The gap measures 55,316 B and the first-call artifact below
+measures 54,178 B (423,285 − 369,107) — the two match to within ~1.2 KB, which puts the pre-phase
+override arm in the unwarmed regime and its own resident arm in the warmed one. That is a
+reading of two numbers, not a re-measurement of `9011794`. The override/eligible ratio rising
+7.1x → 9.20x is entirely the eligible arm shrinking either way.
+
+**Measurement note: the first `BuildRequest` of a process answers a template 54,178 B larger than
+every later one** (423,285 B against a settled 369,107 B, reproduced across three passes in each of
+two probe runs). It is not in the filtered clone — the template measures 368,927 B immediately after
+`FilterBotEquipment` and 423,285 B by the time `BuildTemplateView` runs inside the same
+`BuildRequest` — and it is present at `9011794` too on the arithmetic above, so nothing here suggests
+Phase 4 introduced it; mechanism not chased. It is worth 12% of an unwarmed single-bot reading, so
+any re-take of this line must warm first. The pre-phase resident figures were in the settled regime
+(their single-bot 589,344 B and wave-1 589,444 B differ by the same 100 bytes as this sitting's
+451,223 and 451,323), which is what makes the two comparable.
+
 ## Methodology
 
 - Both paths run in one process against one live shipped database; the fixture asserts `LastPathTaken`
@@ -370,6 +468,10 @@ the shape Phase 0 priced (405.2 MiB `Value`-bound RSS delta, before the statics 
 the gap, not the absolutes: legacy's own peak moved 1415/1356 → 1689/1723 MB on unchanged code,
 so the sitting drifted too. The `.so` is 21.85 MB this sitting (was 20.29 MB), still unstripped.
 
+`ecf856b` — 2026-08-20, post configs flip (phase 4, ABI 30). Not re-timed: `LocationConfig` now
+resolves per location off the resident configs root, while the two loot multipliers stay on the
+varying block because the caller picks them per call.
+
 ## Airdrop loot
 
 `06825b3` — 2026-08-17. One `LootGenerator.CreateRandomLoot` call, n=20 after 2 warmups.
@@ -398,6 +500,10 @@ residency did not just close the ~5x deficit, it inverted it: the pre-flip nativ
 (75.55 ms) was almost entirely the per-call items-view projection and serialisation, and what
 remains is a ~1.6 ms generation pass. The legacy arm is code-identical to pre-flip; its
 15.05 → 19.69 ms move (min 6.42) is the sitting.
+
+`ecf856b` — 2026-08-20, post configs flip (phase 4, ABI 30). Not re-timed: the reward exports read
+the `ItemConfig` sets off the resident configs root, so the config half of the varying block is gone
+and only the service half rides on.
 
 ## Bot generation
 
@@ -473,6 +579,14 @@ within noise: this flip added no root, and `BotDbViews`' derivation is an `Index
 `Select` over the exp table. No bot fixture has a publish arm — both bot fixtures absorb the publish
 in warmup — so the number is read off the scav case fixture, which republishes all five roots per
 timed run.
+
+`ecf856b` — 2026-08-20, post configs flip (phase 4, ABI 30). Not re-timed, but re-weighed: twelve
+config slices and the two equipment blacklists left the shared varying block for the resident configs
+root, taking 138,121 bytes off every eligible send (§ Phase 4), while `BotConfig.Equipment` stays on
+the wire because `ReplayRandomisationClamps` writes into it after every send — which also corrects
+the block above: `modPoolSlotOrder` was never the largest member crossing per call, since `equipment`
+measures 39,811 B off a projection expression that is character-identical at `9011794`, so it led
+there too and the Phase 4 reading is not a new lead.
 
 ### Batched wave
 
@@ -552,6 +666,10 @@ A flat **7.0-7.1x** across every wave size, which is what "the shared block is e
 the request" implies: the flip shrank that block, and the slice was already noise. At wave 45 an
 eligible server crosses 13 KB per bot where the pre-flip wire crossed 94 KB.
 
+`ecf856b` — 2026-08-20, post configs flip (phase 4, ABI 30). The three timed arms are unaffected —
+they all send the views override, whose wire did not move — but the eligible column above is
+superseded by § Phase 4's, which reads 10,272 B at wave 45 against the 13,341 B here.
+
 ## Ragfair offer generation
 
 `06825b3` — 2026-08-17. Two `RagfairOfferGenerator.GenerateDynamicOffers` calls (full pass;
@@ -614,6 +732,10 @@ carve-out fields, O(KB)); at ~1 ms on an 11 ms pass the fixture cannot fully res
 accepted price of retiring the slice cache. Working set over the timed
 phase: native +370 MB on the full pass (2nd run +390 MB), legacy +0 MB — same shape as pre-flip's
 +387 MB.
+
+`ecf856b` — 2026-08-20, post configs flip (phase 4, ABI 30). Not re-timed: `RagfairConfig.Dynamic`
+and the config blacklist now come off the resident configs root — which also retired the
+`customMoneyTpls` divergence — and the service half of the varying block rides on.
 
 ## Repeatable quest generation
 
@@ -700,6 +822,10 @@ parse + both families' view derivation), not a per-send cost; the forced publish
 Measured in the same sitting, ragfair's own arms did not move for gaining the fourth root (full
 pass native 493.28 ms against flip #1's 520.25 ms).
 
+`ecf856b` — 2026-08-20, post configs flip (phase 4, ABI 30). Not re-timed: the `QuestConfig` maps and
+the `ItemConfig` sets went to the resident configs root, while the caller-selected `repeatableConfig`
+stays on the varying block.
+
 ## Scav case rewards
 
 `06825b3` — 2026-08-17. One `ScavCaseRewardGenerator.Generate(recipeId)` per shipped recipe, n=20
@@ -770,6 +896,10 @@ against flip #4's 730.08 ms forced publish, the hideout root's share (`productio
 O(KB)) sits inside the noise. The projection arms are bimodal (spread 5-38 ms across both
 invocations): `Build` 13.99 / 11.93 ms and `BuildViewsOverride` 6.78 / 6.41 ms against the old
 `Build`'s 7.75 / 6.86 ms — the ineligible caller's per-call price held.
+
+`ecf856b` — 2026-08-20, post configs flip (phase 4, ABI 30). Re-timed as the phase's publish arm
+(§ Phase 4): the whole `ScavCaseConfig` block moved to the resident configs root, the warm arm holds
+at 1.54–1.93 ms, and the publish now carries six roots at 736.7–749.4 ms.
 
 ## Item base class cache
 

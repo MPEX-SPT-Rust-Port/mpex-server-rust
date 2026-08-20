@@ -9,17 +9,21 @@
 //! carries `#[serde(default)]`: a partial or junk root (the store tests publish `{"a":1}`)
 //! deserializes with empty containers and derivation stays total over it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use indexmap::{IndexMap, IndexSet};
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::bot::repair_service::MinMax;
+use crate::bot::durability_limits_helper::BotDurability;
+use crate::bot::models::{PmcConfigWire, RandomisedResourceDetails, WalletLootSettingsWire};
+use crate::bot::repair_service::{BonusSettings, MinMax};
 use crate::loot::models::{
     Item, SpawnpointTemplate, StaticContainer, StaticContainerData, StaticForced, StaticLootDetails,
 };
-use crate::quest::models::{LevelledItemFilter, RepeatableTemplates};
+use crate::quest::models::{LevelledItemFilter, RepeatableQuestTemplates, RepeatableTemplates};
+use crate::ragfair::models::DynamicConfigWire;
+use crate::scav_case::models::ScavCaseConfigView;
 
 /// `{"schema":1,"roots":{...}}` — the envelope `DbPayloadProjection` (C#) writes.
 #[derive(Debug, Deserialize)]
@@ -39,6 +43,200 @@ pub struct PublishRoots {
     pub globals: Option<GlobalsRoot>,
     pub locations: Option<LocationsRoot>,
     pub hideout: Option<HideoutRoot>,
+    pub configs: Option<ConfigsRoot>,
+}
+
+/// The `configs` root: SPT_Data/configs projected from the live C# singletons, keyed by each
+/// config's `kind` (`BaseConfig.Kind`, `[JsonPropertyName("kind")]` — `"spt-ragfair"`, …).
+/// Typed stems are lifted only where a family reads them (Tasks 5-10); everything else rides
+/// `extra` full-fidelity. An absent stem is `None` — the consuming family fails its resolve
+/// loudly, per call; a present-but-malformed stem fails the whole publish parse
+/// (STATUS_BAD_ARGS), previous resident DB intact.
+#[derive(Debug, Default, Deserialize)]
+pub struct ConfigsRoot {
+    /// `Models/Spt/Config/ItemConfig.cs`, whose `Kind` is `spt-item` (`ItemConfig.cs:9-10`) — see
+    /// [`ItemConfigLift`].
+    #[serde(default, rename = "spt-item")]
+    pub item: Option<ItemConfigLift>,
+    /// `Models/Spt/Config/ScavCaseConfig.cs`, whose `Kind` is `spt-scavcase`
+    /// (`ScavCaseConfig.cs:8-9`). Parsed by the scav case family's own view of the config — the
+    /// same type the override bundle carries, so both arms read one parse of one shape. The
+    /// members it omits (`kind`, `ammoRewards.ammoRewardBlacklist`, the dispatch/residency flags,
+    /// anything Ceciler's `[JsonExtensionData]` adds on a Release build) are ignored on arrival.
+    #[serde(default, rename = "spt-scavcase")]
+    pub scavcase: Option<ScavCaseConfigView>,
+    /// `Models/Spt/Config/RagfairConfig.cs`, whose `Kind` is `spt-ragfair`
+    /// (`RagfairConfig.cs:8-9`) — see [`RagfairConfigLift`].
+    #[serde(default, rename = "spt-ragfair")]
+    pub ragfair: Option<RagfairConfigLift>,
+    /// `Models/Spt/Config/InventoryConfig.cs`, whose `Kind` is `spt-inventory`
+    /// (`InventoryConfig.cs:8-9`) — see [`InventoryConfigLift`].
+    #[serde(default, rename = "spt-inventory")]
+    pub inventory: Option<InventoryConfigLift>,
+    /// `Models/Spt/Config/QuestConfig.cs`, whose `Kind` is `spt-quest` (`QuestConfig.cs:11-12`) —
+    /// see [`QuestConfigLift`].
+    #[serde(default, rename = "spt-quest")]
+    pub quest: Option<QuestConfigLift>,
+    /// `Models/Spt/Config/LocationConfig.cs`, whose `Kind` is `spt-location`
+    /// (`LocationConfig.cs:9-10`) — see [`LocationConfigLift`].
+    #[serde(default, rename = "spt-location")]
+    pub location: Option<LocationConfigLift>,
+    /// `Models/Spt/Config/SeasonalEventConfig.cs`, whose `Kind` is `spt-seasonalevents`
+    /// (`SeasonalEventConfig.cs:11-12`) — see [`SeasonalEventConfigLift`].
+    #[serde(default, rename = "spt-seasonalevents")]
+    pub seasonalevents: Option<SeasonalEventConfigLift>,
+    /// `Models/Spt/Config/BotConfig.cs`, whose `Kind` is `spt-bot` (`BotConfig.cs:10-11`) — see
+    /// [`BotConfigLift`].
+    #[serde(default, rename = "spt-bot")]
+    pub bot: Option<BotConfigLift>,
+    /// `Models/Spt/Config/PmcConfig.cs`, whose `Kind` is `spt-pmc` (`PmcConfig.cs:10-11`). Parsed
+    /// by the bot family's own narrowed view of the config — the same [`PmcConfigWire`] the
+    /// override bundle carries, so both arms read one parse of one shape (the
+    /// [`ScavCaseConfigView`] precedent). The members it omits are ignored on arrival.
+    #[serde(default, rename = "spt-pmc")]
+    pub pmc: Option<PmcConfigWire>,
+    /// `Models/Spt/Config/RepairConfig.cs`, whose `Kind` is `spt-repair`
+    /// (`RepairConfig.cs:8-9`) — see [`RepairConfigLift`].
+    #[serde(default, rename = "spt-repair")]
+    pub repair: Option<RepairConfigLift>,
+    #[serde(flatten)]
+    pub extra: IndexMap<String, Value>,
+}
+
+/// `Models/Spt/Config/BotConfig.cs` — the nine members bot generation reads that no runtime writer
+/// touches.
+///
+/// `equipment` is deliberately **not** lifted, though `BuildSharedVarying` reads it:
+/// `BotInventoryGenerator.ReplayRandomisationClamps` (`:405-432`) writes the nighttime mod-chance
+/// clamps back into `Equipment[role].Randomisation[band].EquipmentMods` through the dictionary
+/// indexer after *every* native single-bot send, which trips no write barrier and so never moves
+/// the mutation stamp. That write is a cross-bot feedback loop (the next bot's C# prelude reads it
+/// at `BotEquipmentFilterService.cs:63`), so a resident copy would freeze at the published values
+/// and diverge from bot 2 on. It rides the request instead
+/// ([`crate::bot::models::SharedBotVaryingWire::equipment`]) and lands in this lift's
+/// [`Self::extra`], unread.
+///
+/// Strictness per member follows the C# `required`: every member below is `required`
+/// (`BotConfig.cs:57,63,69,76,83,130,135,140,146`) except `secureContainerAmmoStackCount`, a plain
+/// auto-property C# fills with the type's default. Everything else — the four dispatch flags, the
+/// brain types, the caps, whatever Ceciler's `[JsonExtensionData]` adds on a Release build — rides
+/// [`Self::extra`].
+#[derive(Debug, Deserialize)]
+pub struct BotConfigLift {
+    /// `BotConfig.Bosses` — scanned case-insensitively by `BotHelper.IsBotBoss`, so source order
+    /// is irrelevant but the `List<string>` shape is mirrored anyway.
+    pub bosses: Vec<String>,
+    pub durability: BotDurability,
+    /// Bot role → item tpl → max count. Keyed lookups plus one `["pmc"]`/`["default"]` fallback
+    /// (`BotLootGenerator.cs:876-881`); the inner map is cloned and zeroed per bot, so its order
+    /// is the running total's order.
+    #[serde(rename = "itemSpawnLimits")]
+    pub item_spawn_limits: IndexMap<String, IndexMap<String, f64>>,
+    #[serde(rename = "walletLoot")]
+    pub wallet_loot: WalletLootSettingsWire,
+    /// Bot role → currency → stack size → weight. The innermost map is what `GetWeightedValue`
+    /// scans, so every level stays ordered.
+    #[serde(rename = "currencyStackSize")]
+    pub currency_stack_size: IndexMap<String, IndexMap<String, IndexMap<String, f64>>>,
+    #[serde(default, rename = "secureContainerAmmoStackCount")]
+    pub secure_container_ammo_stack_count: i32,
+    #[serde(rename = "disableLootOnBotTypes")]
+    pub disable_loot_on_bot_types: HashSet<String>,
+    /// `HashSet<MongoId>` in C#; membership only (`BotEquipmentModGenerator.cs:1079,1088`).
+    #[serde(rename = "lowProfileGasBlockTpls")]
+    pub low_profile_gas_block_tpls: HashSet<String>,
+    /// Keyed by the *raw* bot role — `BotGeneratorHelper.cs:63` looks it up verbatim, with no
+    /// equipment-role mapping.
+    #[serde(rename = "lootItemResourceRandomization")]
+    pub loot_item_resource_randomization: IndexMap<String, RandomisedResourceDetails>,
+    #[serde(flatten)]
+    pub extra: IndexMap<String, Value>,
+}
+
+/// `Models/Spt/Config/RepairConfig.cs` — `repairKit.weapon` only, the one `BonusSettings` bot
+/// generation passes to [`crate::bot::repair_service::add_buff`]
+/// (`BotWeaponGenerator.cs:173`). `RepairKit` and `RepairKit.Weapon` are both `required`
+/// (`RepairConfig.cs:29-30,84-85`), so both are strict here; the armor/vest/headwear kits and every
+/// other member ride the two `extra` maps.
+#[derive(Debug, Deserialize)]
+pub struct RepairConfigLift {
+    #[serde(rename = "repairKit")]
+    pub repair_kit: RepairKitLift,
+    #[serde(flatten)]
+    pub extra: IndexMap<String, Value>,
+}
+
+/// `RepairConfig.cs:78-92` `RepairKit`, narrowed to `weapon`.
+#[derive(Debug, Deserialize)]
+pub struct RepairKitLift {
+    pub weapon: BonusSettings,
+    #[serde(flatten)]
+    pub extra: IndexMap<String, Value>,
+}
+
+/// `Models/Spt/Config/ItemConfig.cs` — the four sets the reward families read. Shared: the scav
+/// case and repeatable-quest families read `rewardItemBlacklist`/`bossItems`, the ragfair family
+/// reads `blacklist`.
+///
+/// **Deliberately soft, and the only lift that is.** All four members are `required` in C#
+/// (`ItemConfig.cs:16,28,34,40`), so the rule the other lifts follow — mirror the C# `required`, as
+/// [`RagfairConfigLift::dynamic`] does — would make every one of them strict. They carry
+/// `#[serde(default)]` anyway because `spt-item` is the one stem five families share (scav case,
+/// repeatable quest, ragfair, bot, reward loot), and their fixtures publish it *partially* on
+/// purpose: `scav_case/mod.rs:391` and `quest/mod.rs:295` publish a bare `{"bossItems": [...]}` to
+/// prove that the absence of the **sibling** stem is what fails, and the bot family's filler
+/// (`bot/mod.rs:483`) publishes `{"kind": …, "blacklist": [...]}`, the one member flip #6's cases
+/// read. Strict members would turn each of those into a publish failure and make the fixtures
+/// assert the wrong thing.
+///
+/// The consequence to know: a *present but partial* `spt-item` stem yields empty sets, so a family
+/// reading it silently stops filtering rather than failing loudly. Unreachable from the shipped
+/// projection — C# `required` members always serialize, so every stem the server publishes carries
+/// all four — but a hand-built or mod-rewritten stem could fall into it.
+#[derive(Debug, Default, Deserialize)]
+pub struct ItemConfigLift {
+    /// `ItemConfig.Blacklist` (`ItemConfig.cs:14-15`) — what `ItemFilterService.GetBlacklistedItems`
+    /// returns verbatim (`ItemFilterService.cs:51-54`). A `HashSet` rather than an `IndexSet`
+    /// because its only reader is `loot::item_helper::is_valid_item`, whose blacklist parameter is
+    /// shared with the loot family: membership only, so order cannot be observed.
+    #[serde(default)]
+    pub blacklist: HashSet<String>,
+    #[serde(default, rename = "rewardItemBlacklist")]
+    pub reward_item_blacklist: IndexSet<String>,
+    #[serde(default, rename = "rewardItemTypeBlacklist")]
+    pub reward_item_type_blacklist: IndexSet<String>,
+    #[serde(default, rename = "bossItems")]
+    pub boss_items: IndexSet<String>,
+    #[serde(flatten)]
+    pub extra: IndexMap<String, Value>,
+}
+
+/// `Models/Spt/Config/RagfairConfig.cs` — `dynamic` only (`RagfairConfig.cs:29-30`), the same
+/// [`DynamicConfigWire`] the override bundle carries, so both arms read one parse of one shape.
+/// Deliberately strict: no `#[serde(default)]` on `dynamic`, so a `spt-ragfair` stem that arrives
+/// without it — or with a malformed one — fails the whole publish rather than handing the offer
+/// path a config it would have to invent values for. Every other `RagfairConfig` member (and
+/// whatever Ceciler's `[JsonExtensionData]` adds on a Release build) rides [`Self::extra`].
+#[derive(Debug, Deserialize)]
+pub struct RagfairConfigLift {
+    pub dynamic: DynamicConfigWire,
+    #[serde(flatten)]
+    pub extra: IndexMap<String, Value>,
+}
+
+/// `Models/Spt/Config/InventoryConfig.cs` — `customMoneyTpls` only
+/// (`InventoryConfig.cs:20-21`), the mod-added currencies `PaymentHelper.IsMoneyTpl` unions onto
+/// the four `Money` constants (`PaymentHelper.cs:19-33`). `#[serde(default)]`, unlike
+/// [`RagfairConfigLift::dynamic`]: no stock configuration carries a custom currency, and an empty
+/// set is exactly what the ragfair path did before the lift, so an absent member is not a failure.
+#[derive(Debug, Default, Deserialize)]
+pub struct InventoryConfigLift {
+    /// An `IndexSet` because the C# member is a `List<MongoId>` and this is membership-only; a
+    /// duplicate entry would have been a duplicate `HashSet.Add` on the C# side too.
+    #[serde(default, rename = "customMoneyTpls")]
+    pub custom_money_tpls: IndexSet<String>,
+    #[serde(flatten)]
+    pub extra: IndexMap<String, Value>,
 }
 
 /// Hideout root: `production.scavRecipes` only (flip #5) — locations-root
@@ -254,6 +452,118 @@ pub struct Preset {
     /// Only default presets carry `_encyclopedia`.
     #[serde(rename = "_encyclopedia")]
     pub encyclopedia: Option<String>,
+    #[serde(flatten)]
+    pub extra: IndexMap<String, Value>,
+}
+
+/// `Models/Spt/Config/QuestConfig.cs` — the two maps `RepeatableQuestHelper` reads off the config
+/// rather than the database. Both C# members are `required`
+/// (`QuestConfig.cs:44-48`, `:67-71`), so a stem missing one could not have come from a live
+/// `QuestConfig`: strict like [`RagfairConfigLift::dynamic`], rather than defaulting to an empty
+/// map the helper would then fail every lookup against. `repeatableQuests`, the dispatch flags and
+/// whatever Ceciler's `[JsonExtensionData]` adds on a Release build ride [`Self::extra`].
+#[derive(Debug, Deserialize)]
+pub struct QuestConfigLift {
+    /// `QuestConfig.RepeatableQuestTemplates`, whose wire name is `repeatableQuestTemplateIds` —
+    /// the template **ids** by player group (`RepeatableQuestHelper.cs:187-197`), not the quest
+    /// templates the views carry. Named for the wire, as the request member it replaces was.
+    #[serde(rename = "repeatableQuestTemplateIds")]
+    pub repeatable_quest_template_ids: RepeatableQuestTemplates,
+    /// `QuestConfig.LocationIdMap` — `GetQuestLocationByMapId` (`RepeatableQuestHelper.cs:204`).
+    #[serde(rename = "locationIdMap")]
+    pub location_id_map: IndexMap<String, String>,
+    #[serde(flatten)]
+    pub extra: IndexMap<String, Value>,
+}
+
+/// `Models/Spt/Config/LocationConfig.cs` — the *source* members `BuildConfigView`
+/// (`LocationLootGenerator.cs:459-482`) reads, raw and un-resolved: the two per-location
+/// resolutions left to the resident arm are done per call by
+/// `loot::location_loot_generator::resolve_loot_config_view` instead, so the map-keyed members are
+/// lifted whole.
+///
+/// `staticLootMultiplier`/`looseLootMultiplier` are deliberately **not** lifted, though
+/// `BuildConfigView` reads them: `RaidTimeAdjustmentService.AdjustLootMultipliers` scales those two
+/// dictionaries in place through the indexer for a shortened scav raid, which trips no write
+/// barrier and so never moves the mutation stamp. They ride the request instead
+/// (`LootVarying::static_loot_multiplier`) and land in this root's [`Self::extra`], unread.
+///
+/// Strictness per member follows the C# `required`: the two maps and the two settings objects are
+/// `required` (`LocationConfig.cs:101-102,134-135,146-147,158-159`) and so are strict here; the
+/// loose scalars are plain auto-properties, which C# fills with the type's default, and default
+/// here too. Every other member (the dispatch flags, the waves, whatever Ceciler's
+/// `[JsonExtensionData]` adds on a Release build) rides [`Self::extra`].
+#[derive(Debug, Deserialize)]
+pub struct LocationConfigLift {
+    #[serde(rename = "containerRandomisationSettings")]
+    pub container_randomisation_settings: ContainerRandomisationSettingsLift,
+    #[serde(default, rename = "allowDuplicateItemsInStaticContainers")]
+    pub allow_duplicate_items_in_static_containers: bool,
+    /// `HashSet<MongoId>` in C#; membership only on both sides of the flip, so the order is unread.
+    #[serde(rename = "tplsToStripChildItemsFrom")]
+    pub tpls_to_strip_child_items_from: HashSet<String>,
+    #[serde(default, rename = "fitLootIntoContainerAttempts")]
+    pub fit_loot_into_container_attempts: i32,
+    /// `int` in C#, `double` on the view — the widening the C# member assignment does implicitly.
+    #[serde(default, rename = "magazineLootHasAmmoChancePercent")]
+    pub magazine_loot_has_ammo_chance_percent: i32,
+    /// See [`Self::magazine_loot_has_ammo_chance_percent`].
+    #[serde(default, rename = "staticMagazineLootHasAmmoChancePercent")]
+    pub static_magazine_loot_has_ammo_chance_percent: i32,
+    /// See [`Self::magazine_loot_has_ammo_chance_percent`].
+    #[serde(default, rename = "minFillLooseMagazinePercent")]
+    pub min_fill_loose_magazine_percent: i32,
+    /// See [`Self::magazine_loot_has_ammo_chance_percent`].
+    #[serde(default, rename = "minFillStaticMagazinePercent")]
+    pub min_fill_static_magazine_percent: i32,
+    #[serde(rename = "equipmentLootSettings")]
+    pub equipment_loot_settings: EquipmentLootSettingsLift,
+    /// Keyed by map id; the value is that map's blacklisted loose-loot spawn point ids. A map with
+    /// no entry blacklists nothing (`LocationLootGenerator.cs:480`).
+    #[serde(rename = "looseLootBlacklist")]
+    pub loose_loot_blacklist: HashMap<String, HashSet<String>>,
+    #[serde(flatten)]
+    pub extra: IndexMap<String, Value>,
+}
+
+/// `LocationConfig.cs:228-250` `ContainerRandomisationSettings`.
+#[derive(Debug, Deserialize)]
+pub struct ContainerRandomisationSettingsLift {
+    #[serde(default)]
+    pub enabled: bool,
+    /// The maps container randomisation is allowed on. Only `ContainsKey` is ever asked
+    /// (`LocationLootGenerator.cs:466`), so the values ride along unread and the order is unread.
+    pub maps: HashMap<String, bool>,
+    #[serde(rename = "containerTypesToNotRandomise")]
+    pub container_types_to_not_randomise: HashSet<String>,
+    #[serde(default, rename = "containerGroupMinSizeMultiplier")]
+    pub container_group_min_size_multiplier: f64,
+    #[serde(default, rename = "containerGroupMaxSizeMultiplier")]
+    pub container_group_max_size_multiplier: f64,
+    #[serde(flatten)]
+    pub extra: IndexMap<String, Value>,
+}
+
+/// `LocationConfig.cs:192-199` `EquipmentLootSettings`.
+#[derive(Debug, Deserialize)]
+pub struct EquipmentLootSettingsLift {
+    /// Keyed by slot name; keyed lookups only, so the order is unread.
+    #[serde(rename = "modSpawnChancePercent")]
+    pub mod_spawn_chance_percent: HashMap<String, f64>,
+    #[serde(flatten)]
+    pub extra: IndexMap<String, Value>,
+}
+
+/// `Models/Spt/Config/SeasonalEventConfig.cs` — `christmasContainerIds` only
+/// (`SeasonalEventConfig.cs:56-57`), the one member of that config the loot family reads off the
+/// config rather than through `SeasonalEventService`. `required` in C#, so strict here; the whole
+/// rest of the config rides [`Self::extra`].
+#[derive(Debug, Deserialize)]
+pub struct SeasonalEventConfigLift {
+    /// Spawn point ids, not tpls. Membership only — the christmas-container filter in
+    /// `loot::location_loot_generator::generate_static_containers` is the sole reader.
+    #[serde(rename = "christmasContainerIds")]
+    pub christmas_container_ids: HashSet<String>,
     #[serde(flatten)]
     pub extra: IndexMap<String, Value>,
 }
@@ -823,6 +1133,162 @@ mod tests {
         assert_eq!(armor_class("placeholder"), None);
         assert_eq!(armor_class("null"), None);
         assert_eq!(armor_class("absent"), None);
+    }
+
+    /// The four stems the reward and ragfair families read come out of the flatten map as typed
+    /// values, every other kind still rides `extra`, and the members the views omit — `kind`, the
+    /// dispatch flags, `ammoRewardBlacklist`, every `RagfairConfig`/`InventoryConfig` member but
+    /// one, whatever Ceciler's `[JsonExtensionData]` adds on a Release build — are ignored rather
+    /// than failing the parse.
+    #[test]
+    fn configs_root_lifts_the_typed_stems_and_keeps_the_rest() {
+        let root: ConfigsRoot = serde_json::from_str(
+            &(r#"{
+                "spt-item": {"kind": "spt-item", "blacklist": ["b1"],
+                    "rewardItemBlacklist": ["r1"], "rewardItemTypeBlacklist": ["t1"],
+                    "bossItems": ["boss1"], "handbookPriceOverride": {},
+                    "somethingCecilerAdded": 7},
+                "spt-scavcase": {"kind": "spt-scavcase",
+                    "rewardItemValueRangeRub": {"common": {"min": 0.0, "max": 1.0}},
+                    "moneyRewards": {"moneyRewardChancePercent": 5,
+                        "rubCount": {"common": {"min": 1, "max": 1}, "rare": {"min": 1, "max": 1},
+                            "superrare": {"min": 1, "max": 1}},
+                        "usdCount": {"common": {"min": 1, "max": 1}, "rare": {"min": 1, "max": 1},
+                            "superrare": {"min": 1, "max": 1}},
+                        "eurCount": {"common": {"min": 1, "max": 1}, "rare": {"min": 1, "max": 1},
+                            "superrare": {"min": 1, "max": 1}},
+                        "gpCount": {"common": {"min": 1, "max": 1}, "rare": {"min": 1, "max": 1},
+                            "superrare": {"min": 1, "max": 1}}},
+                    "ammoRewards": {"ammoRewardChancePercent": 5, "ammoRewardBlacklist": {},
+                        "ammoRewardValueRangeRub": {}, "minStackSize": 30},
+                    "rewardItemParentBlacklist": [], "rewardItemBlacklist": ["config_r1"],
+                    "allowMultipleMoneyRewardsPerRarity": false,
+                    "allowMultipleAmmoRewardsPerRarity": true,
+                    "allowBossItemsAsRewards": false,
+                    "forceLegacyScavCaseGeneration": false},
+                "spt-core": {"kind": "spt-core"},
+                "spt-quest": {"kind": "spt-quest",
+                    "repeatableQuestTemplateIds": {"pmc": {"Elimination": "pmc_elim"},
+                        "scav": {"Elimination": "scav_elim"}},
+                    "locationIdMap": {"bigmap": "55f2d3fd4bdc2d5f408b4567"},
+                    "repeatableQuests": []},
+                "spt-inventory": {"kind": "spt-inventory", "customMoneyTpls": ["custom_money"],
+                    "randomLootContainers": {}},
+                "spt-ragfair": {"kind": "spt-ragfair", "runIntervalSeconds": 450,
+                    "dynamic": "#
+                .to_owned()
+                + crate::ragfair::models::tests::DYNAMIC_JSON
+                + r#"}
+            }"#),
+        )
+        .unwrap();
+
+        let item = root.item.as_ref().unwrap();
+        assert!(item.blacklist.contains("b1"));
+        assert!(item.reward_item_blacklist.contains("r1"));
+        assert!(item.reward_item_type_blacklist.contains("t1"));
+        assert!(item.boss_items.contains("boss1"));
+        // Unlifted ItemConfig members ride the stem's own extra
+        assert!(item.extra.contains_key("handbookPriceOverride"));
+        assert!(item.extra.contains_key("somethingCecilerAdded"));
+
+        let scavcase = root.scavcase.as_ref().unwrap();
+        assert_eq!(scavcase.money_rewards.money_reward_chance_percent, 5);
+        assert!(scavcase.reward_item_blacklist.contains("config_r1"));
+        assert!(scavcase.allow_multiple_ammo_rewards_per_rarity);
+
+        let ragfair = root.ragfair.as_ref().unwrap();
+        assert!(ragfair.dynamic.use_trader_price_for_offers_if_higher);
+        assert_eq!(ragfair.dynamic.end_time_seconds.max, 36000);
+        // Unlifted RagfairConfig members ride the stem's own extra
+        assert_eq!(ragfair.extra["runIntervalSeconds"], 450);
+
+        assert!(
+            root.inventory
+                .as_ref()
+                .unwrap()
+                .custom_money_tpls
+                .contains("custom_money")
+        );
+
+        let quest = root.quest.as_ref().unwrap();
+        assert_eq!(
+            quest.repeatable_quest_template_ids.pmc["Elimination"],
+            "pmc_elim"
+        );
+        assert_eq!(
+            quest.repeatable_quest_template_ids.scav["Elimination"],
+            "scav_elim"
+        );
+        assert_eq!(quest.location_id_map["bigmap"], "55f2d3fd4bdc2d5f408b4567");
+        // Unlifted QuestConfig members ride the stem's own extra
+        assert!(quest.extra.contains_key("repeatableQuests"));
+
+        // Every other kind is still an untyped key of the flatten map, and the five lifted ones are
+        // no longer in it
+        assert!(root.extra.contains_key("spt-core"));
+        assert!(!root.extra.contains_key("spt-item"));
+        assert!(!root.extra.contains_key("spt-scavcase"));
+        assert!(!root.extra.contains_key("spt-ragfair"));
+        assert!(!root.extra.contains_key("spt-inventory"));
+        assert!(!root.extra.contains_key("spt-quest"));
+    }
+
+    /// A configs root with none of the lifted stems parses: absent is `None`, which the consuming
+    /// family's resolve rejects per call, naming the stem — or, for `spt-inventory`, reads as the
+    /// empty custom-money set the ragfair path had before the lift.
+    #[test]
+    fn configs_root_without_the_lifted_stems_parses_with_none() {
+        let root: ConfigsRoot =
+            serde_json::from_str(r#"{"spt-core": {"kind": "spt-core"}}"#).unwrap();
+
+        assert!(root.item.is_none());
+        assert!(root.scavcase.is_none());
+        assert!(root.ragfair.is_none());
+        assert!(root.inventory.is_none());
+        assert!(root.quest.is_none());
+    }
+
+    /// The other half of the strictness rule: a stem that *is* there but does not parse fails the
+    /// whole publish (`STATUS_BAD_ARGS`, previous resident DB intact) rather than collapsing to the
+    /// `serde(default)` `None` an absent one gets. `#[serde(default)]` only covers an absent key.
+    #[test]
+    fn a_malformed_lifted_stem_is_a_parse_error_not_a_silent_none() {
+        // `rewardItemValueRangeRub` is a map, not a number
+        assert!(
+            serde_json::from_str::<ConfigsRoot>(
+                r#"{"spt-scavcase": {"rewardItemValueRangeRub": 5}}"#
+            )
+            .is_err()
+        );
+        // `bossItems` is a set of strings, not an object
+        assert!(
+            serde_json::from_str::<ConfigsRoot>(r#"{"spt-item": {"bossItems": {"a": 1}}}"#)
+                .is_err()
+        );
+        // `dynamic` carries no `serde(default)`, so a `spt-ragfair` stem without it fails rather
+        // than handing the offer path an invented config
+        assert!(
+            serde_json::from_str::<ConfigsRoot>(r#"{"spt-ragfair": {"kind": "spt-ragfair"}}"#)
+                .is_err()
+        );
+        // `customMoneyTpls` is soft when absent, not when malformed
+        assert!(
+            serde_json::from_str::<ConfigsRoot>(r#"{"spt-inventory": {"customMoneyTpls": 5}}"#)
+                .is_err()
+        );
+        // Neither `QuestConfigLift` member carries a `serde(default)`, so a `spt-quest` stem
+        // without one fails rather than handing the helper an empty map to miss every lookup in
+        assert!(
+            serde_json::from_str::<ConfigsRoot>(r#"{"spt-quest": {"kind": "spt-quest"}}"#).is_err()
+        );
+        assert!(
+            serde_json::from_str::<ConfigsRoot>(
+                r#"{"spt-quest": {"repeatableQuestTemplateIds": {"pmc": {}, "scav": {}},
+                    "locationIdMap": []}}"#
+            )
+            .is_err()
+        );
     }
 
     #[test]

@@ -15,8 +15,8 @@ namespace UnitTests.Tests.Generators;
 
 /// <summary>
 /// Pins the halves of the <c>spt_generate_repeatable_quest</c> request the Rust side parses by name:
-/// the views override's property set and key casing, the varying half's wire names - the six
-/// members moved off the old invariant slice included - and the residency eligibility truth table.
+/// the views override's property set and key casing - the four config-backed members flip #7 moved
+/// onto it included - the varying half's wire names, and the residency eligibility truth table.
 /// Mutates the shared <see cref="QuestConfig"/> singleton, so it restores the flags it flips and
 /// never runs in parallel with other fixtures.
 /// </summary>
@@ -59,6 +59,10 @@ public class RepeatableQuestNativeRequestBuilderTests
         "completionItemsBlacklist",
         "bossSpawnsByLocation",
         "extractsByLocation",
+        "rewardItemBlacklist",
+        "bossItems",
+        "repeatableQuestTemplateIds",
+        "locationIdMap",
     ];
 
     /// <summary>
@@ -167,11 +171,7 @@ public class RepeatableQuestNativeRequestBuilderTests
                     "questTypePool",
                     "repeatableConfig",
                     "itemBlacklist",
-                    "rewardItemBlacklist",
-                    "bossItems",
                     "seasonalItemTplBlacklist",
-                    "repeatableQuestTemplateIds",
-                    "locationIdMap",
                 }
             )
         );
@@ -182,20 +182,32 @@ public class RepeatableQuestNativeRequestBuilderTests
     }
 
     /// <summary>
-    /// The six members moved off the old invariant slice ride the varying half under their
-    /// unchanged wire names, template-id keys still PascalCase.
+    /// The two service-state sets the config lift left on the varying half: both are a service's own
+    /// mutable cache, not a config value.
     /// </summary>
     [Test]
-    public void TheVaryingHalfCarriesTheSixMovedMembers()
+    public void TheVaryingHalfCarriesTheTwoServiceStateSets()
     {
         var varying = Serialize(BuildVarying(seed: null));
 
         Assert.That(varying.GetProperty("itemBlacklist").ValueKind, Is.EqualTo(JsonValueKind.Array));
-        Assert.That(varying.GetProperty("rewardItemBlacklist").ValueKind, Is.EqualTo(JsonValueKind.Array));
-        Assert.That(varying.GetProperty("bossItems").ValueKind, Is.EqualTo(JsonValueKind.Array));
         Assert.That(varying.GetProperty("seasonalItemTplBlacklist").ValueKind, Is.EqualTo(JsonValueKind.Array));
-        Assert.That(varying.GetProperty("repeatableQuestTemplateIds").GetProperty("pmc").TryGetProperty("Elimination", out _), Is.True);
-        Assert.That(varying.GetProperty("locationIdMap").TryGetProperty("bigmap", out _), Is.True);
+    }
+
+    /// <summary>
+    /// The four config-backed members flip #7 moved onto the views override, under their unchanged
+    /// wire names and template-id keys still PascalCase. The resident arm reads the same values off
+    /// the configs root's <c>spt-item</c> and <c>spt-quest</c> stems.
+    /// </summary>
+    [Test]
+    public void TheViewsOverrideCarriesTheFourConfigBackedMembers()
+    {
+        var views = Serialize(_builder.BuildViewsOverride());
+
+        Assert.That(views.GetProperty("rewardItemBlacklist").ValueKind, Is.EqualTo(JsonValueKind.Array));
+        Assert.That(views.GetProperty("bossItems").ValueKind, Is.EqualTo(JsonValueKind.Array));
+        Assert.That(views.GetProperty("repeatableQuestTemplateIds").GetProperty("pmc").TryGetProperty("Elimination", out _), Is.True);
+        Assert.That(views.GetProperty("locationIdMap").TryGetProperty("bigmap", out _), Is.True);
     }
 
     /// <summary>

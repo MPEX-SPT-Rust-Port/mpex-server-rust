@@ -12,6 +12,15 @@ public class PaymentHelper(InventoryConfig inventoryConfig)
     protected readonly HashSet<MongoId> MoneyTpls = [Money.DOLLARS, Money.EUROS, Money.ROUBLES, Money.GP];
 
     /// <summary>
+    ///     Exposed so the native ragfair projection can ship the same <c>customMoneyTpls</c> set
+    ///     <see cref="IsMoneyTpl"/> unions in, without a constructor change on its caller.
+    /// </summary>
+    internal InventoryConfig InventoryConfig
+    {
+        get { return inventoryConfig; }
+    }
+
+    /// <summary>
     ///     Is the passed in tpl money (also checks custom currencies in inventoryConfig.customMoneyTpls)
     /// </summary>
     /// <param name="tpl">Item Tpl to check</param>
