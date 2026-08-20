@@ -37,6 +37,45 @@ public sealed class VerifyResult
 }
 
 /// <summary>
+/// One eager file in the framed <c>spt_db_load</c> response: its manifest-style key and the
+/// length of its blob, which follows the header in this entry's order.
+/// </summary>
+internal sealed class DbLoadFileEntry
+{
+    [JsonPropertyName("path")]
+    public string Path { get; set; } = string.Empty;
+
+    [JsonPropertyName("len")]
+    public int Len { get; set; }
+}
+
+internal sealed class DbLoadHeader
+{
+    [JsonPropertyName("epoch")]
+    public ulong? Epoch { get; set; }
+
+    [JsonPropertyName("verify")]
+    public VerifyResult? Verify { get; set; }
+
+    [JsonPropertyName("files")]
+    public List<DbLoadFileEntry> Files { get; set; } = [];
+}
+
+/// <summary>
+/// What the fused load answers: the verification report when one was asked for, the epoch the
+/// resident DB now holds (null when verification failed and nothing was installed), and the eager
+/// file bytes, already copied out of the native buffer.
+/// </summary>
+internal sealed class DbLoadResult
+{
+    public required VerifyResult? Verify { get; init; }
+
+    public required ulong? Epoch { get; init; }
+
+    public required Dictionary<string, ReadOnlyMemory<byte>> Files { get; init; }
+}
+
+/// <summary>
 /// Picks which of the generation exports a request goes to.
 /// </summary>
 internal enum LootExport
@@ -57,7 +96,7 @@ internal enum LootExport
 
 public static class SptNative
 {
-    private const uint ExpectedAbiVersion = 28;
+    private const uint ExpectedAbiVersion = 29;
 
     // ffi.rs
     private const int StatusOk = 0;
@@ -346,6 +385,95 @@ public static class SptNative
                 return document.RootElement.GetProperty("epoch").GetUInt64();
             }
         );
+    }
+
+    /// <summary>
+    /// Loads SPT_Data in one native pass: hash-verify (when asked), read the tree, install the
+    /// resident DB roots, and hand back the eager file bytes for the managed replica.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">The load failed, or the native side misbehaved.</exception>
+    internal static unsafe DbLoadResult DbLoad(string sptDataDir, bool verify)
+    {
+        EnsureLoadable();
+
+        // Default options on purpose: the request has three scalar members and no model types, so
+        // the loot converters would only risk renaming them away from what db/load.rs reads.
+        var requestUtf8 = JsonSerializer.SerializeToUtf8Bytes(
+            new
+            {
+                schema = 1,
+                dir = sptDataDir,
+                verify,
+            }
+        );
+        byte* outPtr = null;
+        nuint outLen = 0;
+        int status;
+
+        fixed (byte* requestPtr = requestUtf8)
+        {
+            status = NativeMethods.DbLoad(requestPtr, (nuint)requestUtf8.Length, &outPtr, &outLen);
+        }
+
+        return DecodeResult(
+            "DbLoad",
+            status,
+            outPtr,
+            outLen,
+            (buffer, length) =>
+            {
+                return ParseLoadFrame((byte*)buffer, length);
+            }
+        );
+    }
+
+    /// <summary>
+    /// The framed load response: a u32-LE header length, the header JSON, then one blob per
+    /// <c>files[]</c> entry in order. Every blob is copied into a managed array - the native buffer
+    /// is freed as soon as this returns.
+    /// </summary>
+    private static unsafe DbLoadResult ParseLoadFrame(byte* buffer, int length)
+    {
+        var span = new ReadOnlySpan<byte>(buffer, length);
+        var headerLength = checked((int)BinaryPrimitives.ReadUInt32LittleEndian(span));
+        var at = 4;
+        if (headerLength > length - at)
+        {
+            throw new InvalidOperationException(
+                $"spt_native spt_db_load claims a {headerLength}-byte header with only {length - at} bytes in the frame."
+            );
+        }
+
+        var header =
+            JsonSerializer.Deserialize<DbLoadHeader>(span.Slice(at, headerLength))
+            ?? throw new InvalidOperationException("spt_native returned an empty spt_db_load header.");
+        at += headerLength;
+
+        var files = new Dictionary<string, ReadOnlyMemory<byte>>(header.Files.Count);
+        foreach (var entry in header.Files)
+        {
+            if (entry.Len < 0 || entry.Len > length - at)
+            {
+                throw new InvalidOperationException(
+                    $"spt_native spt_db_load claims {entry.Len} bytes for {entry.Path} with only {length - at} bytes left."
+                );
+            }
+
+            files[entry.Path] = span.Slice(at, entry.Len).ToArray();
+            at += entry.Len;
+        }
+
+        if (at != length)
+        {
+            throw new InvalidOperationException($"spt_native spt_db_load frame has {length - at} trailing bytes.");
+        }
+
+        return new DbLoadResult
+        {
+            Verify = header.Verify,
+            Epoch = header.Epoch,
+            Files = files,
+        };
     }
 
     /// <summary>

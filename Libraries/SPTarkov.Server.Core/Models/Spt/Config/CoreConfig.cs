@@ -53,6 +53,14 @@ public record CoreConfig : BaseConfig
     /// </summary>
     [JsonPropertyName("customWatermarkLocaleKeys")]
     public List<string>? CustomWatermarkLocaleKeys { get; set; }
+
+    /// <summary>
+    ///     Import the database through the pure-C# disk walk (verify + per-file reads) instead of
+    ///     the fused native load. The native path requires comment-free JSON in the resident-root
+    ///     files; flip this on if hand-edited SPT_Data fails the native parse at startup.
+    /// </summary>
+    [JsonPropertyName("forceLegacyDatabaseImport")]
+    public bool ForceLegacyDatabaseImport { get; set; }
 }
 
 public record BsgLogging

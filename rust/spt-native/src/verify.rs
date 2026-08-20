@@ -61,14 +61,14 @@ pub fn collect_files(
     files
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct VerifyReport {
     pub ok: bool,
     pub failures: Vec<Failure>,
     pub checked: usize,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct Failure {
     pub path: String,
     pub reason: String,
@@ -77,20 +77,36 @@ pub struct Failure {
 const MAX_CONCURRENT_HASHES: usize = 32;
 
 pub async fn verify(spt_data: PathBuf) -> VerifyReport {
+    verify_collecting(spt_data, |_| false).await.0
+}
+
+// `verify`, plus the bytes of every file `want` accepts: those are whole-read and hashed from the
+// buffer instead of streamed, so a caller that needs the contents anyway (the fused SPT_Data load)
+// reads each file once. Everything else — failure semantics, ordering, the reverse pass — is
+// identical to a plain verify. Returned bytes are raw: any BOM is still on them.
+pub(crate) async fn verify_collecting(
+    spt_data: PathBuf,
+    want: fn(&str) -> bool,
+) -> (VerifyReport, Vec<(String, Vec<u8>)>) {
     use std::sync::Arc;
 
     let manifest_path = spt_data.join("checks.dat");
     let manifest: HashMap<String, String> = match tokio::fs::read(&manifest_path).await {
         Ok(raw) => match parse_manifest(&raw) {
             Ok(manifest) => manifest,
-            Err(e) => return manifest_failure(e),
+            Err(e) => return (manifest_failure(e), Vec::new()),
         },
-        Err(e) => return manifest_failure(format!("cannot read checks.dat: {e}")),
+        Err(e) => {
+            return (
+                manifest_failure(format!("cannot read checks.dat: {e}")),
+                Vec::new(),
+            );
+        }
     };
 
     // An empty manifest would otherwise verify nothing and pass vacuously.
     if manifest.is_empty() {
-        return manifest_failure("manifest is empty".into());
+        return (manifest_failure("manifest is empty".into()), Vec::new());
     }
 
     let files = collect_files(&spt_data, &manifest);
@@ -119,19 +135,28 @@ pub async fn verify(spt_data: PathBuf) -> VerifyReport {
         let semaphore = Arc::clone(&semaphore);
         tasks.spawn(async move {
             let _permit = semaphore.acquire_owned().await.expect("semaphore closed");
-            check_one(&manifest, &path, key).await
+            check_one(&manifest, &path, key, want).await
         });
     }
 
-    let mut failures: Vec<Failure> = tasks.join_all().await.into_iter().flatten().collect();
+    let mut failures: Vec<Failure> = Vec::new();
+    let mut collected: Vec<(String, Vec<u8>)> = Vec::new();
+    for (failure, bytes) in tasks.join_all().await {
+        failures.extend(failure);
+        collected.extend(bytes);
+    }
     failures.extend(missing_from_disk);
     failures.sort_by(|a, b| a.path.cmp(&b.path));
+    collected.sort_by(|a, b| a.0.cmp(&b.0));
 
-    VerifyReport {
-        ok: failures.is_empty(),
-        failures,
-        checked,
-    }
+    (
+        VerifyReport {
+            ok: failures.is_empty(),
+            failures,
+            checked,
+        },
+        collected,
+    )
 }
 
 pub struct GeneratedManifest {
@@ -190,33 +215,57 @@ pub async fn generate(spt_data: PathBuf) -> Result<GeneratedManifest, String> {
     Ok(GeneratedManifest { base64, hashed })
 }
 
+// Bytes come back only for a wanted file that also verified: a mismatching or unreadable file
+// fails the report, and its contents are of no use to anyone.
 async fn check_one(
     manifest: &std::collections::HashMap<String, String>,
     path: &Path,
     key: String,
-) -> Option<Failure> {
+    want: fn(&str) -> bool,
+) -> (Option<Failure>, Option<(String, Vec<u8>)>) {
     let Some(expected) = manifest.get(&key) else {
-        return Some(Failure {
-            path: key,
-            reason: "missing_from_manifest".into(),
-        });
+        return (
+            Some(Failure {
+                path: key,
+                reason: "missing_from_manifest".into(),
+            }),
+            None,
+        );
     };
-    let actual = match xxh3_file(path).await {
-        Ok(hash) => hash,
-        Err(e) => {
-            return Some(Failure {
+    let io_error = |e: std::io::Error, key: String| {
+        (
+            Some(Failure {
                 path: key,
                 reason: format!("io_error: {e}"),
-            });
+            }),
+            None,
+        )
+    };
+    let (actual, bytes) = if want(&key) {
+        match tokio::fs::read(path).await {
+            Ok(bytes) => (xxh3_bytes(&bytes), Some(bytes)),
+            Err(e) => return io_error(e, key),
+        }
+    } else {
+        match xxh3_file(path).await {
+            Ok(hash) => (hash, None),
+            Err(e) => return io_error(e, key),
         }
     };
     if &actual != expected {
-        return Some(Failure {
-            path: key,
-            reason: "hash_mismatch".into(),
-        });
+        return (
+            Some(Failure {
+                path: key,
+                reason: "hash_mismatch".into(),
+            }),
+            None,
+        );
     }
-    None
+    (None, bytes.map(|bytes| (key, bytes)))
+}
+
+pub(crate) fn xxh3_bytes(bytes: &[u8]) -> String {
+    format!("{:032X}", xxhash_rust::xxh3::xxh3_128(bytes))
 }
 
 async fn xxh3_file(path: &Path) -> std::io::Result<String> {
@@ -389,6 +438,33 @@ mod tests {
         assert!(report.ok);
         assert_eq!(report.checked, 2);
         assert!(report.failures.is_empty());
+    }
+
+    #[tokio::test]
+    async fn verify_collecting_returns_wanted_bytes_and_streams_the_rest() {
+        let dir = TempDir::new().unwrap();
+        touch(dir.path(), "database/a.json");
+        touch(dir.path(), "configs/b.json");
+        write_manifest(
+            dir.path(),
+            &[
+                ("database/a.json", xxh3_hex(b"{}").as_str()),
+                ("configs/b.json", xxh3_hex(b"{}").as_str()),
+            ],
+        );
+
+        let (report, collected) =
+            verify_collecting(dir.path().to_path_buf(), |k| k == "database/a.json").await;
+        assert!(report.ok);
+        assert_eq!(report.checked, 2);
+        assert_eq!(
+            collected,
+            vec![("database/a.json".to_string(), b"{}".to_vec())]
+        );
+
+        let (report, collected) = verify_collecting(dir.path().to_path_buf(), |_| false).await;
+        assert!(report.ok);
+        assert!(collected.is_empty());
     }
 
     #[tokio::test]

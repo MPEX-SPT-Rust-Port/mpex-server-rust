@@ -14,9 +14,10 @@ selected automatically when a mod hooks it or manually via a config flag. The lo
 too, and has no legacy path: `SPTLoggerDispatcher` hands every line to the crate, and the crate owns
 the terminal outright — raw `Console.Write*`, prompts, title and clear all cross the boundary.
 
-Twenty-nine C-ABI exports (`src/ffi.rs`) carry all of it, JSON in and JSON out — except the ragfair
-response, which is a framed MessagePack envelope, and the log and console exports, which pass the
-fields of one line, or raw bytes, directly (current ABI 28).
+Thirty C-ABI exports (`src/ffi.rs`) carry all of it, JSON in and JSON out — except the ragfair
+response, which is a framed MessagePack envelope, `spt_db_load`, whose response is a JSON header
+frame followed by the loaded file bytes, and the log and console exports, which pass the fields of
+one line, or raw bytes, directly (current ABI 29).
 
 Native is not uniformly faster. Loot and repeatable quests win; bots, reward loot, ragfair, scav
 case, the base-class hydrate and the linked-item table are slower than the C# they replace, and
@@ -30,6 +31,7 @@ gap without closing it, and every lever short of the remaining state-ownership p
 | Feature | Entry point | Native export |
 |---|---|---|
 | `SPT_Data` hash verification (XXH3-128, parallel) | `DatabaseImporter` → `SptNative` | `spt_verify_database` |
+| Database load (SPT_Data → resident roots + C# replica buffers) | `DatabaseImporter.LoadDatabaseAsync` | `spt_db_load` |
 | Static container loot | `LocationLootGenerator.GenerateStaticContainers` | `spt_generate_static_containers` |
 | Loose loot spawn points | `LocationLootGenerator.GenerateDynamicLoot` | `spt_generate_dynamic_loot` |
 | Airdrop loot | `LootGenerator.CreateRandomLoot` / `CreateForcedLoot` | `spt_create_random_loot`, `spt_create_forced_loot` |
@@ -131,6 +133,20 @@ entry and the inherited `ValueType.ToString()`. Scope is `Color` only — mods t
   `WriteBarrier.Installed` is false there and `ResidentDbDispatch.Eligible` refuses to honour
   `TrustNativeRequestCacheWithMods` — a Debug server with mods loaded always sends the views
   override. Deliberate: the trust flag must not vouch for barriers that were never injected.
+- **Native database load requires comment-free JSON in the resident-root files** — templates,
+  traders, globals, locations and hideout are parsed by `serde_json` inside `spt_db_load`, which
+  rejects the comments the pure-C# reader tolerated (`JsonUtil` sets
+  `ReadCommentHandling = JsonCommentHandling.Skip` and no trailing-comma knob — trailing commas are
+  rejected on both paths, `AllowTrailingCommas` appearing nowhere in the tree). Non-resident files keep that tolerance: their
+  bytes cross as buffers and are still deserialized C#-side on exactly the same options as before.
+  Shipped data passes — `rust/spt-native/tests/phase3_db_load.rs` runs the fused load over the real
+  tree and is the gate — so this bites only a hand-edited or mod-shipped `database/`, for which
+  `forceLegacyDatabaseImport` is the escape hatch.
+- **A `database/` file whose entire body is the JSON `null` literal throws on the native path** —
+  `ImporterUtil.DeserializeFileAsync` guards the buffer deserialize with a `?? throw`, where the
+  pure-C# disk path leaves the property null and carries on. Unreachable on shipped data: all 289
+  `database/*.json` files were scanned and none has a bare `null` body. `forceLegacyDatabaseImport`
+  covers a hand-edited tree here too.
 - **The item base-class and linked-item cache *keys* differ** — legacy stores under `item.Id`
   (`ItemBaseClassService.cs:194,199`; `RagfairLinkedItemService.cs:200`), native under the
   `templateTable.Items` dictionary key. Separable only by a mod filing a template under a key ≠ its
@@ -317,7 +333,9 @@ all.
 is no per-generator flag. Elsewhere: `BotConfig.ForceLegacyBotGeneration` and `ForcePerBotGeneration`,
 `RagfairConfig.ForceLegacyRagfairGeneration` and `ForceLegacyRagfairLinkedItemBuild`,
 `QuestConfig.ForceLegacyRepeatableQuestGeneration`,
-`ScavCaseConfig.ForceLegacyScavCaseGeneration`, `ItemConfig.ForceLegacyItemBaseClassHydration`, plus
+`ScavCaseConfig.ForceLegacyScavCaseGeneration`, `ItemConfig.ForceLegacyItemBaseClassHydration`,
+(since Phase 3) `CoreConfig.ForceLegacyDatabaseImport` — the one flag that is not a generation
+path, restoring the pure-C# verify-then-walk database import — plus
 `TrustNativeRequestCacheWithMods` / `DisableNativeRequestCache`, which carry the resident-DB
 eligibility gate and exist on `RagfairConfig`, `QuestConfig`, (since flip #3) `ItemConfig`,
 (since flip #4) `LocationConfig`, whose pair covers both loot generators, (since flip #5)
@@ -405,8 +423,9 @@ the typed path instead, which is slower than both the raw path and the C# it rep
 therefore put a server on the slow path without saying so. Since flip #4 the fork lives inside the
 request's varying block (`varying.looseLoot`) on both the resident and the override arm — loose
 loot is the one loot input that never went resident, by decision: raw bytes resident would cost
-549 MiB RSS (BENCHMARK.md § Phase 0), so the per-call splice survives until Phase 3
-(`spt_db_load`), where Rust holds the per-map bytes resident from disk for free.
+549 MiB RSS (BENCHMARK.md § Phase 0), so the per-call splice survives — Phase 3 was the named
+revisit point and **declined it again** for the same number (the Phase 3 ledger's decision 1);
+resident paths plus an on-demand read is the upgrade if it is ever wanted.
 
 **The ragfair batch walk is parallel only when unseeded.** An unseeded walk fans across rayon: a
 forked `RagfairContext` per assort entry, merged back in assort order with `intId` reassigned during
@@ -533,9 +552,9 @@ bump, where pre-flip every call read `LazyLoad.Value` fresh; the kill switches
 (`DisableNativeRequestCache`, `ForceLegacyLootGeneration`) cover it. (b) looseLoot stays
 per-call on both arms — resident raw bytes would cost 549 MiB RSS on top of the measured
 405.2 MiB publish delta, for a payload read once per raid start that already rides a zero-copy
-`WriteRawValue` splice; Phase 3 (`spt_db_load`) makes the per-map bytes resident from disk for
-free, so residency is deferred there (this plan's call, per the spec's decision register —
-overriding the spec's older raw-bytes-resident flip-order prose). `staticAmmoDist` is
+`WriteRawValue` splice; residency was deferred to Phase 3 (this plan's call, per the spec's
+decision register — overriding the spec's older raw-bytes-resident flip-order prose), **where it
+was declined outright** on the same number — the Phase 3 ledger's decision 1. `staticAmmoDist` is
 permanently varying: it is a parameter of the frozen public `GenerateStaticContainers`/
 `GenerateDynamicLoot` signatures, so the resident DB must never stand in for it. And the
 `GetDefaultPresetsByTplKey` duplicate-first-item-tpl case now aborts the publish loudly naming
@@ -645,6 +664,85 @@ discharged there: the dispatch-block extraction was the fifth copy triggering it
 stale-epoch retry that had never been exercised end to end now has a scav case self-heal test
 (`ScavCaseResidentDbTests`).
 
+**Phase 3 ledger.** `spt_db_load` (ABI 29) fuses the `checks.dat` hash walk with reading
+`database/`: one walk hashes (when verifying — Debug ships no `checks.dat` and asks for none),
+reads and installs the five resident roots as epoch 1, then hands the
+eager file bytes back for `ImporterUtil`'s reflection walk to materialize `DatabaseTables` from.
+`CoreConfig.ForceLegacyDatabaseImport` restores the pure-C# verify-then-walk arm.
+**Measured, the flip is a regression, not a speed-up.** At the importer it reads **935.7 ms against
+legacy's 480.6 ms — 0.51x, roughly 1.9x slower, +419–455 ms** (BENCHMARK.md § Phase 3), with
+202 files / 49.4 MiB of eager content crossing as buffers. The deliverable is the retired startup
+double-read, and against a warm page cache the read it retires was nearly free while the buffer
+plumbing is not: the buffer-fed walk is 50–68 ms *slower* than the disk walk it replaces (451.1
+against 383.8 ms), and the fused load costs ~380–391 ms over the bare verify (484.6 against
+96.8 ms) for buffer retention, the FFI copy and the five-root assembly, parse and derivation —
+work the legacy arm does not do at import time at all. Neither figure is a startup total, and the
+gap the flip was built to close is **not wired up**: `DbPublisher.EnsureCurrent` still republishes
+all five roots whenever its own `_currentEpoch` is 0, and nothing feeds `DbLoad`'s installed epoch
+into it, so both arms pay a 730–745 ms forced publish that epoch 1 already did the work for.
+Feeding that epoch through is the named follow-up, and it buys less than it looks:
+`EnsureCurrent` republishes when `_currentEpoch == 0` **or** `_lastPublishedStamp != stamp`
+(`DbPublisher.cs:38`), and on Release the write barriers move the stamp during `PostDbLoadService`
+— `AdjustLocationBotValues` writes `map.Base.BotMax`/`BotStart` for every `maxBotCap` entry that
+resolves to a map (12 of the 13 shipped entries; `"default"` has no `LocationTable` property, and
+`PostDbLoadService.cs:624-627` skips what does not resolve), and `LocationBase`'s setters bump
+under Ceciler (`WriteBarrierCoverageTests.AWriteIntoTheLocationsRootBumps`) — so wiring epoch 1
+in would skip that first republish only in the case where nothing dirtied the tables between the
+load and the first eligible call. It is **Phase 4/5 work, not a Phase 3 defect** — decision 3 below
+is why it was deliberately left out of this phase.
+
+(a) Freshness delta: **none at generation time.** `DbPublisher` is untouched, and epoch 1 is
+boot-validation only — always superseded by the first `EnsureCurrent` republish, so no generation
+path ever reads it. The legacy import path survives behind `forceLegacyDatabaseImport`.
+
+(b) Decisions. **1, loose-loot residency declined.** The spec's Phase 3 prose had Rust hold the
+per-map raw bytes resident and serve them to the C# `LazyLoad` over a small export; 549 MiB on top
+of the measured 405.2 MiB publish RSS delta (BENCHMARK.md § Phase 0) is 954.2 MiB, which leaves no
+headroom under the ~1 GB line Phase 0's RSS gate drew, so the per-call splice stays and that
+byte-serving export was **not built**.
+`locations/*/looseLoot.json` and `locales/global/*` are classified never-read by the fused walk and
+stay disk-path `LazyLoad`s on both arms; `staticLoot.json`/`staticContainers.json` are read for
+resident-root assembly but not returned. Resident *paths* plus an on-demand read is the named
+upgrade. **2, per-file buffer handoff, not per-root.** The spec said "per-root raw JSON buffers"
+*replacing* `ImporterUtil.LoadRecursiveAsync`'s tree walk; as built the C# reflection walk stays and
+remains the file→property mapping authority, and Rust owns the file→wire mapping for the five
+resident roots only — the returned map is keyed `database/…` on both sides and consumed inside
+`DeserializeFileAsync`. Reproducing `LoadRecursiveAsync`'s mapping semantics exactly was this
+phase's named risk (a mismatch is a startup-data bug, not a perf bug), and keeping the C# walk
+neutralizes it structurally rather than by testing for it. The one semantic Rust duplicates from C#
+— the importer skip lists and the lazy patterns — fails benign in both drift directions: an extra
+returned file is ignored dead weight, a missing one falls back to a disk read inside
+`DeserializeFileAsync`. **3, epoch-1 assembly is validated by parse + derive + the real-tree
+integration test** (`rust/spt-native/tests/phase3_db_load.rs`), not by a C#-envelope equivalence
+harness. It can be, because epoch 1 is generation-invisible until 6b: the first `EnsureCurrent`
+republish supersedes it, which is also what guarantees generation runs off post-`PostDbLoadService`
+state rather than off raw disk bytes. That is the ceiling this flip accepts, recorded here — and it
+is why the regression above cannot be closed by simply skipping the republish. **The hazard that
+ceiling hides, for whoever wires the load-time epoch through:** `classify` (`load.rs:74`) and
+`LOCATION_MEMBERS` (`load.rs:18`) are a second, independent file→wire mapping duplicating
+`DbPayloadProjection`, and **nothing gates it** — `DatabaseLoadEquivalenceTests` compares
+`DatabaseTables`, never the resident roots. What makes that safe today is only that epoch 1 is
+superseded by the first `EnsureCurrent` republish, which is exactly the republish the follow-up
+exists to remove; whoever removes it inherits a mapping that may have been diverging unobserved
+since this phase landed. Gate it against a `DbPayloadProjection` publish before, not after.
+**4, the equivalence golden is permanent, not a one-shot spike.** `DatabaseLoadEquivalenceTests`
+compares the legacy-built and native-built `DatabaseTables` root by root and pins that the fused load
+still returns a file under every root it compares (that `ImporterUtil` then consumes the map is
+`ImporterUtilPreloadedTests`); it is a plain `[Test]`, so it runs in `dotnet test` — flip #6's route,
+not the manual two-step harness. (c) Net `Native/` delta for the phase, the literal
+`git diff --stat e265396..193bdac -- Libraries/SPTarkov.Server.Core/Native/`:
+
+```
+ .../SPTarkov.Server.Core/Native/NativeMethods.cs   |   3 +
+ Libraries/SPTarkov.Server.Core/Native/SptNative.cs | 130 ++++++++++++++++++++-
+ 2 files changed, 132 insertions(+), 1 deletion(-)
+```
+
+Growth, and almost all of it additive: one `[LibraryImport]` entry, the `DbLoad` wrapper and the
+framed-response parser with its three internal DTOs. The single deleted line is the
+`ExpectedAbiVersion` constant, 28 → 29 — no existing `Native/` code path was replaced, and the
+phase's other edits land outside `Native/`, in `ImporterUtil`, `JsonUtil` and `DatabaseImporter`.
+
 **The ported 4.1.2 quirks are documented at their call sites**, as numbered `Quirk N` comments in
 `rust/spt-native/src/quest/*.rs`, `src/scav_case/generator.rs`, `src/base_class.rs`,
 `src/linked_items.rs` and `src/loot/container_extensions.rs`; grep case-insensitively for `quirk`,
@@ -658,13 +756,13 @@ written against, not the current file.
 
 ## Roadmap
 
-1. **Phases 1 and 2 of the state-ownership program are complete; Phase 3 is the active front.** Phase 1 of
+1. **Phases 1, 2 and 3 of the state-ownership program are complete; Phase 4 is the active front.** Phase 1 of
    `docs/superpowers/specs/2026-08-17-rust-state-ownership-design.md` moved every generation
    export onto the epoch protocol, one family per flip — each its own plan, own ABI bump,
    goldens passing *unchanged*, BENCHMARK.md re-measured before the next started. Landed: #1
    ragfair, #2 repeatable quests, #3 base-class hydrate + linked-item table, #4 loot (statics
    resident on the locations root; looseLoot deliberately stays a per-call splice — the flip #4
-   ledger has the 549 MiB number, Phase 3 the residency point), #5 scav case (2026-08-19,
+   ledger has the 549 MiB number, and Phase 3 declined residency again), #5 scav case (2026-08-19,
    ABI 26; recipes resident on a new `hideout` root), #6 bots (2026-08-19, ABI 27; no new root,
    `SharedBotViewsWire` split into `viewsOverride` + `SharedBotVarying`). All thirteen generation
    exports read the resident DB, both slice caches are gone and all six slower-than-C# families
@@ -677,7 +775,19 @@ written against, not the current file.
    override with mods loaded. A modded Release server rides the resident DB; the container gap and the
    rest of the residual blind spots are the *Broken* ledger's container-mutations bullet, the startup
    and churn numbers are BENCHMARK.md § Phase 2.
-   Next is Phase 3 (Rust loads `SPT_Data`), Phase 4
+   **Phase 3 landed 2026-08-19 (ABI 29):** `spt_db_load` fuses the hash walk with reading
+   `database/`, installs the five resident roots as epoch 1 and hands the eager file bytes to
+   `ImporterUtil`; `CoreConfig.ForceLegacyDatabaseImport` is the opt-out and
+   `DatabaseLoadEquivalenceTests` the permanent gate. It is a **measured regression at the
+   importer** — 0.51x, +419–455 ms — and that cost is real rather than a wiring oversight: the
+   fused load does assembly, parse and derivation work at import time that the legacy arm does not,
+   and the buffer-fed walk is slower than the disk walk it retires. Separately, the *startup* win
+   the flip was built for is still unwired — nothing feeds `DbLoad`'s installed epoch to
+   `DbPublisher`, so **both** arms pay the first `EnsureCurrent` republish and it cancels out of the
+   comparison above. The Phase 3 ledger has the numbers and the follow-up, BENCHMARK.md § Phase 3
+   the measurement. Loose-loot residency was
+   declined a second time, so the spec's `LazyLoad` byte-serving export does not exist.
+   Next is Phase 4
    (configs join the resident set, closing the runtime-config ceiling flip #1's ledger records),
    Phase 5 (profile persistence) and Phase 6 (process inversion: an `mpex-server` bin crate hosts
    the CLR via `netcorehost`, making Rust the executable). Phase 6a — the `run_app` bootstrap (`rust/mpex-server`,
@@ -685,7 +795,8 @@ written against, not the current file.
    its e2e check) — landed 2026-08-18 (`mpex-server.exe` ships from the same wiring but has never
    been executed on Windows); 6b (the delegate-loader shim flip, where the resident DB's
    statics move into the exe and `SptNative.cs`'s `DllImport` layer dissolves into a vtable of
-   the existing exports) waits on Phases 3 and 5.
+   the existing exports) waited on Phases 3 and 5, and with Phase 3 landed now waits on Phase 5
+   alone.
 2. Port candidates and their costing live in [todo/TODO.md](todo/TODO.md); with #1-#6
    landed, the unstarted front is tier 2. The two axes
    are independent — a flip re-homes data for something already ported, a TODO item ports
