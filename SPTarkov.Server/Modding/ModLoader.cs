@@ -3,6 +3,7 @@ using System.Runtime.Loader;
 using System.Text.Json;
 using AsmResolver.DotNet;
 using SPTarkov.Common.Models.Logging;
+using SPTarkov.Common.Native;
 using SPTarkov.Server.Core.Models.Spt.Mod;
 using SPTarkov.Server.Exceptions;
 
@@ -216,12 +217,7 @@ public sealed class ModLoader(ISptLogger<ModLoader> logger, ModValidator modVali
 
     private static void ClearConsole()
     {
-        if (Console.IsOutputRedirected)
-        {
-            return;
-        }
-
-        Console.Clear();
+        SptConsole.Clear();
     }
 
     /// <summary>

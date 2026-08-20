@@ -1,5 +1,6 @@
 using Spectre.Console;
 using SPTarkov.Common.Models.Logging;
+using SPTarkov.Common.Native;
 using SPTarkov.DI.Annotations;
 using SPTarkov.Server.Core.DI;
 using SPTarkov.Server.Core.Models.Spt.Config;
@@ -123,7 +124,7 @@ public class Watermark(
     /// </summary>
     protected void SetTitle()
     {
-        Console.Title = versionLabel;
+        SptConsole.SetTitle(versionLabel);
     }
 
     /// <summary>

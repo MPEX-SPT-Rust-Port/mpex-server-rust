@@ -19,7 +19,7 @@ build/run commands see [CLAUDE.md](CLAUDE.md).
 | `Libraries/SPTarkov.Server.Web` | Blazor Server admin panel (MudBlazor) | `.Server.Core`, the shared Kestrel host |
 | `Libraries/SPTarkov.Server.Assets` | `SPT_Data/`: configs, JSON database, images; the largest files ship compressed as `looseLoot.7z` | The host build (copies to output), `DatabaseImporter` |
 | `Libraries/SPTarkov.DI` | Attribute-driven DI container: `[Injectable]`, `DependencyInjectionHandler` | Core, `.Reflection`, the host |
-| `Libraries/SPTarkov.Common` | Shared primitives and the logging front end (`SptLogger`, `SPTLoggerDispatcher`) | `rust/spt-native` (log exports), Core |
+| `Libraries/SPTarkov.Common` | Shared primitives and the logging front end (`SptLogger`, `SPTLoggerDispatcher`) | `rust/spt-native` (log and console exports), Core |
 | `Libraries/SPTarkov.Reflection` | Runtime method patching for mods (`AbstractPatch`, `PatchManager`) | Mods, the host (not Core) |
 | `rust/` | Three-member Cargo workspace: the `spt-native` cdylib called over C ABI, `mpex-server`, the CLR-hosting launcher shipped builds run, and `spectre-facade`, which emits the stub `Spectre.Console.Ansi` assembly `SPTarkov.Common` builds and four other projects reference | Core's `Native/`, Common's `Native/`, the published server assembly |
 | `Tools/Ceciler` + `Patches/Ceciler.JsonExtensionData` | Mono.Cecil IL rewriter run on Release builds, and the patch assembly it applies | `SPTarkov.Server.Core.dll` post-compile |
@@ -176,13 +176,13 @@ Two non-obvious steps run during build, both in `SPTarkov.Server.Core.csproj`:
 ### Native Rust layer
 
 `rust/spt-native` is a `cdylib` called over C ABI from `Libraries/SPTarkov.Server.Core/Native/`
-(`NativeMethods.cs`, `SptNative.cs`) — and, for the log exports, from the twin
+(`NativeMethods.cs`, `SptNative.cs`) — and, for the log and console exports, from the twin
 `Libraries/SPTarkov.Common/Native/NativeMethods.cs`, because `SPTarkov.Common` cannot reference
 Server.Core. It owns database hash verification, the ported generation paths (location loot, reward
 loot, whole-bot inventory, dynamic ragfair offers, repeatable quests, scav case rewards), the item
 base-class cache build, the ragfair linked-item table, the resident DB every ported family but bots
-reads from, and the whole log pipeline. Twenty-three exports, JSON in / JSON out — except the
-ragfair response, a framed MessagePack envelope, and the log exports — with
+reads from, the whole log pipeline, and the terminal itself. Twenty-nine exports, JSON in / JSON out
+— except the ragfair response, a framed MessagePack envelope, and the log and console exports — with
 `spt_native_abi_version` handshaking against `SptNative.ExpectedAbiVersion`.
 
 Every ported *class* keeps its complete 4.1.2 C# implementation as a **legacy path**, taken
@@ -221,7 +221,7 @@ Linux-only `PropertyGroup`, so from a Windows host nothing maps and the guard in
 | External System | Integration Type | Notes |
 |-------------------|-------------------|-------|
 | Escape from Tarkov game client | Sync HTTP + async WebSocket | Every `/client/*` route; zlib both ways, responses wrapped in the `data`/`err`/`errmsg` envelope. `Models/Eft/` mirrors its wire contracts |
-| `rust/spt-native` (cdylib) | Sync FFI, C ABI | Twenty-three exports; JSON in/out except the MessagePack ragfair response and the log exports. `spt_native_abi_version` handshakes `SptNative.ExpectedAbiVersion` |
+| `rust/spt-native` (cdylib) | Sync FFI, C ABI | Twenty-nine exports; JSON in/out except the MessagePack ragfair response and the log and console exports. `spt_native_abi_version` handshakes `SptNative.ExpectedAbiVersion` |
 | `SPT_Data/` on disk | Batch read at startup | `configs/` via `ConfigLoader`, `database/` via `DatabaseImporter`, hash-verified against `checks.dat` outside DEBUG |
 | `user/profiles/` | Async read/write | `SaveServer` owns the JSON profiles; interval saves plus `BackupService` timers |
 | `user/mods/`, `user/patchers/` | Reflective assembly load | Third-party DLLs: `[Injectable]` registrations, `IOnDIConstruct` hooks, HarmonyX patches, enum prepatchers |

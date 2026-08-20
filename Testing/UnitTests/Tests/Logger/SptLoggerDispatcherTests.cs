@@ -149,6 +149,56 @@ public class SptLoggerDispatcherTests
         }
     }
 
+    [Test]
+    public void IsLogEnabledAsksTheAppliedNativeConfigNotTheCSharpObject()
+    {
+        // Native pipeline (from SetUp): one File target at Information.
+        // C# config object: one target at Critical — the old code would say Debug/Info are off.
+        var config = new SptLoggerConfiguration
+        {
+            Loggers =
+            [
+                new FileSptLoggerReference
+                {
+                    Type = LoggerType.File,
+                    LogLevel = LogLevel.Critical,
+                    Format = "%message%",
+                    FilePath = _directory,
+                    FilePattern = "spt.log",
+                },
+            ],
+        };
+        var dispatcher = new SPTLoggerDispatcher(config, []);
+
+        Assert.That(dispatcher.IsLogEnabled(LogLevel.Information), Is.True, "native config admits Information");
+        Assert.That(dispatcher.IsLogEnabled(LogLevel.Debug), Is.False, "native config rejects Debug");
+    }
+
+    [Test]
+    public void IsLogEnabledFallsBackToTheCSharpConfigWithoutAPipeline()
+    {
+        NativeMethods.LoggerClose(); // drop SetUp's init: no pipeline
+
+        var config = new SptLoggerConfiguration
+        {
+            Loggers =
+            [
+                new FileSptLoggerReference
+                {
+                    Type = LoggerType.File,
+                    LogLevel = LogLevel.Warning,
+                    Format = "%message%",
+                    FilePath = _directory,
+                    FilePattern = "spt.log",
+                },
+            ],
+        };
+        var dispatcher = new SPTLoggerDispatcher(config, []);
+
+        Assert.That(dispatcher.IsLogEnabled(LogLevel.Warning), Is.True);
+        Assert.That(dispatcher.IsLogEnabled(LogLevel.Information), Is.False);
+    }
+
     private sealed class CapturingHandler : ILogHandler
     {
         public List<(SptLogMessage Message, BaseSptLoggerReference Reference)> Received { get; } = [];

@@ -11,11 +11,12 @@ The loot family, the bot family, dynamic ragfair offer generation, the repeatabl
 case rewards, the item base-class cache build and the ragfair linked-item table are ported and run
 natively by default. Every ported class keeps its full 4.1.2 C# implementation as a **legacy path**,
 selected automatically when a mod hooks it or manually via a config flag. The log pipeline is ported
-too, and has no legacy path: `SPTLoggerDispatcher` hands every line to the crate.
+too, and has no legacy path: `SPTLoggerDispatcher` hands every line to the crate, and the crate owns
+the terminal outright — raw `Console.Write*`, prompts, title and clear all cross the boundary.
 
-Twenty-three C-ABI exports (`src/ffi.rs`) carry all of it, JSON in and JSON out — except the ragfair
-response, which is a framed MessagePack envelope, and `spt_log_emit`, which passes the fields of one
-line directly (current ABI 27).
+Twenty-nine C-ABI exports (`src/ffi.rs`) carry all of it, JSON in and JSON out — except the ragfair
+response, which is a framed MessagePack envelope, and the log and console exports, which pass the
+fields of one line, or raw bytes, directly (current ABI 28).
 
 Native is not uniformly faster. Loot and repeatable quests win; bots, reward loot, ragfair, scav
 case, the base-class hydrate and the linked-item table are slower than the C# they replace, and
@@ -43,6 +44,8 @@ gap without closing it, and every lever short of the remaining state-ownership p
 | Ragfair linked-item table | `RagfairLinkedItemService.BuildLinkedItemTable` | `spt_build_ragfair_linked_item_table` |
 | Resident DB publish — the templates, traders, globals, locations and hideout roots, plus the ragfair, quest and bot views derived from them | `DbPublisher.EnsureCurrent` / `ForcePublish` | `spt_db_publish` |
 | The whole log pipeline — filters, level gates, per-target formatting, console + file sinks | `SPTLoggerDispatcher.Log` | `spt_logger_init`, `spt_logger_reinit`, `spt_log_emit`, `spt_logger_close`, `spt_log_set_tap` |
+| The terminal — raw `Console.Write*` (redirected into the pipeline), prompts, title, clear | `NativeConsoleWriter.Install`, `SptConsole` | `spt_console_write`, `spt_console_read_line`, `spt_console_set_title`, `spt_console_clear` |
+| The `IsLogEnabled` gate and the line a mod `ILogHandler` renders | `SPTLoggerDispatcher.IsLogEnabled`, `BaseLogHandler.FormatMessage` | `spt_log_enabled`, `spt_log_format` |
 | Generator diagnostics, localised and logged natively as they happen | `DatabaseImporter` → `SptNative.SetServerLocales` | `spt_locales_set` |
 
 Also working: mod-added fields on game data survive the round trip (`#[serde(flatten)] extra` maps
@@ -175,8 +178,15 @@ silently drops camora ammo on the fifth); and the native `_type` test being
   failed push falls every generator line back to its locale key.
 - **Parallel generator lines interleave** — ragfair and bot rayon workers emit as they run, so lines
   no longer arrive grouped per bot or per assort entry.
-- **Console output is asynchronous and drops on a full queue** — an 8192-line bounded channel to a
-  writer thread. A hard crash loses what is queued; a deeper burst drops rather than blocks.
+- **Console output is asynchronous, and the two things riding its queue behave differently** — one
+  8192-slot bounded channel to a writer thread carries both rendered log lines and the raw
+  `Console.Write*` bytes redirected into it. A burst of log lines deeper than the queue drops; raw
+  bytes, and the drain a `spt_console_read_line` does first, block instead, so a prompt is never
+  lost. The ceiling that buys: a terminal that stops draining stalls managed `Console.Write` behind
+  it and makes `spt_logger_close` wait on the writer thread. Shutdown is carved out of that shared
+  order: `spt_logger_close` takes the pipeline out from under the lock before joining the writer
+  thread, so a `Console.Write` racing the teardown writes straight to stdout and can interleave with
+  the backlog still draining. A hard crash still loses what is queued.
 - **Excluded categories still pay the per-line marshaling cost** — filtering moved native-side, so
   every line crosses the boundary before it is dropped.
 - **Filter regexes are regex-lite** — no lookarounds, no backreferences, ASCII-only character
@@ -185,10 +195,18 @@ silently drops camora ammo on the fifth); and the native `_type` test being
   all for the run, and the same for a config the C# parser tolerated but Rust rejects. The known
   cases are handled except the `type` tag of a `loggers` entry, case-sensitive on both sides.
 - **The pipeline reads `sptLogger.json` once; runtime mutation needs an explicit reload** — mutating
-  `SptLoggerConfiguration.Loggers` changes what `IsLogEnabled` answers but not what is written.
+  `SptLoggerConfiguration.Loggers` changes neither what is written nor, since the gate moved to
+  `spt_log_enabled`, what `IsLogEnabled` answers: both now read the *applied* configuration, where
+  the C# object used to answer immediately and could disagree with what got written.
   `SPTLoggerDispatcher.ReloadConfiguration()` (additive, post-port) re-hands the object to
-  `spt_logger_reinit`; a rejected reload leaves the running pipeline untouched.
-- **Line terminators are always `\n` and dates always Gregorian, culture-independent.**
+  `spt_logger_reinit`; a rejected reload leaves the running pipeline untouched. With no pipeline to
+  ask — before init, after close, no library — `IsLogEnabled` still falls back to the C# object.
+- **Line terminators are always `\n` and dates always Gregorian, culture-independent** — including
+  `BaseLogHandler.FormatMessage` now that it renders through `spt_log_format`. The deleted C#
+  `LogTime.ToString("yyyy-MM-dd")` / `("HH:mm:ss.fff")` used `CurrentCulture`, so under a culture
+  with a non-`:` time separator (fi-FI) or a non-Gregorian default calendar (th-TH, ar-SA) a mod
+  handler stamped a different timestamp from the pipeline line beside it. Nothing pins the process
+  culture; this makes the two agree.
 - **File rotation was redesigned, not ported** — ZLogger rolled ascending (`spt.1.log` was the
   *next* file); the native sink cascades, so `.1` is the *most recent* archive and `spt.log` only
   ever holds the current run. Anyone comparing `spt.N.log` across the upgrade reads it backwards.
@@ -199,6 +217,21 @@ silently drops camora ammo on the fifth); and the native `_type` test being
   text with no `Exception` object. Registration changed shape: resolve `SPTLoggerDispatcher` from DI
   and call `RegisterHandler` (additive, post-port) — a constructor-injected handler set is always
   empty in a real run.
+- **The fatal-error pause is "Press enter to exit..." (`spt_console_read_line`)** — the old
+  `Console.ReadKey(true)` single keypress is gone; raw-mode stdin was not worth the platform console
+  code. The two mod-load-failure pauses (`Program.cs:136` and `:147`) still read with no prompt at
+  all: pre-existing, and only conspicuous now that their two siblings print one.
+- **`BaseLogHandler.FormatMessage` renders through `spt_log_format`** — a format containing bare `{`
+  or `}` now renders literally instead of throwing out of `CompositeFormat.Parse`, and a handler that
+  cannot reach the native side degrades to the unformatted message rather than throwing.
+- **A `GetCompiledFormat` override no longer reaches `FormatMessage`** — `BaseLogHandler` hands the
+  reference's raw `Format` string to `spt_log_format`, so a mod subclassing `BaseSptLoggerReference`
+  to rewrite the compiled format changes nothing about what a handler renders. The method still
+  compiles and caches for anyone calling it directly; both shipped reference types are `sealed`, so
+  reaching the override at all meant constructing the subclass in code.
+- **`Console.Clear()`'s `IsOutputRedirected` guard became a Rust-side tty check** — clear and title
+  are ANSI/OSC escapes queued behind the console sink, with VT enabled on Windows at
+  `spt_logger_init` (where the Windows title is still a console API call, not an escape).
 
 ## Guidelines
 
