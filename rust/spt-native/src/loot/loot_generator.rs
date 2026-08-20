@@ -9,7 +9,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use indexmap::IndexMap;
+use indexmap::{IndexMap, IndexSet};
 use serde_json::json;
 
 use super::item_helper::{self, LootEpochError, LootError};
@@ -20,6 +20,7 @@ use super::models::{
     SealedWeaponCaseRequest, Upd, WARNING,
 };
 use super::{mongo_id, random_util};
+use crate::db::models::{ConfigsRoot, ItemConfigLift};
 use crate::diag::DiagSink;
 use crate::ragfair::views::RagfairDbViews;
 
@@ -41,12 +42,66 @@ struct ItemRewardPoolResults<'a> {
 }
 
 /// The database half of a reward request. The resident arm is the shared ragfair views — loot's
-/// C# projections are the same helpers ragfair's derive ports (items view, preset maps).
+/// C# projections are the same helpers ragfair's derive ports (items view, preset maps) — plus the
+/// configs root the family's four `ItemConfig` sets come out of.
 pub enum RewardViews {
-    Resident(Arc<RagfairDbViews>),
+    Resident {
+        ragfair: Arc<RagfairDbViews>,
+        /// The resident configs root. [`resolve_reward_views`] has already proved the one stem this
+        /// family reads is present, so the accessors below cannot miss it.
+        configs: Arc<ConfigsRoot>,
+    },
     Override(Box<RewardViewsWire>),
 }
 
+impl RewardViews {
+    fn config_blacklist(&self) -> &HashSet<String> {
+        match self {
+            Self::Override(wire) => &wire.config_blacklist,
+            Self::Resident { configs, .. } => &item_config(configs).blacklist,
+        }
+    }
+
+    fn reward_item_blacklist(&self) -> &IndexSet<String> {
+        match self {
+            Self::Override(wire) => &wire.reward_item_blacklist,
+            Self::Resident { configs, .. } => &item_config(configs).reward_item_blacklist,
+        }
+    }
+
+    fn reward_base_type_blacklist(&self) -> &IndexSet<String> {
+        match self {
+            Self::Override(wire) => &wire.reward_base_type_blacklist,
+            Self::Resident { configs, .. } => &item_config(configs).reward_item_type_blacklist,
+        }
+    }
+
+    fn boss_items(&self) -> &IndexSet<String> {
+        match self {
+            Self::Override(wire) => &wire.boss_items,
+            Self::Resident { configs, .. } => &item_config(configs).boss_items,
+        }
+    }
+}
+
+/// The `spt-item` stem, present because [`resolve_reward_views`] refused the request without it.
+fn item_config(configs: &ConfigsRoot) -> &ItemConfigLift {
+    configs
+        .item
+        .as_ref()
+        .expect("resolve_reward_views proved the spt-item stem present")
+}
+
+/// The override arm resolves without consulting the process-global store; the resident arm needs
+/// the named epoch resident with the ragfair views and the configs root.
+///
+/// A missing root is a stale epoch — the publish never carried it, so a republish is the fix. A
+/// configs root that *is* resident but has no `spt-item` stem is a different failure and gets a
+/// different answer: an error naming the stem, per call, rather than a silent default.
+///
+/// # Errors
+///
+/// [`LootEpochError::StaleEpoch`] as above, or [`LootEpochError::Loot`] naming the absent stem.
 pub fn resolve_reward_views(
     epoch: u64,
     views_override: Option<Box<RewardViewsWire>>,
@@ -59,31 +114,45 @@ pub fn resolve_reward_views(
                 return Err(LootEpochError::StaleEpoch);
             }
 
-            Ok(RewardViews::Resident(
-                db.ragfair_views.clone().ok_or(LootEpochError::StaleEpoch)?,
-            ))
+            let ragfair = db.ragfair_views.clone().ok_or(LootEpochError::StaleEpoch)?;
+
+            let configs = db.configs.clone().ok_or(LootEpochError::StaleEpoch)?;
+            if configs.item.is_none() {
+                return Err(LootError::new("configs root has no spt-item stem").into());
+            }
+
+            Ok(RewardViews::Resident { ragfair, configs })
         }
     }
 }
 
 /// What used to be the request's flattened `RewardLootDb`, resolved to borrows: the per-export
-/// view mapping out of [`RewardViews`] plus the request's service-backed sets — so the ported
-/// bodies below keep reading `db.*` verbatim.
+/// view mapping out of [`RewardViews`], the four `ItemConfig` sets off whichever arm it is, plus
+/// the request's service-backed sets — so the ported bodies below keep reading `db.*` verbatim.
 struct RewardDbRefs<'a> {
     items_view: &'a IndexMap<String, ItemView>,
     default_presets: &'a [PresetView],
     default_presets_by_tpl: &'a IndexMap<String, PresetView>,
     global_blacklist: &'a HashSet<String>,
     config_blacklist: &'a HashSet<String>,
-    reward_item_blacklist: &'a HashSet<String>,
-    reward_base_type_blacklist: &'a HashSet<String>,
-    boss_items: &'a HashSet<String>,
+    /// An `IndexSet` where the two `HashSet` members either side of it are not, because that is
+    /// what both arms hand over — the configs root's [`ItemConfigLift`] and the override wire that
+    /// mirrors it. `get_item_reward_pool` only extends a `HashSet` out of it, so the order it keeps
+    /// is unread.
+    reward_item_blacklist: &'a IndexSet<String>,
+    /// `ItemConfig.RewardItemTypeBlacklist`, an `IndexSet` for the same reason: it is collected
+    /// into the `Vec<&str>` the base-class walk answers a bool off.
+    reward_base_type_blacklist: &'a IndexSet<String>,
+    /// `ItemConfig.BossItems`, an `IndexSet` for the same reason.
+    boss_items: &'a IndexSet<String>,
     inactive_seasonal_items: &'a HashSet<String>,
 }
 
 impl<'a> RewardDbRefs<'a> {
-    /// Binds an entry fn's per-export view mapping to the varying block's service-backed sets.
+    /// Binds an entry fn's per-export view mapping to the four config-backed sets off `views` and
+    /// the varying block's service-backed sets.
     fn new(
+        views: &'a RewardViews,
         common: &'a RewardLootVarying,
         items_view: &'a IndexMap<String, ItemView>,
         default_presets: &'a [PresetView],
@@ -94,10 +163,10 @@ impl<'a> RewardDbRefs<'a> {
             default_presets,
             default_presets_by_tpl,
             global_blacklist: &common.global_blacklist,
-            config_blacklist: &common.config_blacklist,
-            reward_item_blacklist: &common.reward_item_blacklist,
-            reward_base_type_blacklist: &common.reward_base_type_blacklist,
-            boss_items: &common.boss_items,
+            config_blacklist: views.config_blacklist(),
+            reward_item_blacklist: views.reward_item_blacklist(),
+            reward_base_type_blacklist: views.reward_base_type_blacklist(),
+            boss_items: views.boss_items(),
             inactive_seasonal_items: &common.inactive_seasonal_items,
         }
     }
@@ -179,7 +248,7 @@ pub fn create_random_loot(
     // The by-tpl map is unread by this export — C# sends `{}` today, the resident arm lends this.
     let empty_by_tpl = IndexMap::new();
     let (items_view, default_presets, default_presets_by_tpl) = match &views {
-        RewardViews::Resident(ragfair) => (
+        RewardViews::Resident { ragfair, .. } => (
             &ragfair.items,
             ragfair.default_presets.as_slice(),
             &empty_by_tpl,
@@ -191,6 +260,7 @@ pub fn create_random_loot(
         ),
     };
     let db = &RewardDbRefs::new(
+        &views,
         &varying.common,
         items_view,
         default_presets,
@@ -401,10 +471,18 @@ pub fn create_forced_loot(
 
     // Forced loot's map is `GetDefaultPresetsByTplKey()` — the resident derivation built for it.
     let (items_view, default_presets_by_tpl) = match &views {
-        RewardViews::Resident(ragfair) => (&ragfair.items, &ragfair.default_presets_by_tpl_key),
+        RewardViews::Resident { ragfair, .. } => {
+            (&ragfair.items, &ragfair.default_presets_by_tpl_key)
+        }
         RewardViews::Override(wire) => (&wire.items_view, &wire.default_presets_by_tpl),
     };
-    let db = &RewardDbRefs::new(&varying.common, items_view, &[], default_presets_by_tpl);
+    let db = &RewardDbRefs::new(
+        &views,
+        &varying.common,
+        items_view,
+        &[],
+        default_presets_by_tpl,
+    );
     let mut result: Vec<Vec<Item>> = Vec::new();
 
     for (item_tpl, details) in &varying.forced_loot {
@@ -805,7 +883,7 @@ pub fn get_sealed_weapon_case_loot(
     // `GetPresets(tpl)` — the resident map is a superset keyed identically (every tpl with
     // presets, inner order identical), and the body only ever looks weapon tpls up by key.
     let (items_view, default_presets_by_tpl, presets_by_tpl) = match &views {
-        RewardViews::Resident(ragfair) => (
+        RewardViews::Resident { ragfair, .. } => (
             &ragfair.items,
             &ragfair.default_presets_by_tpl,
             &ragfair.presets_by_tpl,
@@ -818,7 +896,13 @@ pub fn get_sealed_weapon_case_loot(
             })?,
         ),
     };
-    let db = &RewardDbRefs::new(&varying.common, items_view, &[], default_presets_by_tpl);
+    let db = &RewardDbRefs::new(
+        &views,
+        &varying.common,
+        items_view,
+        &[],
+        default_presets_by_tpl,
+    );
     let settings = &varying.container_settings;
     let mut items_to_return: Vec<Vec<Item>> = Vec::new();
 
@@ -991,7 +1075,7 @@ fn get_sealed_container_non_weapon_mod_rewards(
         // configs the three together leave this pool empty and the branch just logs the skip.
         //
         // The blacklist is [`RewardLootVarying::global_blacklist`] - the cache `IsItemBlacklisted`
-        // reads, not the config list [`RewardLootVarying::config_blacklist`] the reward pool
+        // reads, not the config list [`RewardViewsWire::config_blacklist`] the reward pool
         // unions in.
         let reward_item_pool: Vec<&str> = db
             .items_view
@@ -1100,7 +1184,7 @@ pub fn get_random_loot_container_loot(
     // **is** that (every tpl with any preset at all — `PresetHelper.cs:155-158`). Container opens
     // are user-driven and rare, so building the borrowed set per call is fine.
     let (items_view, default_presets_by_tpl, preset_tpls): (_, _, HashSet<&str>) = match &views {
-        RewardViews::Resident(ragfair) => (
+        RewardViews::Resident { ragfair, .. } => (
             &ragfair.items,
             &ragfair.default_presets_by_tpl,
             ragfair.presets_by_tpl.keys().map(String::as_str).collect(),
@@ -1118,7 +1202,13 @@ pub fn get_random_loot_container_loot(
                 .collect(),
         ),
     };
-    let db = &RewardDbRefs::new(&varying.common, items_view, &[], default_presets_by_tpl);
+    let db = &RewardDbRefs::new(
+        &views,
+        &varying.common,
+        items_view,
+        &[],
+        default_presets_by_tpl,
+    );
     let reward_container_details = &varying.reward_details;
     let mut items_to_return: Vec<Vec<Item>> = Vec::new();
 
@@ -1348,9 +1438,9 @@ mod tests {
         request_from(db_json(), seed, options)
     }
 
-    /// Splits the flat fixture into the envelope halves: the three view members into
-    /// `viewsOverride`, everything else (the service-backed sets, plus the seed) into `varying` —
-    /// so the tests keep mutating one flat object.
+    /// Splits the flat fixture into the envelope halves: the three view members and the four
+    /// `ItemConfig` sets into `viewsOverride`, everything else (the service-backed sets, plus the
+    /// seed) into `varying` — so the tests keep mutating one flat object.
     fn split_envelope(
         envelope: Value,
         seed: u64,
@@ -1362,7 +1452,15 @@ mod tests {
             panic!("fixture envelope is not an object");
         };
         let mut views = serde_json::Map::new();
-        for key in ["itemsView", "defaultPresets", "defaultPresetsByTpl"] {
+        for key in [
+            "itemsView",
+            "defaultPresets",
+            "defaultPresetsByTpl",
+            "configBlacklist",
+            "rewardItemBlacklist",
+            "rewardBaseTypeBlacklist",
+            "bossItems",
+        ] {
             if let Some(value) = varying.remove(key) {
                 views.insert(key.to_owned(), value);
             }

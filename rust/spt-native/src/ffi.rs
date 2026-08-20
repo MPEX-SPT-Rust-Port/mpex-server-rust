@@ -1668,16 +1668,15 @@ mod tests {
 
     /// The `RewardViewsWire` members every override reward send carries; sealed adds
     /// `presetsByTpl` and container adds `presetTpls` beside these.
-    const REWARD_VIEWS_JSON: &str =
-        r#""itemsView":{},"defaultPresets":[],"defaultPresetsByTpl":{}"#;
+    const REWARD_VIEWS_JSON: &str = r#"
+        "itemsView":{},"defaultPresets":[],"defaultPresetsByTpl":{},
+        "configBlacklist":[],"rewardItemBlacklist":[],
+        "rewardBaseTypeBlacklist":[],"bossItems":[]
+    "#;
 
     /// Every required `RewardLootVarying` member, spliced beside each request's per-export
     /// varying members below.
-    const REWARD_VARYING_JSON: &str = r#"
-        "globalBlacklist":[],"configBlacklist":[],
-        "rewardItemBlacklist":[],"rewardBaseTypeBlacklist":[],
-        "bossItems":[],"inactiveSeasonalItems":[]
-    "#;
+    const REWARD_VARYING_JSON: &str = r#""globalBlacklist":[],"inactiveSeasonalItems":[]"#;
 
     #[test]
     fn random_loot_roundtrips_result_json() {

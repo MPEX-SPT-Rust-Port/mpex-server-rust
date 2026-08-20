@@ -1,7 +1,7 @@
-//! Resident-arm integration: publish a minimal four-root DB with per-map statics and weapon
-//! presets, then prove a `{epoch}` send generates identically to the same data sent as
-//! `viewsOverride` — for location loot and for the reward family's sealed case — and that a
-//! wrong epoch is a stale error, not a wrong answer.
+//! Resident-arm integration: publish a minimal five-root DB with per-map statics, weapon presets
+//! and the reward family's `spt-item` config stem, then prove a `{epoch}` send generates
+//! identically to the same data sent as `viewsOverride` — for location loot and for the reward
+//! family's sealed case — and that a wrong epoch is a stale error, not a wrong answer.
 //!
 //! Its own process (integration tests build their own binary), so the process-global store races
 //! with nothing; the whole protocol lives in one `#[test]` fn, sequential, to keep it that way.
@@ -130,16 +130,23 @@ fn preset_views_json() -> String {
 
 /// Every `SealedWeaponCaseVarying` member, shared verbatim by both sealed arms: a single-entry
 /// weapon weight (no draw), a mod reward count with a real range (draws), and a seed so both
-/// arms replay one stream.
+/// arms replay one stream. The four `ItemConfig` sets are not here — they ride the resident
+/// configs root on one arm and [`reward_item_config_json`] on the other.
 fn sealed_varying() -> String {
     format!(
-        r#""globalBlacklist":[],"configBlacklist":[],"rewardItemBlacklist":[],
-        "rewardBaseTypeBlacklist":[],"bossItems":[],"inactiveSeasonalItems":[],"testSeed":7,
+        r#""globalBlacklist":[],"inactiveSeasonalItems":[],"testSeed":7,
         "containerSettings":{{"weaponRewardWeight":{{"{WEAPON_TPL}":1}},"defaultPresetsOnly":false,
             "weaponModRewardLimits":{{"{MISC_NODE}":{{"min":1,"max":2}}}},"rewardTypeLimits":{{}},
             "ammoBoxWhitelist":[],"allowBossItems":false}},
         "linkedItems":{{"{WEAPON_TPL}":["{MOD_A_TPL}","{MOD_B_TPL}"]}}"#
     )
+}
+
+/// The four `ItemConfig` sets on the override arm, byte-identical to what the publish's
+/// `spt-item` stem carries below — all four empty, so no filter fires on either arm.
+fn reward_item_config_json() -> &'static str {
+    r#""configBlacklist":[],"rewardItemBlacklist":[],
+        "rewardBaseTypeBlacklist":[],"bossItems":[]"#
 }
 
 /// Every `LootVarying` member of the sends below, `testSeed` included so both arms replay one
@@ -164,9 +171,10 @@ fn varying() -> String {
 
 #[test]
 fn a_resident_send_matches_the_override_send_and_a_wrong_epoch_is_stale() {
-    // (1) A four-root publish: templates whose derived items view is exactly the override's
-    // below, empty traders/globals (the ragfair and quest derives are total over them), and a
-    // locations root carrying bigmap's statics.
+    // (1) A five-root publish: templates whose derived items view is exactly the override's
+    // below, empty traders/globals (the ragfair and quest derives are total over them), a
+    // locations root carrying bigmap's statics, and a configs root whose `spt-item` stem carries
+    // the four sets the reward family used to be handed per send.
     let publish = format!(
         r#"{{"schema":1,"roots":{{
             "templates":{{"items":{{
@@ -192,7 +200,9 @@ fn a_resident_send_matches_the_override_send_and_a_wrong_epoch_is_stale() {
                 "staticLoot":{loot},
                 "staticContainers":{{"staticWeapons":[],"staticContainers":{containers},
                     "staticForced":[]}},
-                "statics":{statics}}}}}
+                "statics":{statics}}}}},
+            "configs":{{"spt-item":{{"kind":"spt-item","blacklist":[],"rewardItemBlacklist":[],
+                "rewardItemTypeBlacklist":[],"bossItems":[]}}}}
         }}}}"#,
         loot = loot_dist(),
         containers = containers_json(),
@@ -297,9 +307,11 @@ fn a_resident_send_matches_the_override_send_and_a_wrong_epoch_is_stale() {
                 "{MOD_B_TPL}":{{"parent":"{MISC_NODE}"}}
             }},
             "defaultPresets":[],"defaultPresetsByTpl":{{}},
-            "presetsByTpl":{presets}
+            "presetsByTpl":{presets},
+            {item_config}
         }},"varying":{{{varying}}}}}"#,
         presets = preset_views_json(),
+        item_config = reward_item_config_json(),
         varying = sealed_varying(),
     );
     let (status, override_sealed) = call(

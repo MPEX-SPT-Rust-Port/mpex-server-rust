@@ -13,7 +13,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use indexmap::IndexMap;
+use indexmap::{IndexMap, IndexSet};
 use serde::{Deserialize, Serialize};
 
 /// Mod-added fields captured on the way in and replayed on the way out.
@@ -841,9 +841,10 @@ pub struct DynamicLootResult {
 // Reward-loot envelopes (`Generators/Loot/LootGenerator.cs`)
 // ---------------------------------------------------------------------------
 
-/// The distrust fallback for the four reward exports: the C#-built database half, present iff
-/// the caller is ineligible for residency. `presetsByTpl` rides only on sealed-case sends and
-/// `presetTpls` only on reward-container sends, mirroring the old per-envelope members.
+/// The distrust fallback for the four reward exports: the C#-built database half plus the
+/// `ItemConfig` sets the resident arm reads off the configs root, present iff the caller is
+/// ineligible for residency. `presetsByTpl` rides only on sealed-case sends and `presetTpls` only
+/// on reward-container sends, mirroring the old per-envelope members.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RewardViewsWire {
@@ -863,34 +864,48 @@ pub struct RewardViewsWire {
     pub presets_by_tpl: Option<IndexMap<String, Vec<PresetView>>>,
     /// Container only: `presetHelper.HasPreset(tpl)` as a set.
     pub preset_tpls: Option<HashSet<String>>,
+    // The `ItemConfig` sets the resident arm reads off the configs root's `spt-item` stem instead
+    // (flip #8). Same wire names and values as the varying half carried, and the same types
+    // [`crate::db::models::ItemConfigLift`] carries, so both arms hand the generator one shape.
+    /// The blacklist [`get_item_reward_pool`](crate::loot::loot_generator) unions in:
+    /// `itemFilterService.GetBlacklistedItems()` (`LootGenerator.cs:425`), which hands back
+    /// `itemConfig.Blacklist` itself (`ItemFilterService.cs:38-41`). A different object from
+    /// [`RewardLootVarying::global_blacklist`]'s cache, so a mod's runtime additions reach the
+    /// sealed filters and not this one — the two are equal on an unmodded server.
+    pub config_blacklist: HashSet<String>,
+    /// `itemFilterService.GetItemRewardBlacklist()` (`LootGenerator.cs:221`) —
+    /// `ItemConfig.RewardItemBlacklist` verbatim. An `IndexSet`, unlike
+    /// [`Self::config_blacklist`], because that is the shape the lift carries; the reward pool only
+    /// extends a `HashSet` out of it, so the order it keeps is unread.
+    pub reward_item_blacklist: IndexSet<String>,
+    /// `itemFilterService.GetItemRewardBaseTypeBlacklist()` (`LootGenerator.cs:224`) —
+    /// `ItemConfig.RewardItemTypeBlacklist`. Collected into a `Vec<&str>` the base-class walk only
+    /// answers a bool off, so an `IndexSet` for the same reason.
+    pub reward_base_type_blacklist: IndexSet<String>,
+    /// `itemFilterService.GetBossItems()` (`LootGenerator.cs:235`), an `IndexSet` for the same
+    /// reason — the reward pool extends a `HashSet` from it and the sealed filter asks it for
+    /// membership.
+    pub boss_items: IndexSet<String>,
 }
 
 /// The per-call half every reward export carries: the service-backed blacklists/sets (Phases-2/4
-/// carve-out — a mod can extend them at runtime) and the test seed.
+/// carve-out — a mod can extend them at runtime) and the test seed. The four config-backed sets
+/// that used to ride beside them live on [`RewardViewsWire`] now.
 ///
-/// The six blacklists/whitelists are `HashSet` because every use is a membership test — none of
-/// them is ever iterated to make a draw, so a randomised order cannot reach the RNG.
+/// Both sets are `HashSet` because every use is a membership test — neither is ever iterated to
+/// make a draw, so a randomised order cannot reach the RNG.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RewardLootVarying {
     /// The blacklist the sealed-container filters test against: `itemFilterService.IsItemBlacklisted`
     /// (`LootGenerator.cs:822,880`), which reads `ItemBlacklistCache` — a *copy* of
     /// `itemConfig.Blacklist` that `AddItemToBlacklistCache` extends at runtime
-    /// (`ItemFilterService.cs:13,94-102`). Filled from `GetItemBlacklistCache()`.
+    /// (`ItemFilterService.cs:13,94-102`). Filled from `GetItemBlacklistCache()`. Stays varying
+    /// where [`RewardViewsWire::config_blacklist`] did not, precisely because it is that mutable
+    /// cache and not the config value.
     pub global_blacklist: HashSet<String>,
-    /// The blacklist [`get_item_reward_pool`](crate::loot::loot_generator) unions in:
-    /// `itemFilterService.GetBlacklistedItems()` (`LootGenerator.cs:425`), which hands back
-    /// `itemConfig.Blacklist` itself (`ItemFilterService.cs:38-41`). A different object from
-    /// [`Self::global_blacklist`]'s cache, so a mod's runtime additions reach the sealed filters and
-    /// not this one — the two are equal on an unmodded server.
-    pub config_blacklist: HashSet<String>,
-    /// `itemFilterService.GetItemRewardBlacklist()` (`LootGenerator.cs:221`).
-    pub reward_item_blacklist: HashSet<String>,
-    /// `itemFilterService.GetItemRewardBaseTypeBlacklist()` (`LootGenerator.cs:224`).
-    pub reward_base_type_blacklist: HashSet<String>,
-    /// `itemFilterService.GetBossItems()` (`LootGenerator.cs:235`).
-    pub boss_items: HashSet<String>,
-    /// `seasonalEventService.GetInactiveSeasonalEventItems()` (`LootGenerator.cs:240`).
+    /// `seasonalEventService.GetInactiveSeasonalEventItems()` (`LootGenerator.cs:240`) — a
+    /// service's own cache, so it rides every send.
     pub inactive_seasonal_items: HashSet<String>,
     /// Test-only, as [`LootVarying::test_seed`].
     pub test_seed: Option<u64>,
@@ -1249,17 +1264,17 @@ mod tests {
         "defaultPresets":[{"id":"p1","name":"ak_default","encyclopedia":"bbbbbbbbbbbbbbbbbbbbbbbb",
             "items":[{"_id":"aaaaaaaaaaaaaaaaaaaaaaaa","_tpl":"bbbbbbbbbbbbbbbbbbbbbbbb"}]}],
         "defaultPresetsByTpl":{"bbbbbbbbbbbbbbbbbbbbbbbb":{"id":"p1","name":"ak_default",
-            "encyclopedia":"bbbbbbbbbbbbbbbbbbbbbbbb","items":[]}}
+            "encyclopedia":"bbbbbbbbbbbbbbbbbbbbbbbb","items":[]}},
+        "configBlacklist":["cccccccccccccccccccccccc"],
+        "rewardItemBlacklist":["dddddddddddddddddddddddd"],
+        "rewardBaseTypeBlacklist":["eeeeeeeeeeeeeeeeeeeeeeee"],
+        "bossItems":["ffffffffffffffffffffffff"]
     "#;
 
     /// Every required `RewardLootVarying` member, for splicing into a test literal's `varying`.
     /// `testSeed` is deliberately absent, as in [`VARYING_JSON`].
     const REWARD_VARYING_JSON: &str = r#"
         "globalBlacklist":["cccccccccccccccccccccccc"],
-        "configBlacklist":["cccccccccccccccccccccccc"],
-        "rewardItemBlacklist":["dddddddddddddddddddddddd"],
-        "rewardBaseTypeBlacklist":["eeeeeeeeeeeeeeeeeeeeeeee"],
-        "bossItems":["ffffffffffffffffffffffff"],
         "inactiveSeasonalItems":["111111111111111111111111"]
     "#;
 
@@ -1322,12 +1337,13 @@ mod tests {
         let views = parsed.views_override.as_ref().unwrap();
         assert_eq!(views.default_presets.len(), 1);
         assert_eq!(views.default_presets[0].id.as_deref(), Some("p1"));
+        assert!(views.boss_items.contains("ffffffffffffffffffffffff"));
         assert!(
             parsed
                 .varying
                 .common
-                .boss_items
-                .contains("ffffffffffffffffffffffff")
+                .global_blacklist
+                .contains("cccccccccccccccccccccccc")
         );
         assert!(parsed.varying.common.test_seed.is_none());
         assert_eq!(
