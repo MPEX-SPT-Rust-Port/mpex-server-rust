@@ -176,13 +176,13 @@ Two non-obvious steps run during build, both in `SPTarkov.Server.Core.csproj`:
 ### Native Rust layer
 
 `rust/spt-native` is a `cdylib` called over C ABI from `Libraries/SPTarkov.Server.Core/Native/`
-(`NativeMethods.cs`, `SptNative.cs`) — and, for the log exports, from the twin
+(`NativeMethods.cs`, `SptNative.cs`) — and, for the log and console exports, from the twin
 `Libraries/SPTarkov.Common/Native/NativeMethods.cs`, because `SPTarkov.Common` cannot reference
 Server.Core. It owns database hash verification, the ported generation paths (location loot, reward
 loot, whole-bot inventory, dynamic ragfair offers, repeatable quests, scav case rewards), the item
 base-class cache build, the ragfair linked-item table, the resident DB every ported family but bots
-reads from, and the whole log pipeline. Twenty-three exports, JSON in / JSON out — except the
-ragfair response, a framed MessagePack envelope, and the log exports — with
+reads from, the whole log pipeline, and the terminal itself. Twenty-nine exports, JSON in / JSON out
+— except the ragfair response, a framed MessagePack envelope, and the log and console exports — with
 `spt_native_abi_version` handshaking against `SptNative.ExpectedAbiVersion`.
 
 Every ported *class* keeps its complete 4.1.2 C# implementation as a **legacy path**, taken
@@ -221,7 +221,7 @@ Linux-only `PropertyGroup`, so from a Windows host nothing maps and the guard in
 | External System | Integration Type | Notes |
 |-------------------|-------------------|-------|
 | Escape from Tarkov game client | Sync HTTP + async WebSocket | Every `/client/*` route; zlib both ways, responses wrapped in the `data`/`err`/`errmsg` envelope. `Models/Eft/` mirrors its wire contracts |
-| `rust/spt-native` (cdylib) | Sync FFI, C ABI | Twenty-three exports; JSON in/out except the MessagePack ragfair response and the log exports. `spt_native_abi_version` handshakes `SptNative.ExpectedAbiVersion` |
+| `rust/spt-native` (cdylib) | Sync FFI, C ABI | Twenty-nine exports; JSON in/out except the MessagePack ragfair response and the log and console exports. `spt_native_abi_version` handshakes `SptNative.ExpectedAbiVersion` |
 | `SPT_Data/` on disk | Batch read at startup | `configs/` via `ConfigLoader`, `database/` via `DatabaseImporter`, hash-verified against `checks.dat` outside DEBUG |
 | `user/profiles/` | Async read/write | `SaveServer` owns the JSON profiles; interval saves plus `BackupService` timers |
 | `user/mods/`, `user/patchers/` | Reflective assembly load | Third-party DLLs: `[Injectable]` registrations, `IOnDIConstruct` hooks, HarmonyX patches, enum prepatchers |
