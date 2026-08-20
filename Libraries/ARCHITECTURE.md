@@ -22,7 +22,6 @@ files is the build-generated `Utils/ProgramStatics.Generated.cs`):
 | `SPTarkov.Reflection` | 8 | 757 | `SPTarkov.DI` | HarmonyX |
 | `SPTarkov.Server.Core` | 855 | 117,812 | `SPTarkov.Common`, `SPTarkov.DI` | HarmonyX, FastCloner, System.IO.Hashing, MessagePack |
 | `SPTarkov.Server.Web` | 50 | 5,460 | `SPTarkov.Server.Core` | MudBlazor, Argon2Sharp |
-| `SPTarkov.Server.Assets` | 0 | 0 | — | — |
 
 ---
 
@@ -34,8 +33,8 @@ SPTarkov.Common ──────┐
 SPTarkov.DI ──────────┘
      │
      └───────────────> SPTarkov.Reflection      (referenced by the host, not by Core)
-SPTarkov.Server.Assets                          (content-only; the host project-references it
-                                                 solely to copy SPT_Data to output)
+Libraries/SPTarkov.Server.Assets/Assets.props   (not a project; imported by the host and the two
+                                                 Tools generators to copy SPT_Data to output)
 ```
 
 | Component | Responsibility | Interacts With |
@@ -45,7 +44,7 @@ SPTarkov.Server.Assets                          (content-only; the host project-
 | `SPTarkov.Reflection` | Runtime method patching for mods, over HarmonyX | Mod assemblies, the host — *not* Core |
 | `SPTarkov.Server.Core` | All game logic — 855 of the 938 `.cs` files here | `.Common`, `.DI`, `rust/spt-native`; consumed by `.Web` and the host |
 | `SPTarkov.Server.Web` | Blazor Server admin panel (MudBlazor), served by the same Kestrel host | `.Server.Core`, mod `IModBlazorMetadata` implementations |
-| `SPTarkov.Server.Assets` | Content only: `SPT_Data/` plus `looseLoot.7z` | The host build, `DatabaseImporter`, `gen_checks` |
+| `SPTarkov.Server.Assets` | Content only, no project: `SPT_Data/` plus `looseLoot.7z` and `Assets.props` | Consumer builds (via `Assets.props`), `DatabaseImporter`, `gen_checks` |
 
 ---
 
@@ -135,14 +134,14 @@ mod MVC controller is routed by ASP.NET too.
 
 ### SPTarkov.Server.Assets
 
-Content project, no code — just the `.csproj` and the payload. Ships `SPT_Data/` (`configs/`,
+Content directory, not a project — just `Assets.props` and the payload. Ships `SPT_Data/` (`configs/`,
 `database/`, `images/`, generated `checks.dat`) plus `looseLoot.7z`, unpacked by
 `scripts/decompress-assets.sh`. `SPTarkov.Server`'s build relocates `dotnet/` satellite assemblies
 and `wwwroot/` admin-panel assets into the *output* `SPT_Data`, which is why neither is covered by
 hash verification.
 
-`checks.dat` is regenerated on Release builds only, by the `PreBuildHashFile` target running the
-`gen_checks` bin — a thin wrapper over the same XXH3-128 code the startup verifier uses (see the root
+`checks.dat` is regenerated on Release builds only, by the `PreBuildHashFile` target in
+`SPTarkov.Server.csproj` running the `gen_checks` bin — a thin wrapper over the same XXH3-128 code the startup verifier uses (see the root
 ARCHITECTURE.md).
 
 Excluded from the knowledge graph by `.graphifyignore` (~all JSON data, not code).

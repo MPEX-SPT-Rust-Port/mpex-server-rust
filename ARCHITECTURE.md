@@ -17,7 +17,7 @@ build/run commands see [CLAUDE.md](CLAUDE.md).
 | `SPTarkov.Server` | Executable host: `Program.cs`, mod-loading bootstrap, the single catch-all HTTP middleware | Everything; owns startup order and Kestrel |
 | `Libraries/SPTarkov.Server.Core` | All game logic — everything below lives here unless noted | `.Common`, `.DI`, `rust/spt-native` |
 | `Libraries/SPTarkov.Server.Web` | Blazor Server admin panel (MudBlazor) | `.Server.Core`, the shared Kestrel host |
-| `Libraries/SPTarkov.Server.Assets` | `SPT_Data/`: configs, JSON database, images; the largest files ship compressed as `looseLoot.7z` | The host build (copies to output), `DatabaseImporter` |
+| `Libraries/SPTarkov.Server.Assets` | Data only, not a project: `SPT_Data/` (configs, JSON database, images) plus `Assets.props`, the item glob that stages it into consumer output directories; the largest files ship compressed as `looseLoot.7z` | Consumer builds (via `Assets.props`), `DatabaseImporter` |
 | `Libraries/SPTarkov.DI` | Attribute-driven DI container: `[Injectable]`, `DependencyInjectionHandler` | Core, `.Reflection`, the host |
 | `Libraries/SPTarkov.Common` | Shared primitives and the logging front end (`SptLogger`, `SPTLoggerDispatcher`) | `rust/spt-native` (log and console exports), Core |
 | `Libraries/SPTarkov.Reflection` | Runtime method patching for mods (`AbstractPatch`, `PatchManager`) | Mods, the host (not Core) |
@@ -168,7 +168,7 @@ Two non-obvious steps run during build, both in `SPTarkov.Server.Core.csproj`:
   that mirrors it, while the barrier patch has its own Release-only fixtures in
   `Testing/UnitTests/Tests/Native/WriteBarrier*Tests`.
 
-`SPTarkov.Server.Assets` hashes `SPT_Data` into `checks.dat` on Release builds, which
+`SPTarkov.Server`'s `PreBuildHashFile` target hashes `SPT_Data` into `checks.dat` on Release builds, which
 `DatabaseImporter` verifies at startup outside DEBUG. The format is a contract shared with
 `rust/spt-native/src/verify.rs`; scope is manifest-driven and exact in both directions over
 `configs/` and `database/`, so deletions and swaps are caught, while `images/` is unverified.

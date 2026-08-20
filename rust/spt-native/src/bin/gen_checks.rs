@@ -1,5 +1,5 @@
 //! Build-time generator for `SPT_Data/checks.dat`, invoked by the `PreBuildHashFile` target in
-//! `SPTarkov.Server.Assets.csproj` on Release builds. Replaces the former `build/PostBuild.cs`
+//! `SPTarkov.Server.csproj` on Release builds. Replaces the former `build/PostBuild.cs`
 //! dotnet file-based app so the build no longer pulls `System.IO.Hashing` from NuGet.
 
 use std::path::PathBuf;
