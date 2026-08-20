@@ -626,13 +626,13 @@ stale-epoch retry that had never been exercised end to end now has a scav case s
 reads and installs the five resident roots as epoch 1, then hands the
 eager file bytes back for `ImporterUtil`'s reflection walk to materialize `DatabaseTables` from.
 `CoreConfig.ForceLegacyDatabaseImport` restores the pure-C# verify-then-walk arm.
-**Measured, the flip is a regression, not a speed-up.** At the importer it reads **878.4 ms against
-legacy's 426.0 ms — 0.48x, roughly 2.1x slower, +425–455 ms** (BENCHMARK.md § Phase 3), with
+**Measured, the flip is a regression, not a speed-up.** At the importer it reads **935.7 ms against
+legacy's 480.6 ms — 0.51x, roughly 1.9x slower, +419–455 ms** (BENCHMARK.md § Phase 3), with
 202 files / 49.4 MiB of eager content crossing as buffers. The deliverable is the retired startup
 double-read, and against a warm page cache the read it retires was nearly free while the buffer
-plumbing is not: the buffer-fed walk is 60–70 ms *slower* than the disk walk it replaces (410.4
-against 340.3 ms), and the fused load costs ~380–395 ms over the bare verify (480.5 against
-85.7 ms) for buffer retention, the FFI copy and the five-root assembly, parse and derivation —
+plumbing is not: the buffer-fed walk is 50–68 ms *slower* than the disk walk it replaces (451.1
+against 383.8 ms), and the fused load costs ~380–391 ms over the bare verify (484.6 against
+96.8 ms) for buffer retention, the FFI copy and the five-root assembly, parse and derivation —
 work the legacy arm does not do at import time at all. Neither figure is a startup total, and the
 gap the flip was built to close is **not wired up**: `DbPublisher.EnsureCurrent` still republishes
 all five roots whenever its own `_currentEpoch` is 0, and nothing feeds `DbLoad`'s installed epoch
@@ -640,9 +640,10 @@ into it, so both arms pay a 730–745 ms forced publish that epoch 1 already did
 Feeding that epoch through is the named follow-up, and it buys less than it looks:
 `EnsureCurrent` republishes when `_currentEpoch == 0` **or** `_lastPublishedStamp != stamp`
 (`DbPublisher.cs:38`), and on Release the write barriers move the stamp during `PostDbLoadService`
-— `AdjustLocationBotValues` writes `map.Base.BotMax`/`BotStart` for every `maxBotCap` entry with no
-gate above it, and `LocationBase`'s setters bump under Ceciler
-(`WriteBarrierCoverageTests.AWriteIntoTheLocationsRootBumps`) — so wiring epoch 1
+— `AdjustLocationBotValues` writes `map.Base.BotMax`/`BotStart` for every `maxBotCap` entry that
+resolves to a map (12 of the 13 shipped entries; `"default"` has no `LocationTable` property, and
+`PostDbLoadService.cs:624-627` skips what does not resolve), and `LocationBase`'s setters bump
+under Ceciler (`WriteBarrierCoverageTests.AWriteIntoTheLocationsRootBumps`) — so wiring epoch 1
 in would skip that first republish only in the case where nothing dirtied the tables between the
 load and the first eligible call. It is **Phase 4/5 work, not a Phase 3 defect** — decision 3 below
 is why it was deliberately left out of this phase.
@@ -673,11 +674,19 @@ integration test** (`rust/spt-native/tests/phase3_db_load.rs`), not by a C#-enve
 harness. It can be, because epoch 1 is generation-invisible until 6b: the first `EnsureCurrent`
 republish supersedes it, which is also what guarantees generation runs off post-`PostDbLoadService`
 state rather than off raw disk bytes. That is the ceiling this flip accepts, recorded here — and it
-is why the regression above cannot be closed by simply skipping the republish. **4, the equivalence
-golden is permanent, not a one-shot spike.** `DatabaseLoadEquivalenceTests` compares the
-legacy-built and native-built `DatabaseTables` root by root and pins that every root it compares is
-really buffer-fed; it is a plain `[Test]`, so it runs in `dotnet test` — flip #6's route, not the
-manual two-step harness. (c) Net `Native/` delta for the phase, the literal
+is why the regression above cannot be closed by simply skipping the republish. **The hazard that
+ceiling hides, for whoever wires the load-time epoch through:** `classify` (`load.rs:74`) and
+`LOCATION_MEMBERS` (`load.rs:18`) are a second, independent file→wire mapping duplicating
+`DbPayloadProjection`, and **nothing gates it** — `DatabaseLoadEquivalenceTests` compares
+`DatabaseTables`, never the resident roots. What makes that safe today is only that epoch 1 is
+superseded by the first `EnsureCurrent` republish, which is exactly the republish the follow-up
+exists to remove; whoever removes it inherits a mapping that may have been diverging unobserved
+since this phase landed. Gate it against a `DbPayloadProjection` publish before, not after.
+**4, the equivalence golden is permanent, not a one-shot spike.** `DatabaseLoadEquivalenceTests`
+compares the legacy-built and native-built `DatabaseTables` root by root and pins that the fused load
+still returns a file under every root it compares (that `ImporterUtil` then consumes the map is
+`ImporterUtilPreloadedTests`); it is a plain `[Test]`, so it runs in `dotnet test` — flip #6's route,
+not the manual two-step harness. (c) Net `Native/` delta for the phase, the literal
 `git diff --stat e265396..193bdac -- Libraries/SPTarkov.Server.Core/Native/`:
 
 ```
@@ -727,7 +736,7 @@ written against, not the current file.
    `database/`, installs the five resident roots as epoch 1 and hands the eager file bytes to
    `ImporterUtil`; `CoreConfig.ForceLegacyDatabaseImport` is the opt-out and
    `DatabaseLoadEquivalenceTests` the permanent gate. It is a **measured regression at the
-   importer** — 0.48x, +425–455 ms — and that cost is real rather than a wiring oversight: the
+   importer** — 0.51x, +419–455 ms — and that cost is real rather than a wiring oversight: the
    fused load does assembly, parse and derivation work at import time that the legacy arm does not,
    and the buffer-fed walk is slower than the disk walk it retires. Separately, the *startup* win
    the flip was built for is still unwired — nothing feeds `DbLoad`'s installed epoch to
