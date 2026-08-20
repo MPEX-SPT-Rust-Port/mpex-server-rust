@@ -53,7 +53,15 @@ public class ImporterUtilPreloadedTests
         var result = await LoadAsync(Preloaded("database/alpha.json"));
 
         Assert.That(result.Beta!.V, Is.EqualTo(1), "beta.json is absent from the map");
-        Assert.That(result.Nested!.Gamma!.V, Is.EqualTo(1), "the recursion carries the map down, and misses still hit disk");
+        Assert.That(result.Nested!.Gamma!.V, Is.EqualTo(1), "a subdirectory miss still hits disk");
+    }
+
+    [Test]
+    public async Task APreloadedBufferInASubdirectoryBeatsTheFileOnDisk()
+    {
+        var result = await LoadAsync(Preloaded("database/nested/gamma.json"));
+
+        Assert.That(result.Nested!.Gamma!.V, Is.EqualTo(2), "the directory recursion carries the map down to nested/gamma.json");
     }
 
     [Test]
