@@ -133,8 +133,8 @@ entry and the inherited `ValueType.ToString()`. Scope is `Color` only — mods t
 - **Native database load requires comment-free JSON in the resident-root files** — templates,
   traders, globals, locations and hideout are parsed by `serde_json` inside `spt_db_load`, which
   rejects the comments the pure-C# reader tolerated (`JsonUtil` sets
-  `ReadCommentHandling = JsonCommentHandling.Skip`, and nothing else — trailing commas are rejected
-  on both paths, `AllowTrailingCommas` appearing nowhere in the tree). Non-resident files keep that tolerance: their
+  `ReadCommentHandling = JsonCommentHandling.Skip` and no trailing-comma knob — trailing commas are
+  rejected on both paths, `AllowTrailingCommas` appearing nowhere in the tree). Non-resident files keep that tolerance: their
   bytes cross as buffers and are still deserialized C#-side on exactly the same options as before.
   Shipped data passes — `rust/spt-native/tests/phase3_db_load.rs` runs the fused load over the real
   tree and is the gate — so this bites only a hand-edited or mod-shipped `database/`, for which
@@ -622,7 +622,8 @@ stale-epoch retry that had never been exercised end to end now has a scav case s
 (`ScavCaseResidentDbTests`).
 
 **Phase 3 ledger.** `spt_db_load` (ABI 28) fuses the `checks.dat` hash walk with reading
-`database/`: one walk hashes, reads and installs the five resident roots as epoch 1, then hands the
+`database/`: one walk hashes (when verifying — Debug ships no `checks.dat` and asks for none),
+reads and installs the five resident roots as epoch 1, then hands the
 eager file bytes back for `ImporterUtil`'s reflection walk to materialize `DatabaseTables` from.
 `CoreConfig.ForceLegacyDatabaseImport` restores the pure-C# verify-then-walk arm.
 **Measured, the flip is a regression, not a speed-up.** At the importer it reads **878.4 ms against
@@ -639,7 +640,9 @@ into it, so both arms pay a 730–745 ms forced publish that epoch 1 already did
 Feeding that epoch through is the named follow-up, and it buys less than it looks:
 `EnsureCurrent` republishes when `_currentEpoch == 0` **or** `_lastPublishedStamp != stamp`
 (`DbPublisher.cs:38`), and on Release the write barriers move the stamp during `PostDbLoadService`
-(`wave.WildSpawnType = …` and its neighbours write into barriered model types), so wiring epoch 1
+— `AdjustLocationBotValues` writes `map.Base.BotMax`/`BotStart` for every `maxBotCap` entry with no
+gate above it, and `LocationBase`'s setters bump under Ceciler
+(`WriteBarrierCoverageTests.AWriteIntoTheLocationsRootBumps`) — so wiring epoch 1
 in would skip that first republish only in the case where nothing dirtied the tables between the
 load and the first eligible call. It is **Phase 4/5 work, not a Phase 3 defect** — decision 3 below
 is why it was deliberately left out of this phase.
@@ -683,9 +686,10 @@ manual two-step harness. (c) Net `Native/` delta for the phase, the literal
  2 files changed, 132 insertions(+), 1 deletion(-)
 ```
 
-Growth, and all of it additive: one `DllImport`, the `DbLoad` wrapper and the framed-response
-parser with its three internal DTOs. Nothing in `Native/` was replaced — the phase's other edits
-land outside it, in `ImporterUtil`, `JsonUtil` and `DatabaseImporter`.
+Growth, and almost all of it additive: one `[LibraryImport]` entry, the `DbLoad` wrapper and the
+framed-response parser with its three internal DTOs. The single deleted line is the
+`ExpectedAbiVersion` constant, 27 → 28 — no existing `Native/` code path was replaced, and the
+phase's other edits land outside `Native/`, in `ImporterUtil`, `JsonUtil` and `DatabaseImporter`.
 
 **The ported 4.1.2 quirks are documented at their call sites**, as numbered `Quirk N` comments in
 `rust/spt-native/src/quest/*.rs`, `src/scav_case/generator.rs`, `src/base_class.rs`,
