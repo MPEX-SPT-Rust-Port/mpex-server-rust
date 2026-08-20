@@ -19,7 +19,7 @@ use crate::bot::repair_service::MinMax;
 use crate::loot::models::{
     Item, SpawnpointTemplate, StaticContainer, StaticContainerData, StaticForced, StaticLootDetails,
 };
-use crate::quest::models::{LevelledItemFilter, RepeatableTemplates};
+use crate::quest::models::{LevelledItemFilter, RepeatableQuestTemplates, RepeatableTemplates};
 use crate::ragfair::models::DynamicConfigWire;
 use crate::scav_case::models::ScavCaseConfigView;
 
@@ -71,12 +71,17 @@ pub struct ConfigsRoot {
     /// (`InventoryConfig.cs:8-9`) — see [`InventoryConfigLift`].
     #[serde(default, rename = "spt-inventory")]
     pub inventory: Option<InventoryConfigLift>,
+    /// `Models/Spt/Config/QuestConfig.cs`, whose `Kind` is `spt-quest` (`QuestConfig.cs:11-12`) —
+    /// see [`QuestConfigLift`].
+    #[serde(default, rename = "spt-quest")]
+    pub quest: Option<QuestConfigLift>,
     #[serde(flatten)]
     pub extra: IndexMap<String, Value>,
 }
 
 /// `Models/Spt/Config/ItemConfig.cs` — the four sets the reward families read. Shared: the scav
-/// case family reads `rewardItemBlacklist`/`bossItems`, the ragfair family reads `blacklist`.
+/// case and repeatable-quest families read `rewardItemBlacklist`/`bossItems`, the ragfair family
+/// reads `blacklist`.
 #[derive(Debug, Default, Deserialize)]
 pub struct ItemConfigLift {
     /// `ItemConfig.Blacklist` (`ItemConfig.cs:14-15`) — what `ItemFilterService.GetBlacklistedItems`
@@ -336,6 +341,26 @@ pub struct Preset {
     /// Only default presets carry `_encyclopedia`.
     #[serde(rename = "_encyclopedia")]
     pub encyclopedia: Option<String>,
+    #[serde(flatten)]
+    pub extra: IndexMap<String, Value>,
+}
+
+/// `Models/Spt/Config/QuestConfig.cs` — the two maps `RepeatableQuestHelper` reads off the config
+/// rather than the database. Both C# members are `required`
+/// (`QuestConfig.cs:44-48`, `:67-71`), so a stem missing one could not have come from a live
+/// `QuestConfig`: strict like [`RagfairConfigLift::dynamic`], rather than defaulting to an empty
+/// map the helper would then fail every lookup against. `repeatableQuests`, the dispatch flags and
+/// whatever Ceciler's `[JsonExtensionData]` adds on a Release build ride [`Self::extra`].
+#[derive(Debug, Deserialize)]
+pub struct QuestConfigLift {
+    /// `QuestConfig.RepeatableQuestTemplates`, whose wire name is `repeatableQuestTemplateIds` —
+    /// the template **ids** by player group (`RepeatableQuestHelper.cs:187-197`), not the quest
+    /// templates the views carry. Named for the wire, as the request member it replaces was.
+    #[serde(rename = "repeatableQuestTemplateIds")]
+    pub repeatable_quest_template_ids: RepeatableQuestTemplates,
+    /// `QuestConfig.LocationIdMap` — `GetQuestLocationByMapId` (`RepeatableQuestHelper.cs:204`).
+    #[serde(rename = "locationIdMap")]
+    pub location_id_map: IndexMap<String, String>,
     #[serde(flatten)]
     pub extra: IndexMap<String, Value>,
 }
@@ -939,6 +964,11 @@ mod tests {
                     "allowBossItemsAsRewards": false,
                     "forceLegacyScavCaseGeneration": false},
                 "spt-core": {"kind": "spt-core"},
+                "spt-quest": {"kind": "spt-quest",
+                    "repeatableQuestTemplateIds": {"pmc": {"Elimination": "pmc_elim"},
+                        "scav": {"Elimination": "scav_elim"}},
+                    "locationIdMap": {"bigmap": "55f2d3fd4bdc2d5f408b4567"},
+                    "repeatableQuests": []},
                 "spt-inventory": {"kind": "spt-inventory", "customMoneyTpls": ["custom_money"],
                     "randomLootContainers": {}},
                 "spt-ragfair": {"kind": "spt-ragfair", "runIntervalSeconds": 450,
@@ -978,13 +1008,27 @@ mod tests {
                 .contains("custom_money")
         );
 
-        // Every other kind is still an untyped key of the flatten map, and the four lifted ones are
+        let quest = root.quest.as_ref().unwrap();
+        assert_eq!(
+            quest.repeatable_quest_template_ids.pmc["Elimination"],
+            "pmc_elim"
+        );
+        assert_eq!(
+            quest.repeatable_quest_template_ids.scav["Elimination"],
+            "scav_elim"
+        );
+        assert_eq!(quest.location_id_map["bigmap"], "55f2d3fd4bdc2d5f408b4567");
+        // Unlifted QuestConfig members ride the stem's own extra
+        assert!(quest.extra.contains_key("repeatableQuests"));
+
+        // Every other kind is still an untyped key of the flatten map, and the five lifted ones are
         // no longer in it
         assert!(root.extra.contains_key("spt-core"));
         assert!(!root.extra.contains_key("spt-item"));
         assert!(!root.extra.contains_key("spt-scavcase"));
         assert!(!root.extra.contains_key("spt-ragfair"));
         assert!(!root.extra.contains_key("spt-inventory"));
+        assert!(!root.extra.contains_key("spt-quest"));
     }
 
     /// A configs root with none of the lifted stems parses: absent is `None`, which the consuming
@@ -999,6 +1043,7 @@ mod tests {
         assert!(root.scavcase.is_none());
         assert!(root.ragfair.is_none());
         assert!(root.inventory.is_none());
+        assert!(root.quest.is_none());
     }
 
     /// The other half of the strictness rule: a stem that *is* there but does not parse fails the
@@ -1028,6 +1073,18 @@ mod tests {
         assert!(
             serde_json::from_str::<ConfigsRoot>(r#"{"spt-inventory": {"customMoneyTpls": 5}}"#)
                 .is_err()
+        );
+        // Neither `QuestConfigLift` member carries a `serde(default)`, so a `spt-quest` stem
+        // without one fails rather than handing the helper an empty map to miss every lookup in
+        assert!(
+            serde_json::from_str::<ConfigsRoot>(r#"{"spt-quest": {"kind": "spt-quest"}}"#).is_err()
+        );
+        assert!(
+            serde_json::from_str::<ConfigsRoot>(
+                r#"{"spt-quest": {"repeatableQuestTemplateIds": {"pmc": {}, "scav": {}},
+                    "locationIdMap": []}}"#
+            )
+            .is_err()
         );
     }
 

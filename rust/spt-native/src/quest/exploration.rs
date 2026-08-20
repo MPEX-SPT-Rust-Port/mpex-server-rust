@@ -445,6 +445,9 @@ mod tests {
 
         value["repeatableQuestTemplates"]["Exploration"] =
             templates["templates"]["Exploration"].clone();
+        value["repeatableQuestTemplateIds"]["pmc"]["Exploration"] =
+            serde_json::json!("616041eb031af660100c9967");
+        value["locationIdMap"][LOCATION] = serde_json::json!(LOCATION_ID);
         value["extractsByLocation"] = serde_json::json!({
             LOCATION.to_lowercase(): [
                 { "name": DRAWABLE_EXITS[0], "side": "Pmc", "chance": 100.0,
@@ -465,16 +468,10 @@ mod tests {
         ))
     }
 
-    /// The fixture varying half with the Exploration pmc template id and the mixed-case location
-    /// mapping spliced in.
+    /// The fixture varying half. The Exploration pmc template id and the mixed-case location
+    /// mapping ride the views override since flip #7.
     fn varying() -> QuestVaryingRequest {
-        let mut value = varying_value();
-
-        value["repeatableQuestTemplateIds"]["pmc"]["Exploration"] =
-            serde_json::json!("616041eb031af660100c9967");
-        value["locationIdMap"][LOCATION] = serde_json::json!(LOCATION_ID);
-
-        serde_json::from_value(value).expect("fixture varying parses")
+        serde_json::from_value(varying_value()).expect("fixture varying parses")
     }
 
     /// One location, as `quest.json`'s `locations` map spells it — key and target both raw.

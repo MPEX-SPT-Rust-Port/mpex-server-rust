@@ -2196,6 +2196,25 @@ mod tests {
         );
     }
 
+    /// The `configs` member of a publish envelope carrying the two stems the repeatable-quest
+    /// family reads, with the same values `views_override_value()` sends on the override arm — so
+    /// a resident generation and an override one see byte-identical config-backed inputs.
+    fn quest_configs_root() -> String {
+        let views = crate::quest::models::tests::views_override_value();
+        let quest_stem = serde_json::json!({
+            "kind": "spt-quest",
+            "repeatableQuestTemplateIds": views["repeatableQuestTemplateIds"],
+            "locationIdMap": views["locationIdMap"],
+        });
+        let item_stem = serde_json::json!({
+            "kind": "spt-item",
+            "rewardItemBlacklist": views["rewardItemBlacklist"],
+            "bossItems": views["bossItems"],
+        });
+
+        format!(r#""configs":{{"spt-quest":{quest_stem},"spt-item":{item_stem}}}"#)
+    }
+
     /// A repeatable-quest request at `epoch`, with the views override sent or omitted, off the
     /// fixtures the model tests already pin against the shipped database.
     fn quest_request(epoch: u64, include_override: bool, seed: Option<u64>) -> Vec<u8> {
@@ -2270,10 +2289,16 @@ mod tests {
         assert_eq!(status, STATUS_STALE_EPOCH);
 
         // Publish the mini roots (junk roots parse as empty typed containers, so the empty quest
-        // views derive) and name the returned epoch: the request generates
+        // views derive) plus the configs root the override-less arm reads its config-backed
+        // members off, and name the returned epoch: the request generates
+        let configs = quest_configs_root();
         let (status, out) = call_generate(
             spt_db_publish,
-            br#"{"schema":1,"roots":{"templates":{"a":1},"traders":{"b":2},"globals":{"c":3},"locations":{"factory4_day":{}}}}"#,
+            format!(
+                r#"{{"schema":1,"roots":{{"templates":{{"a":1}},"traders":{{"b":2}},
+                "globals":{{"c":3}},"locations":{{"factory4_day":{{}}}},{configs}}}}}"#
+            )
+            .as_bytes(),
         );
         assert_eq!(status, STATUS_OK);
         let epoch = serde_json::from_slice::<serde_json::Value>(&out).unwrap()["epoch"]
@@ -2301,6 +2326,27 @@ mod tests {
         let (status, _) =
             call_generate(spt_generate_repeatable_quest, &quest_request(0, true, None));
         assert_eq!(status, STATUS_OK);
+
+        // Last, because it moves the resident epoch: a configs root that *is* resident but carries
+        // no stem this family reads is a per-call failure naming the stem, not the stale-epoch
+        // answer a missing root gets — a republish would not fix a stem the publish never carried
+        let (status, out) = call_generate(
+            spt_db_publish,
+            br#"{"schema":1,"roots":{"configs":{"spt-core":{"kind":"spt-core"}}}}"#,
+        );
+        assert_eq!(status, STATUS_OK);
+        let stemless = serde_json::from_slice::<serde_json::Value>(&out).unwrap()["epoch"]
+            .as_u64()
+            .unwrap();
+        let (status, out) = call_generate(
+            spt_generate_repeatable_quest,
+            &quest_request(stemless, false, None),
+        );
+        assert_eq!(status, STATUS_ERROR);
+        assert!(
+            String::from_utf8(out).unwrap().contains("spt-quest"),
+            "the stem-missing error must name the stem"
+        );
     }
 
     #[test]
@@ -2349,8 +2395,10 @@ mod tests {
                 "globals":{{"ItemPresets":{{"preset1":{{"_id":"preset1","_name":"default",
                     "_items":[{{"_id":"aaaaaaaaaaaaaaaaaaaaaaaa","_tpl":"bbbbbbbbbbbbbbbbbbbbbbbb"}}],
                     "_encyclopedia":"bbbbbbbbbbbbbbbbbbbbbbbb"}}}}}},
-                "locations":{{}}
-            }}}}"#
+                "locations":{{}},
+                {configs}
+            }}}}"#,
+            configs = quest_configs_root()
         );
 
         let (status, out) = call_generate(spt_db_publish, request.as_bytes());
@@ -2365,6 +2413,12 @@ mod tests {
         let _guard = db_lock();
         let epoch = publish_quest_roots();
         let request = quest_request(epoch, false, Some(42));
+        // Since flip #7 the template ids and the location map ride the resident configs root, not
+        // the request, so the masking's "ids the caller already knew" set has to cover the root
+        // too — otherwise a regression that swapped the drawn template id would be blanked as a
+        // mint on both sides and never show.
+        let known = |request: &[u8]| [request, quest_configs_root().as_bytes()].concat();
+        let known_request = known(&request);
 
         let (first_status, first) = call_generate(spt_generate_repeatable_quest, &request);
         let (second_status, second) = call_generate(spt_generate_repeatable_quest, &request);
@@ -2377,25 +2431,25 @@ mod tests {
             "the fixture request generates a quest"
         );
         assert!(response["pool"]["types"].is_array());
-        // The ids a draw can move — the trader the quest is minted for, and the tpls it hands over
-        // — come off the request, so the masking leaves them in the compared bytes.
+        // The ids a draw can move — the trader the quest is minted for, the template it was cloned
+        // from, and the tpls it hands over — are all known, so the masking leaves them in the
+        // compared bytes.
+        let masked = mask_minted_ids(&first, &known_request);
         assert!(
-            mask_minted_ids(&first, &request).contains("54cb50c76803fa8b248b4571"),
+            masked.contains("54cb50c76803fa8b248b4571"),
             "the request's own ids must survive the masking"
         );
-        assert_eq!(
-            mask_minted_ids(&first, &request),
-            mask_minted_ids(&second, &request)
+        assert!(
+            masked.contains("616052ea3054fc0e2c24ce6e"),
+            "the configs root's template id must survive the masking"
         );
+        assert_eq!(masked, mask_minted_ids(&second, &known_request));
 
         // …and the masking has teeth: another seed draws a different quest.
         let other_request = quest_request(epoch, false, Some(7));
         let (status, other) = call_generate(spt_generate_repeatable_quest, &other_request);
         assert_eq!(status, STATUS_OK);
-        assert_ne!(
-            mask_minted_ids(&first, &request),
-            mask_minted_ids(&other, &other_request)
-        );
+        assert_ne!(masked, mask_minted_ids(&other, &known(&other_request)));
     }
 
     /// A scav case craft off the generator's own synthetic table, seeded so the reward list is the

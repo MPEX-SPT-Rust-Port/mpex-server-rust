@@ -20,7 +20,7 @@
 use std::collections::HashSet;
 use std::sync::OnceLock;
 
-use indexmap::IndexMap;
+use indexmap::{IndexMap, IndexSet};
 use serde::{Deserialize, Serialize};
 
 use crate::bot::repair_service::MinMax;
@@ -904,6 +904,22 @@ pub struct QuestViewsWire {
     /// up with (`ExplorationQuestGenerator.cs:183`). List order is load-bearing: the exit is drawn
     /// from the filtered list by index (`:279`).
     pub extracts_by_location: IndexMap<String, Vec<ExitView>>,
+    // The config-backed members the resident arm reads off the `spt-item` and `spt-quest` stems of
+    // the configs root instead (flip #7). Same wire names and values as the varying half carried.
+    /// `ItemFilterService.GetItemRewardBlacklist()` — `IsItemRewardBlacklisted` (`:711`), which is
+    /// `ItemConfig.RewardItemBlacklist` verbatim (`ItemFilterService.cs:33-36`). An `IndexSet`
+    /// because that is what the resident arm's [`crate::db::models::ItemConfigLift`] carries;
+    /// membership is all either arm is asked for.
+    pub reward_item_blacklist: IndexSet<String>,
+    /// `ItemFilterService.GetBossItems()` — `IsBossItem` (`:726`), `ItemConfig.BossItems` verbatim
+    /// (`ItemFilterService.cs:69-72`).
+    pub boss_items: IndexSet<String>,
+    /// `QuestConfig.RepeatableQuestTemplates` — the template **ids** by player group
+    /// (`RepeatableQuestHelper.cs:187-197`), not the quest templates
+    /// [`Self::repeatable_quest_templates`] carries.
+    pub repeatable_quest_template_ids: RepeatableQuestTemplates,
+    /// `QuestConfig.LocationIdMap` — `GetQuestLocationByMapId` (`RepeatableQuestHelper.cs:204`).
+    pub location_id_map: IndexMap<String, String>,
     /// [`ItemBaseClassCache`] over [`Self::items`], built on first use — an override pays for it
     /// per request, where the resident views carry ragfair's prebuilt cache. Never crosses the
     /// wire.
@@ -983,23 +999,14 @@ pub struct QuestVaryingRequest {
     pub repeatable_config: RepeatableQuestConfig,
     /// Test-only: draws come from a seeded generator when set. Absent in production.
     pub seed: Option<u64>,
-    // Moved from the old invariant slice: service/config state with no resident home until
-    // Phases 2/4. Wire names and value shapes are byte-identical to the old slice members.
+    // Service state with no resident home: both are a service's own mutable cache, not a config
+    // value, so they stay varying past the Phase 4 config lift.
     /// `ItemFilterService.GetItemBlacklistCache()` — what `IsItemBlacklisted` (`:710/:713`)
     /// answers from: the `config/item.json` blacklist plus anything added at runtime.
     pub item_blacklist: HashSet<String>,
-    /// `ItemFilterService.GetItemRewardBlacklist()` — `IsItemRewardBlacklisted` (`:711`).
-    pub reward_item_blacklist: HashSet<String>,
-    /// `ItemFilterService.GetBossItems()` — `IsBossItem` (`:726`).
-    pub boss_items: HashSet<String>,
     /// `SeasonalEventService.GetInactiveSeasonalEventItems()` (`:655`,
     /// `CompletionQuestGenerator.cs:128`). Ragfair's varying half carries it under the same name.
     pub seasonal_item_tpl_blacklist: HashSet<String>,
-    /// `QuestConfig.RepeatableQuestTemplates` — the template **ids** by player group
-    /// (`RepeatableQuestHelper.cs:187-197`), not the quest templates in the views.
-    pub repeatable_quest_template_ids: RepeatableQuestTemplates,
-    /// `QuestConfig.LocationIdMap` — `GetQuestLocationByMapId` (`RepeatableQuestHelper.cs:204`).
-    pub location_id_map: IndexMap<String, String>,
 }
 
 /// One generated quest and the pool it was drawn from, which the generators mutate.
@@ -1194,7 +1201,14 @@ pub mod tests {
                     "name": "Dorms V-Ex", "side": "Pmc", "chance": 100.0,
                     "passageRequirement": "TransferItem"
                 }]
-            }
+            },
+            "rewardItemBlacklist": ["888888888888888888888888"],
+            "bossItems": ["777777777777777777777777"],
+            "repeatableQuestTemplateIds": {
+                "pmc": { "Elimination": "616052ea3054fc0e2c24ce6e" },
+                "scav": { "Elimination": "62825ef60e88d037dc1eb428" }
+            },
+            "locationIdMap": { "bigmap": "55f2d3fd4bdc2d5f408b4567" }
         })
     }
 
@@ -1202,8 +1216,8 @@ pub mod tests {
         serde_json::from_value(views_override_value()).expect("fixture views override parses")
     }
 
-    /// The parsed varying half — what [`crate::quest::QuestContext::new`] borrows its six
-    /// service/config members from.
+    /// The parsed varying half — what [`crate::quest::QuestContext::new`] borrows its two
+    /// service-state members from.
     pub fn varying() -> QuestVaryingRequest {
         serde_json::from_value(varying_value()).expect("fixture varying parses")
     }
@@ -1257,8 +1271,26 @@ pub mod tests {
         assert_eq!(extract.chance, Some(100.0));
         assert_eq!(extract.passage_requirement, "TransferItem");
 
-        // Every view the generators consult is reachable through the context, the varying half's
-        // moved members included
+        // The four config-backed members flip #7 moved off the varying half, under their unchanged
+        // wire names — the resident arm reads the same values off the configs root's stems
+        assert!(
+            views
+                .reward_item_blacklist
+                .contains("888888888888888888888888")
+        );
+        assert!(views.boss_items.contains("777777777777777777777777"));
+        assert_eq!(
+            views.repeatable_quest_template_ids.pmc["Elimination"],
+            "616052ea3054fc0e2c24ce6e"
+        );
+        assert_eq!(
+            views.repeatable_quest_template_ids.scav["Elimination"],
+            "62825ef60e88d037dc1eb428"
+        );
+        assert_eq!(views.location_id_map["bigmap"], "55f2d3fd4bdc2d5f408b4567");
+
+        // Every view the generators consult is reachable through the context, the moved members
+        // included
         let views = crate::quest::QuestViews::Override(Box::new(views));
         let varying = varying();
         let context = crate::quest::QuestContext::new(&views, &varying);
@@ -1290,8 +1322,8 @@ pub mod tests {
         assert!(parsed.views_override.is_none());
     }
 
-    /// The varying half of a request, as the locked contract spells it — the six members moved
-    /// off the old invariant slice included.
+    /// The varying half of a request, as the locked contract spells it — the per-call block plus
+    /// the two service-state sets flip #7 left behind.
     pub fn varying_value() -> serde_json::Value {
         let config = database(QUEST_CONFIG_PATH);
 
@@ -1310,14 +1342,7 @@ pub mod tests {
             },
             "repeatableConfig": config["repeatableQuests"][0],
             "itemBlacklist": ["999999999999999999999999"],
-            "rewardItemBlacklist": ["888888888888888888888888"],
-            "bossItems": ["777777777777777777777777"],
-            "seasonalItemTplBlacklist": ["666666666666666666666666"],
-            "repeatableQuestTemplateIds": {
-                "pmc": { "Elimination": "616052ea3054fc0e2c24ce6e" },
-                "scav": { "Elimination": "62825ef60e88d037dc1eb428" }
-            },
-            "locationIdMap": { "bigmap": "55f2d3fd4bdc2d5f408b4567" }
+            "seasonalItemTplBlacklist": ["666666666666666666666666"]
         })
     }
 
@@ -1340,28 +1365,14 @@ pub mod tests {
             Some(&["any".to_owned()][..])
         );
 
-        // The six members moved off the old invariant slice, under their unchanged wire names
+        // The two service-state sets flip #7 left on the varying half, under their unchanged wire
+        // names. The four config-backed members it moved are asserted on the override instead.
         assert!(parsed.item_blacklist.contains("999999999999999999999999"));
-        assert!(
-            parsed
-                .reward_item_blacklist
-                .contains("888888888888888888888888")
-        );
-        assert!(parsed.boss_items.contains("777777777777777777777777"));
         assert!(
             parsed
                 .seasonal_item_tpl_blacklist
                 .contains("666666666666666666666666")
         );
-        assert_eq!(
-            parsed.repeatable_quest_template_ids.pmc["Elimination"],
-            "616052ea3054fc0e2c24ce6e"
-        );
-        assert_eq!(
-            parsed.repeatable_quest_template_ids.scav["Elimination"],
-            "62825ef60e88d037dc1eb428"
-        );
-        assert_eq!(parsed.location_id_map["bigmap"], "55f2d3fd4bdc2d5f408b4567");
 
         let response = QuestNativeResponse {
             quest: Some(

@@ -47,8 +47,8 @@ public class QuestViewsEquivalenceTests
             )
         );
 
-        // Exactly the ten views the resident DB derives natively - the views override carries
-        // them and nothing else
+        // Exactly the ten views the resident DB derives natively. The override carries four more
+        // members since flip #7, but those come off the configs root, not this derivation
         var viewsPath = Path.Combine(Path.GetTempPath(), "spt-phase1-quest-views-expected.json");
         var expectedViews = new (string Name, byte[] Bytes)[]
         {

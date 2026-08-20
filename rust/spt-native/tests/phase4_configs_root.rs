@@ -73,8 +73,14 @@ fn projected_configs_parse_with_every_kind_present() {
 
     // A kind whose typed stem has been lifted out of the flatten map: it is no longer an `extra`
     // key, so it is named here instead. Task 5 lifted the scav case family's two, Task 6 the
-    // ragfair family's two.
-    const LIFTED_KINDS: [&str; 4] = ["spt-item", "spt-scavcase", "spt-ragfair", "spt-inventory"];
+    // ragfair family's two, Task 7 the repeatable-quest family's one.
+    const LIFTED_KINDS: [&str; 5] = [
+        "spt-item",
+        "spt-scavcase",
+        "spt-ragfair",
+        "spt-inventory",
+        "spt-quest",
+    ];
 
     // The lift's own half of the fidelity claim: the projected bodies parse into the typed stems,
     // not just into `Value`. A stem that failed to parse would have failed the whole envelope
@@ -94,6 +100,10 @@ fn projected_configs_parse_with_every_kind_present() {
     assert!(
         configs.inventory.is_some(),
         "the spt-inventory stem did not bind — check InventoryConfig.Kind against the rename"
+    );
+    assert!(
+        configs.quest.is_some(),
+        "the spt-quest stem did not bind — check QuestConfig.Kind against the rename"
     );
 
     let mut present: BTreeSet<&str> = configs.extra.keys().map(String::as_str).collect();

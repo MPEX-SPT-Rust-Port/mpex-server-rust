@@ -542,6 +542,8 @@ mod tests {
 
         value["repeatableQuestTemplates"]["Completion"] =
             templates["templates"]["Completion"].clone();
+        value["repeatableQuestTemplateIds"]["pmc"]["Completion"] =
+            serde_json::json!("61604635c725987e815b1a46");
 
         let item = serde_json::json!({ "parent": PARENT, "type": "Item", "stackMaxSize": 1 });
         value["items"] = serde_json::json!({
@@ -563,14 +565,10 @@ mod tests {
         ))
     }
 
-    /// The fixture varying half with the Completion pmc template id spliced in.
+    /// The fixture varying half. The Completion pmc template id rides the views override since
+    /// flip #7.
     fn varying() -> QuestVaryingRequest {
-        let mut value = varying_value();
-
-        value["repeatableQuestTemplateIds"]["pmc"]["Completion"] =
-            serde_json::json!("61604635c725987e815b1a46");
-
-        serde_json::from_value(value).expect("fixture varying parses")
+        serde_json::from_value(varying_value()).expect("fixture varying parses")
     }
 
     /// `:264` draws 1-2 unique tpls for a level 20 PMC and `:312` draws 2-4 of each, and the

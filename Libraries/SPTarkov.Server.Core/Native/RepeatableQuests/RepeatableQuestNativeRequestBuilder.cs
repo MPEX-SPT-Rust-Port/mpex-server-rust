@@ -153,11 +153,7 @@ public class RepeatableQuestNativeRequestBuilder(
             RepeatableConfig = repeatableConfig,
             Seed = seed,
             ItemBlacklist = itemFilterService.GetItemBlacklistCache(),
-            RewardItemBlacklist = itemFilterService.GetItemRewardBlacklist(),
-            BossItems = itemFilterService.GetBossItems(),
             SeasonalItemTplBlacklist = seasonalEventService.GetInactiveSeasonalEventItems(),
-            RepeatableQuestTemplateIds = questConfig.RepeatableQuestTemplates,
-            LocationIdMap = questConfig.LocationIdMap,
         };
     }
 
@@ -190,6 +186,12 @@ public class RepeatableQuestNativeRequestBuilder(
             CompletionItemsBlacklist = completionFilters?.ItemsBlacklist ?? [],
             BossSpawnsByLocation = BuildBossSpawnsByLocation(),
             ExtractsByLocation = BuildExtractsByLocation(),
+            // The four config-backed members: the resident arm reads the same values off the
+            // configs root's spt-item and spt-quest stems instead of taking them per call
+            RewardItemBlacklist = itemFilterService.GetItemRewardBlacklist(),
+            BossItems = itemFilterService.GetBossItems(),
+            RepeatableQuestTemplateIds = questConfig.RepeatableQuestTemplates,
+            LocationIdMap = questConfig.LocationIdMap,
         };
     }
 
