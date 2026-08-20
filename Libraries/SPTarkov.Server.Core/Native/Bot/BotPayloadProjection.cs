@@ -84,9 +84,10 @@ internal static class BotPayloadProjection
         List<BotTemplateVariantView>? templateVariants
     )
     {
-        // Raw, not defaulted: the equipment path's `?? 1` (BotInventoryGenerator.cs:583) and the
-        // weapon-mod path's `?? 0` (BotEquipmentModGenerator.cs:546) are applied natively, where
-        // both blacklist bands are now picked out of Equipment
+        // Raw, not defaulted: the equipment path's `?? 1` (BotInventoryGenerator.cs:614 and its six
+        // siblings, effective at :937-939) and the weapon-mod path's `?? 0`
+        // (BotEquipmentModGenerator.cs:546) are applied natively, where both blacklist bands are now
+        // picked out of Equipment
         var pmcProfile = profileHelper.GetPmcProfile(sessionId);
 
         // BotInventoryGenerator.cs:192-196 - no raid means day

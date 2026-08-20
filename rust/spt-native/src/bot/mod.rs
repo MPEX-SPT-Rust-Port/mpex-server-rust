@@ -294,7 +294,8 @@ pub(crate) fn select_equipment_blacklist<'a>(
 
 /// Both blacklists one bot needs, as `(equipment path, weapon-mod path)`: the same
 /// [`select_equipment_blacklist`] call twice, differing only in how an absent `player_level`
-/// defaults — `1` for the equipment path (`BotInventoryGenerator.cs:583`) and **0** for the
+/// defaults — `1` for the equipment path (written at `BotInventoryGenerator.cs:614` and its six
+/// siblings, effective as `GetValueOrDefault(1)` at the call, `:937-939`) and **0** for the
 /// weapon-mod path (`BotEquipmentModGenerator.cs:546`). The single place that pair lives, so the
 /// two cannot drift apart.
 ///

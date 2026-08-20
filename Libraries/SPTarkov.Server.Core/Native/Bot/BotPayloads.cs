@@ -180,14 +180,18 @@ internal record SharedBotVarying
 {
     /// <summary>
     /// <c>pmcProfile?.Info?.Level</c> <b>raw</b>, not pre-defaulted: the equipment path defaults an
-    /// absent level to 1 (<c>BotInventoryGenerator.cs:583</c>) and the weapon-mod path to <b>0</b>
-    /// (<c>BotEquipmentModGenerator.cs:546</c>), and level 0 matches no <c>levelRange</c> where
-    /// level 1 may, so a pre-defaulted <c>1</c> could not tell "level 1 with a profile" from "no
-    /// profile" and would collapse that divergence. The native side applies both defaults and picks
-    /// both blacklist bands out of <see cref="Equipment"/> itself.
+    /// absent level to 1 (written at <c>BotInventoryGenerator.cs:614</c> and its six siblings,
+    /// reaching the blacklist call as <c>GetValueOrDefault(1)</c> at <c>:937-939</c>) and the
+    /// weapon-mod path to <b>0</b> (<c>BotEquipmentModGenerator.cs:546</c>), and level 0 matches no
+    /// <c>levelRange</c> where level 1 may, so a pre-defaulted <c>1</c> could not tell "level 1 with
+    /// a profile" from "no profile" and would collapse that divergence. The native side applies both
+    /// defaults and picks both blacklist bands out of <see cref="Equipment"/> itself.
+    ///
+    /// <c>required</c> like every sibling, though it is nullable: a construction site that forgot it
+    /// would silently ship "no profile" and flip the weapon-mod list to the level-0 band.
     /// </summary>
     [JsonPropertyName("generatingPlayerLevel")]
-    public int? GeneratingPlayerLevel { get; set; }
+    public required int? GeneratingPlayerLevel { get; set; }
 
     [JsonPropertyName("isNightTime")]
     public required bool IsNightTime { get; set; }

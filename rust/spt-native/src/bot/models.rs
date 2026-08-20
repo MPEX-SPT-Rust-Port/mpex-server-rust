@@ -225,9 +225,15 @@ pub struct ArmorPlateWeights {
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct EquipmentFilterDetails {
     /// The band this entry covers. Read by [`crate::bot::select_equipment_blacklist`], which is
-    /// where `GetBotEquipmentBlacklist`'s `FirstOrDefault` now lives. `MinMax<int>` is a plain
-    /// auto-property in C# (`BotConfig.cs:438-439`), so an omitted `levelRange` lands on `(0, 0)`
-    /// there and here.
+    /// where `GetBotEquipmentBlacklist`'s `FirstOrDefault` now lives.
+    ///
+    /// **Divergence on malformed data.** `MinMax<T>` is a `record` — a *reference* type — and
+    /// `LevelRange` is a plain non-required auto-property (`BotConfig.cs:438-439`), so an omitted
+    /// `levelRange` leaves it **null** in C# and the `FirstOrDefault` predicate throws an NRE. The
+    /// `#[serde(default)]` here lands on `(0, 0)` instead, which *matches* a level-0 request — i.e.
+    /// the weapon-mod path would silently select such a band where legacy crashes. Unreachable from
+    /// stock config (both `bot.json` bands carry a `levelRange`); only mod-authored config can get
+    /// here, and answering rather than aborting the publish is the friendlier of the two.
     #[serde(default, rename = "levelRange")]
     pub level_range: MinMax<i32>,
     /// Mod slot name → blacklisted tpls.
@@ -709,11 +715,12 @@ pub struct TemplateVariantWire {
 pub struct SharedBotVaryingWire {
     /// `pmcProfile?.Info?.Level` **raw** — absent when the session has no PMC profile, or when
     /// that profile carries no level. The two blacklist resolutions default it differently
-    /// (`?? 1` for the equipment path at `BotInventoryGenerator.cs:583`, `?? 0` for the weapon-mod
-    /// path at `BotEquipmentModGenerator.cs:546`), and level 0 matches no `levelRange` where level
-    /// 1 may, so the *nullable* level is what has to cross — a pre-defaulted `1` could not tell
-    /// "level 1 with a profile" from "no profile" and would collapse the divergence.
-    /// [`crate::bot::select_equipment_blacklist`] applies both defaults.
+    /// (`?? 1` for the equipment path, written at `BotInventoryGenerator.cs:614` and its six
+    /// siblings and reaching the call as `GetValueOrDefault(1)` at `:937-939`; `?? 0` for the
+    /// weapon-mod path at `BotEquipmentModGenerator.cs:546`), and level 0 matches no `levelRange`
+    /// where level 1 may, so the *nullable* level is what has to cross — a pre-defaulted `1` could
+    /// not tell "level 1 with a profile" from "no profile" and would collapse the divergence.
+    /// [`crate::bot::select_equipment_blacklists`] applies both defaults.
     #[serde(default)]
     pub generating_player_level: Option<i32>,
     pub is_night_time: bool,

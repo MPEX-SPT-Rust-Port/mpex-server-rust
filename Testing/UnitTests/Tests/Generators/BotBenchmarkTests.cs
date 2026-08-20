@@ -4,7 +4,6 @@ using SPTarkov.Server.Core.Generators.Bot;
 using SPTarkov.Server.Core.Generators.Loot;
 using SPTarkov.Server.Core.Generators.Weapons;
 using SPTarkov.Server.Core.Helpers;
-using SPTarkov.Server.Core.Helpers.Bot;
 using SPTarkov.Server.Core.Helpers.InRaid;
 using SPTarkov.Server.Core.Helpers.Items;
 using SPTarkov.Server.Core.Helpers.Profile;
@@ -45,7 +44,6 @@ public class BotBenchmarkTests
     private BotWeaponGenerator _botWeaponGenerator = default!;
     private BotLootGenerator _botLootGenerator = default!;
     private BotEquipmentModGenerator _botEquipmentModGenerator = default!;
-    private BotGeneratorHelper _botGeneratorHelper = default!;
     private ProfileHelper _profileHelper = default!;
     private ItemHelper _itemHelper = default!;
     private WeatherHelper _weatherHelper = default!;
@@ -69,7 +67,6 @@ public class BotBenchmarkTests
         _botWeaponGenerator = di.GetService<BotWeaponGenerator>();
         _botLootGenerator = di.GetService<BotLootGenerator>();
         _botEquipmentModGenerator = di.GetService<BotEquipmentModGenerator>();
-        _botGeneratorHelper = di.GetService<BotGeneratorHelper>();
         _profileHelper = di.GetService<ProfileHelper>();
         _itemHelper = di.GetService<ItemHelper>();
         _weatherHelper = di.GetService<WeatherHelper>();
