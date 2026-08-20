@@ -129,6 +129,22 @@ public sealed class SPTLoggerDispatcher : IAsyncDisposable
 
     public bool IsLogEnabled(LogLevel level)
     {
+        try
+        {
+            var enabled = NativeMethods.LogEnabled((int)level);
+
+            if (enabled >= 0)
+            {
+                return enabled != 0;
+            }
+        }
+        catch (Exception failure) when (failure is DllNotFoundException or EntryPointNotFoundException)
+        {
+            // Fall through: no library, same answer source as no pipeline.
+        }
+
+        // No applied pipeline to ask (before init, after close, unloadable library): the C#
+        // configuration object still gates handler-only fan-out.
         return _config.Loggers.Any(logger => logger.LogLevel.CanLog(level));
     }
 

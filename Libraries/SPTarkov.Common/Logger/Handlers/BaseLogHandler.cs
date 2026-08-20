@@ -1,4 +1,7 @@
+using System.Runtime.InteropServices;
+using System.Text;
 using SPTarkov.Common.Models.Logging;
+using SPTarkov.Common.Native;
 
 namespace SPTarkov.Common.Logger.Handlers;
 
@@ -10,20 +13,8 @@ public abstract class BaseLogHandler : ILogHandler
 
     protected string FormatMessage(string processedMessage, SptLogMessage message, BaseSptLoggerReference reference)
     {
-        var format = reference.GetCompiledFormat();
-
-        var formattedMessage = string.Format(
-            null,
-            format,
-            message.LogTime.ToString("yyyy-MM-dd"),
-            message.LogTime.ToString("HH:mm:ss.fff"),
-            processedMessage ?? string.Empty,
-            GetLoggerShortName(message.Logger),
-            message.Logger,
-            message.threadId.ToString(),
-            message.threadName ?? string.Empty,
-            message.LogLevel.ToString()
-        );
+        var body = processedMessage ?? string.Empty;
+        var formattedMessage = FormatNative(reference.Format, body, message) ?? body;
 
         if (message.Exception != null)
         {
@@ -31,6 +22,60 @@ public abstract class BaseLogHandler : ILogHandler
         }
 
         return formattedMessage;
+    }
+
+    /// <summary>
+    /// The pipeline's own token expansion (spt_log_format), replacing the CompositeFormat
+    /// re-implementation this class used to carry. Null when the native side is unavailable —
+    /// the caller then degrades to the unformatted message rather than throwing, because handler
+    /// fan-out must survive a broken pipeline.
+    /// </summary>
+    private static string? FormatNative(string format, string body, SptLogMessage message)
+    {
+        var formatBytes = Encoding.UTF8.GetBytes(format);
+        var messageBytes = Encoding.UTF8.GetBytes(body);
+        var loggerBytes = Encoding.UTF8.GetBytes(message.Logger ?? string.Empty);
+        var threadNameBytes = message.threadName == null ? [] : Encoding.UTF8.GetBytes(message.threadName);
+        var unixMillis = (long)(message.LogTime - DateTime.UnixEpoch).TotalMilliseconds;
+        nint outPtr = 0;
+        nuint outLen = 0;
+
+        try
+        {
+            var status = NativeMethods.LogFormat(
+                formatBytes,
+                (nuint)formatBytes.Length,
+                messageBytes,
+                (nuint)messageBytes.Length,
+                loggerBytes,
+                (nuint)loggerBytes.Length,
+                threadNameBytes,
+                (nuint)threadNameBytes.Length,
+                (int)message.LogLevel,
+                message.threadId,
+                unixMillis,
+                out outPtr,
+                out outLen
+            );
+
+            if (status != 0)
+            {
+                return null;
+            }
+
+            return outPtr == 0 ? string.Empty : Marshal.PtrToStringUTF8(outPtr, checked((int)outLen));
+        }
+        catch (Exception failure) when (failure is DllNotFoundException or EntryPointNotFoundException)
+        {
+            return null;
+        }
+        finally
+        {
+            if (outPtr != 0)
+            {
+                NativeMethods.BufFree(outPtr, outLen);
+            }
+        }
     }
 
     protected string GetLoggerShortName(string logger)
