@@ -1176,4 +1176,42 @@ mod tests {
         // in `emit`, yet `enabled` still says yes. This mirrors the C# IsLogEnabled contract.
         logger.close();
     }
+
+    /// The seam `spt_console_write` rides: the raw passthrough only works if this lookup finds
+    /// the Console entry among the sinks. Presence-only — Raw/Flush semantics are proven on the
+    /// sink directly above.
+    #[test]
+    fn console_sender_finds_the_console_entry_among_the_sinks() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let file_only = format!(
+            r#"{{ "loggers": [
+                {{ "type": "File", "logLevel": "Information", "format": "%message%",
+                   "filePath": {path:?}, "filePattern": "spt.log" }}
+            ] }}"#,
+            path = dir.path().display().to_string(),
+        );
+        let logger = Logger::from_json(file_only.as_bytes()).unwrap();
+        assert_eq!(logger.entries.len(), 1);
+        assert!(
+            logger.console_sender().is_none(),
+            "a File-only pipeline must not hand out a console channel"
+        );
+        logger.close();
+
+        let both = format!(
+            r#"{{ "loggers": [
+                {{ "type": "File", "logLevel": "Information", "format": "%message%",
+                   "filePath": {path:?}, "filePattern": "spt.log" }},
+                {{ "type": "Console", "logLevel": "Information", "format": "%message%" }}
+            ] }}"#,
+            path = dir.path().display().to_string(),
+        );
+        let logger = Logger::from_json(both.as_bytes()).unwrap();
+        assert_eq!(logger.entries.len(), 2);
+        assert!(
+            logger.console_sender().is_some(),
+            "the raw passthrough must find the Console entry behind the File one"
+        );
+        logger.close();
+    }
 }
