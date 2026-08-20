@@ -164,6 +164,9 @@ public static class Program
 
     public static async Task StartServer(SptEarlyLoggerFactory loggerFactory, string[] args, StartupCancellation startupCancellation)
     {
+        // spt_native owns the terminal: after NativeConsoleWriter.Install() nothing may set
+        // Console.OutputEncoding or call Console.SetOut - both un-wrap Console.Out with no test
+        // failure, restoring Windows mojibake and the fd-1 race against the console sink.
         var configuration = await ConfigLoader.Initialize(_earlyLogger!, startupCancellation.Token);
         var earlyServiceProvider = ProgramHelpers.CreateEarlySptProvider(loggerFactory, configuration, modsEnabled: true);
 

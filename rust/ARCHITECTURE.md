@@ -12,9 +12,9 @@ is the shipped launcher that hosts the CLR. Build coupling and cross-RID rules l
 
 | Language | Lines of Code | File Count |
 |-----------|-----------------|-----------|
-| `Rust` (whole workspace) | `55,278` | `65` |
-| ↳ `spt-native/src/` | `53,338` | `55` |
-| ↳ `spt-native/tests/` | `1,326` | `7` |
+| `Rust` (whole workspace) | `56,956` | `68` |
+| ↳ `spt-native/src/` | `54,487` | `57` |
+| ↳ `spt-native/tests/` | `1,855` | `8` |
 | ↳ `spectre-facade` | `522` | `2` |
 | ↳ `mpex-server` | `92` | `1` |
 
@@ -27,7 +27,7 @@ Inline tests included, `src/` splits: `bot/` ~32%, `loot/` ~23%, `ragfair/` ~15%
 
 | Component | Responsibility | Interacts With |
 |-----------|-----------------|------------------|
-| `spt-native` | The port: generation families, resident DB, database verification, the log pipeline. `cdylib` + `rlib` | `Libraries/SPTarkov.Server.Core/Native/` for everything but the log exports, which come from `Libraries/SPTarkov.Common/Native/NativeMethods.cs` |
+| `spt-native` | The port: generation families, resident DB, database verification, the log pipeline and the terminal. `cdylib` + `rlib` | `Libraries/SPTarkov.Server.Core/Native/` for everything but the log and console exports, which come from `Libraries/SPTarkov.Common/Native/NativeMethods.cs` |
 | `spectre-facade` | Emits a facade `Spectre.Console.Ansi.dll` exposing only `Spectre.Console.Color` | Built by `BuildSpectreFacade` in `SPTarkov.Common.csproj`; referenced by five C# projects |
 | `mpex-server` | Shipped launcher: hosts the CLR via netcorehost and `run_app`s the published server assembly, argv forwarded | The published `SPT.Server` assembly; `Containerfile.release`'s entrypoint. **Must not depend on `spt-native`** |
 
@@ -42,20 +42,22 @@ would create a second, divergent copy.
 
 The C# side of the `spt-native` boundary is `Libraries/SPTarkov.Server.Core/Native/` — `NativeMethods.cs`,
 `SptNative.cs` and the per-family payload projections under `BaseClass/`, `Bot/`, `Db/`, `Loot/`, `Ragfair/`,
-`RepeatableQuests/`, `ScavCase/` — **except the log pipeline**, whose P/Invoke lives in a different assembly:
-`Libraries/SPTarkov.Common/Native/NativeMethods.cs` and `Common/Logger/SPTLoggerDispatcher.cs`.
+`RepeatableQuests/`, `ScavCase/` — **except the log pipeline and the console**, whose P/Invoke lives in a
+different assembly: `Libraries/SPTarkov.Common/Native/NativeMethods.cs`, with
+`Common/Logger/SPTLoggerDispatcher.cs` and `Common/Native/SptConsole.cs` over it.
 
 ### `spt-native` module map
 
 | Path | Role |
 |---|---|
-| `src/lib.rs` | Module roots and `ABI_VERSION` (currently 27; must equal `SptNative.ExpectedAbiVersion`) |
+| `src/lib.rs` | Module roots and `ABI_VERSION` (currently 28; must equal `SptNative.ExpectedAbiVersion`) |
 | `src/ffi.rs` | The C-ABI surface. The **only** module containing `unsafe` |
 | `src/runtime.rs` | Process-wide multi-thread tokio runtime, `OnceLock`-built. Used only by `verify` |
 | `src/verify.rs` | Hashes `SPT_Data` with XXH3-128 and diffs it against `checks.dat` |
 | `src/bin/gen_checks.rs` | The bin that writes `checks.dat`, over `verify::generate`. Release builds only |
 | `src/logger.rs` | The log pipeline: `sptLogger.json`, filters, level gates, per-target formatting — and the console sink |
 | `src/log_sink.rs` | The file sink alone: where a formatted line lands on disk, with its rotation and archiving |
+| `src/console.rs` | Terminal control: Windows console setup, title, clear, the stdin line-ending strip |
 | `src/diag.rs` | The generator families' way into that pipeline: the locale table, the render, and `DiagSink` |
 | `src/db.rs` | The resident DB: the epoch-versioned store of published roots (templates, traders, globals, locations, hideout); a publish re-derives the ragfair, quest and bot views |
 | `src/db/models.rs` | The publish envelope's wire types |
@@ -92,12 +94,14 @@ trades that for build time — `opt-level = 1`, sixteen codegen units, line-tabl
 
 ### FFI boundary (`ffi.rs`)
 
-Twenty-three `extern "C"` exports: two trivial (`spt_native_abi_version`, `spt_buf_free`), thirteen taking a
+Twenty-nine `extern "C"` exports: two trivial (`spt_native_abi_version`, `spt_buf_free`), thirteen taking a
 UTF-8 JSON generation request, `spt_verify_database` taking a directory path, `spt_db_publish` taking the
-resident-DB publish envelope, `spt_locales_set` taking the resolved server-locale table as JSON, and five
-for the log pipeline (`spt_logger_init`, `spt_logger_reinit`, `spt_log_emit`, `spt_logger_close`,
-`spt_log_set_tap` — see *The log pipeline*). The fifteen generation/verify/publish exports hand back a
-heap buffer on success, which the caller releases with `spt_buf_free`.
+resident-DB publish envelope, `spt_locales_set` taking the resolved server-locale table as JSON, and eleven
+for the log pipeline and the terminal it owns (`spt_logger_init`, `spt_logger_reinit`, `spt_log_emit`,
+`spt_logger_close`, `spt_log_set_tap`, `spt_log_enabled`, `spt_log_format`, `spt_console_write`,
+`spt_console_read_line`, `spt_console_set_title`, `spt_console_clear` — see *The log pipeline*). The fifteen
+generation/verify/publish exports hand back a heap buffer on success, which the caller releases with
+`spt_buf_free`; so do `spt_console_read_line` and `spt_log_format`.
 
 - `run_generator_with` is the shared body of every generation export and `spt_db_publish` — parse, `catch_unwind`,
   encode — so a new export is a thin wrapper over it, generic in its error type and response encoding.
@@ -153,6 +157,18 @@ and `BaseLogHandler` survive only for mods to implement, and nothing built-in do
 the raw `sptLogger.json` bytes once per process; `SPTLoggerDispatcher.Log` then hands each line's fields across
 `spt_log_emit`, and the crate owns filter matching, the level gate, per-target format expansion and the sinks.
 
+The pipeline also owns the terminal itself. C# installs a forwarding `TextWriter` over `Console.Out` and
+`Console.Error` (`NativeConsoleWriter.Install`, called from `Program.Main` right after logger init), so raw
+`Console.Write*` sites forward to `spt_console_write`: stdout bytes travel the same queue as rendered log
+lines, stderr bytes write directly. Terminal control is native too — `spt_console_set_title` and
+`spt_console_clear` send tty-gated escapes through that queue (the Windows title is a console API call
+instead, and the Windows console setup — UTF-8 codepage plus VT — happens in `spt_logger_init`), and
+`spt_console_read_line` drains the queue before reading stdin, so a prompt written just before is on screen.
+Two exports answer rather than write: `spt_log_enabled` serves the `IsLogEnabled` gate from the applied
+configuration, and `spt_log_format` renders `BaseLogHandler.FormatMessage`'s line for mod handlers. With no
+pipeline running the C# writer falls back to the real console — which is exactly what the dispatcher's stderr
+fallbacks-of-last-resort need.
+
 - **Init and close are ref-counted, not idempotent.** A second init keeps the running pipeline and ignores the
   new config but bumps the count; teardown needs as many `spt_logger_close` calls as there were successful
   inits. That is what lets the prepatcher's nested `Program.Main` dispose its own container while the outer
@@ -161,6 +177,11 @@ the raw `sptLogger.json` bytes once per process; `SPTLoggerDispatcher.Log` then 
   emit is a silent no-op — and **an emit never blocks on I/O**: each file gets a background writer thread fed
   over a bounded channel that drops lines rather than growing without limit. `log_sink.rs` owns rotation and
   the archive cap together, so the cap is enforced at the rotation rather than on a timer.
+- **The console queue is one FIFO carrying two disciplines.** Rendered log lines are offered and dropped when
+  the 8192-slot channel is full; raw `Console.Write` bytes and the pre-read drain block until there is room,
+  because a lost prompt is worse than a lost log line. The ceiling that buys, stated rather than engineered
+  away: a terminal that stops draining blocks the managed `Console.Write` behind it, and `spt_logger_close`
+  (from `Program.Main`'s `finally`) waits on the writer thread until it does drain.
 - **`spt_logger_reinit` swaps the config in place** without touching the init count — C# calls it from
   `SPTLoggerDispatcher.ReloadConfiguration()` after a mod mutates `SptLoggerConfiguration.Loggers`. A
   same-path target reopens in append mode rather than cascading the archives again.
@@ -336,13 +357,14 @@ Almost all tests are inline `#[cfg(test)]` modules (~770 of them). Three kinds:
   failure, generation failure and null arguments. `spt_generate_bot_inventory_batch` is the one export with no
   transport test of its own.
 
-Seven `tests/` targets, in three groups. `completion_whitelist_baseclass.rs` guards the Completion
+Eight `tests/` targets, in three groups. `completion_whitelist_baseclass.rs` guards the Completion
 whitelist filter's base-class lookups against the real shipped `items.json`, so it needs
 `scripts/decompress-assets.sh` to have run. `phase1_ragfair_views.rs`, `phase1_quest_views.rs`,
 `flip3_oneshot_views.rs` and `phase0_publish_spike.rs` are `#[ignore]`d halves of C#-paired harnesses —
 each replays a fixture its twin under `Testing/UnitTests` wrote to `$TMPDIR`, so running one alone proves
-nothing. `flip4_loot_resident.rs` and `flip5_scavcase_resident.rs` are self-contained: each
-publishes a minimal DB and proves a resident-epoch send generates identically to the same data sent inline.
+nothing. `flip4_loot_resident.rs`, `flip5_scavcase_resident.rs` and `flip6_bots_resident.rs` are
+self-contained: each publishes a minimal DB and proves a resident-epoch send generates identically to the
+same data sent inline.
 
 Run with `cd rust && cargo test && cargo fmt --check && cargo clippy --all-targets -- -D warnings`. That is
 workspace-wide, so it also picks up the other two members' handful of inline tests — `mpex-server`'s three
@@ -354,8 +376,8 @@ over the server-assembly probe, `spectre-facade`'s two.
 
 | External System | Integration Type | Notes |
 |-------------------|-------------------|-------|
-| `SPTarkov.Server.Core` | Sync FFI, C ABI | `Native/NativeMethods.cs` + `SptNative.cs` and the per-family projections. Twenty-three exports; `ABI_VERSION` must equal `SptNative.ExpectedAbiVersion` |
-| `SPTarkov.Common` | Sync FFI, C ABI | The five log exports only, from a second `Native/NativeMethods.cs` — Common cannot reference Core |
+| `SPTarkov.Server.Core` | Sync FFI, C ABI | `Native/NativeMethods.cs` + `SptNative.cs` and the per-family projections. Twenty-nine exports; `ABI_VERSION` must equal `SptNative.ExpectedAbiVersion` |
+| `SPTarkov.Common` | Sync FFI, C ABI | The eleven log and console exports plus `spt_buf_free`, from a second `Native/NativeMethods.cs` — Common cannot reference Core |
 | `SPT_Data/` on disk | Batch, async over tokio | `spt_verify_database` hashes `configs/` + `database/` with XXH3-128; `gen_checks` writes `checks.dat` on Release builds |
 | `sptLogger.json` | Config bytes over FFI | Parsed once per process by `spt_logger_init`; filters use `regex-lite`, so .NET-only syntax degrades to never-match |
 | Log files on disk | Async, background thread per sink | `log_sink.rs`: bounded channel that drops rather than grows; rotation and archive cap enforced together |

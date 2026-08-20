@@ -32,6 +32,10 @@ public abstract class BaseSptLoggerReference
     private string? _cachedFormat;
     private CompositeFormat? _compiledFormat;
 
+    /// <summary>
+    /// GetCompiledFormat and its cache are retained for 4.1.2 mod compatibility and never called
+    /// in-tree: the pipeline expands Format itself, on the Rust side (spt_log_format).
+    /// </summary>
     public virtual CompositeFormat GetCompiledFormat()
     {
         if (_cachedFormat != Format)

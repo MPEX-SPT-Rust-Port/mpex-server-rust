@@ -78,6 +78,10 @@ public abstract class BaseLogHandler : ILogHandler
         }
     }
 
+    /// <summary>
+    /// Retained for 4.1.2 mod compatibility and never called in-tree: %loggerShort% is expanded by
+    /// spt_log_format now.
+    /// </summary>
     protected string GetLoggerShortName(string logger)
     {
         var lastDotIndex = logger.AsSpan().LastIndexOf('.');
