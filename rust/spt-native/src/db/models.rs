@@ -39,6 +39,19 @@ pub struct PublishRoots {
     pub globals: Option<GlobalsRoot>,
     pub locations: Option<LocationsRoot>,
     pub hideout: Option<HideoutRoot>,
+    pub configs: Option<ConfigsRoot>,
+}
+
+/// The `configs` root: SPT_Data/configs projected from the live C# singletons, keyed by each
+/// config's `kind` (`BaseConfig.Kind`, `[JsonPropertyName("kind")]` — `"spt-ragfair"`, …).
+/// Typed stems are lifted only where a family reads them (Tasks 5-10); everything else rides
+/// `extra` full-fidelity. An absent stem is `None` — the consuming family fails its resolve
+/// loudly, per call; a present-but-malformed stem fails the whole publish parse
+/// (STATUS_BAD_ARGS), previous resident DB intact.
+#[derive(Debug, Default, Deserialize)]
+pub struct ConfigsRoot {
+    #[serde(flatten)]
+    pub extra: IndexMap<String, Value>,
 }
 
 /// Hideout root: `production.scavRecipes` only (flip #5) — locations-root
