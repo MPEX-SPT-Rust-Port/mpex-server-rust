@@ -133,7 +133,7 @@ impl LootViews {
 
 /// The override arm resolves without consulting the process-global store; the resident arm needs
 /// the named epoch resident with the ragfair views, the locations root and the two config stems the
-/// family reads, and resolves the config view for `location_id` right here.
+/// family reads, and resolves the config view for `varying`'s location right here.
 ///
 /// A missing root is a stale epoch — the publish never carried it, so a republish is the fix. A
 /// configs root that *is* resident but has no `spt-location`/`spt-seasonalevents` stem is a
@@ -142,12 +142,11 @@ impl LootViews {
 ///
 /// # Errors
 ///
-/// [`LootEpochError::StaleEpoch`] as above, or [`LootEpochError::Loot`] naming the absent stem —
-/// or the multiplier entry [`resolve_loot_config_view`] could not resolve.
+/// [`LootEpochError::StaleEpoch`] as above, or [`LootEpochError::Loot`] naming the absent stem.
 pub fn resolve_views(
     epoch: u64,
     views_override: Option<Box<LootViewsWire>>,
-    location_id: &str,
+    varying: &LootVarying,
 ) -> Result<LootViews, LootEpochError> {
     match views_override {
         Some(wire) => Ok(LootViews::Override(wire)),
@@ -170,23 +169,26 @@ pub fn resolve_views(
             Ok(LootViews::Resident {
                 ragfair: db.ragfair_views.clone().ok_or(LootEpochError::StaleEpoch)?,
                 locations: db.locations.clone().ok_or(LootEpochError::StaleEpoch)?,
-                config: Box::new(resolve_loot_config_view(location_config, location_id)?),
+                config: Box::new(resolve_loot_config_view(location_config, varying)),
                 christmas_container_ids: seasonal_config.christmas_container_ids.clone(),
             })
         }
     }
 }
 
-/// `LocationLootGenerator.BuildConfigView` (`:459-482`), member for member, including its three
-/// inline per-location resolutions: `Maps.ContainsKey(locationId)`, the two multipliers through
-/// [`multiplier_for_location`], and `LooseLootBlacklist.GetValueOrDefault(locationId) ?? []`.
-fn resolve_loot_config_view(
-    config: &LocationConfigLift,
-    location_id: &str,
-) -> Result<LootConfigView, LootError> {
+/// `LocationLootGenerator.BuildConfigView` (`:459-482`), member for member, including the two
+/// per-location resolutions this arm owns: `Maps.ContainsKey(locationId)` and
+/// `LooseLootBlacklist.GetValueOrDefault(locationId) ?? []`.
+///
+/// The third one, `MultiplierForLocation` for each of the two multipliers, stays C#-side and
+/// arrives already resolved on the request — those two config entries are scaled in place per raid
+/// (see [`LootVarying::static_loot_multiplier`]), so resolving them off the published snapshot here
+/// would silently drop a scav raid's loot reduction.
+fn resolve_loot_config_view(config: &LocationConfigLift, varying: &LootVarying) -> LootConfigView {
     let randomisation = &config.container_randomisation_settings;
+    let location_id = varying.location_id.as_str();
 
-    Ok(LootConfigView {
+    LootConfigView {
         container_randomisation_enabled: randomisation.enabled,
         location_in_randomisation_maps: randomisation.maps.contains_key(location_id),
         container_types_to_not_randomise: randomisation.container_types_to_not_randomise.clone(),
@@ -204,16 +206,9 @@ fn resolve_loot_config_view(
         ),
         min_fill_loose_magazine_percent: f64::from(config.min_fill_loose_magazine_percent),
         min_fill_static_magazine_percent: f64::from(config.min_fill_static_magazine_percent),
-        static_loot_multiplier: multiplier_for_location(
-            &config.static_loot_multiplier,
-            location_id,
-            "staticLootMultiplier",
-        )?,
-        loose_loot_multiplier: multiplier_for_location(
-            &config.loose_loot_multiplier,
-            location_id,
-            "looseLootMultiplier",
-        )?,
+        // Resolved C#-side against the live, raid-adjusted config — never off the lift
+        static_loot_multiplier: varying.static_loot_multiplier,
+        loose_loot_multiplier: varying.loose_loot_multiplier,
         mod_spawn_chance_percent: config
             .equipment_loot_settings
             .mod_spawn_chance_percent
@@ -223,32 +218,7 @@ fn resolve_loot_config_view(
             .get(location_id)
             .cloned()
             .unwrap_or_default(),
-    })
-}
-
-/// `LocationLootGenerator.MultiplierForLocation` (`:488-491`):
-///
-/// ```csharp
-/// return multipliers.TryGetValue(locationId, out var multiplier) ? multiplier : multipliers["default"];
-/// ```
-///
-/// The exact key, else the `"default"` one — read with the indexer, so a config carrying neither
-/// throws `KeyNotFoundException` there. Here that is a named error rather than a panic behind the
-/// FFI boundary; `member` names which of the two maps came up empty.
-fn multiplier_for_location(
-    multipliers: &HashMap<String, f64>,
-    location_id: &str,
-    member: &str,
-) -> Result<f64, LootError> {
-    if let Some(multiplier) = multipliers.get(location_id) {
-        return Ok(*multiplier);
     }
-
-    multipliers.get("default").copied().ok_or_else(|| {
-        LootError::new(format!(
-            "LocationConfig.{member} has no entry for location: {location_id} and no \"default\" entry"
-        ))
-    })
 }
 
 /// The owned per-map statics a static-container run consumes — cloned out of the resident root
@@ -346,7 +316,7 @@ pub fn generate_static_containers(
     request: StaticContainersRequest,
 ) -> Result<StaticContainersResult, LootEpochError> {
     let mut varying = request.varying;
-    let mut views = resolve_views(request.epoch, request.views_override, &varying.location_id)?;
+    let mut views = resolve_views(request.epoch, request.views_override, &varying)?;
     let _seed_guard = varying.test_seed.map(random_util::TestSeedGuard::install);
 
     // Everything the run mutates is moved out before the rest of the request is lent to the context.
@@ -1112,11 +1082,7 @@ pub fn generate_dynamic_loot(
     request: DynamicLootRequest,
 ) -> Result<DynamicLootResult, LootEpochError> {
     let mut varying = request.varying;
-    let views = resolve_views(
-        request.epoch,
-        request.views_override,
-        &varying.common.location_id,
-    )?;
+    let views = resolve_views(request.epoch, request.views_override, &varying.common)?;
     // `resume`, not `install`: this is the second half of one `GenerateLocationLoot`, and the C#
     // draws both halves from the single `SeededRandomSource` the caller installed, so the stream
     // carries on from where the static-container run ended.
@@ -1994,6 +1960,8 @@ mod tests {
                 "staticAmmoDist": {
                     CALIBER: [{ "tpl": CARTRIDGE_TPL, "relativeProbability": 1 }]
                 },
+                // Resolved C#-side per call, so the same values the override's config view carries
+                "staticLootMultiplier": 1, "looseLootMultiplier": 1,
                 "seasonal": {
                     "seasonalEventActive": false, "christmasEventEnabled": false,
                     "inactiveSeasonalItems": []
@@ -2017,7 +1985,7 @@ mod tests {
     /// it, for tests that drive `add_loot_to_container` and friends directly.
     fn parts(request: StaticContainersRequest) -> (LootViews, LootVarying, StaticsBundle) {
         let varying = request.varying;
-        let mut views = resolve_views(request.epoch, request.views_override, &varying.location_id)
+        let mut views = resolve_views(request.epoch, request.views_override, &varying)
             .expect("override resolves");
         let statics = statics_for(&mut views, &varying.location_id).expect("fixture has statics");
 
@@ -2161,9 +2129,10 @@ mod tests {
         .unwrap()
     }
 
-    /// A `spt-location` stem with two mapped locations: `bigmap` carries its own multipliers and a
-    /// blacklist entry, `factory4_day` carries neither and falls back to `"default"` with an empty
-    /// blacklist.
+    /// A `spt-location` stem `bigmap` is named by and `factory4_day` is not, so the two cover both
+    /// sides of the resolutions this arm owns. The two multiplier maps are here on purpose even
+    /// though the lift does not declare them: they ride `extra`, unread, and the values are wild
+    /// enough that a regression to reading them off the config is unmistakable in an assertion.
     fn location_config_stem() -> serde_json::Value {
         json!({
             "kind": "spt-location",
@@ -2181,11 +2150,33 @@ mod tests {
             "staticMagazineLootHasAmmoChancePercent": 22,
             "minFillLooseMagazinePercent": 33,
             "minFillStaticMagazinePercent": 44,
-            "staticLootMultiplier": { "bigmap": 2.5, "default": 1.25 },
-            "looseLootMultiplier": { "bigmap": 3.5, "default": 1.75 },
+            "staticLootMultiplier": { "bigmap": 111.0, "default": 222.0 },
+            "looseLootMultiplier": { "bigmap": 333.0, "default": 444.0 },
             "equipmentLootSettings": { "modSpawnChancePercent": { "mod_scope": 5.0 } },
             "looseLootBlacklist": { "bigmap": ["blacklisted_1"] }
         })
+    }
+
+    /// The varying half of a resident send: the location plus the two C#-resolved multipliers.
+    fn resident_varying(
+        location_id: &str,
+        static_loot_multiplier: f64,
+        loose_loot_multiplier: f64,
+    ) -> LootVarying {
+        serde_json::from_value(json!({
+            "locationId": location_id,
+            "moneyTpls": [],
+            "staticAmmoDist": {},
+            "staticLootMultiplier": static_loot_multiplier,
+            "looseLootMultiplier": loose_loot_multiplier,
+            "seasonal": {
+                "seasonalEventActive": false, "christmasEventEnabled": false,
+                "inactiveSeasonalItems": []
+            },
+            "lootableItemBlacklist": [],
+            "counter": { "maxCounts": {}, "trackedCounts": {} }
+        }))
+        .unwrap()
     }
 
     /// The resident arm's config view comes out of the configs root's `spt-location` and
@@ -2198,17 +2189,19 @@ mod tests {
         let _guard = crate::db::tests::DB_TEST_LOCK.lock().unwrap();
         crate::db::clear();
 
+        let bigmap = resident_varying("bigmap", 2.5, 3.5);
+
         // A configs root carrying some other family's stem but neither of this one's. The filler is
         // `spt-inventory` because it is all-defaulted: a strict stem would fail the publish parse.
         let epoch = publish_with_configs(json!({"spt-inventory": {"kind": "spt-inventory"}}));
-        let Err(LootEpochError::Loot(error)) = resolve_views(epoch, None, "bigmap") else {
+        let Err(LootEpochError::Loot(error)) = resolve_views(epoch, None, &bigmap) else {
             panic!("expected a failure naming the absent spt-location stem");
         };
         assert!(error.message.contains("spt-location"), "{error:?}");
 
         // The seasonal stem is named on its own, not folded into the location one
         let epoch = publish_with_configs(json!({"spt-location": location_config_stem()}));
-        let Err(LootEpochError::Loot(error)) = resolve_views(epoch, None, "bigmap") else {
+        let Err(LootEpochError::Loot(error)) = resolve_views(epoch, None, &bigmap) else {
             panic!("expected a failure naming the absent spt-seasonalevents stem");
         };
         assert!(error.message.contains("spt-seasonalevents"), "{error:?}");
@@ -2219,7 +2212,7 @@ mod tests {
             "spt-seasonalevents": { "kind": "spt-seasonalevents",
                 "christmasContainerIds": ["xmas_container"] }
         }));
-        let views = resolve_views(epoch, None, "bigmap").unwrap();
+        let views = resolve_views(epoch, None, &bigmap).unwrap();
         let config = views.config();
 
         assert!(config.container_randomisation_enabled);
@@ -2242,47 +2235,50 @@ mod tests {
         assert_eq!(config.static_magazine_loot_has_ammo_chance_percent, 22.0);
         assert_eq!(config.min_fill_loose_magazine_percent, 33.0);
         assert_eq!(config.min_fill_static_magazine_percent, 44.0);
-        // The map's own entries, not the "default" ones
-        assert_eq!(config.static_loot_multiplier, 2.5);
-        assert_eq!(config.loose_loot_multiplier, 3.5);
         assert_eq!(config.mod_spawn_chance_percent["mod_scope"], 5.0);
         assert!(config.loose_loot_blacklist.contains("blacklisted_1"));
         assert!(views.christmas_container_ids().contains("xmas_container"));
 
-        // A location the config never names: `"default"` multipliers, no randomisation entry, and
-        // an empty blacklist rather than another map's
-        let views = resolve_views(epoch, None, "factory4_day").unwrap();
+        // A location the config never names: no randomisation entry, and an empty blacklist rather
+        // than another map's
+        let views =
+            resolve_views(epoch, None, &resident_varying("factory4_day", 1.0, 1.0)).unwrap();
         let config = views.config();
 
         assert!(!config.location_in_randomisation_maps);
-        assert_eq!(config.static_loot_multiplier, 1.25);
-        assert_eq!(config.loose_loot_multiplier, 1.75);
         assert!(config.loose_loot_blacklist.is_empty());
 
         // A configs root that never arrived is stale, not a stem failure
         crate::db::clear();
         assert!(matches!(
-            resolve_views(epoch, None, "bigmap"),
+            resolve_views(epoch, None, &bigmap),
             Err(LootEpochError::StaleEpoch)
         ));
     }
 
-    /// `MultiplierForLocation` reads its fallback with the indexer, so a config with neither the
-    /// location's key nor `"default"` throws in C#. The port names the member instead of panicking
-    /// behind the FFI boundary.
+    /// The two multipliers are the one part of the config view the resident arm does *not* resolve
+    /// off the stem: `RaidTimeAdjustmentService` scales those two dictionaries in place for a scav
+    /// raid without moving the mutation stamp, so the C#-resolved values ride the request and the
+    /// published snapshot is the wrong answer. The stem the publish carries names this very
+    /// location with values nothing else in the test uses, so re-reading it fails here loudly.
     #[test]
-    fn a_multiplier_map_without_a_default_entry_names_the_member() {
-        let multipliers = HashMap::from([("bigmap".to_owned(), 2.0)]);
+    fn the_view_takes_its_multipliers_from_the_request_not_the_stem() {
+        let _guard = crate::db::tests::DB_TEST_LOCK.lock().unwrap();
+        crate::db::clear();
 
-        assert_eq!(
-            multiplier_for_location(&multipliers, "bigmap", "staticLootMultiplier"),
-            Ok(2.0)
-        );
+        let epoch = publish_with_configs(json!({
+            "spt-location": location_config_stem(),
+            "spt-seasonalevents": { "kind": "spt-seasonalevents", "christmasContainerIds": [] }
+        }));
 
-        let error = multiplier_for_location(&multipliers, "woods", "staticLootMultiplier")
-            .expect_err("no woods key and no default entry");
-        assert!(error.message.contains("staticLootMultiplier"), "{error:?}");
-        assert!(error.message.contains("woods"), "{error:?}");
+        // What a scav raid sends: the stem's `bigmap` entries are 111.0/333.0, these are what
+        // `AdjustLootMultipliers` left them at for this raid
+        let views = resolve_views(epoch, None, &resident_varying("bigmap", 0.35, 0.7)).unwrap();
+
+        assert_eq!(views.config().static_loot_multiplier, 0.35);
+        assert_eq!(views.config().loose_loot_multiplier, 0.7);
+
+        crate::db::clear();
     }
 
     #[test]
@@ -2895,6 +2891,8 @@ mod tests {
                 "staticAmmoDist": {
                     CALIBER: [{ "tpl": CARTRIDGE_TPL, "relativeProbability": 1 }]
                 },
+                // Resolved C#-side per call, so the same values the override's config view carries
+                "staticLootMultiplier": 1, "looseLootMultiplier": 1,
                 "seasonal": {
                     "seasonalEventActive": false, "christmasEventEnabled": false,
                     "inactiveSeasonalItems": [SEASONAL_TPL]

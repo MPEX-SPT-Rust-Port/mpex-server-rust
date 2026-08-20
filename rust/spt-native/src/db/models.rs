@@ -374,14 +374,22 @@ pub struct QuestConfigLift {
 }
 
 /// `Models/Spt/Config/LocationConfig.cs` — the *source* members `BuildConfigView`
-/// (`LocationLootGenerator.cs:459-482`) reads, raw and un-resolved: the three per-location
-/// resolutions the C# does inline are done per call by
+/// (`LocationLootGenerator.cs:459-482`) reads, raw and un-resolved: the two per-location
+/// resolutions left to the resident arm are done per call by
 /// `loot::location_loot_generator::resolve_loot_config_view` instead, so the map-keyed members are
-/// lifted whole. Strictness per member follows the C# `required`: the four maps and the two
-/// settings objects are `required` (`LocationConfig.cs:44-48,101-102,134-135,146-147,158-159`) and
-/// so are strict here; the loose scalars are plain auto-properties, which C# fills with the type's
-/// default, and default here too. Every other member (the dispatch flags, the waves, whatever
-/// Ceciler's `[JsonExtensionData]` adds on a Release build) rides [`Self::extra`].
+/// lifted whole.
+///
+/// `staticLootMultiplier`/`looseLootMultiplier` are deliberately **not** lifted, though
+/// `BuildConfigView` reads them: `RaidTimeAdjustmentService.AdjustLootMultipliers` scales those two
+/// dictionaries in place through the indexer for a shortened scav raid, which trips no write
+/// barrier and so never moves the mutation stamp. They ride the request instead
+/// (`LootVarying::static_loot_multiplier`) and land in this root's [`Self::extra`], unread.
+///
+/// Strictness per member follows the C# `required`: the two maps and the two settings objects are
+/// `required` (`LocationConfig.cs:101-102,134-135,146-147,158-159`) and so are strict here; the
+/// loose scalars are plain auto-properties, which C# fills with the type's default, and default
+/// here too. Every other member (the dispatch flags, the waves, whatever Ceciler's
+/// `[JsonExtensionData]` adds on a Release build) rides [`Self::extra`].
 #[derive(Debug, Deserialize)]
 pub struct LocationConfigLift {
     #[serde(rename = "containerRandomisationSettings")]
@@ -405,13 +413,6 @@ pub struct LocationConfigLift {
     /// See [`Self::magazine_loot_has_ammo_chance_percent`].
     #[serde(default, rename = "minFillStaticMagazinePercent")]
     pub min_fill_static_magazine_percent: i32,
-    /// Keyed by map id, with a `"default"` entry as the fallback — resolved by
-    /// `MultiplierForLocation` (`LocationLootGenerator.cs:488-491`).
-    #[serde(rename = "staticLootMultiplier")]
-    pub static_loot_multiplier: HashMap<String, f64>,
-    /// See [`Self::static_loot_multiplier`].
-    #[serde(rename = "looseLootMultiplier")]
-    pub loose_loot_multiplier: HashMap<String, f64>,
     #[serde(rename = "equipmentLootSettings")]
     pub equipment_loot_settings: EquipmentLootSettingsLift,
     /// Keyed by map id; the value is that map's blacklisted loose-loot spawn point ids. A map with

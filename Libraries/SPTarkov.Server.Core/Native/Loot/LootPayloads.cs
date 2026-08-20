@@ -34,6 +34,21 @@ public record LootVarying
     [JsonPropertyName("staticAmmoDist")]
     public required Dictionary<string, List<StaticAmmoDetails>> StaticAmmoDist { get; set; }
 
+    /// <summary>
+    /// <c>MultiplierForLocation(LocationConfig.StaticLootMultiplier, locationId)</c> off the
+    /// <b>live</b> config. Per-call rather than resident, unlike the rest of
+    /// <see cref="LootConfigView"/>: <c>RaidTimeAdjustmentService.AdjustLootMultipliers</c> scales
+    /// every entry of that dictionary in place through the indexer for a shortened scav raid, and
+    /// puts it back after generation - no property setter fires, so the write barriers never see it
+    /// and a resident snapshot would hand the raid unadjusted PMC-density loot.
+    /// </summary>
+    [JsonPropertyName("staticLootMultiplier")]
+    public required double StaticLootMultiplier { get; set; }
+
+    /// <inheritdoc cref="StaticLootMultiplier"/>
+    [JsonPropertyName("looseLootMultiplier")]
+    public required double LooseLootMultiplier { get; set; }
+
     [JsonPropertyName("seasonal")]
     public required SeasonalView Seasonal { get; set; }
 
@@ -383,7 +398,9 @@ public record PresetView
 /// <summary>
 /// Every config value the generator reads, resolved for one location. Built by the caller for a
 /// views-override send only; the resident arm resolves the same view natively off the
-/// <c>spt-location</c> config stem (<c>resolve_loot_config_view</c>).
+/// <c>spt-location</c> config stem (<c>resolve_loot_config_view</c>) - except the two multipliers,
+/// which that resolve copies out of <see cref="LootVarying"/> because they are adjusted per raid
+/// (see <see cref="LootVarying.StaticLootMultiplier"/>).
 /// </summary>
 public record LootConfigView
 {
@@ -427,14 +444,14 @@ public record LootConfigView
     public required double MinFillStaticMagazinePercent { get; set; }
 
     /// <summary>
-    /// Resolved for this location by the caller.
+    /// Read on the override arm only - the resident arm fills this from
+    /// <see cref="LootVarying.StaticLootMultiplier"/>, the same value from the same C# call, because
+    /// this one is adjusted per raid and a resident read would miss the adjustment.
     /// </summary>
     [JsonPropertyName("staticLootMultiplier")]
     public required double StaticLootMultiplier { get; set; }
 
-    /// <summary>
-    /// Resolved for this location by the caller.
-    /// </summary>
+    /// <inheritdoc cref="StaticLootMultiplier"/>
     [JsonPropertyName("looseLootMultiplier")]
     public required double LooseLootMultiplier { get; set; }
 
@@ -500,7 +517,8 @@ public record LootViewsOverride
 
     /// <summary>
     /// <c>LocationConfig</c> resolved for this send's location; the resident arm builds the same
-    /// view from the <c>spt-location</c> stem and the request's <c>locationId</c>.
+    /// view from the <c>spt-location</c> stem, the request's <c>locationId</c> and - for the two
+    /// multipliers only - the request's own copies of them.
     /// </summary>
     [JsonPropertyName("config")]
     public required LootConfigView Config { get; set; }

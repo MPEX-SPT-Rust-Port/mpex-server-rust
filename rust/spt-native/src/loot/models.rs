@@ -522,8 +522,9 @@ pub struct ContainerData {
 /// The per-call half of both location-loot envelopes: services, per-raid state, and the
 /// caller-supplied `staticAmmoDist` (a frozen public-API parameter, so the resident DB can never
 /// stand in for it). `moneyTpls` is service-backed (`ItemHelper.GetMoneyTpls`) and rides here
-/// under the Phases-2/4 carve-out. The config view left for the views side in Phase 4: the
-/// resident arm resolves it per call off the `spt-location` stem.
+/// under the Phases-2/4 carve-out. The config view left for the views side in Phase 4 — all but
+/// the two multipliers, which are adjusted per raid: the resident arm resolves the rest per call
+/// off the `spt-location` stem.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LootVarying {
@@ -532,6 +533,15 @@ pub struct LootVarying {
     pub location_id: String,
     pub money_tpls: Vec<String>,
     pub static_ammo_dist: HashMap<String, Vec<StaticAmmoDetails>>,
+    /// `MultiplierForLocation(LocationConfig.StaticLootMultiplier, locationId)` off the **live**
+    /// C# config, per call on both arms. Not lifted with the rest of the config:
+    /// `RaidTimeAdjustmentService.AdjustLootMultipliers` scales every entry of that dictionary in
+    /// place through the indexer for a shortened scav raid and restores it after generation, so no
+    /// property setter fires, the write barriers never see it, and a resident read would hand the
+    /// scav raid unadjusted PMC-density loot.
+    pub static_loot_multiplier: f64,
+    /// See [`Self::static_loot_multiplier`].
+    pub loose_loot_multiplier: f64,
     pub seasonal: SeasonalView,
     pub lootable_item_blacklist: HashSet<String>,
     pub counter: CounterState,
@@ -755,9 +765,11 @@ pub struct LootConfigView {
     pub static_magazine_loot_has_ammo_chance_percent: f64,
     pub min_fill_loose_magazine_percent: f64,
     pub min_fill_static_magazine_percent: f64,
-    /// `MultiplierForLocation(StaticLootMultiplier, locationId)`.
+    /// `MultiplierForLocation(StaticLootMultiplier, locationId)` — read off the wire on the
+    /// override arm; copied out of [`LootVarying::static_loot_multiplier`] on the resident one,
+    /// which is where the per-raid adjustment lives.
     pub static_loot_multiplier: f64,
-    /// `MultiplierForLocation(LooseLootMultiplier, locationId)`.
+    /// See [`Self::static_loot_multiplier`].
     pub loose_loot_multiplier: f64,
     /// `EquipmentLootSettings`.
     pub mod_spawn_chance_percent: HashMap<String, f64>,
@@ -1065,6 +1077,7 @@ mod tests {
         "locationId":"bigmap",
         "moneyTpls":["5449016a4bdc2d6f028b456f"],
         "staticAmmoDist":{"Caliber762x39":[{"tpl":"dddddddddddddddddddddddd","relativeProbability":5}]},
+        "staticLootMultiplier":1.5,"looseLootMultiplier":1.1,
         "seasonal":{"seasonalEventActive":false,"christmasEventEnabled":false,
             "inactiveSeasonalItems":[]},
         "lootableItemBlacklist":[],
@@ -1211,6 +1224,7 @@ mod tests {
 
         assert_eq!(parsed.epoch, 7);
         assert_eq!(parsed.varying.location_id, "bigmap");
+        assert_eq!(parsed.varying.static_loot_multiplier, 1.5);
         assert_eq!(
             parsed.varying.counter.max_counts["ffffffffffffffffffffffff"],
             2

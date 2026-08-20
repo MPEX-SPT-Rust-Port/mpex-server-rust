@@ -1476,6 +1476,7 @@ mod tests {
     const VARYING_JSON: &str = r#"
         "locationId":"bigmap",
         "moneyTpls":[],"staticAmmoDist":{},
+        "staticLootMultiplier":1,"looseLootMultiplier":1,
         "seasonal":{"seasonalEventActive":false,"christmasEventEnabled":false,
             "inactiveSeasonalItems":[]},
         "lootableItemBlacklist":[],"counter":{"maxCounts":{},"trackedCounts":{}}

@@ -384,6 +384,9 @@ public class LocationLootGeneratorNativeTests
                 LocationId = TestLocationId,
                 MoneyTpls = [_moneyTpl],
                 StaticAmmoDist = [],
+                // Per-call on both arms, unlike the rest of the config view
+                StaticLootMultiplier = 1,
+                LooseLootMultiplier = 1,
                 Seasonal = BuildSeasonal(),
                 LootableItemBlacklist = [],
                 Counter = new CounterState { MaxCounts = [], TrackedCounts = [] },
@@ -412,6 +415,9 @@ public class LocationLootGeneratorNativeTests
                 LocationId = TestLocationId,
                 MoneyTpls = [_moneyTpl],
                 StaticAmmoDist = [],
+                // Per-call on both arms, unlike the rest of the config view
+                StaticLootMultiplier = 1,
+                LooseLootMultiplier = 1,
                 Seasonal = BuildSeasonal(),
                 LootableItemBlacklist = [],
                 Counter = new CounterState { MaxCounts = [], TrackedCounts = [] },

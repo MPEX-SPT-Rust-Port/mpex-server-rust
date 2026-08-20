@@ -354,8 +354,11 @@ public class LocationLootGenerator(
     /// <summary>
     /// The per-call half of both requests: services and per-raid state, resolved for one location.
     /// Stateless: nothing here is cached between calls, so a mod that swaps a seasonal state is
-    /// picked up on the next raid. The config view rides <see cref="BuildViewsOverride"/> instead -
-    /// the resident arm resolves it from the published config itself.
+    /// picked up on the next raid. The rest of the config view rides
+    /// <see cref="BuildViewsOverride"/>, which a resident send omits - but the two loot multipliers
+    /// stay here on both arms, because <c>RaidTimeAdjustmentService</c> scales them in place for a
+    /// scav raid without tripping a write barrier (see
+    /// <see cref="LootVarying.StaticLootMultiplier"/>).
     /// </summary>
     private LootVarying BuildVarying(string locationId, Dictionary<string, IEnumerable<StaticAmmoDetails>> staticAmmoDist)
     {
@@ -364,6 +367,8 @@ public class LocationLootGenerator(
             LocationId = locationId,
             MoneyTpls = itemHelper.GetMoneyTpls(),
             StaticAmmoDist = staticAmmoDist.ToDictionary(caliber => caliber.Key, caliber => caliber.Value.ToList()),
+            StaticLootMultiplier = MultiplierForLocation(locationConfig.StaticLootMultiplier, locationId),
+            LooseLootMultiplier = MultiplierForLocation(locationConfig.LooseLootMultiplier, locationId),
             Seasonal = new SeasonalView
             {
                 SeasonalEventActive = seasonalEventService.SeasonalEventEnabled(),
@@ -396,6 +401,8 @@ public class LocationLootGenerator(
             LocationId = locationId,
             MoneyTpls = itemHelper.GetMoneyTpls(),
             StaticAmmoDist = staticAmmoDist.ToDictionary(caliber => caliber.Key, caliber => caliber.Value.ToList()),
+            StaticLootMultiplier = MultiplierForLocation(locationConfig.StaticLootMultiplier, locationId),
+            LooseLootMultiplier = MultiplierForLocation(locationConfig.LooseLootMultiplier, locationId),
             Seasonal = new SeasonalView
             {
                 SeasonalEventActive = seasonalEventService.SeasonalEventEnabled(),
@@ -458,7 +465,9 @@ public class LocationLootGenerator(
     /// <summary>
     /// Every config value the generator reads, resolved for one location. Ported member for member
     /// as <c>resolve_loot_config_view</c> in <c>rust/spt-native/src/loot/location_loot_generator.rs</c>,
-    /// which is what a resident-DB send uses instead of this - the two must stay in step.
+    /// which is what a resident-DB send uses instead of this - the two must stay in step. The two
+    /// multipliers are the exception: that resolve copies them out of the varying block, which
+    /// carries the same <see cref="MultiplierForLocation"/> results computed here.
     /// </summary>
     private LootConfigView BuildConfigView(string locationId)
     {

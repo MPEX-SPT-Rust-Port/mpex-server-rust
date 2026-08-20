@@ -164,16 +164,29 @@ fn reward_item_config_json() -> &'static str {
 }
 
 /// Every `LootVarying` member of the sends below, `testSeed` included so both arms replay one
-/// draw stream. The config view and the christmas container ids are not here — they ride the
-/// resident configs root on one arm and [`config_view_json`] on the other.
+/// draw stream. The rest of the config view and the christmas container ids are not here — they
+/// ride the resident configs root on one arm and [`config_view_json`] on the other; the two
+/// multipliers are, because C# resolves those against the live raid-adjusted config on both arms
+/// and the values must match what [`config_view_json`] puts in the override's view.
 fn varying(location_id: &str, test_seed: u64) -> String {
+    let multiplier = multiplier_for(location_id);
+
     format!(
         r#""locationId":"{location_id}","moneyTpls":["{MONEY_TPL}"],"staticAmmoDist":{{}},
+        "staticLootMultiplier":{multiplier},"looseLootMultiplier":{multiplier},
         "seasonal":{{"seasonalEventActive":false,"christmasEventEnabled":false,
             "inactiveSeasonalItems":[]}},
         "lootableItemBlacklist":[],"counter":{{"maxCounts":{{}},"trackedCounts":{{}}}},
         "testSeed":{test_seed}"#
     )
+}
+
+/// What `MultiplierForLocation` answers for each fixture location, C#-side: `bigmap` has its own
+/// entry in the config, `factory4_day` falls back to `"default"`. Both arms are handed this same
+/// resolved number, so it is the one config value the byte comparison cannot police — the live-data
+/// C# gates (`LootParityTests`, `LootResidentDbTests`) cover the resolution itself.
+fn multiplier_for(location_id: &str) -> &'static str {
+    if location_id == "bigmap" { "1" } else { "2" }
 }
 
 /// The seed the static sends replay. Every static send `install`s a fresh stream from it, so the
@@ -186,9 +199,11 @@ const STATIC_SEED: u64 = 42;
 /// static send and the second would start fresh: two different streams for the same request.
 const DYNAMIC_SEED: u64 = 99;
 
-/// The `spt-location` stem the publish carries: `bigmap` has an entry in all three map-keyed
-/// members the C# resolves per location, `factory4_day` in none of them. Every scalar is a value
-/// the generator reads, so a lift that dropped one shows up as a diverging draw.
+/// The `spt-location` stem the publish carries: `bigmap` has an entry in both map-keyed members the
+/// resident arm resolves per location, `factory4_day` in neither. Every scalar is a value the
+/// generator reads, so a lift that dropped one shows up as a diverging draw. The two multiplier maps
+/// are deliberately absent: the lift no longer declares them (they are adjusted per raid and ride
+/// the request instead), and a publish carrying them would only prove they are ignored.
 fn location_config_stem() -> String {
     format!(
         r#"{{"kind":"spt-location",
@@ -199,21 +214,20 @@ fn location_config_stem() -> String {
         "fitLootIntoContainerAttempts":3,"magazineLootHasAmmoChancePercent":0,
         "staticMagazineLootHasAmmoChancePercent":0,"minFillLooseMagazinePercent":0,
         "minFillStaticMagazinePercent":0,
-        "staticLootMultiplier":{{"bigmap":1,"default":2}},
-        "looseLootMultiplier":{{"bigmap":1,"default":2}},
         "equipmentLootSettings":{{"modSpawnChancePercent":{{}}}},
         "looseLootBlacklist":{{"bigmap":["{LOOSE_POINT_ID}"]}}}}"#
     )
 }
 
 /// `LocationLootGenerator.BuildConfigView(locationId)` as the C# projects it, for the override arm.
-/// The two locations differ in exactly the three members the resident resolution has to get right:
-/// `bigmap` is in `maps` with its own multipliers and its own blacklist, `factory4_day` is in none
-/// of the three — not randomised, `"default"` multipliers, empty blacklist.
+/// The two locations differ in the two members the resident resolution has to get right — `bigmap`
+/// is in `maps` and has its own blacklist, `factory4_day` is in neither — plus the multiplier, which
+/// is C#-resolved on both arms and so must equal what [`varying`] sends.
 fn config_view_json(location_id: &str) -> String {
-    let (in_maps, multiplier, blacklist) = match location_id {
-        "bigmap" => ("true", "1", format!(r#"["{LOOSE_POINT_ID}"]"#)),
-        _ => ("false", "2", "[]".to_owned()),
+    let multiplier = multiplier_for(location_id);
+    let (in_maps, blacklist) = match location_id {
+        "bigmap" => ("true", format!(r#"["{LOOSE_POINT_ID}"]"#)),
+        _ => ("false", "[]".to_owned()),
     };
 
     format!(
