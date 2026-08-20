@@ -284,7 +284,7 @@ five shipped recipes:
 |---|---|---|
 | publish **cold** (stamp bumped per run) | 736.7 – 748.2 ms | 742.0 – 749.4 ms |
 | publish cost per send (cold − warm) | 735.2 – 746.4 ms | 740.5 – 747.5 ms |
-| five-root baseline, same fixture (`cecdd5c`) | 733.7 – 744.8 ms | 736.0 – 743.6 ms |
+| five-root baseline, same fixture (`cecdd5c` / `9011794`) | 733.7 – 744.8 ms / 732.9 – 745.1 ms | 736.0 – 743.6 ms |
 | native, publish **warm** | 1.55 – 1.78 ms | 1.54 – 1.93 ms |
 | legacy (C# 4.1.2) | 0.41 – 1.53 ms | 0.42 – 1.39 ms |
 | `Build` (request only) | 14.00 ms | 13.49 ms |
@@ -292,11 +292,11 @@ five shipped recipes:
 
 **The sixth root is free at this fixture's resolution.** The plan budgeted roughly Phase 0's configs
 row (67.7 ms warm projection, 0.7 MiB) on top of the 730–745 ms five-root publish; what the cold arm
-actually reads is 736.7–748.2 ms against 733.7–744.8, a +3 to +6 ms shift on the range endpoints
-inside a per-recipe spread of 719–811 ms. Phase 0 measured that 67.7 ms with the configs root last
-in a per-root loop that also charged it 370.6 ms cold, which is out of all proportion to 0.7 MiB
-next to globals' 0.7 MiB at 7.3 ms warm — read the spike's configs row as first-touch cost, not as
-the marginal price of the root. Nothing per-call moved for it either: the warm arm holds at
+actually reads is 736.7–748.2 ms against flip #6's nearer 732.9–745.1 — **+3.1 to +3.8 ms** on the
+range endpoints, inside a per-recipe spread of 719–811 ms. So the spike's configs row does not
+predict the marginal price of the root in a real publish: 67.7 ms warm for 0.7 MiB, against globals'
+7.3 ms for the same 0.7 MiB, is a 9x gap at equal size that this publish does not reproduce.
+Mechanism not chased. Nothing per-call moved for the root either: the warm arm holds at
 1.54–1.93 ms against flip #5's 1.58–1.88 ms.
 
 The bot wire has no committed fixture that reports bytes — `BotPayloadSizeTests` pins the *override*
@@ -336,7 +336,9 @@ before the flip and 94 KB before residency.
 wave-45 send `templateVariants` — the per-level-band filtered template plus its loot pools — is
 384,685 B, **83.2%** of the 462,235-byte request, with the 45 bot slices at 11,161 B behind it. The
 plan predicted `modPoolSlotOrder` would be left dominant; it is third. Among the members that are
-genuinely varying process state, `equipment` (39,811 B) now leads `modPoolSlotOrder` (26,428 B):
+genuinely varying process state, `equipment` (39,811 B) leads `modPoolSlotOrder` (26,428 B) — and led
+it at `9011794` as well, off the same projection expression, so the flip-6 block's "single largest
+member still crossing per call" was already wrong when written:
 `BotConfig.Equipment` was ruled to stay on the wire because `ReplayRandomisationClamps` writes the
 nighttime mod chances back into it after every send, so the largest config-shaped member is the one
 that did not move. Carving a varying `EquipmentMods` member out of an otherwise resident
@@ -344,18 +346,19 @@ that did not move. Carving a varying `EquipmentMods` member out of an otherwise 
 
 **The ineligible arm did not move.** 4,152,813 B against the pre-phase 4,208,129 B is the same wire
 by construction — the config half moved from `shared` into `viewsOverride`, not off the send, so the
-ineligible total should be flat and is. The 55 KB gap reads as the first-call artifact below:
-4,208,129 − 54,131 is 4,153,998, within 1,185 B of this sitting's warmed figure, which puts the
-pre-phase override arm in the unwarmed regime and its own resident arm in the warmed one. That is a
+ineligible total should be flat and is. The gap measures 55,316 B and the first-call artifact below
+measures 54,178 B (423,285 − 369,107) — the two match to within ~1.2 KB, which puts the pre-phase
+override arm in the unwarmed regime and its own resident arm in the warmed one. That is a
 reading of two numbers, not a re-measurement of `9011794`. The override/eligible ratio rising
 7.1x → 9.20x is entirely the eligible arm shrinking either way.
 
-**Measurement note: the first `BuildRequest` of a process answers a template ~54 KB larger than
+**Measurement note: the first `BuildRequest` of a process answers a template 54,178 B larger than
 every later one** (423,285 B against a settled 369,107 B, reproduced across three passes in each of
-two probe runs). It is not a Phase 4 effect and it is not in the filtered clone — the template measures
-368,927 B immediately after `FilterBotEquipment` and 423,285 B by the time `BuildTemplateView` runs
-inside the same `BuildRequest` — but it is worth 12% of an unwarmed single-bot reading, so any
-re-take of this line must warm first. The pre-phase resident figures were in the settled regime
+two probe runs). It is not in the filtered clone — the template measures 368,927 B immediately after
+`FilterBotEquipment` and 423,285 B by the time `BuildTemplateView` runs inside the same
+`BuildRequest` — and it is present at `9011794` too on the arithmetic above, so nothing here suggests
+Phase 4 introduced it; mechanism not chased. It is worth 12% of an unwarmed single-bot reading, so
+any re-take of this line must warm first. The pre-phase resident figures were in the settled regime
 (their single-bot 589,344 B and wave-1 589,444 B differ by the same 100 bytes as this sitting's
 451,223 and 451,323), which is what makes the two comparable.
 
@@ -577,7 +580,10 @@ timed run.
 `ecf856b` — 2026-08-20, post configs flip (phase 4, ABI 30). Not re-timed, but re-weighed: twelve
 config slices and the two equipment blacklists left the shared varying block for the resident configs
 root, taking 138,121 bytes off every eligible send (§ Phase 4), while `BotConfig.Equipment` stays on
-the wire because `ReplayRandomisationClamps` writes into it after every send.
+the wire because `ReplayRandomisationClamps` writes into it after every send — which also corrects
+the block above: `modPoolSlotOrder` was never the largest member crossing per call, since `equipment`
+measures 39,811 B off a projection expression that is character-identical at `9011794`, so it led
+there too and the Phase 4 reading is not a new lead.
 
 ### Batched wave
 
