@@ -11,8 +11,10 @@
     <PackageReference Include="System.IO.Hashing" Version="10.0.10" />
     <PackageReference Include="HarmonyX" Version="2.16.1" />
   </ItemGroup>
+  <!-- SPT_Data is staged transitively via the SPTarkov.Server reference, which imports
+       Libraries/SPTarkov.Server.Assets/Assets.props. ImageRouterTests and DI.cs read it from the
+       test output directory. -->
   <ItemGroup>
-    <ProjectReference Include="..\..\Libraries\SPTarkov.Server.Assets\SPTarkov.Server.Assets.csproj" />
     <ProjectReference Include="..\..\Libraries\SPTarkov.Server.Core\SPTarkov.Server.Core.csproj" />
     <ProjectReference Include="..\..\Libraries\SPTarkov.DI\SPTarkov.DI.csproj" />
     <ProjectReference Include="..\..\Libraries\SPTarkov.Common\SPTarkov.Common.csproj" />

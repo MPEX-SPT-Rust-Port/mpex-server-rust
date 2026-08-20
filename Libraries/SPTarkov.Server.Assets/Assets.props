@@ -1,9 +1,10 @@
 <Project>
   <!--
-      Stages SPT_Data into the importing project's output directory. Imported by the four projects
-      that read ./SPT_Data/ from their working directory at runtime; SPTarkov.Server.Assets used to
-      do this as a ProjectReference, but it held no code and this fork does not ship its NuGet
-      package (upstream sp-tarkov/server-csharp produces that).
+      Stages SPT_Data into the importing project's output directory. Imported by the three projects
+      that read ./SPT_Data/ from their working directory at runtime; Testing/UnitTests inherits the
+      staged tree transitively through its SPTarkov.Server project reference, so it needs no import
+      of its own. SPTarkov.Server.Assets used to do this as a ProjectReference, but it held no code
+      and this fork does not ship its NuGet package (upstream sp-tarkov/server-csharp produces that).
 
       Link is mandatory: these files live outside the importing project's directory, so without it
       MSBuild derives the destination from the ..\..\ relative identity and flattens the tree.
