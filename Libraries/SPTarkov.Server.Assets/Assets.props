@@ -1,7 +1,7 @@
 <Project>
   <!--
-      Stages SPT_Data into the importing project's output directory. Imported by the three projects
-      that read ./SPT_Data/ from their working directory at runtime; Testing/UnitTests inherits the
+      Stages SPT_Data into the importing project's output directory. Imported by the projects that
+      read ./SPT_Data/ from their working directory at runtime; Testing/UnitTests inherits the
       staged tree transitively through its SPTarkov.Server project reference, so it needs no import
       of its own. SPTarkov.Server.Assets used to do this as a ProjectReference, but it held no code
       and this fork does not ship its NuGet package (upstream sp-tarkov/server-csharp produces that).
@@ -10,18 +10,22 @@
       MSBuild derives the destination from the ..\..\ relative identity and flattens the tree.
   -->
   <ItemGroup>
-    <None Include="$(MSBuildThisFileDirectory)SPT_Data\**"
-          Exclude="$(MSBuildThisFileDirectory)SPT_Data\checks.dat"
-          Link="SPT_Data\%(RecursiveDir)%(Filename)%(Extension)">
+    <None
+      Include="$(MSBuildThisFileDirectory)SPT_Data\**"
+      Exclude="$(MSBuildThisFileDirectory)SPT_Data\checks.dat"
+      Link="SPT_Data\%(RecursiveDir)%(Filename)%(Extension)"
+    >
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <ExcludeFromSingleFile>True</ExcludeFromSingleFile>
     </None>
     <!-- checks.dat is written during the build by gen_checks, after item evaluation. A literal
          Include still resolves at copy time; the ** wildcard above is expanded at evaluation time
-         and would miss it. %(RecursiveDir) is empty for a non-wildcard Include. -->
-    <None Include="$(MSBuildThisFileDirectory)SPT_Data\checks.dat"
-          Condition="'$(Configuration)' == 'Release'"
-          Link="SPT_Data\checks.dat">
+         and would miss it. %(RecursiveDir) is empty for a non-wildcard Include. An Exists()
+         condition here would not be a safe fix for fresh-clone ordering either: item conditions are
+         evaluated before PreBuildHashFile runs, so the item would be silently dropped and a
+         fresh-clone publish would ship without checks.dat, turning a loud build error into a
+         runtime verification failure. -->
+    <None Include="$(MSBuildThisFileDirectory)SPT_Data\checks.dat" Condition="'$(Configuration)' == 'Release'" Link="SPT_Data\checks.dat">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <ExcludeFromSingleFile>True</ExcludeFromSingleFile>
     </None>

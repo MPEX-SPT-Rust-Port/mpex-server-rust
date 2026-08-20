@@ -2,10 +2,10 @@
 
 ## 1. Overview Summary
 
-Map of the six projects under `Libraries/`: which project owns what, what each depends on, and what
+Map of the five projects under `Libraries/`: which project owns what, what each depends on, and what
 deliberately lives elsewhere. All game logic sits in one of them (`SPTarkov.Server.Core`, ~91% of the files
-and ~94% of the lines here); the other five are a container, a logging front end, a patching toolkit, the
-Blazor admin panel and a content-only asset payload.
+and ~94% of the lines here); the other four are a container, a logging front end, a patching toolkit and the
+Blazor admin panel.
 
 | Language | Lines of Code | File Count |
 |-----------|-----------------|-----------|
@@ -141,8 +141,8 @@ and `wwwroot/` admin-panel assets into the *output* `SPT_Data`, which is why nei
 hash verification.
 
 `checks.dat` is regenerated on Release builds only, by the `PreBuildHashFile` target in
-`SPTarkov.Server.csproj` running the `gen_checks` bin — a thin wrapper over the same XXH3-128 code the startup verifier uses (see the root
-ARCHITECTURE.md).
+`SPTarkov.Server.csproj` running the `gen_checks` bin — a thin wrapper over the same XXH3-128 code
+the startup verifier uses (see the root ARCHITECTURE.md).
 
 Excluded from the knowledge graph by `.graphifyignore` (~all JSON data, not code).
 
@@ -154,7 +154,7 @@ Excluded from the knowledge graph by `.graphifyignore` (~all JSON data, not code
 |-------------------|-------------------|-------|
 | `rust/spt-native` (cdylib) | Sync FFI, C ABI | Two P/Invoke sites: Common's `Native/NativeMethods.cs` for the log exports, Core's `Native/` for everything else. Common cannot reference Core, hence the twin |
 | `rust/spectre-facade` | Build-time codegen | Emits `Spectre.Console.Ansi.dll` via `BuildSpectreFacade` in `SPTarkov.Common.csproj`; **Common needs `cargo` on `PATH`** |
-| `SPT_Data/` on disk | Batch, build + startup | `.Assets` ships it; `gen_checks` hashes it on Release; `DatabaseImporter` reads and verifies it |
+| `SPT_Data/` on disk | Batch, build + startup | The `Assets.props` glob stages it into consumer output; `gen_checks` hashes it on Release; `DatabaseImporter` reads and verifies it |
 | Mod assemblies | Reflective load | `[Injectable]` scan (`.DI`), HarmonyX patches (`.Reflection`), `BaseLogHandler` subclasses (`.Common`), `IModBlazorMetadata` pages and MVC controllers (`.Web`) |
 | Browser (admin panel) | Async, Blazor Server circuit | `.Web` over the shared Kestrel host; `AuthService` login, Argon2id hashing |
 | `sptLogger[.Development].json` | Config read at startup | Bound to `.Common`'s `SptLoggerConfiguration`, then handed to Rust as raw bytes |

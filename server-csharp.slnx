@@ -20,9 +20,13 @@
   </Folder>
   <Folder Name="/Tools/">
     <Project Path="Tools/Ceciler/Ceciler.csproj" />
-    <Project Path="Tools/HideoutCraftQuestIdGenerator/HideoutCraftQuestIdGenerator.csproj" />
+    <Project Path="Tools/HideoutCraftQuestIdGenerator/HideoutCraftQuestIdGenerator.csproj">
+      <BuildDependency Project="SPTarkov.Server/SPTarkov.Server.csproj" />
+    </Project>
     <Project Path="Tools/JsonExtensionDataGenerator/JsonExtensionDataGenerator.csproj" />
-    <Project Path="Tools/MongoIdTplGenerator/MongoIdTplGenerator.csproj" />
+    <Project Path="Tools/MongoIdTplGenerator/MongoIdTplGenerator.csproj">
+      <BuildDependency Project="SPTarkov.Server/SPTarkov.Server.csproj" />
+    </Project>
   </Folder>
   <Project Path="SPTarkov.Server/SPTarkov.Server.csproj" />
 </Solution>

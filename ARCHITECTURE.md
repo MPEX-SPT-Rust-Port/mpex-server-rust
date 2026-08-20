@@ -168,8 +168,8 @@ Two non-obvious steps run during build, both in `SPTarkov.Server.Core.csproj`:
   that mirrors it, while the barrier patch has its own Release-only fixtures in
   `Testing/UnitTests/Tests/Native/WriteBarrier*Tests`.
 
-`SPTarkov.Server`'s `PreBuildHashFile` target hashes `SPT_Data` into `checks.dat` on Release builds, which
-`DatabaseImporter` verifies at startup outside DEBUG. The format is a contract shared with
+`SPTarkov.Server`'s `PreBuildHashFile` target hashes `SPT_Data` into `checks.dat` on Release builds,
+which `DatabaseImporter` verifies at startup outside DEBUG. The format is a contract shared with
 `rust/spt-native/src/verify.rs`; scope is manifest-driven and exact in both directions over
 `configs/` and `database/`, so deletions and swaps are caught, while `images/` is unverified.
 

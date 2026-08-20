@@ -61,7 +61,10 @@
        this project directly rather than the solution.
 
        AssignTargetPaths, not BeforeBuild: it is the target that computes %(TargetPath) for content
-       items, so checks.dat is guaranteed on disk before the copy is planned.
+       items, so checks.dat is guaranteed on disk before the copy is planned. That hook has a wider
+       trigger surface than Build: a referencing project's GetCopyToOutputDirectoryItems and IDE
+       project-output-group queries also reach it, so in a Release-configured IDE session gen_checks
+       may run outside an explicit build. It is idempotent and Release-only, so that is benign.
 
        No $(CargoTargetFlag): gen_checks runs on the build host, so a cross-RID publish still
        hashes with a host-triple binary. Hashing is platform-independent, so that is correct. -->
