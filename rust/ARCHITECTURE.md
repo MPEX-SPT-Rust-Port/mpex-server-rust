@@ -50,7 +50,7 @@ different assembly: `Libraries/SPTarkov.Common/Native/NativeMethods.cs`, with
 
 | Path | Role |
 |---|---|
-| `src/lib.rs` | Module roots and `ABI_VERSION` (currently 29; must equal `SptNative.ExpectedAbiVersion`) |
+| `src/lib.rs` | Module roots and `ABI_VERSION` (currently 30; must equal `SptNative.ExpectedAbiVersion`) |
 | `src/ffi.rs` | The C-ABI surface. The **only** module containing `unsafe` |
 | `src/runtime.rs` | Process-wide multi-thread tokio runtime, `OnceLock`-built. Used only by `verify` and the fused load |
 | `src/verify.rs` | Hashes `SPT_Data` with XXH3-128 and diffs it against `checks.dat`. `verify_collecting` is the same walk with a `want` predicate that whole-reads and returns matching files' bytes, so the fused load reads each file once |
@@ -59,7 +59,7 @@ different assembly: `Libraries/SPTarkov.Common/Native/NativeMethods.cs`, with
 | `src/log_sink.rs` | The file sink alone: where a formatted line lands on disk, with its rotation and archiving |
 | `src/console.rs` | Terminal control: Windows console setup, title, clear, the stdin line-ending strip |
 | `src/diag.rs` | The generator families' way into that pipeline: the locale table, the render, and `DiagSink` |
-| `src/db.rs` | The resident DB: the epoch-versioned store of published roots (templates, traders, globals, locations, hideout); a publish re-derives the ragfair, quest and bot views |
+| `src/db.rs` | The resident DB: the epoch-versioned store of published roots (templates, traders, globals, locations, hideout, configs); a publish re-derives the ragfair, quest and bot views from the tables |
 | `src/db/models.rs` | The publish envelope's wire types |
 | `src/db/load.rs` | The fused startup load: one walk over `SPT_Data` hashes, reads and assembles the five roots into epoch 1, and collects the eager `database/` file bytes for the C# replica. A plain `async fn` — no CLR needed, so the post-6b exe can call it before booting the runtime |
 | `src/loot/` | Location loot (static containers, loose loot) and reward loot (airdrops, cases, containers) |
@@ -121,8 +121,9 @@ releases with `spt_buf_free`; so do `spt_console_read_line` and `spt_log_format`
 - **Every family rides the resident DB (Phase 1 complete at flip #6, ABI 27): ragfair, the repeatable
   quest, the two startup one-shots (base-class cache, linked-item table), the loot pair — location loot and
   reward loot — the scav case, and the bot family's two exports.** `spt_db_publish` (called by C#'s
-  `DbPublisher` whenever `DatabaseMutationStamp` has moved) makes the templates, traders, globals, locations
-  and hideout roots resident in `db.rs` and derives the ragfair, quest and bot views off them — in that
+  `DbPublisher` whenever `DatabaseMutationStamp` has moved) makes six roots resident in `db.rs` — templates,
+  traders, globals, locations, hideout and (since Phase 4) configs — and derives the ragfair, quest and bot
+  views off the five tables, in that
   order, because each gates on the previous one's output. Every root is optional — an absent one keeps the
   resident copy — and the epoch bumps on full and partial publishes alike; a bad schema or a failed
   derivation aborts before the swap, so the previous resident DB survives, and an ungated view set is left
@@ -134,6 +135,16 @@ releases with `spt_buf_free`; so do `spt_console_read_line` and `spt_log_format`
   `epoch: 0`, a wire contract that is documented, not runtime-enforced. Which views each family borrows, and
   why loose loot, `staticAmmoDist` and the bot family's `modPoolSlotOrder` deliberately stayed per-call, is
   in RUST-ROADMAP.md's flip ledgers.
+- **The `configs` root is keyed by kind string, and no view derives from it.** All 28 loaded configs arrive
+  under their own `Kind` (`"spt-item"`, `"spt-bot"`, …) rather than a type or file name, and families read
+  them per call the way scav case reads its recipes. Only the stems some family actually reads are lifted
+  into typed structs (`ConfigsRoot` in `db/models.rs`); the rest ride the flatten map, and so does any
+  member of a lifted stem nobody reads. **The strictness contract to know before adding a stem:** each is an
+  `Option<Lift>`, so an *absent* stem still parses and the reading family fails its per-call resolve loudly
+  naming the stem, while a *malformed* one fails the whole publish (`STATUS_BAD_ARGS`) and leaves the
+  previous resident DB standing. Which config members deliberately stayed per-call — they are the ones a C#
+  writer mutates in place through an indexer, where no write barrier fires — is in RUST-ROADMAP.md's Phase 4
+  ledger. Phase 4 added **no** export.
 - **A buffer is written on failure too** — the parse error, the `LootError` message, or the panic text.
   Ownership is decided by the out-pointer being non-null, never by the status code. `spt_verify_database`'s
   free-on-success-only shape must not be copied into the generators.
@@ -215,8 +226,8 @@ original, which is what the dispatcher's stderr fallbacks-of-last-resort need.
 | `models.rs` | `Models/…` | Wire types (see *Conventions*) |
 
 Since flip #4 both generators resolve their DB-derived views off the resident DB (see *FFI boundary*); the
-family has no `views.rs` of its own, borrowing `ragfair/views.rs`'s instead. The service- and config-backed
-fields still ride each request.
+family has no `views.rs` of its own, borrowing `ragfair/views.rs`'s instead. Since Phase 4 its config
+inputs come off the resident `configs` root too; the service-backed fields still ride each request.
 
 ### `src/bot/`
 
@@ -268,7 +279,8 @@ Two crate-internal facts:
 ### `src/quest/`
 
 `mod.rs` defines `QuestContext<'a>` — the read-only views one quest borrows, plus its `DiagSink`. Every
-DB-derived view comes off the resident DB (see *FFI boundary*); the service- and config-backed fields ride
+DB-derived view comes off the resident DB and, since Phase 4, so does every config-backed one (see *FFI
+boundary*); the service-backed fields and the caller's chosen `repeatableConfig` ride
 the request. One native call generates **one** quest of one type.
 
 `generate_repeatable_quest` stands in for the type switch of
@@ -365,16 +377,19 @@ Almost all tests are inline `#[cfg(test)]` modules (~770 of them). Three kinds:
   failure, generation failure and null arguments. `spt_generate_bot_inventory_batch` is the one export with no
   transport test of its own.
 
-Nine `tests/` targets, in three groups. `completion_whitelist_baseclass.rs` and `phase3_db_load.rs` run
+Ten `tests/` targets, in three groups. `completion_whitelist_baseclass.rs` and `phase3_db_load.rs` run
 against the real shipped tree, so both need `scripts/decompress-assets.sh` to have run: the first guards the
 Completion whitelist filter's base-class lookups against `items.json`, the second runs the fused load over
 `SPT_Data` and asserts the installed epoch, the five resident roots and their derived views, which files do
 and do not ride the handoff, and that a returned buffer is byte-exact against disk — it is also the gate on
 the resident roots being comment-free JSON.
 `phase1_ragfair_views.rs`, `phase1_quest_views.rs`,
-`flip3_oneshot_views.rs` and `phase0_publish_spike.rs` are `#[ignore]`d halves of C#-paired harnesses —
+`flip3_oneshot_views.rs`, `phase0_publish_spike.rs` and `phase4_configs_root.rs` are `#[ignore]`d halves of
+C#-paired harnesses —
 each replays a fixture its twin under `Testing/UnitTests` wrote to `$TMPDIR`, so running one alone proves
-nothing. `flip4_loot_resident.rs`, `flip5_scavcase_resident.rs` and `flip6_bots_resident.rs` are
+nothing. The Phase 4 one is the only crossing of `ConfigLoader`'s bespoke serializer options and the shared
+`JsonUtil` ones the publish writes with, so it is the gate on that pair, not on any generator.
+`flip4_loot_resident.rs`, `flip5_scavcase_resident.rs` and `flip6_bots_resident.rs` are
 self-contained: each
 publishes a minimal DB and proves a resident-epoch send generates identically to the same data sent inline.
 
@@ -390,7 +405,7 @@ over the server-assembly probe, `spectre-facade`'s two.
 |-------------------|-------------------|-------|
 | `SPTarkov.Server.Core` | Sync FFI, C ABI | `Native/NativeMethods.cs` + `SptNative.cs` and the per-family projections. Thirty exports; `ABI_VERSION` must equal `SptNative.ExpectedAbiVersion` |
 | `SPTarkov.Common` | Sync FFI, C ABI | The eleven log and console exports plus `spt_buf_free`, from a second `Native/NativeMethods.cs` — Common cannot reference Core |
-| `SPT_Data/` on disk | Batch, async over tokio | `spt_verify_database` hashes `configs/` + `database/` with XXH3-128; `spt_db_load` (since ABI 29) does that walk *and* reads `database/` in one pass, installing the resident roots and handing the eager bytes back to `DatabaseImporter`; `gen_checks` writes `checks.dat` on Release builds |
+| `SPT_Data/` on disk | Batch, async over tokio | `spt_verify_database` hashes `configs/` + `database/` with XXH3-128; `spt_db_load` (since ABI 29) does that walk *and* reads `database/` in one pass, installing the five database roots — never the configs root, which only `spt_db_publish` builds — and handing the eager bytes back to `DatabaseImporter`; `gen_checks` writes `checks.dat` on Release builds |
 | `sptLogger.json` | Config bytes over FFI | Parsed once per process by `spt_logger_init`; filters use `regex-lite`, so .NET-only syntax degrades to never-match |
 | Log files on disk | Async, background thread per sink | `log_sink.rs`: bounded channel that drops rather than grows; rotation and archive cap enforced together |
 | .NET CLR (`mpex-server`) | Process host | netcorehost `run_app`s the published server assembly with argv forwarded; libnethost comes from NuGet at build time via the `nethost-download` feature |
