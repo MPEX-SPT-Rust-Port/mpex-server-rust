@@ -1,5 +1,6 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk.Web">
   <Import Project="..\Build.props" />
+  <Import Project="..\Libraries\SPTarkov.Server.Assets\Assets.props" />
   <PropertyGroup>
     <PackageId>SPTarkov.Server</PackageId>
     <Authors>Single Player Tarkov</Authors>
@@ -30,7 +31,6 @@
   <ItemGroup>
     <ProjectReference Include="..\Libraries\SPTarkov.Reflection\SPTarkov.Reflection.csproj" />
     <ProjectReference Include="..\Libraries\SPTarkov.Server.Core\SPTarkov.Server.Core.csproj" />
-    <ProjectReference Include="..\Libraries\SPTarkov.Server.Assets\SPTarkov.Server.Assets.csproj" />
     <ProjectReference Include="..\Libraries\SPTarkov.Server.Web\SPTarkov.Server.Web.csproj" />
   </ItemGroup>
   <ItemGroup>
@@ -54,6 +54,29 @@
   <ItemGroup>
     <None Include="..\LICENSE" Pack="true" Visible="false" PackagePath="" />
   </ItemGroup>
+  <!-- Regenerates SPT_Data/checks.dat, which DatabaseImporter hash-verifies at startup outside
+       DEBUG builds. Lives here rather than in Assets.props because a props file would run cargo
+       once per importing project, all writing the same source-tree file. SPTarkov.Server is the
+       only project producing a shippable Release artifact, and Containerfile.release publishes
+       this project directly rather than the solution.
+
+       AssignTargetPaths, not BeforeBuild: it is the target that computes %(TargetPath) for content
+       items, so checks.dat is guaranteed on disk before the copy is planned. That hook has a wider
+       trigger surface than Build: a referencing project's GetCopyToOutputDirectoryItems and IDE
+       project-output-group queries also reach it, so in a Release-configured IDE session gen_checks
+       may run outside an explicit build. It is idempotent and Release-only, so that is benign.
+
+       No $(CargoTargetFlag): gen_checks runs on the build host, so a cross-RID publish still
+       hashes with a host-triple binary. Hashing is platform-independent, so that is correct. -->
+  <Target Name="PreBuildHashFile" BeforeTargets="AssignTargetPaths" Condition="'$(Configuration)' == 'Release'">
+    <Exec
+      Command="cargo run --locked --release --bin gen_checks -- &quot;$(MSBuildThisFileDirectory)..\Libraries\SPTarkov.Server.Assets\SPT_Data&quot;"
+      WorkingDirectory="$(MSBuildThisFileDirectory)..\rust"
+    >
+      <Output TaskParameter="ExitCode" PropertyName="HashFileExitCode" />
+    </Exec>
+    <Error Message="Failed to hash files" Condition=" '$(HashFileExitCode)' != '0'" />
+  </Target>
   <!-- Without a Rust target for the RID, cargo emits a host-triple artifact and the publish would package the wrong spt_native. -->
   <Target Name="CheckSptNativeRuntimeIdentifier" BeforeTargets="Build;Publish">
     <Error

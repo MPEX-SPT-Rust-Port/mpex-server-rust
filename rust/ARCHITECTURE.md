@@ -147,7 +147,7 @@ asserts the constant so the bump can't be forgotten.
 ### `src/verify.rs`
 
 `checks.dat` is a path/hash manifest written at Release build time by `generate` in this same module, via the
-`gen_checks` bin (invoked by `PreBuildHashFile` in `SPTarkov.Server.Assets.csproj`). Hashing fans out over the
+`gen_checks` bin (invoked by `PreBuildHashFile` in `SPTarkov.Server.csproj`). Hashing fans out over the
 tokio runtime under a concurrency cap. Three properties are load-bearing:
 
 - **Scope comes from the manifest, not the tree.** Only the top-level `SPT_Data` roots the manifest names

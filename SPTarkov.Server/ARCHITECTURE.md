@@ -6,8 +6,9 @@ The executable host (`SPT.Server`, `SPT.Server.Linux` on linux-x64). Everything 
 logging, load configs, run the mod loader, import the database, build the DI container, hand off to Kestrel. No
 game logic lives in this project; that is all
 [`Libraries/SPTarkov.Server.Core`](../Libraries/SPTarkov.Server.Core/ARCHITECTURE.md). It references
-`SPTarkov.Server.Core`, `.Web`, `.Assets` and `.Reflection`; its only direct NuGet dependency is
-`AsmResolver.DotNet`, used by the enum prepatcher.
+`SPTarkov.Server.Core`, `.Web` and `.Reflection`; `SPT_Data` is not a project reference at all — it is staged
+into the output by importing `Libraries/SPTarkov.Server.Assets/Assets.props`. Its only direct NuGet dependency
+is `AsmResolver.DotNet`, used by the enum prepatcher.
 
 | Language | Lines of Code | File Count |
 |-----------|-----------------|-----------|
@@ -124,6 +125,9 @@ unhandled-exception logging with it, not just the per-request lines.
 
 `Microsoft.NET.Sdk.Web`, server GC, `InternalsVisibleTo(UnitTests)`. MSBuild targets of note:
 
+- `PreBuildHashFile` — Release only, `BeforeTargets="AssignTargetPaths"`: runs the `gen_checks` Rust bin to
+  regenerate `Libraries/SPTarkov.Server.Assets/SPT_Data/checks.dat` before content copies are planned.
+  `Assets.props` from that same directory is imported here to stage `SPT_Data` into the output.
 - `CheckSptNativeRuntimeIdentifier` — fails a cross-RID build/publish when `Build.props` maps no Rust triple for
   the RID, rather than silently packaging a host-triple `spt_native`.
 - `IncludeMpexServerLauncher` — copies the Rust `mpex-server` launcher into the publish output beside the app.
