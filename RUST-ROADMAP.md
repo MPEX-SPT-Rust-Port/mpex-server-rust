@@ -132,8 +132,9 @@ entry and the inherited `ValueType.ToString()`. Scope is `Color` only — mods t
   override. Deliberate: the trust flag must not vouch for barriers that were never injected.
 - **Native database load requires comment-free JSON in the resident-root files** — templates,
   traders, globals, locations and hideout are parsed by `serde_json` inside `spt_db_load`, which
-  rejects the comments and trailing commas the pure-C# reader tolerated (`JsonUtil` sets
-  `ReadCommentHandling = JsonCommentHandling.Skip`). Non-resident files keep that tolerance: their
+  rejects the comments the pure-C# reader tolerated (`JsonUtil` sets
+  `ReadCommentHandling = JsonCommentHandling.Skip`, and nothing else — trailing commas are rejected
+  on both paths, `AllowTrailingCommas` appearing nowhere in the tree). Non-resident files keep that tolerance: their
   bytes cross as buffers and are still deserialized C#-side on exactly the same options as before.
   Shipped data passes — `rust/spt-native/tests/phase3_db_load.rs` runs the fused load over the real
   tree and is the gate — so this bites only a hand-edited or mod-shipped `database/`, for which
@@ -635,9 +636,13 @@ work the legacy arm does not do at import time at all. Neither figure is a start
 gap the flip was built to close is **not wired up**: `DbPublisher.EnsureCurrent` still republishes
 all five roots whenever its own `_currentEpoch` is 0, and nothing feeds `DbLoad`'s installed epoch
 into it, so both arms pay a 730–745 ms forced publish that epoch 1 already did the work for.
-Feeding that epoch through is the named follow-up that would turn the number around; it is
-**Phase 4/5 work, not a Phase 3 defect** — decision 3 below is why it was deliberately left out of
-this phase.
+Feeding that epoch through is the named follow-up, and it buys less than it looks:
+`EnsureCurrent` republishes when `_currentEpoch == 0` **or** `_lastPublishedStamp != stamp`
+(`DbPublisher.cs:38`), and on Release the write barriers move the stamp during `PostDbLoadService`
+(`wave.WildSpawnType = …` and its neighbours write into barriered model types), so wiring epoch 1
+in would skip that first republish only in the case where nothing dirtied the tables between the
+load and the first eligible call. It is **Phase 4/5 work, not a Phase 3 defect** — decision 3 below
+is why it was deliberately left out of this phase.
 
 (a) Freshness delta: **none at generation time.** `DbPublisher` is untouched, and epoch 1 is
 boot-validation only — always superseded by the first `EnsureCurrent` republish, so no generation
@@ -718,9 +723,13 @@ written against, not the current file.
    `database/`, installs the five resident roots as epoch 1 and hands the eager file bytes to
    `ImporterUtil`; `CoreConfig.ForceLegacyDatabaseImport` is the opt-out and
    `DatabaseLoadEquivalenceTests` the permanent gate. It is a **measured regression at the
-   importer** — 0.48x, +425–455 ms — because nothing feeds the installed epoch to `DbPublisher`
-   yet, so the first `EnsureCurrent` still republishes all five roots; the Phase 3 ledger has the
-   numbers and the follow-up, BENCHMARK.md § Phase 3 the measurement. Loose-loot residency was
+   importer** — 0.48x, +425–455 ms — and that cost is real rather than a wiring oversight: the
+   fused load does assembly, parse and derivation work at import time that the legacy arm does not,
+   and the buffer-fed walk is slower than the disk walk it retires. Separately, the *startup* win
+   the flip was built for is still unwired — nothing feeds `DbLoad`'s installed epoch to
+   `DbPublisher`, so **both** arms pay the first `EnsureCurrent` republish and it cancels out of the
+   comparison above. The Phase 3 ledger has the numbers and the follow-up, BENCHMARK.md § Phase 3
+   the measurement. Loose-loot residency was
    declined a second time, so the spec's `LazyLoad` byte-serving export does not exist.
    Next is Phase 4
    (configs join the resident set, closing the runtime-config ceiling flip #1's ledger records),
