@@ -85,6 +85,8 @@ public class WriteBarriersPatch : IPatcher
     ];
 
     private const string BarrierTypeName = "SPTarkov.Server.Core.Native.Db.WriteBarrier";
+    private const string ConfigTypesTypeName = "SPTarkov.Server.Core.Models.Enums.ConfigTypes";
+    private const string ConfigNamespacePrefix = "SPTarkov.Server.Core.Models.Spt.Config.";
 
     public void Patch(AssemblyDefinition assembly)
     {
@@ -98,6 +100,25 @@ public class WriteBarriersPatch : IPatcher
             {
                 throw new InvalidOperationException($"denied type {deniedName} not found - the denylist names have drifted");
             }
+        }
+
+        // Nothing else ties the config roots above to ConfigTypes, and the drift is silent in the
+        // dangerous direction: DbPayloadProjection iterates the injected dictionary, so a 29th enum
+        // arm would publish its config but ship it unbarriered. Counts, not names - the FQN of a
+        // config type is not derivable from its enum member.
+        var configTypes =
+            module.GetType(ConfigTypesTypeName)
+            ?? throw new InvalidOperationException($"{ConfigTypesTypeName} not found - the barrier roots cannot be checked against it");
+        // An enum's fields are one instance `value__` plus a static literal per member.
+        var configTypeCount = configTypes.Fields.Count(field => field.IsStatic && field.IsLiteral);
+        var configRootCount = _publishedRoots.Count(root => root.StartsWith(ConfigNamespacePrefix, StringComparison.Ordinal));
+        if (configTypeCount != configRootCount)
+        {
+            throw new InvalidOperationException(
+                $"ConfigTypes has {configTypeCount} members but _publishedRoots names {configRootCount} configs - "
+                    + "a config was added to ConfigTypes but not to the barrier roots, or removed from ConfigTypes "
+                    + "and left in them"
+            );
         }
 
         var barrierType =
