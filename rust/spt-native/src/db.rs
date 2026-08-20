@@ -284,14 +284,16 @@ mod store_tests {
     fn a_configs_root_publishes_and_survives_a_partial_republish() {
         let _guard = tests::DB_TEST_LOCK.lock().unwrap();
         clear();
+        // An unlifted kind, so the body rides `extra` raw — `spt-ragfair` and `spt-item` are
+        // typed stems now (Task 6) and a truncated body would fail the parse
         let epoch = publish(request(
-            r#"{"schema":1,"roots":{"configs":{"spt-ragfair":{"kind":"spt-ragfair","dynamic":{"expiredOfferThreshold":1500}}}}}"#,
+            r#"{"schema":1,"roots":{"configs":{"spt-core":{"kind":"spt-core","profileSaveIntervalSeconds":15}}}}"#,
         ))
         .unwrap();
         assert_eq!(epoch, 1);
         let before = current().unwrap();
-        let ragfair = &before.configs.as_ref().unwrap().extra["spt-ragfair"];
-        assert_eq!(ragfair["dynamic"]["expiredOfferThreshold"], 1500);
+        let core = &before.configs.as_ref().unwrap().extra["spt-core"];
+        assert_eq!(core["profileSaveIntervalSeconds"], 15);
 
         // partial republish without the root keeps it resident, epoch still moves
         let epoch2 = publish(request(r#"{"schema":1,"roots":{}}"#)).unwrap();

@@ -7,7 +7,7 @@
 //! divergence between the two shows up before a live publish does.
 //!
 //! What it proves: every kind arrives, the envelope parses, and every stem lifted out of `extra`
-//! so far parses into its typed shape rather than raw `Value`. Tasks 6-10 lift the rest; each adds
+//! so far parses into its typed shape rather than raw `Value`. Tasks 7-10 lift the rest; each adds
 //! its kind to `LIFTED_KINDS` below plus a stem-is-`Some` assertion, or the union assertion fails
 //! loudly.
 //!
@@ -72,8 +72,9 @@ fn projected_configs_parse_with_every_kind_present() {
     let configs = request.roots.configs.expect("envelope has a configs root");
 
     // A kind whose typed stem has been lifted out of the flatten map: it is no longer an `extra`
-    // key, so it is named here instead. Task 5 lifted the scav case family's two.
-    const LIFTED_KINDS: [&str; 2] = ["spt-item", "spt-scavcase"];
+    // key, so it is named here instead. Task 5 lifted the scav case family's two, Task 6 the
+    // ragfair family's two.
+    const LIFTED_KINDS: [&str; 4] = ["spt-item", "spt-scavcase", "spt-ragfair", "spt-inventory"];
 
     // The lift's own half of the fidelity claim: the projected bodies parse into the typed stems,
     // not just into `Value`. A stem that failed to parse would have failed the whole envelope
@@ -85,6 +86,14 @@ fn projected_configs_parse_with_every_kind_present() {
     assert!(
         configs.scavcase.is_some(),
         "the spt-scavcase stem did not bind — check ScavCaseConfig.Kind against the rename"
+    );
+    assert!(
+        configs.ragfair.is_some(),
+        "the spt-ragfair stem did not bind — check RagfairConfig.Kind against the rename"
+    );
+    assert!(
+        configs.inventory.is_some(),
+        "the spt-inventory stem did not bind — check InventoryConfig.Kind against the rename"
     );
 
     let mut present: BTreeSet<&str> = configs.extra.keys().map(String::as_str).collect();

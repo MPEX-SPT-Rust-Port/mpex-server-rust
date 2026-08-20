@@ -27,7 +27,10 @@ internal static class RagfairPayloadProjection
         HandbookHelper handbookHelper,
         TraderHelper traderHelper,
         PresetHelper presetHelper,
-        ItemHelper itemHelper
+        ItemHelper itemHelper,
+        RagfairConfig ragfairConfig,
+        ItemFilterService itemFilterService,
+        InventoryConfig inventoryConfig
     )
     {
         var templateItems = templateTable.Items;
@@ -50,6 +53,11 @@ internal static class RagfairPayloadProjection
 
         return new RagfairViewsOverride
         {
+            // The three config-backed members: what the resident arm reads off the configs root's
+            // spt-ragfair, spt-item and spt-inventory stems
+            Dynamic = ragfairConfig.Dynamic,
+            ConfigBlacklist = itemFilterService.GetBlacklistedItems(),
+            CustomMoneyTpls = inventoryConfig.CustomMoneyTpls,
             // The globals' map itself, keys included: the native side mirrors PresetHelper.IsPreset
             // and GetPreset, whose key domain is that map's keys, not each preset's own `_id`
             ItemPresets = presetHelper
@@ -75,8 +83,6 @@ internal static class RagfairPayloadProjection
         long timestamp,
         int offerCounterStart,
         ulong? testSeed,
-        RagfairConfig ragfairConfig,
-        ItemFilterService itemFilterService,
         SeasonalEventService seasonalEventService,
         BotTable botTable,
         BotConfig botConfig
@@ -92,8 +98,6 @@ internal static class RagfairPayloadProjection
                 Timestamp = timestamp,
                 OfferCounterStart = offerCounterStart,
                 ExpiredOffers = expiredOffers,
-                Dynamic = ragfairConfig.Dynamic,
-                ConfigBlacklist = itemFilterService.GetBlacklistedItems(),
                 SeasonalEventActive = seasonalEventService.SeasonalEventEnabled(),
                 SeasonalItemTplBlacklist = seasonalEventService.GetInactiveSeasonalEventItems(),
                 // Per call instead of per slice-build - cheap, and fresher than the old slice by

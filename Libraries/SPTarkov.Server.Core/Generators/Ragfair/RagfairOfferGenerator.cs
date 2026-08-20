@@ -535,7 +535,10 @@ public class RagfairOfferGenerator(
                     handbookHelper,
                     ragfairPriceService.TraderHelper,
                     presetHelper,
-                    itemHelper
+                    itemHelper,
+                    ragfairConfig,
+                    ragfairAssortGenerator.ItemFilterService,
+                    paymentHelper.InventoryConfig
                 )
                 : null,
             epoch,
@@ -543,8 +546,6 @@ public class RagfairOfferGenerator(
             timeUtil.GetTimeStamp(),
             OfferCounter,
             NativeTestSeed,
-            ragfairConfig,
-            ragfairAssortGenerator.ItemFilterService,
             ragfairAssortGenerator.SeasonalEventService,
             botHelper.BotTable,
             botConfig

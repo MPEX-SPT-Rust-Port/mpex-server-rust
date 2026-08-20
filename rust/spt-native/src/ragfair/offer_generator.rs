@@ -62,7 +62,7 @@ use indexmap::IndexSet;
 use rayon::prelude::*;
 use serde_json::json;
 
-use super::RagfairContext;
+use super::{RagfairConfigs, RagfairContext};
 use crate::diag::DiagSink;
 use crate::loot::item_helper::{
     AMMO_BOX, ARMOR_PLATE, ARMORED_EQUIPMENT, FUEL, LootError, WEAPON, add_cartridges_to_ammo_box,
@@ -81,7 +81,7 @@ use crate::ragfair::assort_generator::generate_ragfair_assort_items;
 use crate::ragfair::models::{
     ArmorPlateBlacklistSettingsWire, BarterDetailsWire, DynamicOffersResult,
     GenerateDynamicOffersRequest, OfferRequirementWire, RagfairOfferUserWire, RagfairOfferWire,
-    VaryingFields,
+    RagfairViewsWire, VaryingFields,
 };
 use crate::ragfair::price_service::{
     DOLLARS, EUROS, GP, ROUBLES, get_dynamic_offer_price_for_offer, get_flea_price_for_item,
@@ -146,13 +146,11 @@ pub struct TplWithFleaPrice<'a> {
     pub price: f64,
 }
 
-/// `PaymentHelper.IsMoneyTpl` (`PaymentHelper.cs:19-32`) over the four `Money` constants.
-///
-/// `inventoryConfig.CustomMoneyTpls` is not on the wire, so a mod-added currency prices through
-/// the item arm of [`convert_offer_requirements_into_roubles`] here instead of the money arm. No
-/// stock configuration carries one.
-fn is_money_tpl(tpl: &str) -> bool {
-    [ROUBLES, EUROS, DOLLARS, GP].contains(&tpl)
+/// `PaymentHelper.IsMoneyTpl` (`PaymentHelper.cs:19-33`): the four `Money` constants unioned with
+/// `inventoryConfig.CustomMoneyTpls`, which the C# folds in once and then keeps in the same set.
+/// A pure membership test either way, so no draw moves with it.
+fn is_money_tpl(ctx: &RagfairContext, tpl: &str) -> bool {
+    [ROUBLES, EUROS, DOLLARS, GP].contains(&tpl) || ctx.custom_money_tpls.contains(tpl)
 }
 
 /// `RagfairOfferGenerator.CreateOffer` (`:85-143`). `CreateAndAddFleaOffer` (`:66-77`) is not
@@ -327,7 +325,7 @@ pub fn convert_offer_requirements_into_roubles(
     offer_requirements
         .iter()
         .map(|requirement| {
-            if is_money_tpl(&requirement.template_id) {
+            if is_money_tpl(ctx, &requirement.template_id) {
                 round_half_even(calculate_rouble_price(
                     ctx,
                     requirement.count,
@@ -430,35 +428,73 @@ pub enum RagfairError {
 ///
 /// # Errors
 ///
-/// [`RagfairError::Loot`] for whatever the assort walk and the per-offer path propagate, or
+/// [`RagfairError::Loot`] for whatever the assort walk and the per-offer path propagate — including
+/// a resident configs root with no `spt-ragfair` or `spt-item` stem, which names the stem — or
 /// [`RagfairError::StaleEpoch`] when an override-less request names an epoch the resident DB
 /// does not hold.
+///
+/// A missing root is a stale epoch: the publish never carried it, so a republish is the fix. A
+/// configs root that *is* resident but has no stem this family reads is a different failure and gets
+/// a different answer — an error naming the stem, per call, rather than a silent default.
 pub fn generate_dynamic_offers(
     request: GenerateDynamicOffersRequest,
 ) -> Result<DynamicOffersResult, RagfairError> {
-    let views: Arc<RagfairDbViews> = match request.views_override {
-        Some(wire) => Arc::new(RagfairDbViews::from(wire)),
+    let (views, configs) = resolve_ragfair_views(request.epoch, request.views_override)?;
+
+    generate_with_views(&views, &configs, request.varying).map_err(RagfairError::Loot)
+}
+
+/// The two halves one pass reads: the database views and the config-backed inputs, from the
+/// caller's override bundle or from the resident DB at `epoch`. See
+/// [`generate_dynamic_offers`] for which failure means what.
+///
+/// # Errors
+///
+/// [`RagfairError::StaleEpoch`] for an epoch or a root the resident DB does not hold, or
+/// [`RagfairError::Loot`] naming a configs-root stem this family requires and did not find.
+pub fn resolve_ragfair_views(
+    epoch: u64,
+    views_override: Option<RagfairViewsWire>,
+) -> Result<(Arc<RagfairDbViews>, RagfairConfigs), RagfairError> {
+    match views_override {
+        Some(wire) => {
+            let (views, configs) = wire.split();
+
+            Ok((Arc::new(views), configs))
+        }
         None => {
             let db = crate::db::current().ok_or(RagfairError::StaleEpoch)?;
-            if db.epoch != request.epoch {
+            if db.epoch != epoch {
                 return Err(RagfairError::StaleEpoch);
             }
 
-            db.ragfair_views.clone().ok_or(RagfairError::StaleEpoch)?
-        }
-    };
+            let views = db.ragfair_views.clone().ok_or(RagfairError::StaleEpoch)?;
+            let configs = db.configs.clone().ok_or(RagfairError::StaleEpoch)?;
+            if configs.ragfair.is_none() {
+                return Err(RagfairError::Loot(LootError::new(
+                    "configs root has no spt-ragfair stem",
+                )));
+            }
+            if configs.item.is_none() {
+                return Err(RagfairError::Loot(LootError::new(
+                    "configs root has no spt-item stem",
+                )));
+            }
 
-    generate_with_views(&views, request.varying).map_err(RagfairError::Loot)
+            Ok((views, RagfairConfigs::Resident(configs)))
+        }
+    }
 }
 
-/// [`generate_dynamic_offers`] over an already-derived view bundle — the resident DB's or one
-/// built from the caller's override.
+/// [`generate_dynamic_offers`] over an already-derived view bundle and config half — the resident
+/// DB's or the caller's override.
 ///
 /// # Errors
 ///
 /// Whatever the assort walk and the per-offer path propagate.
 pub fn generate_with_views(
     views: &RagfairDbViews,
+    configs: &RagfairConfigs,
     varying: VaryingFields,
 ) -> Result<DynamicOffersResult, LootError> {
     let _seed_guard = varying.test_seed.map(TestSeedGuard::install);
@@ -467,8 +503,6 @@ pub fn generate_with_views(
         timestamp,
         offer_counter_start,
         expired_offers,
-        dynamic,
-        config_blacklist,
         seasonal_event_active,
         seasonal_item_tpl_blacklist,
         pmc_names_usec,
@@ -479,7 +513,7 @@ pub fn generate_with_views(
     let mut ctx = RagfairContext {
         items: &views.items,
         base_classes: &views.base_classes,
-        dynamic: &dynamic,
+        dynamic: configs.dynamic(),
         item_presets: &views.item_presets,
         default_presets: &views.default_presets,
         default_presets_by_tpl: &views.default_presets_by_tpl,
@@ -487,7 +521,8 @@ pub fn generate_with_views(
         flea_prices: &views.flea_prices,
         handbook_prices: &views.handbook_prices,
         highest_trader_prices: &views.highest_trader_prices,
-        config_blacklist: &config_blacklist,
+        config_blacklist: configs.config_blacklist(),
+        custom_money_tpls: configs.custom_money_tpls(),
         seasonal_item_tpl_blacklist: &seasonal_item_tpl_blacklist,
         pmc_names_usec: &pmc_names_usec,
         pmc_names_bear: &pmc_names_bear,
@@ -1410,7 +1445,7 @@ mod tests {
     use crate::loot::models::{ItemView, PresetView, Upd};
     use crate::loot::random_util::TestSeedGuard;
     use crate::ragfair::models::{DynamicConfigWire, MinMaxIntWire, RagfairViewsWire};
-    use crate::ragfair::{NO_BLACKLIST, NO_DEFAULT_PRESETS};
+    use crate::ragfair::{NO_BLACKLIST, NO_CUSTOM_MONEY_TPLS, NO_DEFAULT_PRESETS};
 
     const SEED: u64 = 20260813;
 
@@ -1582,6 +1617,7 @@ mod tests {
                 handbook_prices: &self.prices,
                 highest_trader_prices: &self.prices,
                 config_blacklist: &self.blacklist,
+                custom_money_tpls: &NO_CUSTOM_MONEY_TPLS,
                 seasonal_item_tpl_blacklist: &NO_BLACKLIST,
                 pmc_names_usec: &self.names_usec,
                 pmc_names_bear: &self.names_bear,
@@ -2702,7 +2738,7 @@ mod tests {
         })
         .expect("the currency fall-through cannot fail here");
 
-        assert!(is_money_tpl(&scheme[0].template));
+        assert!(is_money_tpl(&fixture.ctx(), &scheme[0].template));
 
         let after = stream_position_after(|| {
             create_barter_barter_scheme(&mut fixture.ctx(), &items, &fixture.dynamic.barter)
@@ -2738,7 +2774,7 @@ mod tests {
         })
         .expect("the currency fall-through cannot fail here");
 
-        assert!(is_money_tpl(&scheme[0].template));
+        assert!(is_money_tpl(&fixture.ctx(), &scheme[0].template));
 
         let after = stream_position_after(|| {
             create_barter_barter_scheme(&mut fixture.ctx(), &items, &fixture.dynamic.barter)
@@ -3048,6 +3084,9 @@ mod tests {
         GenerateDynamicOffersRequest {
             epoch: 0,
             views_override: Some(RagfairViewsWire {
+                dynamic: fixture.dynamic,
+                config_blacklist: fixture.blacklist,
+                custom_money_tpls: IndexSet::new(),
                 item_presets: fixture.presets,
                 default_presets: Vec::new(),
                 default_presets_by_tpl: IndexMap::new(),
@@ -3062,8 +3101,6 @@ mod tests {
                 timestamp: OFFER_TIME,
                 offer_counter_start: 0,
                 expired_offers: None,
-                dynamic: fixture.dynamic,
-                config_blacklist: fixture.blacklist,
                 seasonal_event_active: false,
                 seasonal_item_tpl_blacklist: HashSet::new(),
                 pmc_names_usec: fixture.names_usec,
@@ -3103,18 +3140,113 @@ mod tests {
     /// The batch pass with the resident DB stepped over: these tests pin generation, and the
     /// process-global store is exercised in `db` and `ffi` instead of being clobbered from here.
     fn generate(request: GenerateDynamicOffersRequest) -> Result<DynamicOffersResult, LootError> {
-        generate_with_views(
-            &RagfairDbViews::from(
-                request
-                    .views_override
-                    .expect("the fixture request carries a views override"),
-            ),
-            request.varying,
-        )
+        let (views, configs) = request
+            .views_override
+            .expect("the fixture request carries a views override")
+            .split();
+
+        generate_with_views(&views, &configs, request.varying)
     }
 
     fn offers_of(fixture: Fixture) -> DynamicOffersResult {
         generate(request(fixture)).expect("the fixture is complete")
+    }
+
+    /// `PaymentHelper.IsMoneyTpl` unions `inventoryConfig.CustomMoneyTpls` onto the four `Money`
+    /// constants (`PaymentHelper.cs:19-33`), so a mod-added currency takes the money arm of
+    /// `ConvertOfferRequirementsIntoRoubles` rather than the item arm. Membership only — no draw.
+    #[test]
+    fn a_custom_money_tpl_joins_the_four_money_constants() {
+        let fixture = Fixture::new();
+        let custom: IndexSet<String> = IndexSet::from([CHEAP_ROOT_TPL.to_owned()]);
+
+        // Without the stem's set, a mod currency is just an item
+        assert!(!is_money_tpl(&fixture.ctx(), CHEAP_ROOT_TPL));
+
+        let mut ctx = fixture.ctx();
+        ctx.custom_money_tpls = &custom;
+        assert!(is_money_tpl(&ctx, CHEAP_ROOT_TPL));
+        // ...and the four constants are still money alongside it
+        for tpl in [ROUBLES, EUROS, DOLLARS, GP] {
+            assert!(is_money_tpl(&ctx, tpl), "{tpl} stopped being money");
+        }
+    }
+
+    /// The `spt-ragfair` stem as the configs root carries it — the shipped record's shape, `kind`
+    /// and an unlifted member included, so the parse has to ignore both.
+    fn ragfair_stem() -> serde_json::Value {
+        serde_json::json!({
+            "kind": "spt-ragfair",
+            "runIntervalSeconds": 450,
+            "dynamic": serde_json::from_str::<serde_json::Value>(
+                crate::ragfair::models::tests::DYNAMIC_JSON
+            ).unwrap(),
+        })
+    }
+
+    /// Publishes the three roots the ragfair derive needs plus whatever configs root the caller
+    /// hands in, and answers the epoch.
+    fn publish_with_configs(configs: serde_json::Value) -> u64 {
+        crate::db::publish(
+            serde_json::from_value(serde_json::json!({
+                "schema": 1,
+                "roots": {"templates": {}, "traders": {}, "globals": {}, "configs": configs}
+            }))
+            .unwrap(),
+        )
+        .unwrap()
+    }
+
+    /// The resident arm's config-backed inputs come out of the configs root, and a resident root
+    /// missing one of the two stems this family requires is a per-call failure that names it —
+    /// never a silent default, and never the stale-epoch answer a *missing root* gets (a republish
+    /// would not fix a stem the publish does not carry). `spt-inventory` is the deliberate
+    /// exception: absent means no custom currency, exactly as before the lift.
+    #[test]
+    fn a_resident_resolve_reads_the_config_stems_and_names_a_missing_one() {
+        let _guard = crate::db::tests::DB_TEST_LOCK.lock().unwrap();
+        crate::db::clear();
+
+        // spt-item present, spt-ragfair absent
+        let epoch = publish_with_configs(serde_json::json!({"spt-item": {"blacklist": ["b1"]}}));
+        let Err(RagfairError::Loot(error)) = resolve_ragfair_views(epoch, None) else {
+            panic!("expected a failure naming the absent stem");
+        };
+        assert!(error.message.contains("spt-ragfair"), "{}", error.message);
+
+        // the mirror image: spt-ragfair present, spt-item absent
+        let epoch = publish_with_configs(serde_json::json!({"spt-ragfair": ragfair_stem()}));
+        let Err(RagfairError::Loot(error)) = resolve_ragfair_views(epoch, None) else {
+            panic!("expected a failure naming the absent stem");
+        };
+        assert!(error.message.contains("spt-item"), "{}", error.message);
+
+        // Both required stems present, no spt-inventory: the accessors read the stems' own values
+        // and the custom-money set is empty
+        let epoch = publish_with_configs(serde_json::json!({
+            "spt-ragfair": ragfair_stem(),
+            "spt-item": {"kind": "spt-item", "blacklist": ["config_blacklisted"]}
+        }));
+        let (_, configs) = resolve_ragfair_views(epoch, None).unwrap();
+        assert!(configs.dynamic().use_trader_price_for_offers_if_higher);
+        assert!(configs.config_blacklist().contains("config_blacklisted"));
+        assert!(configs.custom_money_tpls().is_empty());
+
+        // ...and with the stem, the currencies it names
+        let epoch = publish_with_configs(serde_json::json!({
+            "spt-ragfair": ragfair_stem(),
+            "spt-item": {"kind": "spt-item"},
+            "spt-inventory": {"kind": "spt-inventory", "customMoneyTpls": ["custom_money"]}
+        }));
+        let (_, configs) = resolve_ragfair_views(epoch, None).unwrap();
+        assert!(configs.custom_money_tpls().contains("custom_money"));
+
+        // A configs root that never arrived is stale, not a stem failure
+        crate::db::clear();
+        assert!(matches!(
+            resolve_ragfair_views(epoch, None),
+            Err(RagfairError::StaleEpoch)
+        ));
     }
 
     #[test]

@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::loot::item_helper::ItemBaseClassCache;
 use crate::loot::models::{Item, ItemView, PresetView};
+use crate::ragfair::RagfairConfigs;
 use crate::ragfair::views::RagfairDbViews;
 
 /// Mod-added fields captured on the way in.
@@ -47,13 +48,9 @@ pub struct VaryingFields {
     /// `null` for a full pass; the cloned expired-offer item lists for a regeneration pass
     /// (`RagfairServer.cs:69-79`).
     pub expired_offers: Option<Vec<Vec<Item>>>,
-    // Moved from the invariant slice (spec § C# driver carve-out): service/config state with no resident
-    // home until Phases 2/4. Wire names and value shapes are byte-identical to the old slice
-    // members.
-    /// `RagfairConfig.Dynamic`, whole.
-    pub dynamic: DynamicConfigWire,
-    /// `ItemFilterService.GetBlacklistedItems()` — read by `ItemHelper.IsValidItem`.
-    pub config_blacklist: HashSet<String>,
+    // Still here from the invariant slice (spec § C# driver carve-out): service state, and the
+    // DB×config join Decision 10 keeps varying. `dynamic` and `configBlacklist` moved off to the
+    // configs root / the views override in Phase 4 Task 6.
     /// `SeasonalEventService.SeasonalEventEnabled()` (`RagfairAssortGenerator.cs:57`).
     pub seasonal_event_active: bool,
     /// `SeasonalEventService.GetInactiveSeasonalEventItems()` (`:58`).
@@ -65,10 +62,22 @@ pub struct VaryingFields {
 }
 
 /// The C#-built override of the eight database views [`crate::ragfair::views::derive`] would have
-/// derived — the wire form of [`RagfairDbViews`], sent by callers ineligible for residency.
+/// derived — the wire form of [`RagfairDbViews`] — plus the three config-backed inputs the resident
+/// arm reads off the configs root. Sent by callers ineligible for residency.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RagfairViewsWire {
+    /// `RagfairConfig.Dynamic`, whole — the resident arm's
+    /// [`crate::db::models::RagfairConfigLift::dynamic`].
+    pub dynamic: DynamicConfigWire,
+    /// `ItemFilterService.GetBlacklistedItems()`, i.e. `ItemConfig.Blacklist` verbatim
+    /// (`ItemFilterService.cs:51-54`) — the resident arm's
+    /// [`crate::db::models::ItemConfigLift::blacklist`].
+    pub config_blacklist: HashSet<String>,
+    /// `InventoryConfig.CustomMoneyTpls` — the resident arm's
+    /// [`crate::db::models::InventoryConfigLift::custom_money_tpls`]. Required on the wire (the C#
+    /// member is `required` too); an empty list is the stock value.
+    pub custom_money_tpls: IndexSet<String>,
     /// `GlobalTable.ItemPresets` — `PresetHelper.IsPreset`/`GetPreset` read this map, and
     /// `GetAllPresets()` is its `Values` in insertion order.
     pub item_presets: IndexMap<String, PresetView>,
@@ -92,23 +101,35 @@ pub struct RagfairViewsWire {
     pub items: IndexMap<String, ItemView>,
 }
 
-impl From<RagfairViewsWire> for RagfairDbViews {
-    fn from(wire: RagfairViewsWire) -> Self {
-        let base_classes = ItemBaseClassCache::build(&wire.items);
+impl RagfairViewsWire {
+    /// Splits the bundle into its two halves: the database views the resident arm would have taken
+    /// off `db::current()`, and the config-backed inputs it would have taken off the configs root.
+    /// One method rather than a `From` each because the wire owns both and neither half can be
+    /// moved out while the other is still borrowed.
+    pub fn split(self) -> (RagfairDbViews, RagfairConfigs) {
+        let base_classes = ItemBaseClassCache::build(&self.items);
 
-        Self {
-            items: wire.items,
-            flea_prices: wire.flea_prices,
-            handbook_prices: wire.handbook_prices,
-            highest_trader_prices: wire.highest_trader_prices,
-            item_presets: wire.item_presets,
-            default_presets: wire.default_presets,
-            default_presets_by_tpl: wire.default_presets_by_tpl,
+        let views = RagfairDbViews {
+            items: self.items,
+            flea_prices: self.flea_prices,
+            handbook_prices: self.handbook_prices,
+            highest_trader_prices: self.highest_trader_prices,
+            item_presets: self.item_presets,
+            default_presets: self.default_presets,
+            default_presets_by_tpl: self.default_presets_by_tpl,
             // Not part of the ragfair override wire — only the resident loot arm reads it.
             default_presets_by_tpl_key: IndexMap::new(),
-            presets_by_tpl: wire.presets_by_tpl,
+            presets_by_tpl: self.presets_by_tpl,
             base_classes,
-        }
+        };
+
+        let configs = RagfairConfigs::Override {
+            dynamic: Box::new(self.dynamic),
+            config_blacklist: self.config_blacklist,
+            custom_money_tpls: self.custom_money_tpls,
+        };
+
+        (views, configs)
     }
 }
 
@@ -368,13 +389,14 @@ pub struct OfferRequirementWire {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// `RagfairConfig.Dynamic` in full, including the three members the wire type leaves to
     /// `extra` (`purchasesAreFoundInRaid`, `expiredOfferThreshold`, `itemPriceOverrideRouble`) and
-    /// one mod-added key.
-    const DYNAMIC_JSON: &str = r#"{
+    /// one mod-added key. Shared with `db::models`' configs-root tests, which need a `spt-ragfair`
+    /// stem that actually parses.
+    pub(crate) const DYNAMIC_JSON: &str = r#"{
         "purchasesAreFoundInRaid":true,
         "useTraderPriceForOffersIfHigher":true,
         "barter":{"chancePercent":50.0,"itemCountMin":1,"itemCountMax":3,
@@ -421,8 +443,11 @@ mod tests {
         "modAddedDynamicField":42
     }"#;
 
-    /// Every member of the views override.
+    /// Every member of the views override except `dynamic`, which is spliced in from
+    /// [`DYNAMIC_JSON`].
     const VIEWS_TAIL: &str = r#"
+        "configBlacklist":["999999999999999999999999"],
+        "customMoneyTpls":["aaaaaaaaaaaaaaaaaaaaaaab"],
         "itemPresets":{"preset1":{"items":[{"_id":"aaaaaaaaaaaaaaaaaaaaaaaa",
             "_tpl":"bbbbbbbbbbbbbbbbbbbbbbbb"}],"id":"preset1","name":"AK",
             "encyclopedia":"bbbbbbbbbbbbbbbbbbbbbbbb"}},
@@ -438,10 +463,9 @@ mod tests {
             "maxRepairResource":1200,"canSellOnRagfair":true}}
     "#;
 
-    /// The six members moved off the old invariant slice (spec § C# driver carve-out), minus `dynamic`,
-    /// which is spliced in from [`DYNAMIC_JSON`].
+    /// The service state still on the varying block after Task 6 moved `dynamic` and
+    /// `configBlacklist` off it.
     const VARYING_TAIL: &str = r#"
-        "configBlacklist":["999999999999999999999999"],
         "seasonalEventActive":false,
         "seasonalItemTplBlacklist":["888888888888888888888888"],
         "pmcNamesUsec":["Deagle"],
@@ -451,8 +475,8 @@ mod tests {
     fn request_json(varying: &str) -> String {
         format!(
             "{{\"epoch\":0,\
-             \"viewsOverride\":{{{VIEWS_TAIL}}},\
-             \"varying\":{{{varying},\"dynamic\":{DYNAMIC_JSON},{VARYING_TAIL}}}}}"
+             \"viewsOverride\":{{\"dynamic\":{DYNAMIC_JSON},{VIEWS_TAIL}}},\
+             \"varying\":{{{varying},{VARYING_TAIL}}}}}"
         )
     }
 
@@ -472,12 +496,6 @@ mod tests {
             parsed.varying.expired_offers.as_ref().unwrap()[0][0].template,
             "bbbbbbbbbbbbbbbbbbbbbbbb"
         );
-        assert!(
-            parsed
-                .varying
-                .config_blacklist
-                .contains("999999999999999999999999")
-        );
         assert!(!parsed.varying.seasonal_event_active);
         assert!(
             parsed
@@ -488,6 +506,10 @@ mod tests {
         assert_eq!(parsed.varying.pmc_names_usec, vec!["Deagle"]);
         assert_eq!(parsed.varying.pmc_names_bear, vec!["Kirill"]);
         let views = parsed.views_override.as_ref().unwrap();
+        // The three config-backed members Task 6 moved onto the override bundle
+        assert!(views.config_blacklist.contains("999999999999999999999999"));
+        assert!(views.custom_money_tpls.contains("aaaaaaaaaaaaaaaaaaaaaaab"));
+        assert!(views.dynamic.use_trader_price_for_offers_if_higher);
         assert_eq!(
             views.item_presets["preset1"].encyclopedia.as_deref(),
             Some("bbbbbbbbbbbbbbbbbbbbbbbb")
@@ -523,7 +545,8 @@ mod tests {
         let json = request_json(r#""testSeed":null,"timestamp":1,"offerCounterStart":0"#);
         let dynamic = serde_json::from_str::<GenerateDynamicOffersRequest>(&json)
             .unwrap()
-            .varying
+            .views_override
+            .unwrap()
             .dynamic;
 
         assert!(dynamic.use_trader_price_for_offers_if_higher);
@@ -672,7 +695,7 @@ mod tests {
         let parsed: GenerateDynamicOffersRequest = serde_json::from_str(&json).unwrap();
 
         // Config passthrough: members the wire type does not name stay reachable
-        let dynamic = &parsed.varying.dynamic;
+        let dynamic = &parsed.views_override.as_ref().unwrap().dynamic;
         assert_eq!(dynamic.extra["modAddedDynamicField"], 42);
         assert_eq!(dynamic.extra["purchasesAreFoundInRaid"], true);
         assert_eq!(dynamic.extra["expiredOfferThreshold"], 1500);

@@ -9,7 +9,7 @@
 //! carries `#[serde(default)]`: a partial or junk root (the store tests publish `{"a":1}`)
 //! deserializes with empty containers and derivation stays total over it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use indexmap::{IndexMap, IndexSet};
 use serde::Deserialize;
@@ -20,6 +20,7 @@ use crate::loot::models::{
     Item, SpawnpointTemplate, StaticContainer, StaticContainerData, StaticForced, StaticLootDetails,
 };
 use crate::quest::models::{LevelledItemFilter, RepeatableTemplates};
+use crate::ragfair::models::DynamicConfigWire;
 use crate::scav_case::models::ScavCaseConfigView;
 
 /// `{"schema":1,"roots":{...}}` — the envelope `DbPayloadProjection` (C#) writes.
@@ -62,22 +63,62 @@ pub struct ConfigsRoot {
     /// anything Ceciler's `[JsonExtensionData]` adds on a Release build) are ignored on arrival.
     #[serde(default, rename = "spt-scavcase")]
     pub scavcase: Option<ScavCaseConfigView>,
+    /// `Models/Spt/Config/RagfairConfig.cs`, whose `Kind` is `spt-ragfair`
+    /// (`RagfairConfig.cs:8-9`) — see [`RagfairConfigLift`].
+    #[serde(default, rename = "spt-ragfair")]
+    pub ragfair: Option<RagfairConfigLift>,
+    /// `Models/Spt/Config/InventoryConfig.cs`, whose `Kind` is `spt-inventory`
+    /// (`InventoryConfig.cs:8-9`) — see [`InventoryConfigLift`].
+    #[serde(default, rename = "spt-inventory")]
+    pub inventory: Option<InventoryConfigLift>,
     #[serde(flatten)]
     pub extra: IndexMap<String, Value>,
 }
 
 /// `Models/Spt/Config/ItemConfig.cs` — the four sets the reward families read. Shared: the scav
-/// case family reads `rewardItemBlacklist`/`bossItems`, later flips read the other two.
+/// case family reads `rewardItemBlacklist`/`bossItems`, the ragfair family reads `blacklist`.
 #[derive(Debug, Default, Deserialize)]
 pub struct ItemConfigLift {
+    /// `ItemConfig.Blacklist` (`ItemConfig.cs:14-15`) — what `ItemFilterService.GetBlacklistedItems`
+    /// returns verbatim (`ItemFilterService.cs:51-54`). A `HashSet` rather than an `IndexSet`
+    /// because its only reader is `loot::item_helper::is_valid_item`, whose blacklist parameter is
+    /// shared with the loot family: membership only, so order cannot be observed.
     #[serde(default)]
-    pub blacklist: IndexSet<String>,
+    pub blacklist: HashSet<String>,
     #[serde(default, rename = "rewardItemBlacklist")]
     pub reward_item_blacklist: IndexSet<String>,
     #[serde(default, rename = "rewardItemTypeBlacklist")]
     pub reward_item_type_blacklist: IndexSet<String>,
     #[serde(default, rename = "bossItems")]
     pub boss_items: IndexSet<String>,
+    #[serde(flatten)]
+    pub extra: IndexMap<String, Value>,
+}
+
+/// `Models/Spt/Config/RagfairConfig.cs` — `dynamic` only (`RagfairConfig.cs:29-30`), the same
+/// [`DynamicConfigWire`] the override bundle carries, so both arms read one parse of one shape.
+/// Deliberately strict: no `#[serde(default)]` on `dynamic`, so a `spt-ragfair` stem that arrives
+/// without it — or with a malformed one — fails the whole publish rather than handing the offer
+/// path a config it would have to invent values for. Every other `RagfairConfig` member (and
+/// whatever Ceciler's `[JsonExtensionData]` adds on a Release build) rides [`Self::extra`].
+#[derive(Debug, Deserialize)]
+pub struct RagfairConfigLift {
+    pub dynamic: DynamicConfigWire,
+    #[serde(flatten)]
+    pub extra: IndexMap<String, Value>,
+}
+
+/// `Models/Spt/Config/InventoryConfig.cs` — `customMoneyTpls` only
+/// (`InventoryConfig.cs:20-21`), the mod-added currencies `PaymentHelper.IsMoneyTpl` unions onto
+/// the four `Money` constants (`PaymentHelper.cs:19-33`). `#[serde(default)]`, unlike
+/// [`RagfairConfigLift::dynamic`]: no stock configuration carries a custom currency, and an empty
+/// set is exactly what the ragfair path did before the lift, so an absent member is not a failure.
+#[derive(Debug, Default, Deserialize)]
+pub struct InventoryConfigLift {
+    /// An `IndexSet` because the C# member is a `List<MongoId>` and this is membership-only; a
+    /// duplicate entry would have been a duplicate `HashSet.Add` on the C# side too.
+    #[serde(default, rename = "customMoneyTpls")]
+    pub custom_money_tpls: IndexSet<String>,
     #[serde(flatten)]
     pub extra: IndexMap<String, Value>,
 }
@@ -866,14 +907,15 @@ mod tests {
         assert_eq!(armor_class("absent"), None);
     }
 
-    /// The two stems the scav case family reads come out of the flatten map as typed values, every
-    /// other kind still rides `extra`, and the members the views omit — `kind`, the dispatch flags,
-    /// `ammoRewardBlacklist`, whatever Ceciler's `[JsonExtensionData]` adds on a Release build —
-    /// are ignored rather than failing the parse.
+    /// The four stems the reward and ragfair families read come out of the flatten map as typed
+    /// values, every other kind still rides `extra`, and the members the views omit — `kind`, the
+    /// dispatch flags, `ammoRewardBlacklist`, every `RagfairConfig`/`InventoryConfig` member but
+    /// one, whatever Ceciler's `[JsonExtensionData]` adds on a Release build — are ignored rather
+    /// than failing the parse.
     #[test]
-    fn configs_root_lifts_the_item_and_scavcase_stems_and_keeps_the_rest() {
+    fn configs_root_lifts_the_typed_stems_and_keeps_the_rest() {
         let root: ConfigsRoot = serde_json::from_str(
-            r#"{
+            &(r#"{
                 "spt-item": {"kind": "spt-item", "blacklist": ["b1"],
                     "rewardItemBlacklist": ["r1"], "rewardItemTypeBlacklist": ["t1"],
                     "bossItems": ["boss1"], "handbookPriceOverride": {},
@@ -896,8 +938,15 @@ mod tests {
                     "allowMultipleAmmoRewardsPerRarity": true,
                     "allowBossItemsAsRewards": false,
                     "forceLegacyScavCaseGeneration": false},
-                "spt-ragfair": {"kind": "spt-ragfair"}
-            }"#,
+                "spt-core": {"kind": "spt-core"},
+                "spt-inventory": {"kind": "spt-inventory", "customMoneyTpls": ["custom_money"],
+                    "randomLootContainers": {}},
+                "spt-ragfair": {"kind": "spt-ragfair", "runIntervalSeconds": 450,
+                    "dynamic": "#
+                .to_owned()
+                + crate::ragfair::models::tests::DYNAMIC_JSON
+                + r#"}
+            }"#),
         )
         .unwrap();
 
@@ -915,15 +964,32 @@ mod tests {
         assert!(scavcase.reward_item_blacklist.contains("config_r1"));
         assert!(scavcase.allow_multiple_ammo_rewards_per_rarity);
 
-        // Every other kind is still an untyped key of the flatten map, and the two lifted ones are
+        let ragfair = root.ragfair.as_ref().unwrap();
+        assert!(ragfair.dynamic.use_trader_price_for_offers_if_higher);
+        assert_eq!(ragfair.dynamic.end_time_seconds.max, 36000);
+        // Unlifted RagfairConfig members ride the stem's own extra
+        assert_eq!(ragfair.extra["runIntervalSeconds"], 450);
+
+        assert!(
+            root.inventory
+                .as_ref()
+                .unwrap()
+                .custom_money_tpls
+                .contains("custom_money")
+        );
+
+        // Every other kind is still an untyped key of the flatten map, and the four lifted ones are
         // no longer in it
-        assert!(root.extra.contains_key("spt-ragfair"));
+        assert!(root.extra.contains_key("spt-core"));
         assert!(!root.extra.contains_key("spt-item"));
         assert!(!root.extra.contains_key("spt-scavcase"));
+        assert!(!root.extra.contains_key("spt-ragfair"));
+        assert!(!root.extra.contains_key("spt-inventory"));
     }
 
-    /// A configs root with neither lifted stem parses: absent is `None`, which the consuming
-    /// family's resolve rejects per call, naming the stem.
+    /// A configs root with none of the lifted stems parses: absent is `None`, which the consuming
+    /// family's resolve rejects per call, naming the stem — or, for `spt-inventory`, reads as the
+    /// empty custom-money set the ragfair path had before the lift.
     #[test]
     fn configs_root_without_the_lifted_stems_parses_with_none() {
         let root: ConfigsRoot =
@@ -931,6 +997,8 @@ mod tests {
 
         assert!(root.item.is_none());
         assert!(root.scavcase.is_none());
+        assert!(root.ragfair.is_none());
+        assert!(root.inventory.is_none());
     }
 
     /// The other half of the strictness rule: a stem that *is* there but does not parse fails the
@@ -948,6 +1016,17 @@ mod tests {
         // `bossItems` is a set of strings, not an object
         assert!(
             serde_json::from_str::<ConfigsRoot>(r#"{"spt-item": {"bossItems": {"a": 1}}}"#)
+                .is_err()
+        );
+        // `dynamic` carries no `serde(default)`, so a `spt-ragfair` stem without it fails rather
+        // than handing the offer path an invented config
+        assert!(
+            serde_json::from_str::<ConfigsRoot>(r#"{"spt-ragfair": {"kind": "spt-ragfair"}}"#)
+                .is_err()
+        );
+        // `customMoneyTpls` is soft when absent, not when malformed
+        assert!(
+            serde_json::from_str::<ConfigsRoot>(r#"{"spt-inventory": {"customMoneyTpls": 5}}"#)
                 .is_err()
         );
     }

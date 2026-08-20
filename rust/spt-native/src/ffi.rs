@@ -1938,40 +1938,51 @@ mod tests {
         )
     }
 
-    /// Every member of the views override, braces included. The two price tables always know
-    /// `SELLABLE_TPL`, which only matters when the items view carries it.
-    fn ragfair_views_override(items: &str) -> String {
+    /// Every member of the views override, braces included — the three config-backed members
+    /// (Task 6) alongside the database views. The two price tables always know `SELLABLE_TPL`, which
+    /// only matters when the items view carries it.
+    fn ragfair_views_override(items: &str, offer_item_count: &str) -> String {
+        let dynamic = ragfair_dynamic(offer_item_count);
         format!(
-            r#"{{"itemPresets":{{}},"defaultPresets":[],"defaultPresetsByTpl":{{}},
+            r#"{{"dynamic":{dynamic},"configBlacklist":[],"customMoneyTpls":[],
+            "itemPresets":{{}},"defaultPresets":[],"defaultPresetsByTpl":{{}},
             "presetsByTpl":{{}},
             "fleaPrices":{{"{SELLABLE_TPL}":25000}},"handbookPrices":{{"{SELLABLE_TPL}":20000}},
             "highestTraderPrices":{{"{SELLABLE_TPL}":12000}},"items":{items}}}"#
         )
     }
 
-    /// The varying half, config and service state included (spec § C# driver carve-out). Starts with
+    /// The varying half: the service state Decision 10 keeps off the resident DB. Starts with
     /// `timestamp` so the expired-pass test can splice `expiredOffers` in front of it.
-    fn ragfair_varying(offer_item_count: &str) -> String {
-        let dynamic = ragfair_dynamic(offer_item_count);
-        format!(
-            r#""varying":{{"timestamp":1700000000,"offerCounterStart":0,
-            "dynamic":{dynamic},"configBlacklist":[],
+    fn ragfair_varying() -> String {
+        r#""varying":{"timestamp":1700000000,"offerCounterStart":0,
             "seasonalEventActive":false,"seasonalItemTplBlacklist":[],
-            "pmcNamesUsec":["Deagle"],"pmcNamesBear":["Kirill"]}}"#
-        )
+            "pmcNamesUsec":["Deagle"],"pmcNamesBear":["Kirill"]}"#
+            .to_owned()
     }
 
     /// Every required `GenerateDynamicOffersRequest` member, views override included.
     fn ragfair_request_with(items: &str, offer_item_count: &str) -> String {
-        let varying = ragfair_varying(offer_item_count);
-        let views_override = ragfair_views_override(items);
+        let varying = ragfair_varying();
+        let views_override = ragfair_views_override(items, offer_item_count);
         format!(r#"{{"epoch":0,{varying},"viewsOverride":{views_override}}}"#)
     }
 
     /// The minimal override-less request naming `epoch` — the resident-DB half of the protocol.
     fn ragfair_request_at_epoch(epoch: u64) -> String {
-        let varying = ragfair_varying(r#"{"default":{"min":2,"max":5}}"#);
+        let varying = ragfair_varying();
         format!(r#"{{"epoch":{epoch},{varying}}}"#)
+    }
+
+    /// The `configs` root an override-less ragfair request needs resident: the two stems the family
+    /// requires, each in the shape `DbPayloadProjection` writes (`kind` included, so the parse has
+    /// to ignore it).
+    fn ragfair_configs_root() -> String {
+        let dynamic = ragfair_dynamic(r#"{"default":{"min":2,"max":5}}"#);
+        format!(
+            r#""configs":{{"spt-ragfair":{{"kind":"spt-ragfair","dynamic":{dynamic}}},
+            "spt-item":{{"kind":"spt-item","blacklist":[]}}}}"#
+        )
     }
 
     /// The one tpl the offer path would accept, were it in the items view.
@@ -2126,10 +2137,16 @@ mod tests {
         assert_eq!(status, STATUS_STALE_EPOCH);
 
         // Publish the mini roots (junk roots parse as empty typed containers, so the empty
-        // ragfair views derive) and name the returned epoch: the request generates
+        // ragfair views derive) plus the configs root the override-less arm reads its config half
+        // off, and name the returned epoch: the request generates
+        let configs = ragfair_configs_root();
         let (status, out) = call_generate(
             spt_db_publish,
-            br#"{"schema":1,"roots":{"templates":{"a":1},"traders":{"b":2},"globals":{"c":3}}}"#,
+            format!(
+                r#"{{"schema":1,"roots":{{"templates":{{"a":1}},"traders":{{"b":2}},
+                "globals":{{"c":3}},{configs}}}}}"#
+            )
+            .as_bytes(),
         );
         assert_eq!(status, STATUS_OK);
         let epoch = serde_json::from_slice::<serde_json::Value>(&out).unwrap()["epoch"]
@@ -2156,6 +2173,27 @@ mod tests {
         // The distrust fallback: a views override at epoch 0 never reads the resident DB
         let (status, _) = call_generate(spt_generate_dynamic_offers, ragfair_request().as_bytes());
         assert_eq!(status, STATUS_OK);
+
+        // Last, because it moves the resident epoch: a configs root that *is* resident but carries
+        // no stem this family reads is a per-call failure naming the stem, not the stale-epoch
+        // answer a missing root gets — a republish would not fix a stem the publish never carried
+        let (status, out) = call_generate(
+            spt_db_publish,
+            br#"{"schema":1,"roots":{"configs":{"spt-core":{"kind":"spt-core"}}}}"#,
+        );
+        assert_eq!(status, STATUS_OK);
+        let stemless = serde_json::from_slice::<serde_json::Value>(&out).unwrap()["epoch"]
+            .as_u64()
+            .unwrap();
+        let (status, out) = call_generate(
+            spt_generate_dynamic_offers,
+            ragfair_request_at_epoch(stemless).as_bytes(),
+        );
+        assert_eq!(status, STATUS_ERROR);
+        assert!(
+            String::from_utf8(out).unwrap().contains("spt-ragfair"),
+            "the stem-missing error must name the stem"
+        );
     }
 
     /// A repeatable-quest request at `epoch`, with the views override sent or omitted, off the

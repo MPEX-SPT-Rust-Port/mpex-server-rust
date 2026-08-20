@@ -181,9 +181,9 @@ mod tests {
     use crate::loot::item_helper::{BUILT_IN_INSERTS, ItemBaseClassCache, MOB_CONTAINER};
     use crate::loot::models::{Item, ItemView, PresetView};
     use crate::loot::random_util::{TestSeedGuard, get_double};
-    use crate::ragfair::NO_NAMES;
     use crate::ragfair::RagfairContext;
     use crate::ragfair::models::DynamicConfigWire;
+    use crate::ragfair::{NO_CUSTOM_MONEY_TPLS, NO_NAMES};
 
     const SEED: u64 = 20260813;
 
@@ -298,6 +298,7 @@ mod tests {
                 handbook_prices: &self.prices,
                 highest_trader_prices: &self.prices,
                 config_blacklist: &self.config_blacklist,
+                custom_money_tpls: &NO_CUSTOM_MONEY_TPLS,
                 seasonal_item_tpl_blacklist: &self.seasonal_blacklist,
                 pmc_names_usec: &NO_NAMES,
                 pmc_names_bear: &NO_NAMES,
