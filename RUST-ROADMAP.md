@@ -97,16 +97,24 @@ entry and the inherited `ValueType.ToString()`. Scope is `Color` only — mods t
   ledgers).
 - **Container mutations of a table are invisible to the resident-DB families** — since Phase 2 the
   Ceciler-injected write barriers (`Patches/Ceciler.WriteBarriers`) bump the stamp from every
-  non-`init` property setter reachable from the five published roots — a walk over property types
+  non-`init` property setter reachable from the published roots — the five tables plus, since
+  Phase 4, the 28 configs, so 33 roots in all — a walk over property types
   *and* base types, since `TradersTable` declares nothing and reaches `Trader` only through its
   `Dictionary<MongoId, Trader>` base — so a mod's scalar writes reach the resident DB without a
   hand-written bump. What stays invisible: a mod calling `Add`/`Remove`/indexer-set on a table
   collection (root-level or one below — `trader.Assort.Items`, `handbook.Items`), array element
-  writes, reflection-driven writes, the setters of the three denied live-per-request types (`Item`,
-  `BotBase`, `PmcDataRepeatableQuest` — so a write to a trader assort `Item`'s `Upd` bumps nothing;
-  the churn guard added no fourth entry), the setters of open-generic model types, which are never
-  barriered by design (`MinMax<T>`'s three, so a mod editing a location's `Limit`/`MinMaxBot` bands
-  writes nothing the stamp sees), anything behind an `object?`-typed property the walk cannot follow
+  writes, reflection-driven writes, the setters of the four denied live-per-request types (`Item`,
+  `BotBase`, `PmcDataRepeatableQuest` — so a write to a trader assort `Item`'s `Upd` bumps nothing —
+  and, since Phase 4, `GenerationData`, which the configs root made reachable through
+  `BotConfig.Generation`/`PlayerScavConfig.ItemLimits` but which `BotWeaponGenerator` and
+  `PlayerScavGenerator.AdjustItemWeights` write per bot generated, so a mod writing
+  `botConfig.Generation["healing"].Weights` or `playerScavConfig.ItemLimits[*].Whitelist` bumps
+  nothing and the resident configs root — which ships whole `BotConfig`/`PlayerScavConfig` — keeps
+  the pre-write values until the next stamped write; neither field is read from the resident root
+  today, but unread is not un-stale, and the hole opens the moment one is), the setters of
+  open-generic model types, which are never barriered by design (`MinMax<T>`'s three, so a mod
+  editing a location's `Limit`/`MinMaxBot` bands writes nothing the stamp sees), anything behind an
+  `object?`-typed property the walk cannot follow
   (`TemplateSide.EquipmentBuilds`/`WeaponBuilds`), and a genuine database write performed inside a
   native-response decode callback's extent — `SptNative.DecodeResult` holds a
   `WriteBarrier.Suppress()` scope across the decode, because deserializing a response into
