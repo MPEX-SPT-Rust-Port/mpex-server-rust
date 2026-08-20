@@ -145,6 +145,52 @@ public class WriteBarrierChurnTests
     }
 
     /// <summary>
+    /// The configs root's side of the bargain (Phase 4). A config edit has to cost exactly one
+    /// republish, not one per pass: the barrier fires on the write, the next native call pays for it,
+    /// and the workload that reads the new value must not keep dirtying the stamp afterwards.
+    /// RunIntervalSeconds is deliberately a property the generation path never reads - the subject
+    /// here is the barrier's churn, not the config's effect.
+    /// </summary>
+    [Test]
+    public void AConfigWriteCostsExactlyOneRepublish()
+    {
+        var ragfairConfig = DI.GetInstance().GetService<RagfairConfig>();
+        var trusted = ragfairConfig.TrustNativeRequestCacheWithMods;
+        var interval = ragfairConfig.RunIntervalSeconds;
+        ragfairConfig.TrustNativeRequestCacheWithMods = true;
+        _generator.NativeTestSeed = 424242;
+
+        try
+        {
+            // Same settling as the sibling test - the first pass may legitimately flip
+            // CanSellOnRagfair, and this test can only measure a settled baseline.
+            GenerateOnePass();
+            _publisher.EnsureCurrent();
+            var settled = _publisher.EnsureCurrent();
+
+            ragfairConfig.RunIntervalSeconds = interval + 1;
+            var afterWrite = _publisher.EnsureCurrent();
+
+            GenerateOnePass();
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(afterWrite, Is.GreaterThan(settled), "a config write must dirty the stamp and force one republish");
+                Assert.That(
+                    _publisher.EnsureCurrent(),
+                    Is.EqualTo(afterWrite),
+                    "the config write must converge - one republish, not one per pass"
+                );
+            });
+        }
+        finally
+        {
+            ragfairConfig.RunIntervalSeconds = interval;
+            ragfairConfig.TrustNativeRequestCacheWithMods = trusted;
+        }
+    }
+
+    /// <summary>
     /// One dynamic-offer pass, driven exactly as <c>RagfairResidentDbTests</c> drives it: the
     /// unseeded per-template cap draw in <c>RagfairOfferHolder</c> runs off a fresh fixed stream, and
     /// the holder starts empty so the second pass pays the same draws as the first.

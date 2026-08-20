@@ -4,9 +4,9 @@ using Mono.Cecil.Cil;
 namespace Ceciler.WriteBarriers;
 
 /// <summary>
-/// Prepends a `call WriteBarrier::Bump()` to the property setters of every DB-only model type
-/// reachable from the roots DbPublisher publishes, so a mod writing game data dirties the resident
-/// DB without a hand-written Bump() call.
+/// Prepends a `call WriteBarrier::Bump()` to the property setters of every model type reachable
+/// from the roots DbPublisher publishes - the five tables and, since Phase 4, the configs - so a
+/// mod writing game data or config dirties the resident DB without a hand-written Bump() call.
 ///
 /// Scope is a reachability walk, deliberately not the namespace sweep the spec first described.
 /// Namespaces are wrong in both directions: Eft.Common.Location and Models/Eft/Hideout/* are
@@ -28,6 +28,35 @@ public class WriteBarriersPatch : IPatcher
         "SPTarkov.Server.Core.Models.Spt.Tables.GlobalTable",
         "SPTarkov.Server.Core.Models.Spt.Tables.LocationTable",
         "SPTarkov.Server.Core.Models.Spt.Tables.HideoutTable",
+        // One per ConfigTypes.GetConfigType() arm - the configs root ships every loaded config.
+        "SPTarkov.Server.Core.Models.Spt.Config.AirdropConfig",
+        "SPTarkov.Server.Core.Models.Spt.Config.BackupConfig",
+        "SPTarkov.Server.Core.Models.Spt.Config.BotConfig",
+        "SPTarkov.Server.Core.Models.Spt.Config.BtrDeliveryConfig",
+        "SPTarkov.Server.Core.Models.Spt.Config.PmcConfig",
+        "SPTarkov.Server.Core.Models.Spt.Config.CoreConfig",
+        "SPTarkov.Server.Core.Models.Spt.Config.HealthConfig",
+        "SPTarkov.Server.Core.Models.Spt.Config.HideoutConfig",
+        "SPTarkov.Server.Core.Models.Spt.Config.HttpConfig",
+        "SPTarkov.Server.Core.Models.Spt.Config.InRaidConfig",
+        "SPTarkov.Server.Core.Models.Spt.Config.InsuranceConfig",
+        "SPTarkov.Server.Core.Models.Spt.Config.InventoryConfig",
+        "SPTarkov.Server.Core.Models.Spt.Config.ItemConfig",
+        "SPTarkov.Server.Core.Models.Spt.Config.LocaleConfig",
+        "SPTarkov.Server.Core.Models.Spt.Config.LocationConfig",
+        "SPTarkov.Server.Core.Models.Spt.Config.LootConfig",
+        "SPTarkov.Server.Core.Models.Spt.Config.MatchConfig",
+        "SPTarkov.Server.Core.Models.Spt.Config.PlayerScavConfig",
+        "SPTarkov.Server.Core.Models.Spt.Config.PmcChatResponseConfig",
+        "SPTarkov.Server.Core.Models.Spt.Config.QuestConfig",
+        "SPTarkov.Server.Core.Models.Spt.Config.RagfairConfig",
+        "SPTarkov.Server.Core.Models.Spt.Config.RepairConfig",
+        "SPTarkov.Server.Core.Models.Spt.Config.ScavCaseConfig",
+        "SPTarkov.Server.Core.Models.Spt.Config.TraderConfig",
+        "SPTarkov.Server.Core.Models.Spt.Config.WeatherConfig",
+        "SPTarkov.Server.Core.Models.Spt.Config.SeasonalEventConfig",
+        "SPTarkov.Server.Core.Models.Spt.Config.LostOnDeathConfig",
+        "SPTarkov.Server.Core.Models.Spt.Config.GiftsConfig",
     ];
 
     /// <summary>
@@ -43,6 +72,15 @@ public class WriteBarriersPatch : IPatcher
         "SPTarkov.Server.Core.Models.Eft.Common.Tables.BotBase",
         // Per-profile quest progress, not the quest template.
         "SPTarkov.Server.Core.Models.Eft.Common.Tables.PmcDataRepeatableQuest",
+        // Newly reachable in Phase 4 via BotConfig.Generation and PlayerScavConfig.ItemLimits, but
+        // two production paths write it per bot generated: BotWeaponGenerator builds one as a scratch
+        // local for every UBGL-armed bot, and PlayerScavGenerator.AdjustItemWeights overwrites
+        // Weights/Whitelist on the bot template for every karma subtype. Both would cost a full
+        // republish on the next native call, on the hottest path in the server. Nothing is given up:
+        // neither consumer reads these values from the resident configs root - bot generation gets
+        // BotConfig in its per-request payload (BotPayloadProjection.BuildRequest) and player-scav
+        // generation never crosses into native at all.
+        "SPTarkov.Server.Core.Models.Eft.Common.Tables.GenerationData",
     ];
 
     private const string BarrierTypeName = "SPTarkov.Server.Core.Native.Db.WriteBarrier";
@@ -50,6 +88,16 @@ public class WriteBarriersPatch : IPatcher
     public void Patch(AssemblyDefinition assembly)
     {
         var module = assembly.MainModule;
+
+        // A denied name that no longer resolves silently barriers the type it was meant to keep out,
+        // so it fails the build here alongside the root check in CollectReachableTypes.
+        foreach (var deniedName in _denied)
+        {
+            if (module.GetType(deniedName) is null)
+            {
+                throw new InvalidOperationException($"denied type {deniedName} not found - the denylist names have drifted");
+            }
+        }
 
         var barrierType =
             module.GetType(BarrierTypeName)
