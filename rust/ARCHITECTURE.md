@@ -165,9 +165,10 @@ lines, stderr bytes write directly. Terminal control is native too — `spt_cons
 instead, and the Windows console setup — UTF-8 codepage plus VT — happens in `spt_logger_init`), and
 `spt_console_read_line` drains the queue before reading stdin, so a prompt written just before is on screen.
 Two exports answer rather than write: `spt_log_enabled` serves the `IsLogEnabled` gate from the applied
-configuration, and `spt_log_format` renders `BaseLogHandler.FormatMessage`'s line for mod handlers. With no
-pipeline running the C# writer falls back to the real console — which is exactly what the dispatcher's stderr
-fallbacks-of-last-resort need.
+configuration, and `spt_log_format` renders `BaseLogHandler.FormatMessage`'s line for mod handlers. Before
+init, after close, or with no console target configured the bytes still reach the terminal, written straight
+to stdout on the Rust side; only an unloadable library falls the write back through the C# writer's captured
+original, which is what the dispatcher's stderr fallbacks-of-last-resort need.
 
 - **Init and close are ref-counted, not idempotent.** A second init keeps the running pipeline and ignores the
   new config but bumps the count; teardown needs as many `spt_logger_close` calls as there were successful

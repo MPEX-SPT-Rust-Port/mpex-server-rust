@@ -19,7 +19,7 @@ build/run commands see [CLAUDE.md](CLAUDE.md).
 | `Libraries/SPTarkov.Server.Web` | Blazor Server admin panel (MudBlazor) | `.Server.Core`, the shared Kestrel host |
 | `Libraries/SPTarkov.Server.Assets` | `SPT_Data/`: configs, JSON database, images; the largest files ship compressed as `looseLoot.7z` | The host build (copies to output), `DatabaseImporter` |
 | `Libraries/SPTarkov.DI` | Attribute-driven DI container: `[Injectable]`, `DependencyInjectionHandler` | Core, `.Reflection`, the host |
-| `Libraries/SPTarkov.Common` | Shared primitives and the logging front end (`SptLogger`, `SPTLoggerDispatcher`) | `rust/spt-native` (log exports), Core |
+| `Libraries/SPTarkov.Common` | Shared primitives and the logging front end (`SptLogger`, `SPTLoggerDispatcher`) | `rust/spt-native` (log and console exports), Core |
 | `Libraries/SPTarkov.Reflection` | Runtime method patching for mods (`AbstractPatch`, `PatchManager`) | Mods, the host (not Core) |
 | `rust/` | Three-member Cargo workspace: the `spt-native` cdylib called over C ABI, `mpex-server`, the CLR-hosting launcher shipped builds run, and `spectre-facade`, which emits the stub `Spectre.Console.Ansi` assembly `SPTarkov.Common` builds and four other projects reference | Core's `Native/`, Common's `Native/`, the published server assembly |
 | `Tools/Ceciler` + `Patches/Ceciler.JsonExtensionData` | Mono.Cecil IL rewriter run on Release builds, and the patch assembly it applies | `SPTarkov.Server.Core.dll` post-compile |
