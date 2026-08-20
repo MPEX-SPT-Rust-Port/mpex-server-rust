@@ -199,7 +199,8 @@ stopping the server.
 
 Only the bot family still projects its payload from the live database on every call. Every other
 family carries no call-invariant half at all: `DbPublisher` re-publishes the
-templates/traders/globals/locations/hideout roots into the native resident DB when
+templates/traders/globals/locations/hideout roots — and, since Phase 4, a configs root carrying
+every loaded config — into the native resident DB when
 `DatabaseMutationStamp` has moved, and each call carries just an epoch (a stale epoch self-heals by
 force-publish and one retry). Since Phase 2 the stamp's bump sites are mostly Ceciler-injected
 setter barriers, so a modded server rides the resident path too — `TrustNativeRequestCacheWithMods`

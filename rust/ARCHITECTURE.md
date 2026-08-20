@@ -142,9 +142,9 @@ releases with `spt_buf_free`; so do `spt_console_read_line` and `spt_log_format`
   member of a lifted stem nobody reads. **The strictness contract to know before adding a stem:** each is an
   `Option<Lift>`, so an *absent* stem still parses and the reading family fails its per-call resolve loudly
   naming the stem, while a *malformed* one fails the whole publish (`STATUS_BAD_ARGS`) and leaves the
-  previous resident DB standing. Which config members deliberately stayed per-call — they are the ones a C#
-  writer mutates in place through an indexer, where no write barrier fires — is in RUST-ROADMAP.md's Phase 4
-  ledger. Phase 4 added **no** export.
+  previous resident DB standing. Which config members deliberately stayed per-call — the ones a C# writer
+  mutates in place through an indexer, where no write barrier fires, or that the caller itself selects — is
+  in RUST-ROADMAP.md's Phase 4 ledger. Phase 4 added **no** export.
 - **A buffer is written on failure too** — the parse error, the `LootError` message, or the panic text.
   Ownership is decided by the out-pointer being non-null, never by the status code. `spt_verify_database`'s
   free-on-success-only shape must not be copied into the generators.
@@ -227,7 +227,9 @@ original, which is what the dispatcher's stderr fallbacks-of-last-resort need.
 
 Since flip #4 both generators resolve their DB-derived views off the resident DB (see *FFI boundary*); the
 family has no `views.rs` of its own, borrowing `ragfair/views.rs`'s instead. Since Phase 4 its config
-inputs come off the resident `configs` root too; the service-backed fields still ride each request.
+inputs come off the resident `configs` root too — **except the two loot multipliers**, which a C#
+service rescales in place per scav raid and which therefore stay per-call; the service-backed fields
+ride each request as before.
 
 ### `src/bot/`
 

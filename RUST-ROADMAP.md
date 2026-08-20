@@ -127,9 +127,10 @@ entry and the inherited `ValueType.ToString()`. Scope is `Color` only — mods t
   `DbPayloadProjection`'s `LazyLoad.Value` reads, so a mod-registered transformer that writes into a
   published root *other* than the value it transforms is suppressed too (both shipped `StaticLoot`
   transformers write only inside the transformed graph).
-  **The config half of that list is the wider half.** Config bodies are mostly collections
-  (`ItemConfig.Blacklist`/`RewardItemBlacklist`/`BossItems`, `QuestConfig.RepeatableQuests`,
-  `LocationConfig.StaticLootMultiplier`, `BotConfig.ItemSpawnLimits`/`CurrencyStackSize`), so where a
+  **The config half of that list is the wider half.** Config bodies are mostly collections, and the
+  resident ones are the exposure: `ItemConfig.Blacklist`/`RewardItemBlacklist`/`BossItems`,
+  `LocationConfig.LooseLootBlacklist`, `SeasonalEventConfig.ChristmasContainerIds`,
+  `BotConfig.ItemSpawnLimits`/`CurrencyStackSize`. So where a
   table root's stale window needs a mod to reach for a container, a config root's opens for most
   runtime config edits short of a plain property set — and unlike much of the table case, these are
   values a family reads off the resident root today.
@@ -535,7 +536,7 @@ C#-projected in the varying block; flip #6 (bots
 root resident) is the named revisit point — **closed by flip #6's decision 1: no bots root**, the
 lists stay varying, deferred to Phase 4, because the filter reads a config value and the root's
 ~94.6 ms of per-publish projection would serve nothing else. **Phase 4 answered that deferral
-declined again** (its decision 2): the configs root supplies the config half, but
+declined again** (its decision 10): the configs root supplies the config half, but
 `GatherPmcNamesOfLength` still reads the bot *table*, which has no root, so residency would need the
 root flip #6 refused. A names-only mini-root is the standing upgrade if the varying cost ever
 measures. (c) Runtime *config* edits still bypass the
@@ -621,9 +622,11 @@ names (`HideoutProduction.cs`); the request-time derivation maps them onto the e
 `ScavCaseRewardGenerator` mirroring `LootGenerator` exactly (nullable additive `DbPublisher?` +
 loaded-mod list via a new DI ctor chaining the old one, the frozen 4.1.2 ctor untouched; private
 `ResidentDbEligible`, where loot's is internal — the benchmark seam here needs only `Build`).
-The varying carve-out at the flip was `recipeId`, `config` and the four service-backed sets; Phase 4
-took `config` and the two config-backed lists resident, leaving `recipeId` (caller-selected) plus
-`inactiveSeasonalItems` and `globalBlacklist` (service state). The pre-flip hydration sweep found
+The varying carve-out at the flip was `recipeId`, `config` and four sets — two of them service-backed
+(`inactiveSeasonalItems`, `globalBlacklist`), two config-backed (`rewardItemBlacklist`, `bossItems`),
+a distinction the flip did not need to draw and Phase 4 did: it took `config` and the two
+config-backed lists resident, leaving `recipeId` (caller-selected) and the two service-backed sets.
+The pre-flip hydration sweep found
 readers only (`ScavCaseRewardGenerator`, `HideoutController`) and no lazy writer into
 `Production.ScavRecipes`, so no `DbPublisher` pre-touch carve-out was needed. (c) Net `Native/`
 delta for the flip (`git diff --stat a9a224f..ed0144d -- Libraries/SPTarkov.Server.Core/Native/`):
@@ -653,7 +656,7 @@ so the root would carry 5.7 MiB and ~94.6 ms of warm projection on *every* publi
 measured ~735 ms — to serve two name lists on ragfair's varying block. And it would not finish the
 job either way: `GatherPmcNamesOfLength` filters on `botConfig.BotNameLengthLimit`, a config value,
 so the derivation cannot go resident before Phase 4. Deferred there, with flip #1's revisit note
-closed as answered — and **Phase 4 declined it a second time** (its decision 2): the config half is
+closed as answered — and **Phase 4 declined it a second time** (its decision 10): the config half is
 resident now, but the names still come off the bot table, so the deferral only ever moved half the
 blocker and the other half is the root this flip refused. **2, `modPoolSlotOrder` is not a view.**
 The plan had it deriving
@@ -804,7 +807,7 @@ send, so it was live by construction; now it is last-published state on the elig
 *scalar* config write that is a wash — Phase 4 extended the Ceciler walk to all 28 config types
 (33 roots in all), so a runtime property set moves the stamp and the next call republishes: still
 correct, one republish dearer. For a *collection* mutation it is a straight loss. A mod calling
-`Add`/`Remove`/indexer-set on `ItemConfig.Blacklist`, `QuestConfig.RepeatableQuests`,
+`Add`/`Remove`/indexer-set on `ItemConfig.Blacklist`, `LocationConfig.LooseLootBlacklist`,
 `BotConfig.ItemSpawnLimits` and their kind was read fresh on every send before this phase and is
 now invisible until some other stamped write happens to land. Config bodies are mostly collections,
 so the window is wider than the table roots' equivalent, and unlike most of the table case these are
@@ -929,7 +932,8 @@ written against, not the current file.
    have been re-measured; bots was the biggest win, as predicted — 90.32 → 13.19 ms per assault
    bot and a 7.1x smaller wire (BENCHMARK.md).
    **Phase 2 landed 2026-08-19** (no ABI change, still 27): `Patches/Ceciler.WriteBarriers` injects a
-   stamp bump into every non-`init` model setter reachable from the five published roots, and
+   stamp bump into every non-`init` model setter reachable from the five published roots (33 since
+   Phase 4), and
    `TrustNativeRequestCacheWithMods` now defaults **on** in all six configs, gated on
    `WriteBarrier.Installed` so a Debug build — which Ceciler never rewrites — still forces the views
    override with mods loaded. A modded Release server rides the resident DB; the container gap and the
