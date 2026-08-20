@@ -39,8 +39,9 @@ public record ScavCaseRewardsRequest
 }
 
 /// <summary>
-/// The C#-built invariant bundle: the distrust fallback. Member shapes are the pre-flip request's,
-/// unchanged.
+/// The C#-built invariant bundle: the distrust fallback. Every member has a resident twin - the
+/// four database views derive off the published roots, the three config-backed ones come off the
+/// <c>configs</c> root's <c>spt-scavcase</c> and <c>spt-item</c> stems.
 /// </summary>
 public record ScavCaseViewsOverride
 {
@@ -71,6 +72,30 @@ public record ScavCaseViewsOverride
     /// </summary>
     [JsonPropertyName("defaultPresetsByTpl")]
     public required Dictionary<MongoId, PresetView> DefaultPresetsByTpl { get; set; }
+
+    /// <summary>
+    /// The live <c>ScavCaseConfig</c>, sent whole: its JSON names already match the native view, and
+    /// the members that view omits - <c>kind</c>, <c>ammoRewards.ammoRewardBlacklist</c> (dead
+    /// config, nothing reads it), <c>MinMax.type</c> and the dispatch/residency flags - are ignored
+    /// on arrival. The resident arm parses the same shape out of the <c>spt-scavcase</c> stem.
+    /// </summary>
+    [JsonPropertyName("config")]
+    public required ScavCaseConfig Config { get; set; }
+
+    /// <summary>
+    /// <c>ItemFilterService.GetItemRewardBlacklist()</c>, which is <c>ItemConfig.RewardItemBlacklist</c>
+    /// verbatim - distinct from the scav case config's own <c>rewardItemBlacklist</c>, which rides
+    /// along inside <see cref="Config"/>. Resident twin: the <c>spt-item</c> stem.
+    /// </summary>
+    [JsonPropertyName("rewardItemBlacklist")]
+    public required HashSet<MongoId> RewardItemBlacklist { get; set; }
+
+    /// <summary>
+    /// <c>ItemFilterService.GetBossItems()</c>, which is <c>ItemConfig.BossItems</c> verbatim.
+    /// Resident twin: the <c>spt-item</c> stem.
+    /// </summary>
+    [JsonPropertyName("bossItems")]
+    public required HashSet<MongoId> BossItems { get; set; }
 }
 
 /// <summary>
@@ -87,39 +112,19 @@ public record ScavCaseVarying
     public required MongoId RecipeId { get; set; }
 
     /// <summary>
-    /// The live <c>ScavCaseConfig</c>, sent whole: its JSON names already match the native view, and
-    /// the members that view omits - <c>kind</c>, <c>ammoRewards.ammoRewardBlacklist</c> (dead
-    /// config, nothing reads it), <c>MinMax.type</c> and the dispatch/residency flags - are ignored
-    /// on arrival.
-    /// </summary>
-    [JsonPropertyName("config")]
-    public required ScavCaseConfig Config { get; set; }
-
-    /// <summary>
-    /// <c>SeasonalEventService.GetInactiveSeasonalEventItems()</c>.
+    /// <c>SeasonalEventService.GetInactiveSeasonalEventItems()</c> - service state, not config.
     /// </summary>
     [JsonPropertyName("inactiveSeasonalItems")]
     public required HashSet<MongoId> InactiveSeasonalItems { get; set; }
 
     /// <summary>
     /// <c>ItemFilterService.IsItemBlacklisted</c>'s backing cache, which mods extend at runtime
-    /// through <c>AddItemToBlacklistCache</c>.
+    /// through <c>AddItemToBlacklistCache</c> - the config blacklist plus those additions, so it
+    /// stays varying where the two config-backed lists on
+    /// <see cref="ScavCaseViewsOverride"/> did not.
     /// </summary>
     [JsonPropertyName("globalBlacklist")]
     public required HashSet<MongoId> GlobalBlacklist { get; set; }
-
-    /// <summary>
-    /// <c>ItemFilterService.GetItemRewardBlacklist()</c> - distinct from the config's own
-    /// <c>rewardItemBlacklist</c>, which rides along inside <see cref="Config"/>.
-    /// </summary>
-    [JsonPropertyName("rewardItemBlacklist")]
-    public required HashSet<MongoId> RewardItemBlacklist { get; set; }
-
-    /// <summary>
-    /// <c>ItemFilterService.GetBossItems()</c>.
-    /// </summary>
-    [JsonPropertyName("bossItems")]
-    public required HashSet<MongoId> BossItems { get; set; }
 
     /// <inheritdoc cref="RewardLootVarying.TestSeed"/>
     [JsonPropertyName("testSeed")]

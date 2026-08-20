@@ -20,6 +20,7 @@ use crate::loot::models::{
     Item, SpawnpointTemplate, StaticContainer, StaticContainerData, StaticForced, StaticLootDetails,
 };
 use crate::quest::models::{LevelledItemFilter, RepeatableTemplates};
+use crate::scav_case::models::ScavCaseConfigView;
 
 /// `{"schema":1,"roots":{...}}` — the envelope `DbPayloadProjection` (C#) writes.
 #[derive(Debug, Deserialize)]
@@ -50,6 +51,33 @@ pub struct PublishRoots {
 /// (STATUS_BAD_ARGS), previous resident DB intact.
 #[derive(Debug, Default, Deserialize)]
 pub struct ConfigsRoot {
+    /// `Models/Spt/Config/ItemConfig.cs`, whose `Kind` is `spt-item` (`ItemConfig.cs:9-10`) — see
+    /// [`ItemConfigLift`].
+    #[serde(default, rename = "spt-item")]
+    pub item: Option<ItemConfigLift>,
+    /// `Models/Spt/Config/ScavCaseConfig.cs`, whose `Kind` is `spt-scavcase`
+    /// (`ScavCaseConfig.cs:8-9`). Parsed by the scav case family's own view of the config — the
+    /// same type the override bundle carries, so both arms read one parse of one shape. The
+    /// members it omits (`kind`, `ammoRewards.ammoRewardBlacklist`, the dispatch/residency flags,
+    /// anything Ceciler's `[JsonExtensionData]` adds on a Release build) are ignored on arrival.
+    #[serde(default, rename = "spt-scavcase")]
+    pub scavcase: Option<ScavCaseConfigView>,
+    #[serde(flatten)]
+    pub extra: IndexMap<String, Value>,
+}
+
+/// `Models/Spt/Config/ItemConfig.cs` — the four sets the reward families read. Shared: the scav
+/// case family reads `rewardItemBlacklist`/`bossItems`, later flips read the other two.
+#[derive(Debug, Default, Deserialize)]
+pub struct ItemConfigLift {
+    #[serde(default)]
+    pub blacklist: IndexSet<String>,
+    #[serde(default, rename = "rewardItemBlacklist")]
+    pub reward_item_blacklist: IndexSet<String>,
+    #[serde(default, rename = "rewardItemTypeBlacklist")]
+    pub reward_item_type_blacklist: IndexSet<String>,
+    #[serde(default, rename = "bossItems")]
+    pub boss_items: IndexSet<String>,
     #[serde(flatten)]
     pub extra: IndexMap<String, Value>,
 }
@@ -836,6 +864,92 @@ mod tests {
         assert_eq!(armor_class("placeholder"), None);
         assert_eq!(armor_class("null"), None);
         assert_eq!(armor_class("absent"), None);
+    }
+
+    /// The two stems the scav case family reads come out of the flatten map as typed values, every
+    /// other kind still rides `extra`, and the members the views omit — `kind`, the dispatch flags,
+    /// `ammoRewardBlacklist`, whatever Ceciler's `[JsonExtensionData]` adds on a Release build —
+    /// are ignored rather than failing the parse.
+    #[test]
+    fn configs_root_lifts_the_item_and_scavcase_stems_and_keeps_the_rest() {
+        let root: ConfigsRoot = serde_json::from_str(
+            r#"{
+                "spt-item": {"kind": "spt-item", "blacklist": ["b1"],
+                    "rewardItemBlacklist": ["r1"], "rewardItemTypeBlacklist": ["t1"],
+                    "bossItems": ["boss1"], "handbookPriceOverride": {},
+                    "somethingCecilerAdded": 7},
+                "spt-scavcase": {"kind": "spt-scavcase",
+                    "rewardItemValueRangeRub": {"common": {"min": 0.0, "max": 1.0}},
+                    "moneyRewards": {"moneyRewardChancePercent": 5,
+                        "rubCount": {"common": {"min": 1, "max": 1}, "rare": {"min": 1, "max": 1},
+                            "superrare": {"min": 1, "max": 1}},
+                        "usdCount": {"common": {"min": 1, "max": 1}, "rare": {"min": 1, "max": 1},
+                            "superrare": {"min": 1, "max": 1}},
+                        "eurCount": {"common": {"min": 1, "max": 1}, "rare": {"min": 1, "max": 1},
+                            "superrare": {"min": 1, "max": 1}},
+                        "gpCount": {"common": {"min": 1, "max": 1}, "rare": {"min": 1, "max": 1},
+                            "superrare": {"min": 1, "max": 1}}},
+                    "ammoRewards": {"ammoRewardChancePercent": 5, "ammoRewardBlacklist": {},
+                        "ammoRewardValueRangeRub": {}, "minStackSize": 30},
+                    "rewardItemParentBlacklist": [], "rewardItemBlacklist": ["config_r1"],
+                    "allowMultipleMoneyRewardsPerRarity": false,
+                    "allowMultipleAmmoRewardsPerRarity": true,
+                    "allowBossItemsAsRewards": false,
+                    "forceLegacyScavCaseGeneration": false},
+                "spt-ragfair": {"kind": "spt-ragfair"}
+            }"#,
+        )
+        .unwrap();
+
+        let item = root.item.as_ref().unwrap();
+        assert!(item.blacklist.contains("b1"));
+        assert!(item.reward_item_blacklist.contains("r1"));
+        assert!(item.reward_item_type_blacklist.contains("t1"));
+        assert!(item.boss_items.contains("boss1"));
+        // Unlifted ItemConfig members ride the stem's own extra
+        assert!(item.extra.contains_key("handbookPriceOverride"));
+        assert!(item.extra.contains_key("somethingCecilerAdded"));
+
+        let scavcase = root.scavcase.as_ref().unwrap();
+        assert_eq!(scavcase.money_rewards.money_reward_chance_percent, 5);
+        assert!(scavcase.reward_item_blacklist.contains("config_r1"));
+        assert!(scavcase.allow_multiple_ammo_rewards_per_rarity);
+
+        // Every other kind is still an untyped key of the flatten map, and the two lifted ones are
+        // no longer in it
+        assert!(root.extra.contains_key("spt-ragfair"));
+        assert!(!root.extra.contains_key("spt-item"));
+        assert!(!root.extra.contains_key("spt-scavcase"));
+    }
+
+    /// A configs root with neither lifted stem parses: absent is `None`, which the consuming
+    /// family's resolve rejects per call, naming the stem.
+    #[test]
+    fn configs_root_without_the_lifted_stems_parses_with_none() {
+        let root: ConfigsRoot =
+            serde_json::from_str(r#"{"spt-core": {"kind": "spt-core"}}"#).unwrap();
+
+        assert!(root.item.is_none());
+        assert!(root.scavcase.is_none());
+    }
+
+    /// The other half of the strictness rule: a stem that *is* there but does not parse fails the
+    /// whole publish (`STATUS_BAD_ARGS`, previous resident DB intact) rather than collapsing to the
+    /// `serde(default)` `None` an absent one gets. `#[serde(default)]` only covers an absent key.
+    #[test]
+    fn a_malformed_lifted_stem_is_a_parse_error_not_a_silent_none() {
+        // `rewardItemValueRangeRub` is a map, not a number
+        assert!(
+            serde_json::from_str::<ConfigsRoot>(
+                r#"{"spt-scavcase": {"rewardItemValueRangeRub": 5}}"#
+            )
+            .is_err()
+        );
+        // `bossItems` is a set of strings, not an object
+        assert!(
+            serde_json::from_str::<ConfigsRoot>(r#"{"spt-item": {"bossItems": {"a": 1}}}"#)
+                .is_err()
+        );
     }
 
     #[test]

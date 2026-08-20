@@ -7,6 +7,7 @@ using SPTarkov.Server.Core.Models.Common;
 using SPTarkov.Server.Core.Models.Enums;
 using SPTarkov.Server.Core.Models.Spt.Config;
 using SPTarkov.Server.Core.Models.Spt.Tables;
+using SPTarkov.Server.Core.Services.Server;
 using SPTarkov.Server.Core.Utils;
 
 namespace UnitTests.Tests.Generators;
@@ -19,7 +20,9 @@ namespace UnitTests.Tests.Generators;
 /// <see cref="ScavCaseConfig.ForceLegacyScavCaseGeneration"/> on the shared config singleton - the
 /// path selector - that config's <c>MoneyRewards.MoneyRewardChancePercent</c> and
 /// <c>AmmoRewards.AmmoRewardChancePercent</c> for the two forced cases, and
-/// <see cref="RandomUtil.RandomSource"/>, the seam the legacy path draws through.
+/// <see cref="RandomUtil.RandomSource"/>, the seam the legacy path draws through. The two chance
+/// writes are published-root writes since the config moved onto the resident configs root, so
+/// <see cref="Generate"/> stamps them the way <c>RagfairParityTests</c> stamps its own.
 /// The generator itself is built fresh per run, so its two instance caches rebuild every time and the
 /// <c>NativeTestSeed</c> never outlives the call.
 ///
@@ -36,6 +39,7 @@ public class ScavCaseParityTests
     private static readonly ulong[] _seeds = [42, 1337];
 
     private ScavCaseConfig _scavCaseConfig = default!;
+    private DatabaseMutationStamp _databaseMutationStamp = default!;
     private RandomUtil _randomUtil = default!;
     private JsonUtil _jsonUtil = default!;
     private ItemHelper _itemHelper = default!;
@@ -47,6 +51,7 @@ public class ScavCaseParityTests
         var di = DI.GetInstance();
 
         _scavCaseConfig = di.GetService<ScavCaseConfig>();
+        _databaseMutationStamp = di.GetService<DatabaseMutationStamp>();
         _randomUtil = di.GetService<RandomUtil>();
         _jsonUtil = di.GetService<JsonUtil>();
         _itemHelper = di.GetService<ItemHelper>();
@@ -75,8 +80,8 @@ public class ScavCaseParityTests
     /// Money is a 5% roll per reward (<c>scavcase.json</c>'s <c>moneyRewardChancePercent</c>) and never
     /// came up across the matrix above, so nothing there proves the money pool's fixed
     /// rouble/euro/dollar/GP order or the per-currency stack counts. Forced here, the way
-    /// <c>RepeatableQuestParityTests</c> forces its specific-location arm - the whole config crosses to
-    /// the native side, so the one write reaches both paths.
+    /// <c>RepeatableQuestParityTests</c> forces its specific-location arm - the stamped write
+    /// republishes the configs root, so the one write reaches both paths.
     /// </summary>
     [Test]
     public void AForcedMoneyRewardMatchesOnBothPaths([ValueSource(nameof(_seeds))] ulong seed)
@@ -171,6 +176,12 @@ public class ScavCaseParityTests
             _scavCaseConfig.MoneyRewards.MoneyRewardChancePercent = moneyRewardChancePercent ?? originalMoneyChance;
             _scavCaseConfig.AmmoRewards.AmmoRewardChancePercent = ammoRewardChancePercent ?? originalAmmoChance;
 
+            // The two chance writes above land in the published configs root, and only the
+            // Ceciler-injected write barriers see a config setter - a Debug build has none. Stamp
+            // them here, the RagfairParityTests precedent, so the resident send republishes and the
+            // one write reaches both paths.
+            _databaseMutationStamp.Bump();
+
             if (forceLegacy)
             {
                 _randomUtil.RandomSource = new SeededRandomSource(seed);
@@ -196,6 +207,8 @@ public class ScavCaseParityTests
             _scavCaseConfig.MoneyRewards.MoneyRewardChancePercent = originalMoneyChance;
             _scavCaseConfig.AmmoRewards.AmmoRewardChancePercent = originalAmmoChance;
             _randomUtil.RandomSource = originalSource;
+            // the config restores above are published-root writes too
+            _databaseMutationStamp.Bump();
         }
     }
 

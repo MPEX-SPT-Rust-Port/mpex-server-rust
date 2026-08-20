@@ -49,18 +49,17 @@ public class ScavCaseNativeRequestBuilder(
         return new ScavCaseVarying
         {
             RecipeId = recipeId,
-            Config = scavCaseConfig,
             InactiveSeasonalItems = seasonalEventService.GetInactiveSeasonalEventItems(),
             GlobalBlacklist = itemFilterService.GetItemBlacklistCache(),
-            RewardItemBlacklist = itemFilterService.GetItemRewardBlacklist(),
-            BossItems = itemFilterService.GetBossItems(),
             TestSeed = testSeed,
         };
     }
 
     /// <summary>
-    /// The database views an override send carries - the distrust fallback, built fresh per call so
-    /// a mod that swaps an item or blacklists one at runtime is picked up.
+    /// The database views and config-backed inputs an override send carries - the distrust
+    /// fallback, built fresh per call so a mod that swaps an item, blacklists one or edits the
+    /// config at runtime is picked up. On the resident arm these come off the published
+    /// <c>configs</c> root's <c>spt-scavcase</c>/<c>spt-item</c> stems instead.
     /// </summary>
     public ScavCaseViewsOverride BuildViewsOverride()
     {
@@ -82,6 +81,9 @@ public class ScavCaseNativeRequestBuilder(
             DefaultPresetsByTpl = presetHelper
                 .GetDefaultPresetByTpl()
                 .ToDictionary(preset => preset.Key, preset => PayloadProjection.ToPresetView(preset.Value)),
+            Config = scavCaseConfig,
+            RewardItemBlacklist = itemFilterService.GetItemRewardBlacklist(),
+            BossItems = itemFilterService.GetBossItems(),
         };
     }
 

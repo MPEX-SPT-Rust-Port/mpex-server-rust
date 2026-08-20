@@ -6,10 +6,10 @@
 //! `JsonUtil.JsonSerializerOptionsNoIndent`. A round trip through the pair is the only place a
 //! divergence between the two shows up before a live publish does.
 //!
-//! What it proves today is that every kind arrives and the envelope parses; `ConfigsRoot` still
-//! holds `extra: IndexMap<String, Value>` only, so no config *body* is type-checked yet. Tasks
-//! 5-10 lift typed stems out of `extra` and add their kind to `LIFTED_KINDS` below — that is
-//! where the parse grows teeth.
+//! What it proves: every kind arrives, the envelope parses, and every stem lifted out of `extra`
+//! so far parses into its typed shape rather than raw `Value`. Tasks 6-10 lift the rest; each adds
+//! its kind to `LIFTED_KINDS` below plus a stem-is-`Some` assertion, or the union assertion fails
+//! loudly.
 //!
 //! Run by hand, after `DbPublishFixtureTests.WriteConfigsRootFixture` has written the dump:
 //!   cargo test -p spt-native --test phase4_configs_root -- --ignored --nocapture
@@ -72,8 +72,20 @@ fn projected_configs_parse_with_every_kind_present() {
     let configs = request.roots.configs.expect("envelope has a configs root");
 
     // A kind whose typed stem has been lifted out of the flatten map: it is no longer an `extra`
-    // key, so it is named here instead. Empty until Task 5 lifts the first stem.
-    const LIFTED_KINDS: [&str; 0] = [];
+    // key, so it is named here instead. Task 5 lifted the scav case family's two.
+    const LIFTED_KINDS: [&str; 2] = ["spt-item", "spt-scavcase"];
+
+    // The lift's own half of the fidelity claim: the projected bodies parse into the typed stems,
+    // not just into `Value`. A stem that failed to parse would have failed the whole envelope
+    // above, so reaching here with a `None` means the wire name drifted off the record's `Kind`.
+    assert!(
+        configs.item.is_some(),
+        "the spt-item stem did not bind — check ItemConfig.Kind against the rename"
+    );
+    assert!(
+        configs.scavcase.is_some(),
+        "the spt-scavcase stem did not bind — check ScavCaseConfig.Kind against the rename"
+    );
 
     let mut present: BTreeSet<&str> = configs.extra.keys().map(String::as_str).collect();
     present.extend(LIFTED_KINDS);

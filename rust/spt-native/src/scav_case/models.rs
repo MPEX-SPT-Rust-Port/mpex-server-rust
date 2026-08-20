@@ -7,7 +7,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use indexmap::IndexMap;
+use indexmap::{IndexMap, IndexSet};
 use serde::{Deserialize, Serialize};
 
 use crate::bot::repair_service::MinMax;
@@ -25,8 +25,9 @@ pub struct ScavCaseRewardsRequest {
     pub varying: ScavCaseVarying,
 }
 
-/// The C#-built invariant bundle: the distrust fallback. Field shapes are the pre-flip request's,
-/// unchanged.
+/// The C#-built invariant bundle: the distrust fallback. Every member has a resident twin — the
+/// four view members derive off the published roots, the three config-backed ones read the
+/// `spt-scavcase`/`spt-item` stems of the configs root.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScavCaseViewsWire {
@@ -42,6 +43,18 @@ pub struct ScavCaseViewsWire {
     /// `presetHelper.GetDefaultPreset(tpl)` (`:345`). A tpl absent from here is the C# `null` that
     /// warns and skips the reward.
     pub default_presets_by_tpl: IndexMap<String, PresetView>,
+    /// The `spt-scavcase` config. Config-backed, so it rides the invariant bundle now; the resident
+    /// arm reads [`crate::db::models::ConfigsRoot::scavcase`] instead.
+    pub config: ScavCaseConfigView,
+    /// `itemFilterService.IsItemRewardBlacklisted` (`:119,174`), which is
+    /// `ItemConfig.RewardItemBlacklist` verbatim (`ItemFilterService.cs:33-35`) — distinct from
+    /// [`ScavCaseConfigView::reward_item_blacklist`], the scav case config's own list. The resident
+    /// arm reads [`crate::db::models::ItemConfigLift::reward_item_blacklist`].
+    pub reward_item_blacklist: IndexSet<String>,
+    /// `itemFilterService.IsBossItem` (`:124,179`) — `ItemConfig.BossItems` verbatim
+    /// (`ItemFilterService.cs:69-71`). `IndexSet`, as every set lifted off a C# `HashSet`
+    /// (`db::models`); membership is all the generator asks of it.
+    pub boss_items: IndexSet<String>,
 }
 
 /// Everything else `ScavCaseRewardGenerator.Generate` (`:49-77`) reads — the per-request and
@@ -50,16 +63,12 @@ pub struct ScavCaseViewsWire {
 #[serde(rename_all = "camelCase")]
 pub struct ScavCaseVarying {
     pub recipe_id: String,
-    pub config: ScavCaseConfigView,
-    /// `seasonalEventService.GetInactiveSeasonalEventItems()` (`:86`).
+    /// `seasonalEventService.GetInactiveSeasonalEventItems()` (`:86`) — service state, not config.
     pub inactive_seasonal_items: HashSet<String>,
-    /// `itemFilterService.IsItemBlacklisted` (`:112,168`), as a set.
+    /// `itemFilterService.IsItemBlacklisted` (`:112,168`), as a set. Its backing cache is the
+    /// config blacklist *plus* whatever `AddItemToBlacklistCache` added at runtime, so it stays
+    /// varying where the two config-backed lists above did not.
     pub global_blacklist: HashSet<String>,
-    /// `itemFilterService.IsItemRewardBlacklisted` (`:119,174`) — distinct from
-    /// [`ScavCaseConfigView::reward_item_blacklist`], which is the config's own list.
-    pub reward_item_blacklist: HashSet<String>,
-    /// `itemFilterService.IsBossItem` (`:124,179`).
-    pub boss_items: HashSet<String>,
     /// Test-only, as [`crate::loot::models::RewardLootVarying::test_seed`].
     pub test_seed: Option<u64>,
 }
@@ -84,7 +93,9 @@ pub struct EndProductsView {
 }
 
 /// `Models/Spt/Config/ScavCaseConfig.cs`. `AmmoRewards.AmmoRewardBlacklist` is absent — nothing in
-/// the generator reads it.
+/// the generator reads it. Also the resident `spt-scavcase` stem
+/// ([`crate::db::models::ConfigsRoot::scavcase`]): no `deny_unknown_fields`, so the unread members
+/// (`kind`, the dispatch flags, a Release build's `[JsonExtensionData]` additions) ride past.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScavCaseConfigView {
@@ -93,8 +104,8 @@ pub struct ScavCaseConfigView {
     pub money_rewards: MoneyRewardsView,
     pub ammo_rewards: AmmoRewardsView,
     pub reward_item_parent_blacklist: HashSet<String>,
-    /// The config's own list (`:111,168`) — distinct from [`ScavCaseVarying::reward_item_blacklist`],
-    /// which is `ItemFilterService`'s.
+    /// The config's own list (`:111,168`) — distinct from
+    /// [`ScavCaseViewsWire::reward_item_blacklist`], which is `ItemFilterService`'s.
     pub reward_item_blacklist: HashSet<String>,
     pub allow_multiple_money_rewards_per_rarity: bool,
     pub allow_multiple_ammo_rewards_per_rarity: bool,
@@ -160,9 +171,7 @@ mod tests {
             "staticPrices":{"111111111111111111111111":42.5,
                 "222222222222222222222222":31000.0},
             "defaultPresetsByTpl":{"222222222222222222222222":{"id":"p1","name":"ak_default",
-                "items":[{"_id":"eeeeeeeeeeeeeeeeeeeeeeee","_tpl":"222222222222222222222222"}]}}},
-        "varying": {
-            "recipeId":"aaaaaaaaaaaaaaaaaaaaaaaa",
+                "items":[{"_id":"eeeeeeeeeeeeeeeeeeeeeeee","_tpl":"222222222222222222222222"}]}},
             "config":{
                 "rewardItemValueRangeRub":{"common":{"min":0.0,"max":25000.5},
                     "rare":{"min":25000.5,"max":100000.0},
@@ -183,10 +192,12 @@ mod tests {
                 "allowMultipleMoneyRewardsPerRarity":false,
                 "allowMultipleAmmoRewardsPerRarity":true,
                 "allowBossItemsAsRewards":false},
+            "rewardItemBlacklist":["555555555555555555555555"],
+            "bossItems":["666666666666666666666666"]},
+        "varying": {
+            "recipeId":"aaaaaaaaaaaaaaaaaaaaaaaa",
             "inactiveSeasonalItems":["333333333333333333333333"],
             "globalBlacklist":["444444444444444444444444"],
-            "rewardItemBlacklist":["555555555555555555555555"],
-            "bossItems":["666666666666666666666666"],
             "testSeed":42}
     }"#;
 
@@ -213,12 +224,10 @@ mod tests {
 
     #[test]
     fn a_resident_request_with_epoch_and_varying_only_deserializes() {
-        let req: ScavCaseRewardsRequest = serde_json::from_str(&format!(
-            r#"{{"epoch": 3, "varying": {{"recipeId": "6662e9aca7e0b43baa3d5f9c",
-                 "config": {MINIMAL_CONFIG_JSON}, "inactiveSeasonalItems": [],
-                 "globalBlacklist": [], "rewardItemBlacklist": [], "bossItems": [],
-                 "testSeed": 7}}}}"#
-        ))
+        let req: ScavCaseRewardsRequest = serde_json::from_str(
+            r#"{"epoch": 3, "varying": {"recipeId": "6662e9aca7e0b43baa3d5f9c",
+                 "inactiveSeasonalItems": [], "globalBlacklist": [], "testSeed": 7}}"#,
+        )
         .unwrap();
 
         assert_eq!(req.epoch, 3);
@@ -231,10 +240,10 @@ mod tests {
         let req: ScavCaseRewardsRequest = serde_json::from_str(&format!(
             r#"{{"epoch": 0,
                 "viewsOverride": {{"scavRecipes": [], "itemsView": {{}}, "staticPrices": {{}},
-                    "defaultPresetsByTpl": {{}}}},
+                    "defaultPresetsByTpl": {{}}, "config": {MINIMAL_CONFIG_JSON},
+                    "rewardItemBlacklist": [], "bossItems": []}},
                 "varying": {{"recipeId": "6662e9aca7e0b43baa3d5f9c",
-                    "config": {MINIMAL_CONFIG_JSON}, "inactiveSeasonalItems": [],
-                    "globalBlacklist": [], "rewardItemBlacklist": [], "bossItems": []}}}}"#
+                    "inactiveSeasonalItems": [], "globalBlacklist": []}}}}"#
         ))
         .unwrap();
 
@@ -258,7 +267,7 @@ mod tests {
         assert_eq!(recipe.end_products.rare.max, 2);
         assert_eq!(recipe.end_products.superrare.min, 0);
 
-        let config = &parsed.varying.config;
+        let config = &views.config;
         assert_eq!(config.reward_item_value_range_rub["common"].max, 25000.5);
         assert_eq!(
             config.reward_item_value_range_rub["superrare"].min,
@@ -317,18 +326,14 @@ mod tests {
                 .global_blacklist
                 .contains("444444444444444444444444")
         );
+        // The two config-backed sets ride the views bundle now, and stay distinct from the config's
+        // own `rewardItemBlacklist` asserted above.
         assert!(
-            parsed
-                .varying
+            views
                 .reward_item_blacklist
                 .contains("555555555555555555555555")
         );
-        assert!(
-            parsed
-                .varying
-                .boss_items
-                .contains("666666666666666666666666")
-        );
+        assert!(views.boss_items.contains("666666666666666666666666"));
     }
 
     /// `testSeed` is the only optional varying member — its omission must not fail the parse.

@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 
-use indexmap::IndexMap;
+use indexmap::{IndexMap, IndexSet};
 
 use crate::bot::repair_service::MinMax;
 use crate::diag::DiagSink;
@@ -35,8 +35,9 @@ const RARE: &str = "rare";
 const SUPERRARE: &str = "superrare";
 
 /// What used to be the flattened request, resolved to borrows: the per-request view mapping out
-/// of [`ScavCaseViews`] plus the varying block's config and service-backed sets — so the ported
-/// bodies below keep reading `req.*` verbatim, as the loot family's `RewardDbRefs` does.
+/// of [`ScavCaseViews`] — the database views, the config and the two config-backed sets — plus the
+/// varying block's own members, so the ported bodies below keep reading `req.*` verbatim, as the
+/// loot family's `RewardDbRefs` does.
 pub(crate) struct ScavCaseRefs<'a> {
     recipe_id: &'a str,
     scav_recipes: &'a [ScavRecipeView],
@@ -46,8 +47,8 @@ pub(crate) struct ScavCaseRefs<'a> {
     default_presets_by_tpl: &'a IndexMap<String, PresetView>,
     inactive_seasonal_items: &'a HashSet<String>,
     global_blacklist: &'a HashSet<String>,
-    reward_item_blacklist: &'a HashSet<String>,
-    boss_items: &'a HashSet<String>,
+    reward_item_blacklist: &'a IndexSet<String>,
+    boss_items: &'a IndexSet<String>,
 }
 
 impl<'a> ScavCaseRefs<'a> {
@@ -56,14 +57,14 @@ impl<'a> ScavCaseRefs<'a> {
         Self {
             recipe_id: &varying.recipe_id,
             scav_recipes: views.scav_recipes(),
-            config: &varying.config,
+            config: views.config(),
             items_view: views.items_view(),
             static_prices: views.static_prices(),
             default_presets_by_tpl: views.default_presets_by_tpl(),
             inactive_seasonal_items: &varying.inactive_seasonal_items,
             global_blacklist: &varying.global_blacklist,
-            reward_item_blacklist: &varying.reward_item_blacklist,
-            boss_items: &varying.boss_items,
+            reward_item_blacklist: views.reward_item_blacklist(),
+            boss_items: views.boss_items(),
         }
     }
 }
@@ -683,9 +684,10 @@ pub mod tests {
     use crate::scav_case::models::{ScavCaseRewardsRequest, ScavCaseVarying};
     use crate::scav_case::{ScavCaseError, ScavCaseViews, resolve_scav_case_views};
 
-    /// Splits a flat fixture into the envelope halves: the four view members into `viewsOverride`,
-    /// everything else (config, sets, seed) into `varying` — so the tests keep mutating one flat
-    /// object, as the loot family's `split_envelope` lets them.
+    /// Splits a flat fixture into the envelope halves: the seven invariant members into
+    /// `viewsOverride` — the four database views plus the three config-backed ones the flip moved
+    /// there — everything else (the recipe id, the service-state sets, the seed) into `varying`, so
+    /// the tests keep mutating one flat object, as the loot family's `split_envelope` lets them.
     pub fn envelope(flat: Value) -> Value {
         let Value::Object(mut varying) = flat else {
             panic!("fixture envelope is not an object");
@@ -696,6 +698,9 @@ pub mod tests {
             "itemsView",
             "staticPrices",
             "defaultPresetsByTpl",
+            "config",
+            "rewardItemBlacklist",
+            "bossItems",
         ] {
             if let Some(value) = varying.remove(key) {
                 views.insert(key.to_owned(), value);
