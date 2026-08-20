@@ -12,9 +12,9 @@ is the shipped launcher that hosts the CLR. Build coupling and cross-RID rules l
 
 | Language | Lines of Code | File Count |
 |-----------|-----------------|-----------|
-| `Rust` (whole workspace) | `55,278` | `65` |
-| ↳ `spt-native/src/` | `53,338` | `55` |
-| ↳ `spt-native/tests/` | `1,326` | `7` |
+| `Rust` (whole workspace) | `57,450` | `69` |
+| ↳ `spt-native/src/` | `54,883` | `57` |
+| ↳ `spt-native/tests/` | `1,953` | `9` |
 | ↳ `spectre-facade` | `522` | `2` |
 | ↳ `mpex-server` | `92` | `1` |
 
@@ -49,16 +49,17 @@ The C# side of the `spt-native` boundary is `Libraries/SPTarkov.Server.Core/Nati
 
 | Path | Role |
 |---|---|
-| `src/lib.rs` | Module roots and `ABI_VERSION` (currently 27; must equal `SptNative.ExpectedAbiVersion`) |
+| `src/lib.rs` | Module roots and `ABI_VERSION` (currently 28; must equal `SptNative.ExpectedAbiVersion`) |
 | `src/ffi.rs` | The C-ABI surface. The **only** module containing `unsafe` |
-| `src/runtime.rs` | Process-wide multi-thread tokio runtime, `OnceLock`-built. Used only by `verify` |
-| `src/verify.rs` | Hashes `SPT_Data` with XXH3-128 and diffs it against `checks.dat` |
+| `src/runtime.rs` | Process-wide multi-thread tokio runtime, `OnceLock`-built. Used only by `verify` and the fused load |
+| `src/verify.rs` | Hashes `SPT_Data` with XXH3-128 and diffs it against `checks.dat`. `verify_collecting` is the same walk with a `want` predicate that whole-reads and returns matching files' bytes, so the fused load reads each file once |
 | `src/bin/gen_checks.rs` | The bin that writes `checks.dat`, over `verify::generate`. Release builds only |
 | `src/logger.rs` | The log pipeline: `sptLogger.json`, filters, level gates, per-target formatting — and the console sink |
 | `src/log_sink.rs` | The file sink alone: where a formatted line lands on disk, with its rotation and archiving |
 | `src/diag.rs` | The generator families' way into that pipeline: the locale table, the render, and `DiagSink` |
 | `src/db.rs` | The resident DB: the epoch-versioned store of published roots (templates, traders, globals, locations, hideout); a publish re-derives the ragfair, quest and bot views |
 | `src/db/models.rs` | The publish envelope's wire types |
+| `src/db/load.rs` | The fused startup load: one walk over `SPT_Data` hashes, reads and assembles the five roots into epoch 1, and collects the eager `database/` file bytes for the C# replica. A plain `async fn` — no CLR needed, so the post-6b exe can call it before booting the runtime |
 | `src/loot/` | Location loot (static containers, loose loot) and reward loot (airdrops, cases, containers) |
 | `src/bot/` | One bot's entire inventory: equipment, mods, weapons, magazines, loot |
 | `src/ragfair/` | One batch of dynamic flea offers: the assort walk, pricing, barter schemes, the offers |
@@ -92,16 +93,22 @@ trades that for build time — `opt-level = 1`, sixteen codegen units, line-tabl
 
 ### FFI boundary (`ffi.rs`)
 
-Twenty-three `extern "C"` exports: two trivial (`spt_native_abi_version`, `spt_buf_free`), thirteen taking a
+Twenty-four `extern "C"` exports: two trivial (`spt_native_abi_version`, `spt_buf_free`), thirteen taking a
 UTF-8 JSON generation request, `spt_verify_database` taking a directory path, `spt_db_publish` taking the
-resident-DB publish envelope, `spt_locales_set` taking the resolved server-locale table as JSON, and five
+resident-DB publish envelope, `spt_db_load` taking the fused-load request (`{schema, dir, verify}`) and
+returning a framed byte response — a length-prefixed JSON header naming the verify report, the installed
+epoch and each returned file's path and length, followed by the file bodies back to back —
+`spt_locales_set` taking the resolved server-locale table as JSON, and five
 for the log pipeline (`spt_logger_init`, `spt_logger_reinit`, `spt_log_emit`, `spt_logger_close`,
-`spt_log_set_tap` — see *The log pipeline*). The fifteen generation/verify/publish exports hand back a
+`spt_log_set_tap` — see *The log pipeline*). The sixteen generation/verify/publish/load exports hand back a
 heap buffer on success, which the caller releases with `spt_buf_free`.
 
-- `run_generator_with` is the shared body of every generation export and `spt_db_publish` — parse, `catch_unwind`,
+- `run_generator_with` is the shared body of every generation export, `spt_db_publish` and `spt_db_load` —
+  parse, `catch_unwind`,
   encode — so a new export is a thin wrapper over it, generic in its error type and response encoding.
-  `spt_verify_database` is the one that stands apart, because it blocks on the tokio runtime.
+  `spt_db_load` is its own encoder (the framed byte response) and blocks on the tokio runtime inside its
+  generator fn. `spt_verify_database` is the one that stands apart from the shared body entirely, because it
+  blocks on the runtime around a hand-written wrapper.
 - Status codes: `STATUS_OK` 0, `STATUS_BAD_ARGS` 1, `STATUS_PANIC` 2, `STATUS_ERROR` 3, `STATUS_STALE_EPOCH` 4
   (every generation export since flip #6). **Quest and scav case never return 2**: they catch the generator's
   panic themselves and report it as 3 carrying the message, because those families port a C#-sanctioned throw
@@ -336,12 +343,17 @@ Almost all tests are inline `#[cfg(test)]` modules (~770 of them). Three kinds:
   failure, generation failure and null arguments. `spt_generate_bot_inventory_batch` is the one export with no
   transport test of its own.
 
-Seven `tests/` targets, in three groups. `completion_whitelist_baseclass.rs` guards the Completion
-whitelist filter's base-class lookups against the real shipped `items.json`, so it needs
-`scripts/decompress-assets.sh` to have run. `phase1_ragfair_views.rs`, `phase1_quest_views.rs`,
+Nine `tests/` targets, in three groups. `completion_whitelist_baseclass.rs` and `phase3_db_load.rs` run
+against the real shipped tree, so both need `scripts/decompress-assets.sh` to have run: the first guards the
+Completion whitelist filter's base-class lookups against `items.json`, the second runs the fused load over
+`SPT_Data` and asserts the installed epoch, the five resident roots and their derived views, which files do
+and do not ride the handoff, and that a returned buffer is byte-exact against disk — it is also the gate on
+the resident roots being comment-free JSON.
+`phase1_ragfair_views.rs`, `phase1_quest_views.rs`,
 `flip3_oneshot_views.rs` and `phase0_publish_spike.rs` are `#[ignore]`d halves of C#-paired harnesses —
 each replays a fixture its twin under `Testing/UnitTests` wrote to `$TMPDIR`, so running one alone proves
-nothing. `flip4_loot_resident.rs` and `flip5_scavcase_resident.rs` are self-contained: each
+nothing. `flip4_loot_resident.rs`, `flip5_scavcase_resident.rs` and `flip6_bots_resident.rs` are
+self-contained: each
 publishes a minimal DB and proves a resident-epoch send generates identically to the same data sent inline.
 
 Run with `cd rust && cargo test && cargo fmt --check && cargo clippy --all-targets -- -D warnings`. That is
@@ -354,9 +366,9 @@ over the server-assembly probe, `spectre-facade`'s two.
 
 | External System | Integration Type | Notes |
 |-------------------|-------------------|-------|
-| `SPTarkov.Server.Core` | Sync FFI, C ABI | `Native/NativeMethods.cs` + `SptNative.cs` and the per-family projections. Twenty-three exports; `ABI_VERSION` must equal `SptNative.ExpectedAbiVersion` |
+| `SPTarkov.Server.Core` | Sync FFI, C ABI | `Native/NativeMethods.cs` + `SptNative.cs` and the per-family projections. Twenty-four exports; `ABI_VERSION` must equal `SptNative.ExpectedAbiVersion` |
 | `SPTarkov.Common` | Sync FFI, C ABI | The five log exports only, from a second `Native/NativeMethods.cs` — Common cannot reference Core |
-| `SPT_Data/` on disk | Batch, async over tokio | `spt_verify_database` hashes `configs/` + `database/` with XXH3-128; `gen_checks` writes `checks.dat` on Release builds |
+| `SPT_Data/` on disk | Batch, async over tokio | `spt_verify_database` hashes `configs/` + `database/` with XXH3-128; `spt_db_load` (since ABI 28) does that walk *and* reads `database/` in one pass, installing the resident roots and handing the eager bytes back to `DatabaseImporter`; `gen_checks` writes `checks.dat` on Release builds |
 | `sptLogger.json` | Config bytes over FFI | Parsed once per process by `spt_logger_init`; filters use `regex-lite`, so .NET-only syntax degrades to never-match |
 | Log files on disk | Async, background thread per sink | `log_sink.rs`: bounded channel that drops rather than grows; rotation and archive cap enforced together |
 | .NET CLR (`mpex-server`) | Process host | netcorehost `run_app`s the published server assembly with argv forwarded; libnethost comes from NuGet at build time via the `nethost-download` feature |
