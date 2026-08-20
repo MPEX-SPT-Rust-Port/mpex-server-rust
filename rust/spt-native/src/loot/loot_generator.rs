@@ -1548,6 +1548,69 @@ mod tests {
         assert!(create_random_loot(request, &mut DiagSink::capture()).is_ok());
     }
 
+    /// Publishes the three roots the ragfair derive needs plus whatever configs root the caller
+    /// hands in, and answers the epoch.
+    fn publish_with_configs(configs: Value) -> u64 {
+        crate::db::publish(
+            serde_json::from_value(json!({
+                "schema": 1,
+                "roots": {
+                    "templates": {}, "traders": {}, "globals": {}, "configs": configs
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap()
+    }
+
+    /// The resident arm's four `ItemConfig` sets come out of the configs root's `spt-item` stem, and
+    /// a resident root missing it is a per-call failure that names it — never a silent default, and
+    /// never the stale-epoch answer a *missing root* gets (a republish would not fix a stem the
+    /// publish does not carry).
+    #[test]
+    fn a_resident_resolve_reads_the_item_stem_and_names_a_missing_one() {
+        let _guard = crate::db::tests::DB_TEST_LOCK.lock().unwrap();
+        crate::db::clear();
+
+        // A configs root that carries some other family's stem but not this one
+        let epoch = publish_with_configs(json!({"spt-inventory": {"kind": "spt-inventory"}}));
+        let Err(LootEpochError::Loot(error)) = resolve_reward_views(epoch, None) else {
+            panic!("expected a failure naming the absent stem");
+        };
+        assert!(error.message.contains("spt-item"), "{error:?}");
+
+        // Present: the accessors read the stem's own values, right through to `RewardDbRefs`
+        let epoch = publish_with_configs(json!({"spt-item": {
+            "kind": "spt-item",
+            "blacklist": ["config_blacklisted"],
+            "rewardItemBlacklist": ["reward_blacklisted"],
+            "rewardItemTypeBlacklist": ["base_type_blacklisted"],
+            "bossItems": [BOSS_ITEM_TPL]
+        }}));
+        let views = resolve_reward_views(epoch, None).unwrap();
+        let varying: RewardLootVarying =
+            serde_json::from_value(json!({"globalBlacklist": [], "inactiveSeasonalItems": []}))
+                .unwrap();
+        let items_view = IndexMap::new();
+        let by_tpl = IndexMap::new();
+        let db = RewardDbRefs::new(&views, &varying, &items_view, &[], &by_tpl);
+
+        assert!(db.config_blacklist.contains("config_blacklisted"));
+        assert!(db.reward_item_blacklist.contains("reward_blacklisted"));
+        assert!(
+            db.reward_base_type_blacklist
+                .contains("base_type_blacklisted")
+        );
+        assert!(db.boss_items.contains(BOSS_ITEM_TPL));
+
+        // A configs root that never arrived is stale, not a stem failure
+        crate::db::clear();
+        assert!(matches!(
+            resolve_reward_views(epoch, None),
+            Err(LootEpochError::StaleEpoch)
+        ));
+    }
+
     #[test]
     fn a_test_seed_makes_random_loot_deterministic() {
         // Swept over seeds rather than repeated on one: a single seed replays one set of draw
