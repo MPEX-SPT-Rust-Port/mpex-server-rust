@@ -1,0 +1,28 @@
+<Project>
+  <!--
+      Stages SPT_Data into the importing project's output directory. Imported by the four projects
+      that read ./SPT_Data/ from their working directory at runtime; SPTarkov.Server.Assets used to
+      do this as a ProjectReference, but it held no code and this fork does not ship its NuGet
+      package (upstream sp-tarkov/server-csharp produces that).
+
+      Link is mandatory: these files live outside the importing project's directory, so without it
+      MSBuild derives the destination from the ..\..\ relative identity and flattens the tree.
+  -->
+  <ItemGroup>
+    <None Include="$(MSBuildThisFileDirectory)SPT_Data\**"
+          Exclude="$(MSBuildThisFileDirectory)SPT_Data\checks.dat"
+          Link="SPT_Data\%(RecursiveDir)%(Filename)%(Extension)">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <ExcludeFromSingleFile>True</ExcludeFromSingleFile>
+    </None>
+    <!-- checks.dat is written during the build by gen_checks, after item evaluation. A literal
+         Include still resolves at copy time; the ** wildcard above is expanded at evaluation time
+         and would miss it. %(RecursiveDir) is empty for a non-wildcard Include. -->
+    <None Include="$(MSBuildThisFileDirectory)SPT_Data\checks.dat"
+          Condition="'$(Configuration)' == 'Release'"
+          Link="SPT_Data\checks.dat">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <ExcludeFromSingleFile>True</ExcludeFromSingleFile>
+    </None>
+  </ItemGroup>
+</Project>
