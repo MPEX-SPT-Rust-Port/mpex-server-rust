@@ -88,7 +88,7 @@ public class NativeConsoleWriterTests
     }
 
     [Test]
-    public void InstallIsIdempotentByTypeName()
+    public void InstallIsIdempotentByAppContextMarker()
     {
         var originalOut = Console.Out;
         var originalError = Console.Error;
