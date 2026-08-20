@@ -1,6 +1,7 @@
 using System.Text.Json;
 using NUnit.Framework;
 using SPTarkov.Server.Core.Helpers.Items;
+using SPTarkov.Server.Core.Models.Spt.Config;
 using SPTarkov.Server.Core.Models.Spt.Tables;
 using SPTarkov.Server.Core.Native.Db;
 using SPTarkov.Server.Core.Native.RepeatableQuests;
@@ -41,7 +42,8 @@ public class QuestViewsEquivalenceTests
                 di.GetService<TradersTable>(),
                 di.GetService<GlobalTable>(),
                 di.GetService<LocationTable>(),
-                di.GetService<HideoutTable>()
+                di.GetService<HideoutTable>(),
+                di.GetService<IReadOnlyDictionary<Type, BaseConfig>>()
             )
         );
 

@@ -108,6 +108,8 @@ public class DI
             services.AddSingleton(configEntry.Key, configEntry.Value);
         }
 
+        services.AddSingleton(configuration);
+
         var diHandler = new DependencyInjectionHandler(services);
 
         diHandler.AddInjectableTypesFromTypeAssembly(typeof(SPTStartupHostedService));

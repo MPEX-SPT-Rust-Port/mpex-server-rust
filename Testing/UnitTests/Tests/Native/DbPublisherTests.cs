@@ -1,5 +1,6 @@
 using System.Text.Json;
 using NUnit.Framework;
+using SPTarkov.Server.Core.Models.Spt.Config;
 using SPTarkov.Server.Core.Models.Spt.Tables;
 using SPTarkov.Server.Core.Native.Db;
 using SPTarkov.Server.Core.Services.Server;
@@ -41,7 +42,8 @@ public class DbPublisherTests
             di.GetService<TradersTable>(),
             di.GetService<GlobalTable>(),
             locationTable,
-            di.GetService<HideoutTable>()
+            di.GetService<HideoutTable>(),
+            new Dictionary<Type, BaseConfig>()
         );
 
         using var document = JsonDocument.Parse(envelope);
@@ -75,6 +77,41 @@ public class DbPublisherTests
     }
 
     [Test]
+    public void BuildPublishEnvelopeCarriesTheConfigsRootKeyedByKind()
+    {
+        var di = DI.GetInstance();
+
+        var envelope = DbPayloadProjection.BuildPublishEnvelope(
+            di.GetService<TemplateTable>(),
+            di.GetService<TradersTable>(),
+            di.GetService<GlobalTable>(),
+            di.GetService<LocationTable>(),
+            di.GetService<HideoutTable>(),
+            // The live singletons, not fresh records: both carry required members, and these are
+            // the very instances a publish projects.
+            new Dictionary<Type, BaseConfig>
+            {
+                { typeof(RagfairConfig), di.GetService<RagfairConfig>() },
+                { typeof(ItemConfig), di.GetService<ItemConfig>() },
+            }
+        );
+
+        using var document = JsonDocument.Parse(envelope);
+        var configs = document.RootElement.GetProperty("roots").GetProperty("configs");
+
+        // Phase 4: one member per loaded config, keyed by its self-declared kind — nothing else.
+        Assert.That(
+            configs.EnumerateObject().Select(member => member.Name),
+            Is.EquivalentTo(new[] { "spt-ragfair", "spt-item" }),
+            "configs must carry one member per dictionary entry, keyed by Kind"
+        );
+
+        // The serialized body self-describes: it carries the same kind the key does, so the Rust
+        // side can key off either.
+        Assert.That(configs.GetProperty("spt-ragfair").GetProperty("kind").GetString(), Is.EqualTo("spt-ragfair"));
+    }
+
+    [Test]
     public void BuildPublishEnvelopeCarriesTheScavRecipesBearingHideoutRoot()
     {
         var di = DI.GetInstance();
@@ -84,7 +121,8 @@ public class DbPublisherTests
             di.GetService<TradersTable>(),
             di.GetService<GlobalTable>(),
             di.GetService<LocationTable>(),
-            di.GetService<HideoutTable>()
+            di.GetService<HideoutTable>(),
+            new Dictionary<Type, BaseConfig>()
         );
 
         using var document = JsonDocument.Parse(envelope);

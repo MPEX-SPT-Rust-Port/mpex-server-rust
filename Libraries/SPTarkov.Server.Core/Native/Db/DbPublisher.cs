@@ -1,6 +1,7 @@
 using SPTarkov.DI.Annotations;
 using SPTarkov.Server.Core.Helpers.Profile;
 using SPTarkov.Server.Core.Models.Enums;
+using SPTarkov.Server.Core.Models.Spt.Config;
 using SPTarkov.Server.Core.Models.Spt.Tables;
 using SPTarkov.Server.Core.Services.Server;
 
@@ -23,7 +24,8 @@ public class DbPublisher(
     TradersTable tradersTable,
     GlobalTable globalTable,
     LocationTable locationTable,
-    HideoutTable hideoutTable
+    HideoutTable hideoutTable,
+    IReadOnlyDictionary<Type, BaseConfig> configs
 )
 {
     private readonly Lock _gate = new();
@@ -73,7 +75,7 @@ public class DbPublisher(
             handbookHelper.IsCategory(Money.ROUBLES);
 
             _currentEpoch = SptNative.DbPublish(
-                DbPayloadProjection.BuildPublishEnvelope(templateTable, tradersTable, globalTable, locationTable, hideoutTable)
+                DbPayloadProjection.BuildPublishEnvelope(templateTable, tradersTable, globalTable, locationTable, hideoutTable, configs)
             );
         }
 
