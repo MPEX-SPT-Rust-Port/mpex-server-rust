@@ -234,8 +234,12 @@ cold column is reported and not used.
 arms still pay the first `DbPublisher.EnsureCurrent` republish of all five roots — 730-745 ms, the
 forced-publish figure under § Scav case rewards — because `EnsureCurrent` publishes whenever its own
 `_currentEpoch` is 0 and nothing feeds `DbLoad`'s installed epoch into it (`DatabaseImporter`'s
-`ponytail:` note says so in as many words). So a startup today reads ≈1.16 s legacy against
-≈1.62 s native, and the saving on offer — dropping that first republish, since epoch 1 is already
+`ponytail:` note says so in as many words). Estimated, not measured end-to-end: adding that
+republish to each arm's total puts a startup at ≈1.16 s legacy against ≈1.62 s native — arithmetic
+over two fixtures, since the 730-745 ms addend comes from `ScavCaseBenchmarkTests`' publish-cold arm
+at a different commit and sitting, not from this one. No process-start-to-`/health` figure was taken
+for this flip; Phase 2's startup rows are what a measured one would look like. The saving on offer —
+dropping that first republish, since epoch 1 is already
 resident and was assembled from the same bytes — is the measurement to retake once it exists.
 `CoreConfig.ForceLegacyDatabaseImport` is the opt-out; `DatabaseLoadEquivalenceTests` is the gate that
 both arms still produce identical tables.
