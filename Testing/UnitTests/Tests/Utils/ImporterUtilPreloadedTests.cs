@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json.Serialization;
 using NUnit.Framework;
+using SPTarkov.Server.Core.Models.Common;
 using SPTarkov.Server.Core.Utils;
 using SPTarkov.Server.Core.Utils.Json;
 
@@ -17,6 +18,9 @@ public class ImporterUtilPreloadedTests
     private const string FromDisk = """{"v":1}""";
     private const string FromBuffer = """{"v":2}""";
 
+    /// Prapor: the importer's MongoId directory branch only fires on a 24-hex directory name.
+    private const string TraderId = "54cb50c76803fa8b248b4571";
+
     private ImporterUtil _importerUtil = default!;
     private string _rootDirectory = string.Empty;
 
@@ -31,6 +35,7 @@ public class ImporterUtilPreloadedTests
         WriteFile("beta.json", FromDisk);
         WriteFile("lazy.json", FromDisk);
         WriteFile(Path.Combine("nested", "gamma.json"), FromDisk);
+        WriteFile(Path.Combine("traders", TraderId, "delta.json"), FromDisk);
     }
 
     [TearDown]
@@ -65,6 +70,18 @@ public class ImporterUtilPreloadedTests
     }
 
     [Test]
+    public async Task APreloadedBufferInAMongoIdSubdirectoryBeatsTheFileOnDisk()
+    {
+        var result = await LoadAsync(Preloaded($"database/traders/{TraderId}/delta.json"));
+
+        Assert.That(
+            result.Traders[new MongoId(TraderId)].Delta!.V,
+            Is.EqualTo(2),
+            "the MongoId recursion carries the map down to traders/<id>/delta.json"
+        );
+    }
+
+    [Test]
     public async Task ALazyLoadTargetIgnoresTheBufferAndStaysDiskBacked()
     {
         var result = await LoadAsync(Preloaded("database/lazy.json"));
@@ -96,11 +113,19 @@ public class ImporterUtilPreloadedTests
         public TestPayload? Beta { get; set; }
         public LazyLoad<TestPayload>? Lazy { get; set; }
         public TestNested? Nested { get; set; }
+
+        // The traders shape: a MongoId-keyed dictionary the importer fills from 24-hex subdirectories.
+        public Dictionary<MongoId, TestTrader> Traders { get; set; } = new();
     }
 
     private record TestNested
     {
         public TestPayload? Gamma { get; set; }
+    }
+
+    private record TestTrader
+    {
+        public TestPayload? Delta { get; set; }
     }
 
     private record TestPayload

@@ -222,7 +222,11 @@ fn require_root_sources(raw: &BTreeMap<String, Vec<u8>>) -> Result<(), LoadError
 /// only file→wire mapping Rust owns. Every member name is a filename or directory stem, which
 /// already equals the wire name `db/models.rs` pins.
 fn assemble_publish_envelope(raw: &BTreeMap<String, Vec<u8>>) -> Vec<u8> {
-    let mut out = Vec::new();
+    // ~60 MB on the shipped tree, so grow it once. Every body is spliced at most once, which makes
+    // the raw total an upper bound on file bytes; 64 per entry covers the spliced key and its
+    // punctuation (trader ids, the widest keys, are 24 characters).
+    let capacity = raw.values().map(Vec::len).sum::<usize>() + raw.len() * 64 + 256;
+    let mut out = Vec::with_capacity(capacity);
     out.extend_from_slice(br#"{"schema":1,"roots":{"templates":"#);
     write_stem_object(&mut out, raw, "database/templates/");
     out.extend_from_slice(br#","traders":"#);
@@ -727,8 +731,13 @@ pub mod tests {
             .into_iter()
             .map(|(key, bytes)| (key, strip_bom(bytes)))
             .collect();
+        let bytes = assemble_publish_envelope(&raw);
+        assert!(
+            bytes.len() <= raw.values().map(Vec::len).sum::<usize>() + raw.len() * 64 + 256,
+            "the envelope outgrew the capacity it preallocates, so it reallocs on the shipped tree"
+        );
         let envelope: serde_json::Value =
-            serde_json::from_slice(&assemble_publish_envelope(&raw)).expect("the envelope parses");
+            serde_json::from_slice(&bytes).expect("the envelope parses");
 
         let locations = &envelope["roots"]["locations"];
         assert!(

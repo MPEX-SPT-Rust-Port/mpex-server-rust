@@ -64,8 +64,10 @@ public class DatabaseLoadEquivalenceTests
 
         // Anti-vacuity. A key the map lacks falls back to disk silently (ImporterUtil.DeserializeFileAsync),
         // so a native filter that drops a subtree would turn this arm into a second legacy arm for that
-        // subtree and every comparison below would still pass. One file per compared root, three of them
-        // two levels down, pins that every root is really buffer-fed.
+        // subtree and every comparison below would still pass. One file per compared root, four of them
+        // two levels down, pins that the fused load still returns a file under every root compared below.
+        // That ImporterUtil then consumes what it returns is ImporterUtilPreloadedTests' job, not this
+        // assert's - it reads the map, not the walk.
         Assert.That(load.Files.Keys, Is.SupersetOf(BufferFedPerRoot), "the fused load stopped feeding a root the golden compares");
 
         var native = await _importerUtil.LoadRecursiveAsync<DatabaseTables>($"{SptDataPath}database/", load.Files);
