@@ -8,8 +8,9 @@ namespace SPTarkov.Common.Logger;
 /// every raw Console.Write* — PatchManager, DI failures, mod code, future call sites — forwards
 /// as UTF-8 bytes to spt_console_write, where stdout bytes queue behind the log pipeline's
 /// console sink (ordered against log lines, never dropped) and stderr bytes write directly.
-/// When the native side declines (before init, after close, unloadable library), the write falls
-/// back to the captured original writer — which is exactly the degraded path the dispatcher's
+/// Before init, after close, or with no console target configured the bytes still reach the
+/// terminal, written straight to stdout on the Rust side; only an unloadable library falls the
+/// write back to the captured original writer — which is exactly the degraded path the dispatcher's
 /// stderr fallbacks-of-last-resort need.
 /// <para>
 /// Every overload that carries a whole string is overridden to forward it as one message: the

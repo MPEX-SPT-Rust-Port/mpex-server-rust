@@ -183,7 +183,10 @@ silently drops camora ammo on the fifth); and the native `_type` test being
   `Console.Write*` bytes redirected into it. A burst of log lines deeper than the queue drops; raw
   bytes, and the drain a `spt_console_read_line` does first, block instead, so a prompt is never
   lost. The ceiling that buys: a terminal that stops draining stalls managed `Console.Write` behind
-  it and makes `spt_logger_close` wait on the writer thread. A hard crash still loses what is queued.
+  it and makes `spt_logger_close` wait on the writer thread. Shutdown is carved out of that shared
+  order: `spt_logger_close` takes the pipeline out from under the lock before joining the writer
+  thread, so a `Console.Write` racing the teardown writes straight to stdout and can interleave with
+  the backlog still draining. A hard crash still loses what is queued.
 - **Excluded categories still pay the per-line marshaling cost** — filtering moved native-side, so
   every line crosses the boundary before it is dropped.
 - **Filter regexes are regex-lite** — no lookarounds, no backreferences, ASCII-only character
@@ -221,6 +224,11 @@ silently drops camora ammo on the fifth); and the native `_type` test being
 - **`BaseLogHandler.FormatMessage` renders through `spt_log_format`** — a format containing bare `{`
   or `}` now renders literally instead of throwing out of `CompositeFormat.Parse`, and a handler that
   cannot reach the native side degrades to the unformatted message rather than throwing.
+- **A `GetCompiledFormat` override no longer reaches `FormatMessage`** — `BaseLogHandler` hands the
+  reference's raw `Format` string to `spt_log_format`, so a mod subclassing `BaseSptLoggerReference`
+  to rewrite the compiled format changes nothing about what a handler renders. The method still
+  compiles and caches for anyone calling it directly; both shipped reference types are `sealed`, so
+  reaching the override at all meant constructing the subclass in code.
 - **`Console.Clear()`'s `IsOutputRedirected` guard became a Rust-side tty check** — clear and title
   are ANSI/OSC escapes queued behind the console sink, with VT enabled on Windows at
   `spt_logger_init` (where the Windows title is still a console API call, not an escape).

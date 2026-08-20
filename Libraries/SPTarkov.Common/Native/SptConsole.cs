@@ -4,9 +4,10 @@ namespace SPTarkov.Common.Native;
 
 /// <summary>
 /// The terminal, owned by spt_native: raw byte writes ordered behind the log pipeline's console
-/// queue, terminal control, and stdin reads. Every method is best-effort — an unloadable native
-/// library degrades to a false return or a plain-C# fallback, never an exception, because these
-/// are the paths that report failures.
+/// queue, terminal control, and stdin reads. Every method is best-effort about the native library
+/// itself — an unloadable one degrades to a false return or a plain-C# fallback rather than an
+/// exception, because these are the paths that report failures. Bad arguments are not covered by
+/// that: a null argument throws as it would from any other call.
 /// </summary>
 public static class SptConsole
 {
