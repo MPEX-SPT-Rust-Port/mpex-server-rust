@@ -222,7 +222,8 @@ silently drops camora ammo on the fifth); and the native `_type` test being
   code. The two mod-load-failure pauses (`Program.cs:136` and `:147`) still read with no prompt at
   all: pre-existing, and only conspicuous now that their two siblings print one.
 - **`BaseLogHandler.FormatMessage` renders through `spt_log_format`** — a format containing bare `{`
-  or `}` now renders literally instead of throwing out of `CompositeFormat.Parse`, and a handler that
+  or `}` now renders literally instead of throwing out of `CompositeFormat.Parse`, a positional hole
+  like `{0}` (previously expanded as the date argument) renders literally too, and a handler that
   cannot reach the native side degrades to the unformatted message rather than throwing.
 - **A `GetCompiledFormat` override no longer reaches `FormatMessage`** — `BaseLogHandler` hands the
   reference's raw `Format` string to `spt_log_format`, so a mod subclassing `BaseSptLoggerReference`
@@ -232,6 +233,15 @@ silently drops camora ammo on the fifth); and the native `_type` test being
 - **`Console.Clear()`'s `IsOutputRedirected` guard became a Rust-side tty check** — clear and title
   are ANSI/OSC escapes queued behind the console sink, with VT enabled on Windows at
   `spt_logger_init` (where the Windows title is still a console API call, not an escape).
+- **A mod calling `Console.SetOut`/`SetError` — or setting `Console.OutputEncoding`, which does the
+  same internally — silently un-wraps `NativeConsoleWriter`** and reverts that process to raw writes
+  racing the pipeline on fd 1 (and, on Windows, the mojibake the UTF-8 codepage setup fixed), with
+  zero test failures. Before this port such a call was harmless. There is no mechanical guard; the
+  only in-tree warning is a comment in `Program.StartServer`.
+- **Non-string `Console.WriteLine(value)` overloads can tear** — `TextWriter` decomposes them into
+  `Write(value); WriteLine();`, two queue messages, so a log line from another thread can land
+  between the value and its newline. Every in-tree call site uses the string overloads; only mod
+  output can hit it, and the failure is cosmetic interleaving.
 
 ## Guidelines
 
