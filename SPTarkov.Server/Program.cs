@@ -3,11 +3,11 @@ using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Runtime.Loader;
 using System.Security.Authentication;
-using System.Text;
 using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.AspNetCore.Server.Kestrel.Https;
 using SPTarkov.Common.Extensions;
 using SPTarkov.Common.Logger;
+using SPTarkov.Common.Native;
 using SPTarkov.Server.Core.Helpers.Server;
 using SPTarkov.Server.Core.Loaders;
 using SPTarkov.Server.Core.Models.Spt.Config;
@@ -35,6 +35,10 @@ public static class Program
         ProgramStatics.Initialize();
 
         var loggerFactory = SptLoggerProvider.Create(ProgramStatics.DEBUG());
+
+        // From here on, spt_native owns the terminal: raw Console writes queue behind the log
+        // pipeline's console sink instead of racing it on fd 1.
+        NativeConsoleWriter.Install();
 
         // Some users don't know how to create a shortcut...
         if (!IsRunFromInstallationFolder())
@@ -112,8 +116,8 @@ public static class Program
                 }
             }
 
-            Console.WriteLine("Press any key to exit...");
-            Console.ReadKey(true);
+            Console.WriteLine("Press enter to exit...");
+            SptConsole.ReadLine();
         }
         catch (Exception e)
         {
@@ -129,7 +133,7 @@ public static class Program
                     "You may have installed a mod that needs a newer version of of SPT installed. Please try updating SPT"
                 );
 
-                Console.ReadLine();
+                SptConsole.ReadLine();
                 return;
             }
 
@@ -140,7 +144,7 @@ public static class Program
                     "You may have forgotten to install a requirement for one of your mods, please check the mod page again and install any requirements listed. Read the error message below CAREFULLY for the name of the mod you need to install"
                 );
 
-                Console.ReadLine();
+                SptConsole.ReadLine();
                 // Don't show below error message when it's a mod exception.
                 return;
             }
@@ -149,8 +153,8 @@ public static class Program
                 e,
                 "The server has unexpectedly stopped, reach out to the support channel in our Discord server. Include a screenshot of this message and the surrounding error(s) above and below"
             );
-            Console.WriteLine("Press any key to exit...");
-            Console.ReadLine();
+            Console.WriteLine("Press enter to exit...");
+            SptConsole.ReadLine();
         }
         finally
         {
@@ -160,8 +164,6 @@ public static class Program
 
     public static async Task StartServer(SptEarlyLoggerFactory loggerFactory, string[] args, StartupCancellation startupCancellation)
     {
-        Console.OutputEncoding = Encoding.UTF8;
-
         var configuration = await ConfigLoader.Initialize(_earlyLogger!, startupCancellation.Token);
         var earlyServiceProvider = ProgramHelpers.CreateEarlySptProvider(loggerFactory, configuration, modsEnabled: true);
 
