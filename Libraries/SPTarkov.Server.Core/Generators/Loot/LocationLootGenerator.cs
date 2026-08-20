@@ -245,7 +245,7 @@ public class LocationLootGenerator(
                 new StaticContainersRequest
                 {
                     Epoch = 0,
-                    ViewsOverride = BuildViewsOverride(locationTable.GetLocation(locationId)),
+                    ViewsOverride = BuildViewsOverride(locationTable.GetLocation(locationId), locationId),
                     Varying = varying,
                 }
             );
@@ -308,7 +308,7 @@ public class LocationLootGenerator(
                 {
                     Epoch = 0,
                     // No statics serialize on a dynamic send
-                    ViewsOverride = BuildViewsOverride(mapData: null),
+                    ViewsOverride = BuildViewsOverride(mapData: null, locationName),
                     Varying = varying,
                 }
             );
@@ -352,9 +352,10 @@ public class LocationLootGenerator(
     }
 
     /// <summary>
-    /// The per-call half of both requests: services, config and per-raid state, resolved for one
-    /// location. Stateless: nothing here is cached between calls, so a mod that swaps a config
-    /// value or a seasonal state is picked up on the next raid.
+    /// The per-call half of both requests: services and per-raid state, resolved for one location.
+    /// Stateless: nothing here is cached between calls, so a mod that swaps a seasonal state is
+    /// picked up on the next raid. The config view rides <see cref="BuildViewsOverride"/> instead -
+    /// the resident arm resolves it from the published config itself.
     /// </summary>
     private LootVarying BuildVarying(string locationId, Dictionary<string, IEnumerable<StaticAmmoDetails>> staticAmmoDist)
     {
@@ -363,13 +364,11 @@ public class LocationLootGenerator(
             LocationId = locationId,
             MoneyTpls = itemHelper.GetMoneyTpls(),
             StaticAmmoDist = staticAmmoDist.ToDictionary(caliber => caliber.Key, caliber => caliber.Value.ToList()),
-            Config = BuildConfigView(locationId),
             Seasonal = new SeasonalView
             {
                 SeasonalEventActive = seasonalEventService.SeasonalEventEnabled(),
                 ChristmasEventEnabled = seasonalEventService.ChristmasEventEnabled(),
                 InactiveSeasonalItems = seasonalEventService.GetInactiveSeasonalEventItems(),
-                ChristmasContainerIds = seasonalEventConfig.ChristmasContainerIds,
             },
             // The cache, not the config list: it also holds anything a mod blacklisted at runtime
             LootableItemBlacklist = itemFilterService.GetLootableItemBlacklistCache(),
@@ -397,13 +396,11 @@ public class LocationLootGenerator(
             LocationId = locationId,
             MoneyTpls = itemHelper.GetMoneyTpls(),
             StaticAmmoDist = staticAmmoDist.ToDictionary(caliber => caliber.Key, caliber => caliber.Value.ToList()),
-            Config = BuildConfigView(locationId),
             Seasonal = new SeasonalView
             {
                 SeasonalEventActive = seasonalEventService.SeasonalEventEnabled(),
                 ChristmasEventEnabled = seasonalEventService.ChristmasEventEnabled(),
                 InactiveSeasonalItems = seasonalEventService.GetInactiveSeasonalEventItems(),
-                ChristmasContainerIds = seasonalEventConfig.ChristmasContainerIds,
             },
             // The cache, not the config list: it also holds anything a mod blacklisted at runtime
             LootableItemBlacklist = itemFilterService.GetLootableItemBlacklistCache(),
@@ -418,13 +415,13 @@ public class LocationLootGenerator(
     }
 
     /// <summary>
-    /// The database half, for ineligible sends only. With a map, the statics ride along (the
-    /// static-containers send); without one they are omitted (the dynamic send). The LazyLoad
-    /// reads keep a null StaticContainers/StaticLoot on a real map throwing here, as the old
-    /// request builder did; an unknown locationId (null map) used to NRE in C# and now surfaces
-    /// as a named native error instead.
+    /// The database half plus the two config-backed views, for ineligible sends only. With a map,
+    /// the statics ride along (the static-containers send); without one they are omitted (the
+    /// dynamic send). The LazyLoad reads keep a null StaticContainers/StaticLoot on a real map
+    /// throwing here, as the old request builder did; an unknown locationId (null map) used to NRE
+    /// in C# and now surfaces as a named native error instead.
     /// </summary>
-    private LootViewsOverride BuildViewsOverride(Location? mapData)
+    private LootViewsOverride BuildViewsOverride(Location? mapData, string locationId)
     {
         var views = new LootViewsOverride
         {
@@ -432,6 +429,8 @@ public class LocationLootGenerator(
             DefaultPresets = presetHelper
                 .GetDefaultPresetByTpl()
                 .ToDictionary(preset => preset.Key, preset => new PresetView { Items = preset.Value.Items }),
+            Config = BuildConfigView(locationId),
+            ChristmasContainerIds = seasonalEventConfig.ChristmasContainerIds,
         };
 
         if (mapData is not null)
@@ -456,6 +455,11 @@ public class LocationLootGenerator(
         return PayloadProjection.BuildItemsView(itemHelper.TemplateTable.Items);
     }
 
+    /// <summary>
+    /// Every config value the generator reads, resolved for one location. Ported member for member
+    /// as <c>resolve_loot_config_view</c> in <c>rust/spt-native/src/loot/location_loot_generator.rs</c>,
+    /// which is what a resident-DB send uses instead of this - the two must stay in step.
+    /// </summary>
     private LootConfigView BuildConfigView(string locationId)
     {
         var randomisation = locationConfig.ContainerRandomisationSettings;

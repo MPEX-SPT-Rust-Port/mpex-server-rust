@@ -1476,6 +1476,15 @@ mod tests {
     const VARYING_JSON: &str = r#"
         "locationId":"bigmap",
         "moneyTpls":[],"staticAmmoDist":{},
+        "seasonal":{"seasonalEventActive":false,"christmasEventEnabled":false,
+            "inactiveSeasonalItems":[]},
+        "lootableItemBlacklist":[],"counter":{"maxCounts":{},"trackedCounts":{}}
+    "#;
+
+    /// The four `LootViewsWire` members every override send carries.
+    const VIEWS_JSON: &str = r#"
+        "itemsView":{"111111111111111111111111":{"width":1,"height":1,"gridCellsH":2,"gridCellsV":2}},
+        "defaultPresets":{},
         "config":{"containerRandomisationEnabled":false,"locationInRandomisationMaps":false,
             "containerTypesToNotRandomise":[],"containerGroupMinSizeMultiplier":1,
             "containerGroupMaxSizeMultiplier":1,"allowDuplicateItemsInStaticContainers":true,
@@ -1484,15 +1493,7 @@ mod tests {
             "minFillLooseMagazinePercent":0,"minFillStaticMagazinePercent":0,
             "staticLootMultiplier":1,"looseLootMultiplier":1,"modSpawnChancePercent":{},
             "looseLootBlacklist":[]},
-        "seasonal":{"seasonalEventActive":false,"christmasEventEnabled":false,
-            "inactiveSeasonalItems":[],"christmasContainerIds":[]},
-        "lootableItemBlacklist":[],"counter":{"maxCounts":{},"trackedCounts":{}}
-    "#;
-
-    /// The two `LootViewsWire` members every override send carries.
-    const VIEWS_JSON: &str = r#"
-        "itemsView":{"111111111111111111111111":{"width":1,"height":1,"gridCellsH":2,"gridCellsV":2}},
-        "defaultPresets":{}
+        "christmasContainerIds":[]
     "#;
 
     type Export = unsafe extern "C" fn(*const u8, usize, *mut *mut u8, *mut usize) -> i32;

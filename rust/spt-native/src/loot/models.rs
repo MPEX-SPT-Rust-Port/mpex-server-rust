@@ -519,18 +519,19 @@ pub struct ContainerData {
 // Request / response envelopes
 // ---------------------------------------------------------------------------
 
-/// The per-call half of both location-loot envelopes: services, config, per-raid state, and the
+/// The per-call half of both location-loot envelopes: services, per-raid state, and the
 /// caller-supplied `staticAmmoDist` (a frozen public-API parameter, so the resident DB can never
 /// stand in for it). `moneyTpls` is service-backed (`ItemHelper.GetMoneyTpls`) and rides here
-/// under the Phases-2/4 carve-out.
+/// under the Phases-2/4 carve-out. The config view left for the views side in Phase 4: the
+/// resident arm resolves it per call off the `spt-location` stem.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LootVarying {
-    /// Already lowercased by the C# caller; the resident arm's key into the locations root.
+    /// Already lowercased by the C# caller; the resident arm's key into the locations root and into
+    /// every map-keyed member of the `spt-location` config stem.
     pub location_id: String,
     pub money_tpls: Vec<String>,
     pub static_ammo_dist: HashMap<String, Vec<StaticAmmoDetails>>,
-    pub config: LootConfigView,
     pub seasonal: SeasonalView,
     pub lootable_item_blacklist: HashSet<String>,
     pub counter: CounterState,
@@ -539,9 +540,10 @@ pub struct LootVarying {
     pub test_seed: Option<u64>,
 }
 
-/// The distrust fallback (spec § Exports): the C#-built database half, present iff the caller is
-/// ineligible for residency. The statics members are present on static-container sends and
-/// absent on dynamic sends, mirroring the two old envelopes.
+/// The distrust fallback (spec § Exports): the C#-built database half plus the two config-backed
+/// members the resident arm resolves off the configs root, present iff the caller is ineligible
+/// for residency. The statics members are present on static-container sends and absent on dynamic
+/// sends, mirroring the two old envelopes.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LootViewsWire {
@@ -550,6 +552,12 @@ pub struct LootViewsWire {
     pub items_view: IndexMap<String, ItemView>,
     /// `GetDefaultPresetByTpl()` projected Items-only (`LocationLootGenerator.BuildViewsOverride`).
     pub default_presets: IndexMap<String, PresetView>,
+    /// `BuildConfigView(locationId)` — the C#-resolved view of the `spt-location` config. The
+    /// resident arm builds the same thing per call (`resolve_loot_config_view`).
+    pub config: LootConfigView,
+    /// `SeasonalEventConfig.ChristmasContainerIds`; the resident arm reads it off the
+    /// `spt-seasonalevents` stem. Spawn point ids, not tpls.
+    pub christmas_container_ids: HashSet<String>,
     pub static_weapons: Option<Vec<SpawnpointTemplate>>,
     pub static_containers: Option<Vec<StaticContainerData>>,
     pub static_forced: Option<Vec<StaticForced>>,
@@ -727,11 +735,15 @@ pub struct PresetView {
     pub encyclopedia: Option<String>,
 }
 
+/// Every config value the generator reads, resolved for one location: by the C# caller on the
+/// override arm (`LocationLootGenerator.BuildConfigView`), by
+/// `location_loot_generator::resolve_loot_config_view` off the resident `spt-location` stem
+/// otherwise.
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LootConfigView {
     pub container_randomisation_enabled: bool,
-    /// C# resolves `Maps.ContainsKey(locationId)`.
+    /// `Maps.ContainsKey(locationId)`.
     pub location_in_randomisation_maps: bool,
     pub container_types_to_not_randomise: HashSet<String>,
     pub container_group_min_size_multiplier: f64,
@@ -743,23 +755,24 @@ pub struct LootConfigView {
     pub static_magazine_loot_has_ammo_chance_percent: f64,
     pub min_fill_loose_magazine_percent: f64,
     pub min_fill_static_magazine_percent: f64,
-    /// Resolved per-location by C#.
+    /// `MultiplierForLocation(StaticLootMultiplier, locationId)`.
     pub static_loot_multiplier: f64,
-    /// Resolved per-location by C#.
+    /// `MultiplierForLocation(LooseLootMultiplier, locationId)`.
     pub loose_loot_multiplier: f64,
     /// `EquipmentLootSettings`.
     pub mod_spawn_chance_percent: HashMap<String, f64>,
-    /// Resolved per-location by C#.
+    /// `LooseLootBlacklist[locationId]`, or empty when the map has no entry.
     pub loose_loot_blacklist: HashSet<String>,
 }
 
+/// The three `SeasonalEventService` answers the generator reads. `christmasContainerIds` left for
+/// the views side in Phase 4 — it is config, not service, state.
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SeasonalView {
     pub seasonal_event_active: bool,
     pub christmas_event_enabled: bool,
     pub inactive_seasonal_items: HashSet<String>,
-    pub christmas_container_ids: HashSet<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -1052,6 +1065,18 @@ mod tests {
         "locationId":"bigmap",
         "moneyTpls":["5449016a4bdc2d6f028b456f"],
         "staticAmmoDist":{"Caliber762x39":[{"tpl":"dddddddddddddddddddddddd","relativeProbability":5}]},
+        "seasonal":{"seasonalEventActive":false,"christmasEventEnabled":false,
+            "inactiveSeasonalItems":[]},
+        "lootableItemBlacklist":[],
+        "counter":{"maxCounts":{"ffffffffffffffffffffffff":2},"trackedCounts":{}}
+    "#;
+
+    /// The four `LootViewsWire` members every override carries, for splicing beside the per-send
+    /// statics members.
+    const VIEWS_JSON: &str = r#"
+        "itemsView":{"aaaaaaaaaaaaaaaaaaaaaaaa":{"parent":"bbbbbbbbbbbbbbbbbbbbbbbb","width":2,"height":1,
+            "slots":[{"name":"mod_magazine","required":false,"filter":["cccccccccccccccccccccccc"]}]}},
+        "defaultPresets":{"p1":{"items":[{"_id":"aaaaaaaaaaaaaaaaaaaaaaaa","_tpl":"bbbbbbbbbbbbbbbbbbbbbbbb"}]}},
         "config":{"containerRandomisationEnabled":true,"locationInRandomisationMaps":true,
             "containerTypesToNotRandomise":["eeeeeeeeeeeeeeeeeeeeeeee"],
             "containerGroupMinSizeMultiplier":0.8,"containerGroupMaxSizeMultiplier":1.2,
@@ -1060,18 +1085,7 @@ mod tests {
             "staticMagazineLootHasAmmoChancePercent":50,"minFillLooseMagazinePercent":30,
             "minFillStaticMagazinePercent":30,"staticLootMultiplier":1.5,"looseLootMultiplier":1.1,
             "modSpawnChancePercent":{"mod_scope":25},"looseLootBlacklist":[]},
-        "seasonal":{"seasonalEventActive":false,"christmasEventEnabled":false,
-            "inactiveSeasonalItems":[],"christmasContainerIds":[]},
-        "lootableItemBlacklist":[],
-        "counter":{"maxCounts":{"ffffffffffffffffffffffff":2},"trackedCounts":{}}
-    "#;
-
-    /// The two `LootViewsWire` members every override carries, for splicing beside the per-send
-    /// statics members.
-    const VIEWS_JSON: &str = r#"
-        "itemsView":{"aaaaaaaaaaaaaaaaaaaaaaaa":{"parent":"bbbbbbbbbbbbbbbbbbbbbbbb","width":2,"height":1,
-            "slots":[{"name":"mod_magazine","required":false,"filter":["cccccccccccccccccccccccc"]}]}},
-        "defaultPresets":{"p1":{"items":[{"_id":"aaaaaaaaaaaaaaaaaaaaaaaa","_tpl":"bbbbbbbbbbbbbbbbbbbbbbbb"}]}}
+        "christmasContainerIds":[]
     "#;
 
     #[test]
@@ -1197,12 +1211,12 @@ mod tests {
 
         assert_eq!(parsed.epoch, 7);
         assert_eq!(parsed.varying.location_id, "bigmap");
-        assert_eq!(parsed.varying.config.static_loot_multiplier, 1.5);
         assert_eq!(
             parsed.varying.counter.max_counts["ffffffffffffffffffffffff"],
             2
         );
         let views = parsed.views_override.unwrap();
+        assert_eq!(views.config.static_loot_multiplier, 1.5);
         assert_eq!(views.items_view["aaaaaaaaaaaaaaaaaaaaaaaa"].width, Some(2));
         assert_eq!(views.static_weapons.unwrap()[0].id.as_deref(), Some("w1"));
         assert_eq!(views.static_containers.unwrap()[0].probability, Some(0.35));

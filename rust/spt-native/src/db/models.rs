@@ -75,6 +75,14 @@ pub struct ConfigsRoot {
     /// see [`QuestConfigLift`].
     #[serde(default, rename = "spt-quest")]
     pub quest: Option<QuestConfigLift>,
+    /// `Models/Spt/Config/LocationConfig.cs`, whose `Kind` is `spt-location`
+    /// (`LocationConfig.cs:9-10`) — see [`LocationConfigLift`].
+    #[serde(default, rename = "spt-location")]
+    pub location: Option<LocationConfigLift>,
+    /// `Models/Spt/Config/SeasonalEventConfig.cs`, whose `Kind` is `spt-seasonalevents`
+    /// (`SeasonalEventConfig.cs:11-12`) — see [`SeasonalEventConfigLift`].
+    #[serde(default, rename = "spt-seasonalevents")]
+    pub seasonalevents: Option<SeasonalEventConfigLift>,
     #[serde(flatten)]
     pub extra: IndexMap<String, Value>,
 }
@@ -361,6 +369,97 @@ pub struct QuestConfigLift {
     /// `QuestConfig.LocationIdMap` — `GetQuestLocationByMapId` (`RepeatableQuestHelper.cs:204`).
     #[serde(rename = "locationIdMap")]
     pub location_id_map: IndexMap<String, String>,
+    #[serde(flatten)]
+    pub extra: IndexMap<String, Value>,
+}
+
+/// `Models/Spt/Config/LocationConfig.cs` — the *source* members `BuildConfigView`
+/// (`LocationLootGenerator.cs:459-482`) reads, raw and un-resolved: the three per-location
+/// resolutions the C# does inline are done per call by
+/// `loot::location_loot_generator::resolve_loot_config_view` instead, so the map-keyed members are
+/// lifted whole. Strictness per member follows the C# `required`: the four maps and the two
+/// settings objects are `required` (`LocationConfig.cs:44-48,101-102,134-135,146-147,158-159`) and
+/// so are strict here; the loose scalars are plain auto-properties, which C# fills with the type's
+/// default, and default here too. Every other member (the dispatch flags, the waves, whatever
+/// Ceciler's `[JsonExtensionData]` adds on a Release build) rides [`Self::extra`].
+#[derive(Debug, Deserialize)]
+pub struct LocationConfigLift {
+    #[serde(rename = "containerRandomisationSettings")]
+    pub container_randomisation_settings: ContainerRandomisationSettingsLift,
+    #[serde(default, rename = "allowDuplicateItemsInStaticContainers")]
+    pub allow_duplicate_items_in_static_containers: bool,
+    /// `HashSet<MongoId>` in C#; membership only on both sides of the flip, so the order is unread.
+    #[serde(rename = "tplsToStripChildItemsFrom")]
+    pub tpls_to_strip_child_items_from: HashSet<String>,
+    #[serde(default, rename = "fitLootIntoContainerAttempts")]
+    pub fit_loot_into_container_attempts: i32,
+    /// `int` in C#, `double` on the view — the widening the C# member assignment does implicitly.
+    #[serde(default, rename = "magazineLootHasAmmoChancePercent")]
+    pub magazine_loot_has_ammo_chance_percent: i32,
+    /// See [`Self::magazine_loot_has_ammo_chance_percent`].
+    #[serde(default, rename = "staticMagazineLootHasAmmoChancePercent")]
+    pub static_magazine_loot_has_ammo_chance_percent: i32,
+    /// See [`Self::magazine_loot_has_ammo_chance_percent`].
+    #[serde(default, rename = "minFillLooseMagazinePercent")]
+    pub min_fill_loose_magazine_percent: i32,
+    /// See [`Self::magazine_loot_has_ammo_chance_percent`].
+    #[serde(default, rename = "minFillStaticMagazinePercent")]
+    pub min_fill_static_magazine_percent: i32,
+    /// Keyed by map id, with a `"default"` entry as the fallback — resolved by
+    /// `MultiplierForLocation` (`LocationLootGenerator.cs:488-491`).
+    #[serde(rename = "staticLootMultiplier")]
+    pub static_loot_multiplier: HashMap<String, f64>,
+    /// See [`Self::static_loot_multiplier`].
+    #[serde(rename = "looseLootMultiplier")]
+    pub loose_loot_multiplier: HashMap<String, f64>,
+    #[serde(rename = "equipmentLootSettings")]
+    pub equipment_loot_settings: EquipmentLootSettingsLift,
+    /// Keyed by map id; the value is that map's blacklisted loose-loot spawn point ids. A map with
+    /// no entry blacklists nothing (`LocationLootGenerator.cs:480`).
+    #[serde(rename = "looseLootBlacklist")]
+    pub loose_loot_blacklist: HashMap<String, HashSet<String>>,
+    #[serde(flatten)]
+    pub extra: IndexMap<String, Value>,
+}
+
+/// `LocationConfig.cs:228-250` `ContainerRandomisationSettings`.
+#[derive(Debug, Deserialize)]
+pub struct ContainerRandomisationSettingsLift {
+    #[serde(default)]
+    pub enabled: bool,
+    /// The maps container randomisation is allowed on. Only `ContainsKey` is ever asked
+    /// (`LocationLootGenerator.cs:466`), so the values ride along unread and the order is unread.
+    pub maps: HashMap<String, bool>,
+    #[serde(rename = "containerTypesToNotRandomise")]
+    pub container_types_to_not_randomise: HashSet<String>,
+    #[serde(default, rename = "containerGroupMinSizeMultiplier")]
+    pub container_group_min_size_multiplier: f64,
+    #[serde(default, rename = "containerGroupMaxSizeMultiplier")]
+    pub container_group_max_size_multiplier: f64,
+    #[serde(flatten)]
+    pub extra: IndexMap<String, Value>,
+}
+
+/// `LocationConfig.cs:192-199` `EquipmentLootSettings`.
+#[derive(Debug, Deserialize)]
+pub struct EquipmentLootSettingsLift {
+    /// Keyed by slot name; keyed lookups only, so the order is unread.
+    #[serde(rename = "modSpawnChancePercent")]
+    pub mod_spawn_chance_percent: HashMap<String, f64>,
+    #[serde(flatten)]
+    pub extra: IndexMap<String, Value>,
+}
+
+/// `Models/Spt/Config/SeasonalEventConfig.cs` — `christmasContainerIds` only
+/// (`SeasonalEventConfig.cs:56-57`), the one member of that config the loot family reads off the
+/// config rather than through `SeasonalEventService`. `required` in C#, so strict here; the whole
+/// rest of the config rides [`Self::extra`].
+#[derive(Debug, Deserialize)]
+pub struct SeasonalEventConfigLift {
+    /// Spawn point ids, not tpls. Membership only — the christmas-container filter in
+    /// `loot::location_loot_generator::generate_static_containers` is the sole reader.
+    #[serde(rename = "christmasContainerIds")]
+    pub christmas_container_ids: HashSet<String>,
     #[serde(flatten)]
     pub extra: IndexMap<String, Value>,
 }

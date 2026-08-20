@@ -34,9 +34,6 @@ public record LootVarying
     [JsonPropertyName("staticAmmoDist")]
     public required Dictionary<string, List<StaticAmmoDetails>> StaticAmmoDist { get; set; }
 
-    [JsonPropertyName("config")]
-    public required LootConfigView Config { get; set; }
-
     [JsonPropertyName("seasonal")]
     public required SeasonalView Seasonal { get; set; }
 
@@ -384,7 +381,9 @@ public record PresetView
 }
 
 /// <summary>
-/// Every config value the generator reads, resolved for one location by the caller.
+/// Every config value the generator reads, resolved for one location. Built by the caller for a
+/// views-override send only; the resident arm resolves the same view natively off the
+/// <c>spt-location</c> config stem (<c>resolve_loot_config_view</c>).
 /// </summary>
 public record LootConfigView
 {
@@ -452,6 +451,10 @@ public record LootConfigView
     public required HashSet<string> LooseLootBlacklist { get; set; }
 }
 
+/// <summary>
+/// The three <c>SeasonalEventService</c> answers the generator reads. <c>ChristmasContainerIds</c>
+/// is config rather than service state, so it rides <see cref="LootViewsOverride"/> instead.
+/// </summary>
 public record SeasonalView
 {
     [JsonPropertyName("seasonalEventActive")]
@@ -462,12 +465,6 @@ public record SeasonalView
 
     [JsonPropertyName("inactiveSeasonalItems")]
     public required HashSet<MongoId> InactiveSeasonalItems { get; set; }
-
-    /// <summary>
-    /// Spawn point ids, not tpls.
-    /// </summary>
-    [JsonPropertyName("christmasContainerIds")]
-    public required HashSet<string> ChristmasContainerIds { get; set; }
 }
 
 /// <summary>
@@ -484,10 +481,10 @@ public record CounterState
 }
 
 /// <summary>
-/// The distrust fallback (spec § Exports): the C#-built database half, used for this call only and
-/// never made resident. Present iff the caller is ineligible for residency. The statics members
-/// ride on static-container sends and are omitted on dynamic sends, mirroring the two old
-/// envelopes.
+/// The distrust fallback (spec § Exports): the C#-built database half plus the two config-backed
+/// members the resident arm resolves off the configs root, used for this call only and never made
+/// resident. Present iff the caller is ineligible for residency. The statics members ride on
+/// static-container sends and are omitted on dynamic sends, mirroring the two old envelopes.
 /// </summary>
 public record LootViewsOverride
 {
@@ -500,6 +497,20 @@ public record LootViewsOverride
 
     [JsonPropertyName("defaultPresets")]
     public required Dictionary<MongoId, PresetView> DefaultPresets { get; set; }
+
+    /// <summary>
+    /// <c>LocationConfig</c> resolved for this send's location; the resident arm builds the same
+    /// view from the <c>spt-location</c> stem and the request's <c>locationId</c>.
+    /// </summary>
+    [JsonPropertyName("config")]
+    public required LootConfigView Config { get; set; }
+
+    /// <summary>
+    /// <c>SeasonalEventConfig.ChristmasContainerIds</c> - spawn point ids, not tpls. The resident
+    /// arm reads it off the <c>spt-seasonalevents</c> stem.
+    /// </summary>
+    [JsonPropertyName("christmasContainerIds")]
+    public required HashSet<string> ChristmasContainerIds { get; set; }
 
     /// <summary>
     /// Null when the map's <c>StaticContainerDetails</c> is missing the list; the native side logs a

@@ -376,13 +376,14 @@ public class LocationLootGeneratorNativeTests
                     },
                 },
                 Statics = null,
+                Config = BuildConfig(),
+                ChristmasContainerIds = [],
             },
             Varying = new LootVarying
             {
                 LocationId = TestLocationId,
                 MoneyTpls = [_moneyTpl],
                 StaticAmmoDist = [],
-                Config = BuildConfig(),
                 Seasonal = BuildSeasonal(),
                 LootableItemBlacklist = [],
                 Counter = new CounterState { MaxCounts = [], TrackedCounts = [] },
@@ -399,13 +400,18 @@ public class LocationLootGeneratorNativeTests
         return new DynamicLootRequest
         {
             Epoch = 0,
-            ViewsOverride = new LootViewsOverride { ItemsView = BuildItemsView(), DefaultPresets = [] },
+            ViewsOverride = new LootViewsOverride
+            {
+                ItemsView = BuildItemsView(),
+                DefaultPresets = [],
+                Config = BuildConfig(),
+                ChristmasContainerIds = [],
+            },
             Varying = new DynamicLootVarying
             {
                 LocationId = TestLocationId,
                 MoneyTpls = [_moneyTpl],
                 StaticAmmoDist = [],
-                Config = BuildConfig(),
                 Seasonal = BuildSeasonal(),
                 LootableItemBlacklist = [],
                 Counter = new CounterState { MaxCounts = [], TrackedCounts = [] },
@@ -491,7 +497,6 @@ public class LocationLootGeneratorNativeTests
             SeasonalEventActive = false,
             ChristmasEventEnabled = false,
             InactiveSeasonalItems = [],
-            ChristmasContainerIds = [],
         };
     }
 }
