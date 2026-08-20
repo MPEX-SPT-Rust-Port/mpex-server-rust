@@ -109,6 +109,16 @@ public class DbPublisherTests
         // The serialized body self-describes: it carries the same kind the key does, so the Rust
         // side can key off either.
         Assert.That(configs.GetProperty("spt-ragfair").GetProperty("kind").GetString(), Is.EqualTo("spt-ragfair"));
+
+        // Each body must serialize as its concrete record, not as BaseConfig: dropping the
+        // runtime-type argument would degenerate every body to {"kind":...} — the only member
+        // BaseConfig declares — and every assertion above would still pass. RagfairConfig.Dynamic
+        // exists only on the concrete record.
+        Assert.That(
+            configs.GetProperty("spt-ragfair").TryGetProperty("dynamic", out _),
+            Is.True,
+            "configs bodies must serialize as their concrete records (runtime-type overload), not as BaseConfig"
+        );
     }
 
     [Test]
