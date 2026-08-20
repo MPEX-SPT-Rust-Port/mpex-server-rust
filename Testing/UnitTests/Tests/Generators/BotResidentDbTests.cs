@@ -298,6 +298,10 @@ public class BotResidentDbTests
                 _botLootGenerator.HandbookHelper,
                 _itemHelper,
                 _botWeaponGenerator.GlobalTable,
+                _botEquipmentModGenerator.ItemFilterService,
+                _botConfig,
+                _pmcConfig,
+                _botWeaponGenerator.RepairConfig,
                 request.Shared.TemplateVariants!.Select(variant => variant.LootPools)
             );
             var overrideResult = SptNative.GenerateBotInventoryBatch(request);
@@ -335,18 +339,12 @@ public class BotResidentDbTests
             Epoch = 0,
             Shared = BotPayloadProjection.BuildSharedVarying(
                 _sessionId,
-                details.RoleLowercase,
                 _profileHelper,
                 _profileActivityService,
                 _weatherHelper,
-                _botGeneratorHelper,
-                _botEquipmentFilterService,
                 _botEquipmentModPoolService,
-                _botEquipmentModGenerator.ItemFilterService,
                 _itemHelper,
                 _botConfig,
-                _pmcConfig,
-                _botWeaponGenerator.RepairConfig,
                 isPmc ? new LevelGenerationView { LevelMin = 1, LevelMax = levelMax } : null,
                 [
                     new BotTemplateVariantView

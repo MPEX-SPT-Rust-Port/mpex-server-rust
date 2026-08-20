@@ -1785,7 +1785,28 @@ mod tests {
         format!(
             r#"{{
             "epoch":0,
-            "viewsOverride":{{"items":{{}},"itemPresets":{{}},"defaultPresetsByTpl":{{}}}},
+            "viewsOverride":{{"items":{{}},"itemPresets":{{}},"defaultPresetsByTpl":{{}},
+            "bosses":[],
+            "durability":{{
+                "default":{{"armor":{{"maxDelta":10,"minDelta":0,"minLimitPercent":15}},
+                    "weapon":{{"lowestMax":60,"highestMax":100,"maxDelta":10,"minDelta":0,
+                        "minLimitPercent":15}}}},
+                "botDurabilities":{{}},
+                "pmc":{{"armor":{{"lowestMaxPercent":90,"highestMaxPercent":100,"maxDelta":10,
+                        "minDelta":0,"minLimitPercent":15}},
+                    "weapon":{{"lowestMax":95,"highestMax":100,"maxDelta":5,"minDelta":0,
+                        "minLimitPercent":15}}}}}},
+            "itemSpawnLimits":{{}},
+            "walletLoot":{{"chancePercent":0}},
+            "currencyStackSize":{{}},
+            "secureContainerAmmoStackCount":0,
+            "disableLootOnBotTypes":[],
+            "lowProfileGasBlockTpls":[],
+            "lootItemResourceRandomization":{{}},
+            "pmcConfig":{{}},
+            "repairKitWeapon":{{"rarityWeight":{{}},"bonusTypeWeight":{{}},"Common":{{}},
+                "Rare":{{}}}},
+            "configBlacklist":[]}},
             "bot":{{
                 "botId":"bbbbbbbbbbbbbbbbbbbbbbbb",
                 "details":{{"role":"assault","roleLowercase":"assault","side":"Savage","botLevel":15,
@@ -1809,30 +1830,7 @@ mod tests {
             "shared":{{
             "generatingPlayerLevel":20,
             "isNightTime":false,
-            "equipment":{{}},
-            "bosses":[],
-            "durability":{{
-                "default":{{"armor":{{"maxDelta":10,"minDelta":0,"minLimitPercent":15}},
-                    "weapon":{{"lowestMax":60,"highestMax":100,"maxDelta":10,"minDelta":0,
-                        "minLimitPercent":15}}}},
-                "botDurabilities":{{}},
-                "pmc":{{"armor":{{"lowestMaxPercent":90,"highestMaxPercent":100,"maxDelta":10,
-                        "minDelta":0,"minLimitPercent":15}},
-                    "weapon":{{"lowestMax":95,"highestMax":100,"maxDelta":5,"minDelta":0,
-                        "minLimitPercent":15}}}}}},
-            "itemSpawnLimits":{{}},
-            "walletLoot":{{"chancePercent":0}},
-            "currencyStackSize":{{}},
-            "secureContainerAmmoStackCount":0,
-            "disableLootOnBotTypes":[],
-            "lowProfileGasBlockTpls":[],
-            "lootItemResourceRandomization":{{}},
-            "pmcConfig":{{}},
-            "repairKitWeapon":{{"rarityWeight":{{}},"bonusTypeWeight":{{}},"Common":{{}},
-                "Rare":{{}}}},
-            "equipmentBlacklist":{{}},
-            "weaponModEquipmentBlacklist":{{}},
-            "configBlacklist":[]
+            "equipment":{{}}
             }}
         }}"#
         )

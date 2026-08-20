@@ -212,11 +212,29 @@ fn view_items() -> Value {
     })
 }
 
-/// The override's views, value-identical to what the publish below derives: the items view,
-/// the presets map (globals key domain, map order), the default re-keyed to the preset's own id,
-/// a handbook price per items-table key (0.0 for a handbook miss), and the three exp bands.
-/// The rifle's non-identity slot order is not a view — it rides the shared varying block on
-/// both arms ([`shared`]).
+/// `BotConfig.Durability`, shared verbatim by the override bundle and the published `spt-bot`
+/// stem: `lowestMax` 60 / `highestMax` 100 give the durability roll something to draw, and a draw
+/// that read a different number on one arm would fail the byte comparison.
+fn durability() -> Value {
+    json!({
+        "default": {"armor": {"maxDelta": 10, "minDelta": 0, "minLimitPercent": 15},
+            "weapon": {"lowestMax": 60, "highestMax": 100, "maxDelta": 10, "minDelta": 0,
+                       "minLimitPercent": 15}},
+        "botDurabilities": {},
+        "pmc": {"armor": {"lowestMaxPercent": 90, "highestMaxPercent": 100, "maxDelta": 10,
+                          "minDelta": 0, "minLimitPercent": 15},
+            "weapon": {"lowestMax": 95, "highestMax": 100, "maxDelta": 5, "minDelta": 0,
+                       "minLimitPercent": 15}}
+    })
+}
+
+/// The override's views, value-identical to what the publish below derives or lifts: the items
+/// view, the presets map (globals key domain, map order), the default re-keyed to the preset's own
+/// id, a handbook price per items-table key (0.0 for a handbook miss), the three exp bands, and the
+/// twelve config members that went resident in Task 10 — the `spt-bot`, `spt-pmc`, `spt-repair` and
+/// `spt-item` stems the publish below carries. The rifle's non-identity slot order, the raid's
+/// daylight, the player's level and `BotConfig.Equipment` are *not* views — they ride the shared
+/// varying block on both arms ([`shared`]).
 fn views_override() -> Value {
     json!({
         "items": view_items(),
@@ -234,6 +252,45 @@ fn views_override() -> Value {
             RIFLE_TPL: 50000.0, MAG_TPL: 500.0, AMMO_TPL: 50.0,
         },
         "expTable": [100, 200, 400],
+        "bosses": [],
+        "durability": durability(),
+        "itemSpawnLimits": {"assault": {}, "pmc": {}},
+        "walletLoot": {"chancePercent": 0, "itemCount": {"min": 0, "max": 0},
+            "stackSizeWeight": {}, "currencyWeight": {}, "walletTplPool": []},
+        "currencyStackSize": {},
+        "secureContainerAmmoStackCount": 0,
+        "disableLootOnBotTypes": [],
+        "lowProfileGasBlockTpls": [],
+        "lootItemResourceRandomization": {},
+        "pmcConfig": {},
+        "repairKitWeapon": {"rarityWeight": {}, "bonusTypeWeight": {}, "Common": {}, "Rare": {}},
+        "configBlacklist": [],
+    })
+}
+
+/// The `configs` root the publish carries, mirroring [`views_override`]'s config half value for
+/// value. `spt-bot`'s members are all strict, so this is also the shape a real `bot.json` publish
+/// has to satisfy.
+fn configs_root() -> Value {
+    json!({
+        "spt-bot": {
+            "kind": "spt-bot",
+            "bosses": [],
+            "durability": durability(),
+            "itemSpawnLimits": {"assault": {}, "pmc": {}},
+            "walletLoot": {"chancePercent": 0, "itemCount": {"min": 0, "max": 0},
+                "stackSizeWeight": {}, "currencyWeight": {}, "walletTplPool": []},
+            "currencyStackSize": {},
+            "secureContainerAmmoStackCount": 0,
+            "disableLootOnBotTypes": [],
+            "lowProfileGasBlockTpls": [],
+            "lootItemResourceRandomization": {},
+        },
+        "spt-pmc": {"kind": "spt-pmc"},
+        "spt-repair": {"kind": "spt-repair", "repairKit": {
+            "weapon": {"rarityWeight": {}, "bonusTypeWeight": {}, "Common": {}, "Rare": {}},
+        }},
+        "spt-item": {"kind": "spt-item"},
     })
 }
 
@@ -292,36 +349,22 @@ fn template(with_weapon_mod_pool: bool) -> Value {
     })
 }
 
-/// The wave-constant block both requests share. The batch send appends `levelGeneration` and
+/// The wave-constant block both requests share — live C# process state only, since Task 10 moved
+/// every config slice but `equipment` onto the views. The batch send appends `levelGeneration` and
 /// `templateVariants`; the single send carries its template and loot pools at the top level.
+///
+/// `equipment`'s two roles each carry a `blacklist` band that covers the player level (20) and bans
+/// nothing, so `select_equipment_blacklist`'s pick is exercised — and exercised *identically* on
+/// both arms, because `equipment` never went resident.
 fn shared() -> Value {
+    let filters = json!({"blacklist": [
+        {"levelRange": {"min": 1, "max": 99}, "equipment": {"Earpiece": []}},
+    ]});
+
     json!({
         "generatingPlayerLevel": 20,
         "isNightTime": false,
-        "equipment": {"assault": {}, "pmc": {}},
-        "bosses": [],
-        "durability": {
-            "default": {"armor": {"maxDelta": 10, "minDelta": 0, "minLimitPercent": 15},
-                "weapon": {"lowestMax": 60, "highestMax": 100, "maxDelta": 10, "minDelta": 0,
-                           "minLimitPercent": 15}},
-            "botDurabilities": {},
-            "pmc": {"armor": {"lowestMaxPercent": 90, "highestMaxPercent": 100, "maxDelta": 10,
-                              "minDelta": 0, "minLimitPercent": 15},
-                "weapon": {"lowestMax": 95, "highestMax": 100, "maxDelta": 5, "minDelta": 0,
-                           "minLimitPercent": 15}}},
-        "itemSpawnLimits": {"assault": {}, "pmc": {}},
-        "walletLoot": {"chancePercent": 0, "itemCount": {"min": 0, "max": 0},
-            "stackSizeWeight": {}, "currencyWeight": {}, "walletTplPool": []},
-        "currencyStackSize": {},
-        "secureContainerAmmoStackCount": 0,
-        "disableLootOnBotTypes": [],
-        "lowProfileGasBlockTpls": [],
-        "lootItemResourceRandomization": {},
-        "pmcConfig": {},
-        "repairKitWeapon": {"rarityWeight": {}, "bonusTypeWeight": {}, "Common": {}, "Rare": {}},
-        "equipmentBlacklist": {},
-        "weaponModEquipmentBlacklist": {},
-        "configBlacklist": [],
+        "equipment": {"assault": filters, "pmc": filters},
         // The rifle's non-identity slot order, shared verbatim by both arms - live C# service
         // state, so it rides every send rather than the views
         "modPoolSlotOrder": {RIFLE_TPL: [1, 2]},
@@ -389,7 +432,8 @@ fn single_request(epoch: u64, views_override: Option<Value>) -> Vec<u8> {
 fn a_resident_send_matches_the_override_send_and_a_wrong_epoch_is_stale() {
     // (1) The smallest publish that derives the bot views: templates + globals for the views
     // themselves, empty traders because the ragfair derive (whose items/presets maps the bot
-    // views embed) gates on all three roots being resident.
+    // views embed) gates on all three roots being resident, and the configs root carrying the
+    // four stems `resolve_bot_views` demands.
     let publish = json!({"schema": 1, "roots": {
         "templates": {
             "items": raw_items(),
@@ -411,6 +455,7 @@ fn a_resident_send_matches_the_override_send_and_a_wrong_epoch_is_stale() {
                 {"exp": 100}, {"exp": 200}, {"exp": 400},
             ]}}},
         },
+        "configs": configs_root(),
     }});
 
     let (status, out) = call(

@@ -65,15 +65,11 @@ public class SptNativeBotWireTests
             di.GetService<ProfileHelper>(),
             di.GetService<ProfileActivityService>(),
             di.GetService<WeatherHelper>(),
-            di.GetService<BotGeneratorHelper>(),
-            di.GetService<BotEquipmentFilterService>(),
             di.GetService<BotEquipmentModPoolService>(),
             di.GetService<BotLootCacheService>(),
-            di.GetService<ItemFilterService>(),
             di.GetService<ItemHelper>(),
             di.GetService<BotConfig>(),
-            di.GetService<PmcConfig>(),
-            di.GetService<RepairConfig>()
+            di.GetService<PmcConfig>()
         );
         // The override send (epoch 0), which is the arm whose wire this fixture pins
         _request.ViewsOverride = BotPayloadProjection.BuildViewsOverride(
@@ -81,6 +77,10 @@ public class SptNativeBotWireTests
             di.GetService<HandbookHelper>(),
             di.GetService<ItemHelper>(),
             di.GetService<GlobalTable>(),
+            di.GetService<ItemFilterService>(),
+            di.GetService<BotConfig>(),
+            di.GetService<PmcConfig>(),
+            di.GetService<RepairConfig>(),
             [_request.LootPools]
         );
     }
@@ -174,15 +174,17 @@ public class SptNativeBotWireTests
     [Test]
     public void RequestCarriesTheResolvedConfigAndPoolSlices()
     {
-        Assert.That(_request.Shared.GeneratingPlayerLevel, Is.EqualTo(1));
+        // The profile the fixture created carries no level, so the raw member is null and the
+        // native side applies the equipment path's `?? 1` and the weapon-mod path's `?? 0` itself
+        Assert.That(_request.Shared.GeneratingPlayerLevel, Is.Null);
         Assert.That(_request.Bot.TestSeed, Is.EqualTo(TestSeed));
         Assert.That(_request.Shared.Equipment, Does.ContainKey("assault"));
-        Assert.That(_request.Shared.Bosses, Is.Not.Empty);
-        Assert.That(_request.ViewsOverride!.ItemPresets, Is.Not.Empty);
+        Assert.That(_request.ViewsOverride!.Bosses, Is.Not.Empty);
+        Assert.That(_request.ViewsOverride.ItemPresets, Is.Not.Empty);
         Assert.That(_request.ViewsOverride.DefaultPresetsByTpl, Is.Not.Empty);
         // The defaults ride as ids, so every one has to resolve against the only preset map sent
         Assert.That(_request.ViewsOverride.DefaultPresetsByTpl.Values, Is.SubsetOf(_request.ViewsOverride.ItemPresets.Keys));
-        Assert.That(_request.Shared.ConfigBlacklist, Is.Not.Empty);
+        Assert.That(_request.ViewsOverride.ConfigBlacklist, Is.Not.Empty);
         Assert.That(_request.LootPools.BackpackLoot, Is.Not.Empty);
         // Every pool tpl has to be priceable, or the running rouble total silently reads 0
         Assert.That(_request.ViewsOverride.HandbookPrices.Keys, Is.SupersetOf(_request.LootPools.BackpackLoot.Keys));

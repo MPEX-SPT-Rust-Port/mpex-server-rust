@@ -15,7 +15,9 @@ use indexmap::{IndexMap, IndexSet};
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::bot::repair_service::MinMax;
+use crate::bot::durability_limits_helper::BotDurability;
+use crate::bot::models::{PmcConfigWire, RandomisedResourceDetails, WalletLootSettingsWire};
+use crate::bot::repair_service::{BonusSettings, MinMax};
 use crate::loot::models::{
     Item, SpawnpointTemplate, StaticContainer, StaticContainerData, StaticForced, StaticLootDetails,
 };
@@ -83,6 +85,91 @@ pub struct ConfigsRoot {
     /// (`SeasonalEventConfig.cs:11-12`) — see [`SeasonalEventConfigLift`].
     #[serde(default, rename = "spt-seasonalevents")]
     pub seasonalevents: Option<SeasonalEventConfigLift>,
+    /// `Models/Spt/Config/BotConfig.cs`, whose `Kind` is `spt-bot` (`BotConfig.cs:10-11`) — see
+    /// [`BotConfigLift`].
+    #[serde(default, rename = "spt-bot")]
+    pub bot: Option<BotConfigLift>,
+    /// `Models/Spt/Config/PmcConfig.cs`, whose `Kind` is `spt-pmc` (`PmcConfig.cs:10-11`). Parsed
+    /// by the bot family's own narrowed view of the config — the same [`PmcConfigWire`] the
+    /// override bundle carries, so both arms read one parse of one shape (the
+    /// [`ScavCaseConfigView`] precedent). The members it omits are ignored on arrival.
+    #[serde(default, rename = "spt-pmc")]
+    pub pmc: Option<PmcConfigWire>,
+    /// `Models/Spt/Config/RepairConfig.cs`, whose `Kind` is `spt-repair`
+    /// (`RepairConfig.cs:8-9`) — see [`RepairConfigLift`].
+    #[serde(default, rename = "spt-repair")]
+    pub repair: Option<RepairConfigLift>,
+    #[serde(flatten)]
+    pub extra: IndexMap<String, Value>,
+}
+
+/// `Models/Spt/Config/BotConfig.cs` — the nine members bot generation reads that no runtime writer
+/// touches.
+///
+/// `equipment` is deliberately **not** lifted, though `BuildSharedVarying` reads it:
+/// `BotInventoryGenerator.ReplayRandomisationClamps` (`:405-432`) writes the nighttime mod-chance
+/// clamps back into `Equipment[role].Randomisation[band].EquipmentMods` through the dictionary
+/// indexer after *every* native single-bot send, which trips no write barrier and so never moves
+/// the mutation stamp. That write is a cross-bot feedback loop (the next bot's C# prelude reads it
+/// at `BotEquipmentFilterService.cs:63`), so a resident copy would freeze at the published values
+/// and diverge from bot 2 on. It rides the request instead
+/// ([`crate::bot::models::SharedBotVaryingWire::equipment`]) and lands in this lift's
+/// [`Self::extra`], unread.
+///
+/// Strictness per member follows the C# `required`: every member below is `required`
+/// (`BotConfig.cs:57,63,69,76,83,130,135,140,146`) except `secureContainerAmmoStackCount`, a plain
+/// auto-property C# fills with the type's default. Everything else — the four dispatch flags, the
+/// brain types, the caps, whatever Ceciler's `[JsonExtensionData]` adds on a Release build — rides
+/// [`Self::extra`].
+#[derive(Debug, Deserialize)]
+pub struct BotConfigLift {
+    /// `BotConfig.Bosses` — scanned case-insensitively by `BotHelper.IsBotBoss`, so source order
+    /// is irrelevant but the `List<string>` shape is mirrored anyway.
+    pub bosses: Vec<String>,
+    pub durability: BotDurability,
+    /// Bot role → item tpl → max count. Keyed lookups plus one `["pmc"]`/`["default"]` fallback
+    /// (`BotLootGenerator.cs:876-881`); the inner map is cloned and zeroed per bot, so its order
+    /// is the running total's order.
+    #[serde(rename = "itemSpawnLimits")]
+    pub item_spawn_limits: IndexMap<String, IndexMap<String, f64>>,
+    #[serde(rename = "walletLoot")]
+    pub wallet_loot: WalletLootSettingsWire,
+    /// Bot role → currency → stack size → weight. The innermost map is what `GetWeightedValue`
+    /// scans, so every level stays ordered.
+    #[serde(rename = "currencyStackSize")]
+    pub currency_stack_size: IndexMap<String, IndexMap<String, IndexMap<String, f64>>>,
+    #[serde(default, rename = "secureContainerAmmoStackCount")]
+    pub secure_container_ammo_stack_count: i32,
+    #[serde(rename = "disableLootOnBotTypes")]
+    pub disable_loot_on_bot_types: HashSet<String>,
+    /// `HashSet<MongoId>` in C#; membership only (`BotEquipmentModGenerator.cs:1079,1088`).
+    #[serde(rename = "lowProfileGasBlockTpls")]
+    pub low_profile_gas_block_tpls: HashSet<String>,
+    /// Keyed by the *raw* bot role — `BotGeneratorHelper.cs:63` looks it up verbatim, with no
+    /// equipment-role mapping.
+    #[serde(rename = "lootItemResourceRandomization")]
+    pub loot_item_resource_randomization: IndexMap<String, RandomisedResourceDetails>,
+    #[serde(flatten)]
+    pub extra: IndexMap<String, Value>,
+}
+
+/// `Models/Spt/Config/RepairConfig.cs` — `repairKit.weapon` only, the one `BonusSettings` bot
+/// generation passes to [`crate::bot::repair_service::add_buff`]
+/// (`BotWeaponGenerator.cs:173`). `RepairKit` and `RepairKit.Weapon` are both `required`
+/// (`RepairConfig.cs:29-30,84-85`), so both are strict here; the armor/vest/headwear kits and every
+/// other member ride the two `extra` maps.
+#[derive(Debug, Deserialize)]
+pub struct RepairConfigLift {
+    #[serde(rename = "repairKit")]
+    pub repair_kit: RepairKitLift,
+    #[serde(flatten)]
+    pub extra: IndexMap<String, Value>,
+}
+
+/// `RepairConfig.cs:78-92` `RepairKit`, narrowed to `weapon`.
+#[derive(Debug, Deserialize)]
+pub struct RepairKitLift {
+    pub weapon: BonusSettings,
     #[serde(flatten)]
     pub extra: IndexMap<String, Value>,
 }

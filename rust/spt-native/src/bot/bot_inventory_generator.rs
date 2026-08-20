@@ -90,7 +90,7 @@ use crate::bot::models::{
     GenerateBotInventoryRequest, GenerateEquipmentPropertiesWire, GenerationWire, PmcConfigWire,
     RandomisationDetails, SharedBotVaryingWire,
 };
-use crate::bot::{BotContext, BotViews, resolve_bot_views};
+use crate::bot::{BotContext, BotViews, resolve_bot_views, select_equipment_blacklists};
 use crate::diag::DiagSink;
 use crate::loot::item_helper::{LootEpochError, LootError, get_item};
 use crate::loot::models::{DEBUG, Diagnostic, ERROR, Item, ItemView, WARNING};
@@ -355,22 +355,9 @@ fn generate_prepared(
     } = prepared;
 
     let SharedBotVaryingWire {
+        generating_player_level,
         is_night_time,
         equipment,
-        bosses,
-        durability,
-        item_spawn_limits,
-        wallet_loot,
-        currency_stack_size,
-        secure_container_ammo_stack_count,
-        disable_loot_on_bot_types,
-        low_profile_gas_block_tpls,
-        loot_item_resource_randomization,
-        pmc_config,
-        repair_kit_weapon,
-        equipment_blacklist,
-        weapon_mod_equipment_blacklist,
-        config_blacklist,
         mod_pool_slot_order,
         ..
     } = shared;
@@ -382,23 +369,32 @@ fn generate_prepared(
         ..
     } = template;
 
+    // `BuildSharedVarying` used to resolve both of these C# side and ship them; they are a band
+    // lookup over the (still varying) equipment map, so they are resolved here instead.
+    let (equipment_blacklist, weapon_mod_equipment_blacklist) = select_equipment_blacklists(
+        equipment,
+        get_bot_equipment_role(&details.role_lowercase),
+        *generating_player_level,
+    );
+
+    let pmc_config = views.pmc_config();
     let mut ctx = BotContext {
         items: views.items(),
         mod_pool_slot_order,
-        bosses,
-        durability,
+        bosses: views.bosses(),
+        durability: views.durability(),
         equipment,
-        loot_item_resource_randomization,
+        loot_item_resource_randomization: views.loot_item_resource_randomization(),
         is_night_time: *is_night_time,
-        item_blacklist: config_blacklist,
+        item_blacklist: views.config_blacklist(),
         default_presets_by_tpl: views.default_preset_ids(),
         item_presets: views.item_presets(),
         equipment_blacklist,
         weapon_mod_equipment_blacklist,
-        low_profile_gas_block_tpls,
+        low_profile_gas_block_tpls: views.low_profile_gas_block_tpls(),
         weapon_has_enhancement_chance_percent: pmc_config.weapon_has_enhancement_chance_percent,
-        repair_kit_weapon,
-        secure_container_ammo_stack_count: *secure_container_ammo_stack_count,
+        repair_kit_weapon: views.repair_kit_weapon(),
+        secure_container_ammo_stack_count: views.secure_container_ammo_stack_count(),
         diagnostics: DiagSink::Pipeline,
     };
     let mut grids = ContainerGrids::default();
@@ -433,10 +429,10 @@ fn generate_prepared(
     let loot_config = BotLootConfig {
         equipment_id: &bot_inventory.equipment,
         item_counts: &item_generation_limits_min_max.items,
-        disable_loot_on_bot_types,
-        item_spawn_limits,
-        wallet_loot,
-        currency_stack_size,
+        disable_loot_on_bot_types: views.disable_loot_on_bot_types(),
+        item_spawn_limits: views.item_spawn_limits(),
+        wallet_loot: views.wallet_loot(),
+        currency_stack_size: views.currency_stack_size(),
         pmc: pmc_config,
         handbook_prices: views.handbook_prices(),
         loot_pools: &loot_pools,
@@ -1309,6 +1305,28 @@ mod tests {
                 "items": items(),
                 "itemPresets": {},
                 "defaultPresetsByTpl": {},
+                "bosses": [],
+                "durability": {
+                    "default": {"armor": {"maxDelta": 10, "minDelta": 0, "minLimitPercent": 15},
+                        "weapon": {"lowestMax": 60, "highestMax": 100, "maxDelta": 10, "minDelta": 0,
+                                   "minLimitPercent": 15}},
+                    "botDurabilities": {},
+                    "pmc": {"armor": {"lowestMaxPercent": 90, "highestMaxPercent": 100, "maxDelta": 10,
+                                      "minDelta": 0, "minLimitPercent": 15},
+                        "weapon": {"lowestMax": 95, "highestMax": 100, "maxDelta": 5, "minDelta": 0,
+                                   "minLimitPercent": 15}}},
+                "itemSpawnLimits": {"assault": {}, "pmc": {}},
+                "walletLoot": {"chancePercent": 0, "itemCount": {"min": 0, "max": 0},
+                    "stackSizeWeight": {}, "currencyWeight": {}, "walletTplPool": []},
+                "currencyStackSize": {},
+                "secureContainerAmmoStackCount": 0,
+                "disableLootOnBotTypes": [],
+                "lowProfileGasBlockTpls": [],
+                "lootItemResourceRandomization": {},
+                "pmcConfig": {},
+                "repairKitWeapon": {"rarityWeight": {}, "bonusTypeWeight": {}, "Common": {},
+                    "Rare": {}},
+                "configBlacklist": [],
             },
             "bot": {
                 "botId": "bbbbbbbbbbbbbbbbbbbbbbbb",
@@ -1354,30 +1372,6 @@ mod tests {
                 "generatingPlayerLevel": 20,
                 "isNightTime": false,
                 "equipment": {"assault": {}},
-                "bosses": [],
-                "durability": {
-                    "default": {"armor": {"maxDelta": 10, "minDelta": 0, "minLimitPercent": 15},
-                        "weapon": {"lowestMax": 60, "highestMax": 100, "maxDelta": 10, "minDelta": 0,
-                                   "minLimitPercent": 15}},
-                    "botDurabilities": {},
-                    "pmc": {"armor": {"lowestMaxPercent": 90, "highestMaxPercent": 100, "maxDelta": 10,
-                                      "minDelta": 0, "minLimitPercent": 15},
-                        "weapon": {"lowestMax": 95, "highestMax": 100, "maxDelta": 5, "minDelta": 0,
-                                   "minLimitPercent": 15}}},
-                "itemSpawnLimits": {"assault": {}, "pmc": {}},
-                "walletLoot": {"chancePercent": 0, "itemCount": {"min": 0, "max": 0},
-                    "stackSizeWeight": {}, "currencyWeight": {}, "walletTplPool": []},
-                "currencyStackSize": {},
-                "secureContainerAmmoStackCount": 0,
-                "disableLootOnBotTypes": [],
-                "lowProfileGasBlockTpls": [],
-                "lootItemResourceRandomization": {},
-                "pmcConfig": {},
-                "repairKitWeapon": {"rarityWeight": {}, "bonusTypeWeight": {}, "Common": {},
-                    "Rare": {}},
-                "equipmentBlacklist": {},
-                "weaponModEquipmentBlacklist": {},
-                "configBlacklist": [],
             },
         })
     }
@@ -1864,7 +1858,7 @@ mod tests {
         request["bot"]["details"]["isPmc"] = json!(true);
         request["bot"]["details"]["roleLowercase"] = json!("pmcbear");
         request["shared"]["equipment"] = json!({"pmc": {}});
-        request["shared"]["pmcConfig"] = json!({
+        request["viewsOverride"]["pmcConfig"] = json!({
             "forceArmband": {"enabled": true, "usec": "armband_usec", "bear": FORCED_ARMBAND_TPL},
         });
         // The real chance key stays untouched, so dropping it to 0 still loses the slot even though
@@ -1880,7 +1874,7 @@ mod tests {
         request["bot"]["details"]["isPmc"] = json!(true);
         request["bot"]["details"]["roleLowercase"] = json!("pmcbear");
         request["shared"]["equipment"] = json!({"pmc": {}});
-        request["shared"]["pmcConfig"] = json!({
+        request["viewsOverride"]["pmcConfig"] = json!({
             "forceArmband": {"enabled": true, "usec": "armband_usec", "bear": FORCED_ARMBAND_TPL},
         });
 

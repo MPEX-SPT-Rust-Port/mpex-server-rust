@@ -201,15 +201,11 @@ public class BotBenchmarkTests
             _profileHelper,
             _profileActivityService,
             _weatherHelper,
-            _botGeneratorHelper,
-            _botEquipmentFilterService,
             _botEquipmentModPoolService,
             _botLootGenerator.BotLootCacheService,
-            _botEquipmentModGenerator.ItemFilterService,
             _itemHelper,
             _botConfig,
-            _pmcConfig,
-            _botWeaponGenerator.RepairConfig
+            _pmcConfig
         );
     }
 

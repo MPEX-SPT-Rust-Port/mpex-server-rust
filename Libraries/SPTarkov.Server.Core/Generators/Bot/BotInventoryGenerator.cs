@@ -298,15 +298,11 @@ public class BotInventoryGenerator(
             profileHelper,
             profileActivityService,
             weatherHelper,
-            botGeneratorHelper,
-            botEquipmentFilterService,
             botEquipmentModPoolService,
             botLootGenerator.BotLootCacheService,
-            botEquipmentModGenerator.ItemFilterService,
             itemHelper,
             botConfig,
-            pmcConfig,
-            botWeaponGenerator.RepairConfig
+            pmcConfig
         );
 
         BotInventoryResult result;
@@ -318,6 +314,10 @@ public class BotInventoryGenerator(
                 botLootGenerator.HandbookHelper,
                 itemHelper,
                 botWeaponGenerator.GlobalTable,
+                botEquipmentModGenerator.ItemFilterService,
+                botConfig,
+                pmcConfig,
+                botWeaponGenerator.RepairConfig,
                 [request.LootPools]
             );
             result = SptNative.GenerateBotInventory(request);

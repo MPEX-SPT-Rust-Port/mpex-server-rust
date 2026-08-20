@@ -139,6 +139,13 @@ pub struct EquipmentFilters {
     /// The level-banded randomisation blocks `BotHelper.GetBotRandomizationDetails` picks from.
     #[serde(rename = "randomisation")]
     pub randomisation: Option<Vec<RandomisationDetails>>,
+    /// The level-banded equipment blacklists `BotEquipmentFilterService.GetBotEquipmentBlacklist`
+    /// picks from — see [`crate::bot::select_equipment_blacklist`], which does that pick natively
+    /// for both the equipment and the weapon-mod path. `Whitelist` and
+    /// `WeightingAdjustmentsByBotLevel` are the C# caller's: they filter the template *before* the
+    /// call and never cross.
+    #[serde(rename = "blacklist")]
+    pub blacklist: Option<Vec<EquipmentFilterDetails>>,
     /// `BotConfig.cs:214-215` — the two caps `BotWeaponModLimitService.GetWeaponModLimits` reads.
     #[serde(rename = "weaponModLimits")]
     pub weapon_mod_limits: Option<ModLimitsWire>,
@@ -212,11 +219,17 @@ pub struct ArmorPlateWeights {
     pub values: IndexMap<String, IndexMap<String, f64>>,
 }
 
-/// `Models/Spt/Config/BotConfig.cs:399-418`, narrowed to the one member the mod generators read.
-/// `LevelRange` is resolved by the C# caller (`GetBotEquipmentBlacklist`) before the call, and
-/// `Cartridge` grows a field in the task that first reads it.
+/// `Models/Spt/Config/BotConfig.cs:433-452`, narrowed to the two members the native side reads.
+/// `Cartridge` grows a field in the task that first reads it — the cartridge filter still runs C#
+/// side, before the call.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct EquipmentFilterDetails {
+    /// The band this entry covers. Read by [`crate::bot::select_equipment_blacklist`], which is
+    /// where `GetBotEquipmentBlacklist`'s `FirstOrDefault` now lives. `MinMax<int>` is a plain
+    /// auto-property in C# (`BotConfig.cs:438-439`), so an omitted `levelRange` lands on `(0, 0)`
+    /// there and here.
+    #[serde(default, rename = "levelRange")]
+    pub level_range: MinMax<i32>,
     /// Mod slot name → blacklisted tpls.
     #[serde(rename = "equipment")]
     pub equipment: Option<IndexMap<String, IndexSet<String>>>,
@@ -585,9 +598,14 @@ pub struct ContainerMapDetailsWire {
     pub grid_full: bool,
 }
 
-/// The database half of both bot requests — [`crate::bot::views::BotDbViews`] on the wire, for the
-/// override arm of [`crate::bot::resolve_bot_views`]. An override-less request reads the same six
-/// views off the resident DB instead.
+/// The database half of both bot requests — [`crate::bot::views::BotDbViews`] plus the three
+/// resident config stems on the wire, for the override arm of
+/// [`crate::bot::resolve_bot_views`]. An override-less request reads all of it off the resident DB
+/// instead ([`crate::db::models::BotConfigLift`], the `spt-pmc` [`PmcConfigWire`] stem,
+/// [`crate::db::models::RepairConfigLift`] and [`crate::db::models::ItemConfigLift::blacklist`]).
+///
+/// Every config member below is `required` on the C# record, so all are strict here: the override
+/// arm is always C#-built and always carries them.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BotViewsWire {
@@ -608,6 +626,25 @@ pub struct BotViewsWire {
     /// sums out of (`BotLevelGenerator.cs:39`).
     #[serde(default)]
     pub exp_table: Vec<i32>,
+
+    // -- The `spt-bot` config slice (`BotConfigLift`).
+    pub bosses: Vec<String>,
+    pub durability: crate::bot::durability_limits_helper::BotDurability,
+    pub item_spawn_limits: IndexMap<String, IndexMap<String, f64>>,
+    pub wallet_loot: WalletLootSettingsWire,
+    pub currency_stack_size: IndexMap<String, IndexMap<String, IndexMap<String, f64>>>,
+    pub secure_container_ammo_stack_count: i32,
+    pub disable_loot_on_bot_types: std::collections::HashSet<String>,
+    pub low_profile_gas_block_tpls: std::collections::HashSet<String>,
+    pub loot_item_resource_randomization: IndexMap<String, RandomisedResourceDetails>,
+
+    // -- The `spt-pmc` and `spt-repair` slices, and `ItemConfig.Blacklist`.
+    pub pmc_config: PmcConfigWire,
+    /// `RepairConfig.RepairKit.Weapon` — the one `BonusSettings` bot generation passes.
+    pub repair_kit_weapon: crate::bot::repair_service::BonusSettings,
+    /// `ItemFilterService.GetBlacklistedItems()`, i.e. `ItemConfig.Blacklist` verbatim
+    /// (`ItemFilterService.cs:51-54`) — *not* the runtime-augmented `ItemBlacklistCache`.
+    pub config_blacklist: std::collections::HashSet<String>,
 }
 
 /// The single-bot request: the `{epoch, viewsOverride?, …}` envelope around one varying block, one
@@ -659,39 +696,34 @@ pub struct TemplateVariantWire {
     pub loot_pools: BotLootCacheWire,
 }
 
-/// The request members that do not vary between the bots of one wave and are not database views —
-/// every config slice, the blacklist the caller resolved from the wave's role and the player's
-/// level, and (as [`Self::template_variants`]) the templates and loot pools, which vary by level
-/// *band* rather than by bot. The database views live on [`BotViewsWire`] / the resident DB.
+/// The request members that do not vary between the bots of one wave and are not database views:
+/// live C# process state (the player's level, the raid's daylight, the mod-pool slot order), the
+/// one config slice a runtime writer keeps out of the resident DB ([`Self::equipment`]), and (as
+/// [`Self::template_variants`]) the templates and loot pools, which vary by level *band* rather
+/// than by bot. Every other config slice lives on [`BotViewsWire`] / the resident DB.
 ///
 /// Deserialized as a nested object rather than `#[serde(flatten)]`: flatten routes the whole map
 /// through serde's buffering path, which would cost more than the duplication it removes.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SharedBotVaryingWire {
-    pub generating_player_level: i32,
+    /// `pmcProfile?.Info?.Level` **raw** — absent when the session has no PMC profile, or when
+    /// that profile carries no level. The two blacklist resolutions default it differently
+    /// (`?? 1` for the equipment path at `BotInventoryGenerator.cs:583`, `?? 0` for the weapon-mod
+    /// path at `BotEquipmentModGenerator.cs:546`), and level 0 matches no `levelRange` where level
+    /// 1 may, so the *nullable* level is what has to cross — a pre-defaulted `1` could not tell
+    /// "level 1 with a profile" from "no profile" and would collapse the divergence.
+    /// [`crate::bot::select_equipment_blacklist`] applies both defaults.
+    #[serde(default)]
+    pub generating_player_level: Option<i32>,
     pub is_night_time: bool,
+    /// `BotConfig.Equipment`, minus the null values the C# projection drops
+    /// (`BotPayloadProjection.cs:123`). Stays on the varying block rather than going resident:
+    /// `ReplayRandomisationClamps` (`BotInventoryGenerator.cs:405-432`) mutates
+    /// `Randomisation[band].EquipmentMods` in place after every send and no write barrier sees it,
+    /// so the resident copy would freeze at the published values — see
+    /// [`crate::db::models::BotConfigLift`].
     pub equipment: IndexMap<String, EquipmentFilters>,
-    pub bosses: Vec<String>,
-    pub durability: crate::bot::durability_limits_helper::BotDurability,
-    pub item_spawn_limits: IndexMap<String, IndexMap<String, f64>>,
-    pub wallet_loot: WalletLootSettingsWire,
-    pub currency_stack_size: IndexMap<String, IndexMap<String, IndexMap<String, f64>>>,
-    pub secure_container_ammo_stack_count: i32,
-    pub disable_loot_on_bot_types: std::collections::HashSet<String>,
-    pub low_profile_gas_block_tpls: std::collections::HashSet<String>,
-    pub loot_item_resource_randomization: IndexMap<String, RandomisedResourceDetails>,
-    pub pmc_config: PmcConfigWire,
-    pub repair_kit_weapon: crate::bot::repair_service::BonusSettings,
-    /// `GetBotEquipmentBlacklist(role, level)` result, as the equipment path resolves it
-    /// (`BotInventoryGenerator.cs:583`, level defaulted to 1).
-    pub equipment_blacklist: EquipmentFilterDetails,
-    /// The same call as [`Self::equipment_blacklist`] but as the *weapon-mod* path resolves it
-    /// (`BotEquipmentModGenerator.cs:546`, level defaulted to **0**). Legacy is internally
-    /// inconsistent about that default and level 0 matches no `levelRange`, so the two blacklists
-    /// differ and each path has to use its own.
-    pub weapon_mod_equipment_blacklist: EquipmentFilterDetails,
-    pub config_blacklist: std::collections::HashSet<String>,
     /// The C# `BotEquipmentModPoolService` pools' slot-name enumeration order per template, as
     /// indices into that template's projected `slots` array. On the *varying* block rather than
     /// the views: the order is an emergent artifact of the live C# service's
@@ -839,7 +871,28 @@ mod tests {
             "itemPresets":{"p1":{"id":"p1","items":[]},"p2":{"id":"p2","items":[]}},
             "defaultPresetsByTpl":{"aaaaaaaaaaaaaaaaaaaaaab2":"p2"},
             "handbookPrices":{"aaaaaaaaaaaaaaaaaaaaaab4":12500.5},
-            "expTable":[10]},
+            "expTable":[10],
+            "bosses":["bossknight"],
+            "durability":{"default":{"armor":{"maxDelta":10,"minDelta":0,"minLimitPercent":15},
+                    "weapon":{"lowestMax":60,"highestMax":100,"maxDelta":10,"minDelta":0,
+                              "minLimitPercent":15}},
+                "botDurabilities":{},
+                "pmc":{"armor":{"lowestMaxPercent":90,"highestMaxPercent":100,"maxDelta":10,
+                                "minDelta":0,"minLimitPercent":15},
+                    "weapon":{"lowestMax":95,"highestMax":100,"maxDelta":5,"minDelta":0,
+                              "minLimitPercent":15}}},
+            "itemSpawnLimits":{"assault":{"aaaaaaaaaaaaaaaaaaaaaaa7":1}},
+            "walletLoot":{"chancePercent":10},
+            "currencyStackSize":{"default":{"RUB":{"1000":1}}},
+            "secureContainerAmmoStackCount":3,
+            "disableLootOnBotTypes":["bosstest"],
+            "lowProfileGasBlockTpls":["aaaaaaaaaaaaaaaaaaaaaaa8"],
+            "lootItemResourceRandomization":{"assault":{"food":{"chanceMaxResourcePercent":60}}},
+            "pmcConfig":{"forceHealingItemsIntoSecure":true,
+                "forceArmband":{"enabled":true,"usec":"armband_usec","bear":"armband_bear"},
+                "weaponHasEnhancementChancePercent":25},
+            "repairKitWeapon":{"rarityWeight":{},"bonusTypeWeight":{},"Common":{},"Rare":{}},
+            "configBlacklist":["aaaaaaaaaaaaaaaaaaaaaab3"]},
         "bot":{"botId":"bbbbbbbbbbbbbbbbbbbbbbbb",
         "details":{"role":"assault","roleLowercase":"assault","side":"Savage","botLevel":12,
             "isPmc":false,"isPlayerScav":false,"gameVersion":"standard","location":"bigmap",
@@ -864,30 +917,9 @@ mod tests {
             "forceRigWhenNoVest":true,"forceOnlyArmoredRigWhenNoArmor":false,
             "randomisation":[{"levelRange":{"min":1,"max":99},
                 "randomisedArmorSlots":["Headwear"],"equipmentMods":{"mod_nvg":40},
-                "nighttimeChanges":{"equipmentModsModifiers":{"mod_nvg":90}}}]}},
-        "bosses":["bossknight"],
-        "durability":{"default":{"armor":{"maxDelta":10,"minDelta":0,"minLimitPercent":15},
-                "weapon":{"lowestMax":60,"highestMax":100,"maxDelta":10,"minDelta":0,
-                          "minLimitPercent":15}},
-            "botDurabilities":{},
-            "pmc":{"armor":{"lowestMaxPercent":90,"highestMaxPercent":100,"maxDelta":10,
-                            "minDelta":0,"minLimitPercent":15},
-                "weapon":{"lowestMax":95,"highestMax":100,"maxDelta":5,"minDelta":0,
-                          "minLimitPercent":15}}},
-        "itemSpawnLimits":{"assault":{"aaaaaaaaaaaaaaaaaaaaaaa7":1}},
-        "walletLoot":{"chancePercent":10},
-        "currencyStackSize":{"default":{"RUB":{"1000":1}}},
-        "secureContainerAmmoStackCount":3,
-        "disableLootOnBotTypes":["bosstest"],
-        "lowProfileGasBlockTpls":["aaaaaaaaaaaaaaaaaaaaaaa8"],
-        "lootItemResourceRandomization":{"assault":{"food":{"chanceMaxResourcePercent":60}}},
-        "pmcConfig":{"forceHealingItemsIntoSecure":true,
-            "forceArmband":{"enabled":true,"usec":"armband_usec","bear":"armband_bear"},
-            "weaponHasEnhancementChancePercent":25},
-        "repairKitWeapon":{"rarityWeight":{},"bonusTypeWeight":{},"Common":{},"Rare":{}},
-        "equipmentBlacklist":{"equipment":{"Headwear":["aaaaaaaaaaaaaaaaaaaaaaa9"]}},
-        "weaponModEquipmentBlacklist":{},
-        "configBlacklist":["aaaaaaaaaaaaaaaaaaaaaab3"],
+                "nighttimeChanges":{"equipmentModsModifiers":{"mod_nvg":90}}}],
+            "blacklist":[{"levelRange":{"min":1,"max":99},
+                "equipment":{"Headwear":["aaaaaaaaaaaaaaaaaaaaaaa9"]}}]}},
         "modPoolSlotOrder":{"aaaaaaaaaaaaaaaaaaaaaaa5":[1,0]}},
         "lootPools":{"backpackLoot":{"aaaaaaaaaaaaaaaaaaaaaab1":4}}
     }"#;
@@ -951,7 +983,7 @@ mod tests {
             1.0
         );
 
-        assert_eq!(parsed.shared.generating_player_level, 30);
+        assert_eq!(parsed.shared.generating_player_level, Some(30));
         assert!(parsed.shared.is_night_time);
         let assault_equipment = &parsed.shared.equipment["assault"];
         assert_eq!(
@@ -987,56 +1019,13 @@ mod tests {
                 .equipment_mods_modifiers["mod_nvg"],
             90.0
         );
-        assert_eq!(parsed.shared.bosses, vec!["bossknight"]);
-        assert_eq!(parsed.shared.durability.default.weapon.lowest_max, 60);
-        assert_eq!(
-            parsed.shared.item_spawn_limits["assault"]["aaaaaaaaaaaaaaaaaaaaaaa7"],
-            1.0
-        );
-        assert_eq!(parsed.shared.wallet_loot.chance_percent, 10.0);
-        assert_eq!(
-            parsed.shared.currency_stack_size["default"]["RUB"]["1000"],
-            1.0
-        );
-        assert_eq!(parsed.shared.secure_container_ammo_stack_count, 3);
-        assert!(parsed.shared.disable_loot_on_bot_types.contains("bosstest"));
+        // The two equipment blacklists are no longer wire members at all: the bands ride
+        // `equipment` and `select_equipment_blacklist` picks one per resolution.
+        let blacklist_band = &assault_equipment.blacklist.as_ref().unwrap()[0];
+        assert_eq!(blacklist_band.level_range.min, 1);
+        assert_eq!(blacklist_band.level_range.max, 99);
         assert!(
-            parsed
-                .shared
-                .low_profile_gas_block_tpls
-                .contains("aaaaaaaaaaaaaaaaaaaaaaa8")
-        );
-        let food = parsed.shared.loot_item_resource_randomization["assault"]
-            .food
-            .as_ref()
-            .unwrap();
-        assert_eq!(food.chance_max_resource_percent, 60.0);
-        // Absent in the payload; C#'s non-nullable float lands on 0, not on "no randomisation".
-        assert_eq!(food.resource_percent, 0.0);
-        assert!(
-            parsed.shared.loot_item_resource_randomization["assault"]
-                .meds
-                .is_none()
-        );
-        assert!(parsed.shared.pmc_config.force_healing_items_into_secure);
-        assert!(parsed.shared.pmc_config.force_armband.enabled);
-        assert_eq!(parsed.shared.pmc_config.force_armband.usec, "armband_usec");
-        assert_eq!(parsed.shared.pmc_config.force_armband.bear, "armband_bear");
-        assert_eq!(
-            parsed
-                .shared
-                .pmc_config
-                .weapon_has_enhancement_chance_percent,
-            25.0
-        );
-        assert!(parsed.shared.repair_kit_weapon.rarity_weight.is_empty());
-        assert!(
-            parsed
-                .shared
-                .equipment_blacklist
-                .equipment
-                .as_ref()
-                .unwrap()["Headwear"]
+            blacklist_band.equipment.as_ref().unwrap()["Headwear"]
                 .contains("aaaaaaaaaaaaaaaaaaaaaaa9")
         );
         assert_eq!(
@@ -1045,12 +1034,6 @@ mod tests {
         );
         // Pools the payload omits deserialize empty, not missing.
         assert!(parsed.loot_pools.combined_pool_loot.is_empty());
-        assert!(
-            parsed
-                .shared
-                .config_blacklist
-                .contains("aaaaaaaaaaaaaaaaaaaaaab3")
-        );
         // The mod-pool slot order rides the varying block, not the views.
         assert_eq!(
             parsed.shared.mod_pool_slot_order["aaaaaaaaaaaaaaaaaaaaaaa5"],
@@ -1058,6 +1041,43 @@ mod tests {
         );
 
         let views = parsed.views_override.as_ref().unwrap();
+        // The twelve config members that went resident: on the views block on this arm, off the
+        // resident stems on the other.
+        assert_eq!(views.bosses, vec!["bossknight"]);
+        assert_eq!(views.durability.default.weapon.lowest_max, 60);
+        assert_eq!(
+            views.item_spawn_limits["assault"]["aaaaaaaaaaaaaaaaaaaaaaa7"],
+            1.0
+        );
+        assert_eq!(views.wallet_loot.chance_percent, 10.0);
+        assert_eq!(views.currency_stack_size["default"]["RUB"]["1000"], 1.0);
+        assert_eq!(views.secure_container_ammo_stack_count, 3);
+        assert!(views.disable_loot_on_bot_types.contains("bosstest"));
+        assert!(
+            views
+                .low_profile_gas_block_tpls
+                .contains("aaaaaaaaaaaaaaaaaaaaaaa8")
+        );
+        let food = views.loot_item_resource_randomization["assault"]
+            .food
+            .as_ref()
+            .unwrap();
+        assert_eq!(food.chance_max_resource_percent, 60.0);
+        // Absent in the payload; C#'s non-nullable float lands on 0, not on "no randomisation".
+        assert_eq!(food.resource_percent, 0.0);
+        assert!(
+            views.loot_item_resource_randomization["assault"]
+                .meds
+                .is_none()
+        );
+        assert!(views.pmc_config.force_healing_items_into_secure);
+        assert!(views.pmc_config.force_armband.enabled);
+        assert_eq!(views.pmc_config.force_armband.usec, "armband_usec");
+        assert_eq!(views.pmc_config.force_armband.bear, "armband_bear");
+        assert_eq!(views.pmc_config.weapon_has_enhancement_chance_percent, 25.0);
+        assert!(views.repair_kit_weapon.rarity_weight.is_empty());
+        assert!(views.config_blacklist.contains("aaaaaaaaaaaaaaaaaaaaaab3"));
+
         assert_eq!(views.item_presets["p1"].id.as_deref(), Some("p1"));
         // The default rides as an id and is resolved against `item_presets`, not inlined
         assert_eq!(
@@ -1197,7 +1217,7 @@ mod tests {
         assert_eq!(parsed.epoch, 3);
         assert!(parsed.views_override.is_none());
         assert_eq!(parsed.bot.bot_id, "bbbbbbbbbbbbbbbbbbbbbbbb");
-        assert_eq!(parsed.shared.generating_player_level, 30);
+        assert_eq!(parsed.shared.generating_player_level, Some(30));
         assert_eq!(parsed.template.chances.equipment["Headwear"], 75.0);
         assert_eq!(
             parsed.loot_pools.backpack_loot["aaaaaaaaaaaaaaaaaaaaaab1"],
