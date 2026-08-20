@@ -17,6 +17,7 @@
     >
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <ExcludeFromSingleFile>True</ExcludeFromSingleFile>
+      <Visible>false</Visible>
     </None>
     <!-- checks.dat is written during the build by gen_checks, after item evaluation. A literal
          Include still resolves at copy time; the ** wildcard above is expanded at evaluation time
@@ -28,6 +29,19 @@
     <None Include="$(MSBuildThisFileDirectory)SPT_Data\checks.dat" Condition="'$(Configuration)' == 'Release'" Link="SPT_Data\checks.dat">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <ExcludeFromSingleFile>True</ExcludeFromSingleFile>
+      <Visible>false</Visible>
     </None>
   </ItemGroup>
+  <!-- Fresh-clone guard for single-project Release builds: the slnx BuildDependency edges only
+       order solution builds, so `dotnet build Tools/<generator> -c Release` on a tree without
+       checks.dat would otherwise fail with a cryptic MSB3030 at copy time. A target-time Exists()
+       check is not the item-condition trap above — it fails loud instead of silently dropping the
+       item. SPTarkov.Server is excluded because its own PreBuildHashFile generates the file. -->
+  <Target
+    Name="EnsureChecksDatExists"
+    BeforeTargets="AssignTargetPaths"
+    Condition="'$(Configuration)' == 'Release' AND '$(MSBuildProjectName)' != 'SPTarkov.Server' AND !Exists('$(MSBuildThisFileDirectory)SPT_Data\checks.dat')"
+  >
+    <Error Text="SPT_Data\checks.dat is missing. Build SPTarkov.Server in Release first (its PreBuildHashFile target runs gen_checks to generate it), or build the solution." />
+  </Target>
 </Project>
