@@ -17,6 +17,7 @@ runs them. There are no `cargo bench` targets.
 | `DbPublishSpikeTests.cs` | phase 0 state-ownership spike — full-DB publish envelope: per-root size and projection time; paired with `rust/spt-native/tests/phase0_publish_spike.rs` for parse time and RSS |
 | `RagfairViewsEquivalenceTests.cs` | phase 1 flip #1 — writes the 3-root publish envelope and C#-built expected ragfair views; paired with `rust/spt-native/tests/phase1_ragfair_views.rs` for the derivation-equivalence check |
 | `QuestViewsEquivalenceTests.cs` | phase 1 flip #2 — writes the 4-root publish envelope and C#-built expected quest views; paired with `rust/spt-native/tests/phase1_quest_views.rs` for the derivation-equivalence check |
+| `DatabaseImportBenchmarkTests.cs` | phase 3 fused SPT_Data load — startup import: verify, native fused load and the managed replica walk timed separately on both `DatabaseImporter` arms |
 
 ## Running them
 
@@ -174,6 +175,75 @@ because the flip is one-way; `ASteadyStateRagfairPassConvergesToNoRepublish` is 
 
 The three pre-existing denylist entries and their reasons live in `WriteBarriersPatch._denied`
 (`Item`, `BotBase`, `PmcDataRepeatableQuest` — all live per-request state).
+
+## Phase 3 — Rust loads SPT_Data
+
+`ca7e3de` — 2026-08-19. Both `DatabaseImporter` arms, driven directly by the fixture so each half is
+timed on its own: legacy hashes the tree (`SptNative.VerifyDatabaseAsync`) and then walks it a second
+time off disk, native does one native walk (`SptNative.DbLoad(verify: true)`) that hashes, reads and
+installs the five resident roots, after which the same reflection walk materializes `DatabaseTables`
+from the returned buffers. 1 cold + 3 warm runs per arm, medians over the warm ones.
+
+    dotnet test -c Release --filter "FullyQualifiedName~DatabaseImportBenchmarkTests" --logger "console;verbosity=detailed"
+
+| measure | value |
+|---|---|
+| legacy verify | 85.7 ms |
+| legacy import (disk walk) | 340.3 ms |
+| legacy total | 426.0 ms |
+| native fused load (verify + read + install) | 480.5 ms |
+| native replica materialize (buffer-fed walk) | 410.4 ms |
+| native total | 878.4 ms |
+| returned buffers | 202 files, 49.4 MiB |
+| native against legacy | **0.48x** — ~2.1x slower |
+
+Three Release invocations, verbatim fixture output (warm medians; the third reverses the arm order):
+
+```
+measure                              cold ms  warm median ms     |  run 2          |  reversed
+legacy verify                          228.0            85.7     |  106.0    85.6  |   85.3    83.5
+legacy import (disk walk)              534.6           340.3     |  547.7   355.8  |  334.3   332.6
+legacy total                           762.5           426.0     |  653.8   438.6  |  419.5   416.1
+native fused load (verify+read)        697.2           480.5     |  679.3   463.2  |  481.6   476.6
+native replica materialize             410.7           410.4     |  411.4   413.3  | 1214.6   396.4
+native total                          1107.8           878.4     | 1090.7   863.1  | 1696.2   873.0
+```
+
+**The deliverable is the retired double-read, and it is not a speed-up.** 202 files / 49.4 MiB of
+eager content now cross from Rust as buffers instead of being read once by the verifier and again by
+`ImporterUtil`; the lazy files are excluded by design and stay disk-path `LazyLoad`s on both arms
+(`locales/global/*` and `locations/*/looseLoot.json` are never read, `staticLoot.json` /
+`staticContainers.json` are read for resident-root assembly but not returned). Measured at the
+importer the flip **costs 425-455 ms** (426.0 → 878.4 ms; 438.6 → 863.1 on the repeat), for two reasons
+this fixture separates:
+
+- The fused load's ~380-395 ms over the bare verify (480.5 against 85.7) is not a read. Buffer
+  retention, the FFI copy and the five-root assembly, parse and derivation are all inside it,
+  unsplit here — work the legacy arm does not do at import time at all.
+- The buffer-fed walk is **60-70 ms slower** than the disk walk it replaces (410.4 against 340.3),
+  not faster. With the page cache warm the second read it retires was nearly free, while the buffer
+  plumbing is not.
+
+Arm order does not explain either reading. Reversed (native measured first), the arms hold position
+for position: legacy total 416.1 ms against 426.0/438.6 measured first, native total 873.0 ms against
+878.4/863.1 measured second — inside the spread of the two same-order invocations. The reversed
+native cold materialize (1214.6 ms) is first-position JIT on the reflection walk, which is why the
+cold column is reported and not used.
+
+**Neither total is a startup total, and the gap the flip was built to close is not wired up.** Both
+arms still pay the first `DbPublisher.EnsureCurrent` republish of all five roots — 730-745 ms, the
+forced-publish figure under § Scav case rewards — because `EnsureCurrent` publishes whenever its own
+`_currentEpoch` is 0 and nothing feeds `DbLoad`'s installed epoch into it (`DatabaseImporter`'s
+`ponytail:` note says so in as many words). So a startup today reads ≈1.16 s legacy against
+≈1.62 s native, and the saving on offer — dropping that first republish, since epoch 1 is already
+resident and was assembled from the same bytes — is the measurement to retake once it exists.
+`CoreConfig.ForceLegacyDatabaseImport` is the opt-out; `DatabaseLoadEquivalenceTests` is the gate that
+both arms still produce identical tables.
+
+Read against a warm page cache only: `DI`'s container build imports the database once before any
+timed run, so "cold" here is JIT-cold, never disk-cold, and both arms' reads are served from memory.
+A genuinely cold `SPT_Data` would favour the single-read arm by whatever the retired second read
+costs off the disk — not measured, and not measurable from this fixture.
 
 ## Methodology
 
