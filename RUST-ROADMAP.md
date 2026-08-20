@@ -848,8 +848,11 @@ publish parse (`STATUS_BAD_ARGS`), previous resident DB intact — but *not* for
 every later `EnsureCurrent()` re-attempts and throws again, from outside `ResidentDbDispatch.Send`'s
 try, and every eligible native call 500s until the config is fixed. Reachable only through a mod
 nulling a `required` member with `TrustNativeRequestCacheWithMods` on; the shipped projection cannot
-produce it. The one lift that deliberately breaks the rule is `spt-item`, whose four sets stay
-`#[serde(default)]` despite being C# `required` — the reasoning is in `ItemConfigLift`'s doc.
+produce it. Three lifts deliberately break the rule: `spt-item`'s four sets and `spt-inventory`'s
+`customMoneyTpls` stay `#[serde(default)]` despite being C# `required`, and the `spt-pmc` stem
+parses as the override wire's soft `PmcConfigWire` — the reasoning is in `ItemConfigLift`'s,
+`InventoryConfigLift`'s, and `PmcConfigWire`'s docs, and the hand-run `phase4_configs_root.rs`
+pins the soft members' wire names against the projected dump.
 **8, caller-selected config stays varying.** Quest's `repeatableConfig` — the caller picks which
 `QuestConfig.RepeatableQuests[i]`
 applies — keeps riding both arms, flip #6's precedent for caller-supplied products; same for loot's

@@ -178,7 +178,7 @@ pub struct RepairKitLift {
 /// case and repeatable-quest families read `rewardItemBlacklist`/`bossItems`, the ragfair family
 /// reads `blacklist`.
 ///
-/// **Deliberately soft, and the only lift that is.** All four members are `required` in C#
+/// **Deliberately soft.** All four members are `required` in C#
 /// (`ItemConfig.cs:16,28,34,40`), so the rule the other lifts follow — mirror the C# `required`, as
 /// [`RagfairConfigLift::dynamic`] does — would make every one of them strict. They carry
 /// `#[serde(default)]` anyway because `spt-item` is the one stem five families share (scav case,
@@ -193,6 +193,12 @@ pub struct RepairKitLift {
 /// reading it silently stops filtering rather than failing loudly. Unreachable from the shipped
 /// projection — C# `required` members always serialize, so every stem the server publishes carries
 /// all four — but a hand-built or mod-rewritten stem could fall into it.
+///
+/// Two other lifts stay soft-despite-`required`: [`InventoryConfigLift::custom_money_tpls`] (an
+/// absent member is a valid empty set — its doc has the reasoning) and the whole `spt-pmc` stem,
+/// which parses as the override wire's soft [`PmcConfigWire`](crate::bot::models::PmcConfigWire)
+/// (its doc has the trade). `phase4_configs_root.rs` pins every soft member's wire name against the
+/// projected dump, since a drifted name on a soft member parses fine and silently reads empty.
 #[derive(Debug, Default, Deserialize)]
 pub struct ItemConfigLift {
     /// `ItemConfig.Blacklist` (`ItemConfig.cs:14-15`) — what `ItemFilterService.GetBlacklistedItems`

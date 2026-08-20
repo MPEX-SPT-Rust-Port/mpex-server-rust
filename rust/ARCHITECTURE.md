@@ -145,9 +145,12 @@ releases with `spt_buf_free`; so do `spt_console_read_line` and `spt_log_format`
   previous resident DB standing — and keeps failing, because `DbPublisher.PublishLocked` never advances
   `_lastPublishedStamp` on a throw, so every later `EnsureCurrent()` retries and throws from outside
   `ResidentDbDispatch.Send`'s try, and every eligible native call 500s until the config is fixed. A member
-  is strict exactly when the C# member is `required`, with one deliberate exception: `spt-item`, whose four
+  is strict exactly when the C# member is `required`, with three deliberate exceptions: `spt-item`, whose four
   sets stay `#[serde(default)]` so the five families sharing the stem can keep publishing partial ones in
-  their fixtures (`ItemConfigLift`'s doc has the trade). Which config members deliberately stayed per-call
+  their fixtures (`ItemConfigLift`'s doc has the trade); `spt-inventory`'s `customMoneyTpls`, where an absent
+  member is a valid empty set; and the whole `spt-pmc` stem, which parses as the override wire's soft
+  `PmcConfigWire` (its doc has the trade). The soft members' wire names are pinned by the hand-run
+  `phase4_configs_root.rs`, since a drifted name on a soft member parses fine and silently reads empty. Which config members deliberately stayed per-call
   — the ones a C# writer mutates in place through an indexer, where no write barrier fires, or that the
   caller itself selects — is in RUST-ROADMAP.md's Phase 4 ledger. Phase 4 added **no** export.
 - **A buffer is written on failure too** — the parse error, the `LootError` message, or the panic text.

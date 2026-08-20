@@ -491,6 +491,16 @@ pub struct WalletLootSettingsWire {
 }
 
 /// `Models/Spt/Config/PmcConfig.cs`, narrowed to what bot generation reads.
+///
+/// Soft-despite-`required`: every mirrored member is `required` in C#, but this is the override
+/// wire's shape, reused verbatim as the `spt-pmc` stem (one parse, one shape, both arms — the
+/// [`DynamicConfigWire`] precedent), and the bot suite's override fixtures publish it partially
+/// throughout, so the struct-level `#[serde(default)]` stays. The consequence is
+/// [`ItemConfigLift`](crate::db::models::ItemConfigLift)'s: the shipped projection always carries
+/// all eight members, but a hand-built or mod-rewritten stem that omits one silently reads
+/// defaults instead of failing the publish. A strict twin struct for the stem would have to
+/// mirror this one field for field and would drift; `phase4_configs_root.rs` pins the eight wire
+/// names against the projected dump instead.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct PmcConfigWire {

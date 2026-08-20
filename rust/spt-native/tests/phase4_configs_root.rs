@@ -6,8 +6,10 @@
 //! `JsonUtil.JsonSerializerOptionsNoIndent`. A round trip through the pair is the only place a
 //! divergence between the two shows up before a live publish does.
 //!
-//! What it proves: every kind arrives, the envelope parses, and every stem lifted out of `extra`
-//! so far parses into its typed shape rather than raw `Value`. Tasks 7-10 lift the rest; each adds
+//! What it proves: every kind arrives, the envelope parses, every stem lifted out of `extra`
+//! so far parses into its typed shape rather than raw `Value`, and every soft-despite-`required`
+//! member's pinned wire name is present in the dump (a drifted name on a soft member parses fine
+//! and silently reads empty, so no strict gate would catch it). Tasks 7-10 lift the rest; each adds
 //! its kind to `LIFTED_KINDS` below plus a stem-is-`Some` assertion, or the union assertion fails
 //! loudly.
 //!
@@ -131,6 +133,48 @@ fn projected_configs_parse_with_every_kind_present() {
         configs.repair.is_some(),
         "the spt-repair stem did not bind — check RepairConfig.Kind against the rename"
     );
+
+    // The soft-despite-`required` members (`ItemConfigLift`'s four sets,
+    // `InventoryConfigLift::custom_money_tpls`, all of `PmcConfigWire`) parse fine when their wire
+    // name drifts — the value just silently reads empty, where a strict member would fail the
+    // publish. C# `required` members always serialize, so the dump must carry each pinned name;
+    // this is the one gate that catches a rename on a soft member.
+    let raw: serde_json::Value =
+        serde_json::from_slice(&bytes).expect("the envelope re-parses as raw JSON");
+    let stems = &raw["roots"]["configs"];
+    let soft_members: [(&str, &[&str]); 3] = [
+        (
+            "spt-item",
+            &[
+                "blacklist",
+                "rewardItemBlacklist",
+                "rewardItemTypeBlacklist",
+                "bossItems",
+            ],
+        ),
+        ("spt-inventory", &["customMoneyTpls"]),
+        (
+            "spt-pmc",
+            &[
+                "forceHealingItemsIntoSecure",
+                "looseWeaponInBackpackChancePercent",
+                "looseWeaponInBackpackLootMinMax",
+                "lootSettings",
+                "addSecureContainerLootFromBotConfig",
+                "lootItemLimitsRub",
+                "forceArmband",
+                "weaponHasEnhancementChancePercent",
+            ],
+        ),
+    ];
+    for (kind, members) in soft_members {
+        for member in members {
+            assert!(
+                !stems[kind][member].is_null(),
+                "{kind} did not carry `{member}` — a soft member's wire name drifted off the C# `JsonPropertyName`"
+            );
+        }
+    }
 
     let mut present: BTreeSet<&str> = configs.extra.keys().map(String::as_str).collect();
     present.extend(LIFTED_KINDS);

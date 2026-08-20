@@ -5,6 +5,7 @@ using SPTarkov.Server.Core.Generators.Bot;
 using SPTarkov.Server.Core.Generators.Loot;
 using SPTarkov.Server.Core.Generators.Weapons;
 using SPTarkov.Server.Core.Helpers;
+using SPTarkov.Server.Core.Helpers.Bot;
 using SPTarkov.Server.Core.Helpers.InRaid;
 using SPTarkov.Server.Core.Helpers.Items;
 using SPTarkov.Server.Core.Helpers.Profile;
@@ -51,6 +52,7 @@ public class BotResidentDbTests
     private WeatherHelper _weatherHelper = default!;
     private ProfileActivityService _profileActivityService = default!;
     private BotEquipmentFilterService _botEquipmentFilterService = default!;
+    private BotHelper _botHelper = default!;
     private BotEquipmentModPoolService _botEquipmentModPoolService = default!;
     private BotConfig _botConfig = default!;
     private PmcConfig _pmcConfig = default!;
@@ -76,6 +78,7 @@ public class BotResidentDbTests
         _weatherHelper = di.GetService<WeatherHelper>();
         _profileActivityService = di.GetService<ProfileActivityService>();
         _botEquipmentFilterService = di.GetService<BotEquipmentFilterService>();
+        _botHelper = di.GetService<BotHelper>();
         _botEquipmentModPoolService = di.GetService<BotEquipmentModPoolService>();
         _botConfig = di.GetService<BotConfig>();
         _pmcConfig = di.GetService<PmcConfig>();
@@ -305,6 +308,70 @@ public class BotResidentDbTests
 
             LootJsonAssert.AssertEqual(Serialize(residentResult), Serialize(overrideResult), label, Seed);
         }
+    }
+
+    /// <summary>
+    /// The bot family's twin of
+    /// <see cref="LootResidentDbTests.AnInPlaceLootMultiplierAdjustmentReachesAResidentSend"/>,
+    /// pinning the Equipment carve-out: <c>ReplayRandomisationClamps</c> writes nighttime mod-chance
+    /// clamps back into <c>BotConfig.Equipment[role].Randomisation[band].EquipmentMods</c> through
+    /// the dictionary indexer — no setter, no write barrier, no stamp move — and
+    /// <c>BotEquipmentFilterService.AdjustChances</c> reads them off the shared config object when
+    /// the next bot is filtered. Equipment therefore rides the varying block, C#-resolved per bot; a
+    /// regression that resolves it off the resident <c>spt-bot</c> stem would hand every bot after
+    /// the first stale chances, and nothing else in the suite would notice. RUST-ROADMAP roadmap
+    /// item 5 records the upgrade path this test gates.
+    /// </summary>
+    [Test]
+    public void AnInPlaceEquipmentModClampReachesAResidentSend()
+    {
+        Assert.That(_botConfig.Equipment.TryGetValue("pmc", out var pmcEquipConfig), Is.True, "no pmc equipment config in bot.json");
+        var band = _botHelper.GetBotRandomizationDetails(1, pmcEquipConfig!);
+        Assert.That(band?.EquipmentMods, Is.Not.Null.And.Not.Empty, "no pmc randomisation band with equipment mods covers level 1");
+
+        var original = new Dictionary<string, double>(band!.EquipmentMods!);
+        string allSlotsBlocked,
+            allSlotsForced;
+        try
+        {
+            allSlotsBlocked = GeneratePmcWaveOffTheResidentDb(band, 0);
+            allSlotsForced = GeneratePmcWaveOffTheResidentDb(band, 100);
+        }
+        finally
+        {
+            foreach (var (slot, chance) in original)
+            {
+                band.EquipmentMods![slot] = chance;
+            }
+        }
+
+        Assert.That(allSlotsForced, Is.Not.EqualTo(allSlotsBlocked), "the in-place equipment-mod clamp never reached the native side");
+    }
+
+    /// <summary>
+    /// Clamps every equipment-mod chance in the band — exactly the write
+    /// <c>ReplayRandomisationClamps</c> makes, a dictionary indexer assignment with no setter —
+    /// then sends one seeded pmc wave off the resident DB and returns its normalized serialization.
+    /// </summary>
+    private string GeneratePmcWaveOffTheResidentDb(RandomisationDetails band, double chancePercent)
+    {
+        foreach (var slot in band.EquipmentMods!.Keys.ToList())
+        {
+            band.EquipmentMods[slot] = chancePercent;
+        }
+
+        var request = BuildWaveRequest(isPmc: true, [Seed, Seed + 1, Seed + 2]);
+        var result = ResidentDbDispatch.Send(
+            _publisher,
+            epoch =>
+            {
+                request.Epoch = epoch;
+                return SptNative.GenerateBotInventoryBatch(request);
+            }
+        );
+        Assert.That(result.Bots.All(envelope => envelope.Result is not null), Is.True, "a resident pmc bot failed");
+
+        return Serialize(result);
     }
 
     /// <summary>
