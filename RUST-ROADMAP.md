@@ -106,12 +106,13 @@ entry and the inherited `ValueType.ToString()`. Scope is `Color` only — mods t
   writes, reflection-driven writes, the setters of the four denied live-per-request types (`Item`,
   `BotBase`, `PmcDataRepeatableQuest` — so a write to a trader assort `Item`'s `Upd` bumps nothing —
   and, since Phase 4, `GenerationData`, which the configs root made reachable through
-  `BotConfig.Generation`/`PlayerScavConfig.ItemLimits` but which `BotWeaponGenerator` and
-  `PlayerScavGenerator.AdjustItemWeights` write per bot generated, so a mod writing
-  `botConfig.Generation["healing"].Weights` or `playerScavConfig.ItemLimits[*].Whitelist` bumps
-  nothing and the resident configs root — which ships whole `BotConfig`/`PlayerScavConfig` — keeps
-  the pre-write values until the next stamped write; neither field is read from the resident root
-  today, but unread is not un-stale, and the hole opens the moment one is), the setters of
+  `EquipmentFilters.Randomisation[].Generation` and `KarmaLevel.ItemLimits` but which
+  `BotWeaponGenerator` and `PlayerScavGenerator.AdjustItemWeights` write per bot generated, so a mod
+  writing `botConfig.Equipment["pmc"].Randomisation[i].Generation["healing"].Weights` or
+  `playerScavConfig.KarmaLevel["-7"].ItemLimits["healing"].Whitelist` bumps nothing and the resident
+  configs root — which ships whole `BotConfig`/`PlayerScavConfig` — keeps the pre-write values until
+  the next stamped write; neither field is read from the resident root today, but unread is not
+  un-stale, and the hole opens the moment one is), the setters of
   open-generic model types, which are never barriered by design (`MinMax<T>`'s three, so a mod
   editing a location's `Limit`/`MinMaxBot` bands writes nothing the stamp sees), anything behind an
   `object?`-typed property the walk cannot follow

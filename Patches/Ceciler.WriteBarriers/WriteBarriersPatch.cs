@@ -72,15 +72,15 @@ public class WriteBarriersPatch : IPatcher
         "SPTarkov.Server.Core.Models.Eft.Common.Tables.BotBase",
         // Per-profile quest progress, not the quest template.
         "SPTarkov.Server.Core.Models.Eft.Common.Tables.PmcDataRepeatableQuest",
-        // Newly reachable in Phase 4 via BotConfig.Generation and PlayerScavConfig.ItemLimits, but
-        // two production paths write it per bot generated: BotWeaponGenerator builds one as a scratch
-        // local for every UBGL-armed bot, and PlayerScavGenerator.AdjustItemWeights overwrites
-        // Weights/Whitelist on the bot template for every karma subtype. Both would cost a full
-        // republish on the next native call, on the hottest path in the server. Neither consumer
-        // reads these values from the resident configs root today - bot generation gets BotConfig in
-        // its per-request payload (BotPayloadProjection.BuildRequest) and player-scav generation
-        // never crosses into native - but unread is not un-stale, so the coverage this gives up is
-        // in RUST-ROADMAP.md's Broken ledger.
+        // Newly reachable in Phase 4 through EquipmentFilters.Randomisation[].Generation (BotConfig)
+        // and KarmaLevel.ItemLimits (PlayerScavConfig), but two production paths write it per bot
+        // generated: BotWeaponGenerator builds one as a scratch local for every UBGL-armed bot, and
+        // PlayerScavGenerator.AdjustItemWeights overwrites Weights/Whitelist on the bot template for
+        // every karma subtype. Both would cost a full republish on the next native call, on the
+        // hottest path in the server. Neither write is read back from the resident configs root
+        // today - bot generation gets BotConfig and the bot template alike in its per-request payload
+        // (BotPayloadProjection.BuildRequest takes both) - but unread is not un-stale, so the
+        // coverage this gives up is in RUST-ROADMAP.md's Broken ledger.
         "SPTarkov.Server.Core.Models.Eft.Common.Tables.GenerationData",
     ];
 
