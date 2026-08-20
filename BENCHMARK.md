@@ -296,7 +296,10 @@ actually reads is 736.7–748.2 ms against flip #6's nearer 732.9–745.1 — **
 range endpoints, inside a per-recipe spread of 719–811 ms. So the spike's configs row does not
 predict the marginal price of the root in a real publish: 67.7 ms warm for 0.7 MiB, against globals'
 7.3 ms for the same 0.7 MiB, is a 9x gap at equal size that this publish does not reproduce.
-Mechanism not chased. Nothing per-call moved for the root either: the warm arm holds at
+The gap is the spike fixture, not the projection: `DbPublishSpikeTests.cs:57-78` calls
+`ConfigLoader.Initialize(...)` *inside* the timed closure, so both its cold and warm configs figures
+pay a full 28-file disk read plus deserialize that no other root's closure pays.
+Nothing per-call moved for the root either: the warm arm holds at
 1.54–1.93 ms against flip #5's 1.58–1.88 ms.
 
 The bot wire has no committed fixture that reports bytes — `BotPayloadSizeTests` pins the *override*

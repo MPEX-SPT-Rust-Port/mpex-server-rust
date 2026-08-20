@@ -843,8 +843,15 @@ gained `GenerationData`, so there are **four** denied types now, and gained name
 drifted entry fails the build instead of silently barriering nothing. **7, `Option<Lift>` is the
 strictness contract at the stem boundary.** An absent stem is `None` — the root parses, and the
 family's per-call resolve fails loudly naming the stem. A present-but-malformed stem fails the whole
-publish parse (`STATUS_BAD_ARGS`), previous resident DB intact. **8, caller-selected config stays
-varying.** Quest's `repeatableConfig` — the caller picks which `QuestConfig.RepeatableQuests[i]`
+publish parse (`STATUS_BAD_ARGS`), previous resident DB intact — but *not* for one call only:
+`DbPublisher.PublishLocked` never reaches `_lastPublishedStamp = stamp` when the publish throws, so
+every later `EnsureCurrent()` re-attempts and throws again, from outside `ResidentDbDispatch.Send`'s
+try, and every eligible native call 500s until the config is fixed. Reachable only through a mod
+nulling a `required` member with `TrustNativeRequestCacheWithMods` on; the shipped projection cannot
+produce it. The one lift that deliberately breaks the rule is `spt-item`, whose four sets stay
+`#[serde(default)]` despite being C# `required` — the reasoning is in `ItemConfigLift`'s doc.
+**8, caller-selected config stays varying.** Quest's `repeatableConfig` — the caller picks which
+`QuestConfig.RepeatableQuests[i]`
 applies — keeps riding both arms, flip #6's precedent for caller-supplied products; same for loot's
 `containerSettings`/`rewardDetails` and bots' `levelGeneration`. **9, the bot equipment blacklists
 moved to native selection.** The per-(role, level) `FirstOrDefault` over

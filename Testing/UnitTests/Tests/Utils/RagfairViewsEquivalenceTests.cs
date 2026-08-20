@@ -66,8 +66,9 @@ public class RagfairViewsEquivalenceTests
             writer.WriteEndObject();
         }
 
-        // Exactly the eight views the resident DB derives natively - the views override carries
-        // them and nothing else
+        // Exactly the eight views the resident DB derives natively. The override carries three more
+        // members since the Phase 4 ragfair flip, but those come off the configs root, not this
+        // derivation
         var viewsPath = Path.Combine(Path.GetTempPath(), "spt-phase1-ragfair-views-expected.json");
         var expectedViews = new (string Name, byte[] Bytes)[]
         {

@@ -11,7 +11,7 @@ namespace UnitTests.Tests.Native;
 
 /// <summary>
 /// The other half of Phase 2's bargain. Barriers are only worth having if a steady-state workload
-/// does not dirty the stamp, because a dirty stamp costs a full five-root republish on the next
+/// does not dirty the stamp, because a dirty stamp costs a full six-root republish on the next
 /// native call. Each test runs a representative workload twice and asserts the second pass needed
 /// no republish - i.e. the workload's own writes are either absent, converged, or suppressed.
 ///
@@ -99,7 +99,7 @@ public class WriteBarrierChurnTests
     /// than through the republish it would otherwise cost. A static-containers response deserializes
     /// hundreds of SpawnpointTemplates, whose setters are barriered because LocationTable reaches the
     /// type - so without the scope one native call moves the stamp once per decoded property and
-    /// every call after it pays a five-root republish. Narrowing or removing that scope has to fail
+    /// every call after it pays a six-root republish. Narrowing or removing that scope has to fail
     /// here by name, not turn up as a perf regression in LocationLootGeneratorTests.
     /// </summary>
     [Test]

@@ -177,6 +177,22 @@ pub struct RepairKitLift {
 /// `Models/Spt/Config/ItemConfig.cs` — the four sets the reward families read. Shared: the scav
 /// case and repeatable-quest families read `rewardItemBlacklist`/`bossItems`, the ragfair family
 /// reads `blacklist`.
+///
+/// **Deliberately soft, and the only lift that is.** All four members are `required` in C#
+/// (`ItemConfig.cs:16,28,34,40`), so the rule the other lifts follow — mirror the C# `required`, as
+/// [`RagfairConfigLift::dynamic`] does — would make every one of them strict. They carry
+/// `#[serde(default)]` anyway because `spt-item` is the one stem five families share (scav case,
+/// repeatable quest, ragfair, bot, reward loot), and their fixtures publish it *partially* on
+/// purpose: `scav_case/mod.rs:391` and `quest/mod.rs:295` publish a bare `{"bossItems": [...]}` to
+/// prove that the absence of the **sibling** stem is what fails, and the bot family's filler
+/// (`bot/mod.rs:483`) publishes `{"kind": …, "blacklist": [...]}`, the one member flip #6's cases
+/// read. Strict members would turn each of those into a publish failure and make the fixtures
+/// assert the wrong thing.
+///
+/// The consequence to know: a *present but partial* `spt-item` stem yields empty sets, so a family
+/// reading it silently stops filtering rather than failing loudly. Unreachable from the shipped
+/// projection — C# `required` members always serialize, so every stem the server publishes carries
+/// all four — but a hand-built or mod-rewritten stem could fall into it.
 #[derive(Debug, Default, Deserialize)]
 pub struct ItemConfigLift {
     /// `ItemConfig.Blacklist` (`ItemConfig.cs:14-15`) — what `ItemFilterService.GetBlacklistedItems`

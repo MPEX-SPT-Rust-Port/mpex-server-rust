@@ -142,9 +142,14 @@ releases with `spt_buf_free`; so do `spt_console_read_line` and `spt_log_format`
   member of a lifted stem nobody reads. **The strictness contract to know before adding a stem:** each is an
   `Option<Lift>`, so an *absent* stem still parses and the reading family fails its per-call resolve loudly
   naming the stem, while a *malformed* one fails the whole publish (`STATUS_BAD_ARGS`) and leaves the
-  previous resident DB standing. Which config members deliberately stayed per-call — the ones a C# writer
-  mutates in place through an indexer, where no write barrier fires, or that the caller itself selects — is
-  in RUST-ROADMAP.md's Phase 4 ledger. Phase 4 added **no** export.
+  previous resident DB standing — and keeps failing, because `DbPublisher.PublishLocked` never advances
+  `_lastPublishedStamp` on a throw, so every later `EnsureCurrent()` retries and throws from outside
+  `ResidentDbDispatch.Send`'s try, and every eligible native call 500s until the config is fixed. A member
+  is strict exactly when the C# member is `required`, with one deliberate exception: `spt-item`, whose four
+  sets stay `#[serde(default)]` so the five families sharing the stem can keep publishing partial ones in
+  their fixtures (`ItemConfigLift`'s doc has the trade). Which config members deliberately stayed per-call
+  — the ones a C# writer mutates in place through an indexer, where no write barrier fires, or that the
+  caller itself selects — is in RUST-ROADMAP.md's Phase 4 ledger. Phase 4 added **no** export.
 - **A buffer is written on failure too** — the parse error, the `LootError` message, or the panic text.
   Ownership is decided by the out-pointer being non-null, never by the status code. `spt_verify_database`'s
   free-on-success-only shape must not be copied into the generators.
