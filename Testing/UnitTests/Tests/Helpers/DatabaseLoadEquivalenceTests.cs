@@ -23,6 +23,22 @@ public class DatabaseLoadEquivalenceTests
 {
     private const string SptDataPath = "./SPT_Data/";
 
+    /// One eager file per <see cref="DatabaseTables"/> root, named rather than counted so SPT_Data
+    /// gaining or losing files does not make the fixture brittle.
+    private static readonly string[] BufferFedPerRoot =
+    [
+        "database/bots/types/assault.json",
+        "database/globals.json",
+        "database/hideout/production.json",
+        "database/locales/menu/en.json",
+        "database/locations/bigmap/statics.json",
+        "database/match/metrics.json",
+        "database/server.json",
+        "database/settings.json",
+        "database/templates/items.json",
+        "database/traders/54cb50c76803fa8b248b4571/base.json",
+    ];
+
     private ImporterUtil _importerUtil = default!;
 
     [OneTimeSetUp]
@@ -45,6 +61,13 @@ public class DatabaseLoadEquivalenceTests
     {
         var legacy = await _importerUtil.LoadRecursiveAsync<DatabaseTables>($"{SptDataPath}database/");
         var load = SptNative.DbLoad(SptDataPath, verify: false);
+
+        // Anti-vacuity. A key the map lacks falls back to disk silently (ImporterUtil.DeserializeFileAsync),
+        // so a native filter that drops a subtree would turn this arm into a second legacy arm for that
+        // subtree and every comparison below would still pass. One file per compared root, three of them
+        // two levels down, pins that every root is really buffer-fed.
+        Assert.That(load.Files.Keys, Is.SupersetOf(BufferFedPerRoot), "the fused load stopped feeding a root the golden compares");
+
         var native = await _importerUtil.LoadRecursiveAsync<DatabaseTables>($"{SptDataPath}database/", load.Files);
 
         // Roots with no LazyLoad anywhere below them: whole-root byte equality. Only globals.json,
