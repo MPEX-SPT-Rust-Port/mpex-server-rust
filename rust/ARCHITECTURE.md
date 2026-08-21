@@ -50,7 +50,7 @@ different assembly: `Libraries/SPTarkov.Common/Native/NativeMethods.cs`, with
 
 | Path | Role |
 |---|---|
-| `src/lib.rs` | Module roots and `ABI_VERSION` (currently 30; must equal `SptNative.ExpectedAbiVersion`) |
+| `src/lib.rs` | Module roots and `ABI_VERSION` (currently 31; must equal `SptNative.ExpectedAbiVersion`) |
 | `src/ffi.rs` | The C-ABI surface. The **only** module containing `unsafe` |
 | `src/runtime.rs` | Process-wide multi-thread tokio runtime, `OnceLock`-built. Used only by `verify` and the fused load |
 | `src/verify.rs` | Hashes `SPT_Data` with XXH3-128 and diffs it against `checks.dat`. `verify_collecting` is the same walk with a `want` predicate that whole-reads and returns matching files' bytes, so the fused load reads each file once |
@@ -69,6 +69,7 @@ different assembly: `Libraries/SPTarkov.Common/Native/NativeMethods.cs`, with
 | `src/scav_case/` | One scav case craft's rewards: the pools, the per-rarity picks, the money/ammo/preset arms |
 | `src/base_class.rs` | The whole `ItemBaseClassService` cache in one call, over `loot/item_helper.rs`'s `ItemBaseClassCache` |
 | `src/linked_items.rs` | The whole `RagfairLinkedItemService` table in one call: the bidirectional slot/chamber/cartridge walk plus the revolver camora-ammo edge case |
+| `src/profile.rs` | The disk half of `SaveServer`: list, load, save, delete over `user/profiles/`, with `FileUtil.WriteFileAsync`'s temp-then-rename protocol. Stateless — the directory arrives in every request — and profile bytes are opaque, written and read verbatim. The live `SptProfile` graph, the MD5 dirty-check and `BackupService` all stay C# |
 
 ```
 C# SptNative → spt_generate_* (JSON in)
@@ -95,8 +96,12 @@ trades that for build time — `opt-level = 1`, sixteen codegen units, line-tabl
 
 ### FFI boundary (`ffi.rs`)
 
-Thirty `extern "C"` exports: two trivial (`spt_native_abi_version`, `spt_buf_free`), thirteen taking a
-UTF-8 JSON generation request, `spt_verify_database` taking a directory path, `spt_db_publish` taking the
+Thirty-four `extern "C"` exports: two trivial (`spt_native_abi_version`, `spt_buf_free`), thirteen taking a
+UTF-8 JSON generation request, four taking a profile-persistence request (`{schema, dir}`, plus `id`
+on all but `spt_profile_list` and the profile text on `spt_profile_save` — see *`src/profile.rs`*;
+`spt_profile_load` returns a framed byte response, `[u32-LE header length][{"found":bool}][file
+bytes]`),
+`spt_verify_database` taking a directory path, `spt_db_publish` taking the
 resident-DB publish envelope, `spt_db_load` taking the fused-load request (`{schema, dir, verify}`) and
 returning a framed byte response — a length-prefixed JSON header naming the verify report, the installed
 epoch and each returned file's path and length, followed by the file bodies back to back —
@@ -104,10 +109,11 @@ epoch and each returned file's path and length, followed by the file bodies back
 for the log pipeline and the terminal it owns (`spt_logger_init`, `spt_logger_reinit`, `spt_log_emit`,
 `spt_logger_close`, `spt_log_set_tap`, `spt_log_enabled`, `spt_log_format`, `spt_console_write`,
 `spt_console_read_line`, `spt_console_set_title`, `spt_console_clear` — see *The log pipeline*). The
-sixteen generation/verify/publish/load exports hand back a heap buffer on success, which the caller
+twenty generation/verify/publish/load/profile exports hand back a heap buffer on success, which the caller
 releases with `spt_buf_free`; so do `spt_console_read_line` and `spt_log_format`.
 
-- `run_generator_with` is the shared body of every generation export, `spt_db_publish` and `spt_db_load` —
+- `run_generator_with` is the shared body of every generation export, `spt_db_publish`, `spt_db_load` and
+  the four `spt_profile_*` —
   parse, `catch_unwind`,
   encode — so a new export is a thin wrapper over it, generic in its error type and response encoding.
   `spt_db_load` is its own encoder (the framed byte response) and blocks on the tokio runtime inside its
@@ -385,7 +391,11 @@ Almost all tests are inline `#[cfg(test)]` modules (~770 of them). Three kinds:
   C# end.
 - **FFI transport tests** — `ffi.rs` round-trips the exports through raw pointers, covering success, parse
   failure, generation failure and null arguments. `spt_generate_bot_inventory_batch` is the one export with no
-  transport test of its own.
+  transport test of its own. The four `spt_profile_*` are covered here too — junk envelope, wrong schema,
+  traversal id, null args.
+
+`profile.rs`'s own tests each work in a `tempfile::TempDir` and touch no resident state, so unlike the
+resident-DB tests they need no `DB_TEST_LOCK` and run fully parallel.
 
 Ten `tests/` targets, in three groups. `completion_whitelist_baseclass.rs` and `phase3_db_load.rs` run
 against the real shipped tree, so both need `scripts/decompress-assets.sh` to have run: the first guards the
@@ -413,9 +423,10 @@ over the server-assembly probe, `spectre-facade`'s two.
 
 | External System | Integration Type | Notes |
 |-------------------|-------------------|-------|
-| `SPTarkov.Server.Core` | Sync FFI, C ABI | `Native/NativeMethods.cs` + `SptNative.cs` and the per-family projections. Thirty exports; `ABI_VERSION` must equal `SptNative.ExpectedAbiVersion` |
+| `SPTarkov.Server.Core` | Sync FFI, C ABI | `Native/NativeMethods.cs` + `SptNative.cs` and the per-family projections. Thirty-four exports; `ABI_VERSION` must equal `SptNative.ExpectedAbiVersion` |
 | `SPTarkov.Common` | Sync FFI, C ABI | The eleven log and console exports plus `spt_buf_free`, from a second `Native/NativeMethods.cs` — Common cannot reference Core |
 | `SPT_Data/` on disk | Batch, async over tokio | `spt_verify_database` hashes `configs/` + `database/` with XXH3-128; `spt_db_load` (since ABI 29) does that walk *and* reads `database/` in one pass, installing the five database roots — never the configs root, which only `spt_db_publish` builds — and handing the eager bytes back to `DatabaseImporter`; `gen_checks` writes `checks.dat` on Release builds |
+| `user/profiles/` on disk | Blocking read/write per call | `spt_profile_*` (since Phase 5) own every live listing, read, write and delete; the directory arrives in each request. `BackupService` (C#) still copies and restores beside them |
 | `sptLogger.json` | Config bytes over FFI | Parsed once per process by `spt_logger_init`; filters use `regex-lite`, so .NET-only syntax degrades to never-match |
 | Log files on disk | Async, background thread per sink | `log_sink.rs`: bounded channel that drops rather than grows; rotation and archive cap enforced together |
 | .NET CLR (`mpex-server`) | Process host | netcorehost `run_app`s the published server assembly with argv forwarded; libnethost comes from NuGet at build time via the `nethost-download` feature |
