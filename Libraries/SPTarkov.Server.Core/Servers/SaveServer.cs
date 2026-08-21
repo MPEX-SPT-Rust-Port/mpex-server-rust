@@ -71,7 +71,19 @@ public sealed class SaveServer(
         var totalTime = 0L;
         foreach (var sessionID in profiles)
         {
-            totalTime += await SaveProfileAsync(sessionID.Key, cancellationToken);
+            try
+            {
+                totalTime += await SaveProfileAsync(sessionID.Key, cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception e)
+            {
+                // One unwritable profile must not starve the others: this loop is the autosave tick.
+                logger.Error($"Failed to save profile {sessionID.Key.ToString()}: {e.Message}");
+            }
         }
 
         if (!profiles.IsEmpty && logger.IsLogEnabled(LogLevel.Debug))
@@ -274,9 +286,10 @@ public sealed class SaveServer(
             var fmd5 = await hashUtil.GenerateHashForDataAsync(HashingAlgorithm.MD5, jsonProfile, cancellationToken);
             if (!saveMd5.TryGetValue(sessionID, out var currentMd5) || currentMd5 != fmd5)
             {
-                saveMd5[sessionID] = fmd5;
                 // save profile to disk
                 await fileUtil.WriteFileAsync(filePath, jsonProfile, cancellationToken);
+                // Only once the bytes are on disk does this hash describe the file.
+                saveMd5[sessionID] = fmd5;
             }
 
             start.Stop();
