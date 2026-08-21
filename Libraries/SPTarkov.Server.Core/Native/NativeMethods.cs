@@ -82,6 +82,18 @@ internal static unsafe partial class NativeMethods
     [LibraryImport(LibraryName, EntryPoint = "spt_db_load")]
     internal static partial int DbLoad(byte* requestUtf8, nuint requestLen, byte** outPtr, nuint* outLen);
 
+    [LibraryImport(LibraryName, EntryPoint = "spt_profile_list")]
+    internal static partial int ProfileList(byte* requestUtf8, nuint requestLen, byte** outPtr, nuint* outLen);
+
+    [LibraryImport(LibraryName, EntryPoint = "spt_profile_load")]
+    internal static partial int ProfileLoad(byte* requestUtf8, nuint requestLen, byte** outPtr, nuint* outLen);
+
+    [LibraryImport(LibraryName, EntryPoint = "spt_profile_save")]
+    internal static partial int ProfileSave(byte* requestUtf8, nuint requestLen, byte** outPtr, nuint* outLen);
+
+    [LibraryImport(LibraryName, EntryPoint = "spt_profile_delete")]
+    internal static partial int ProfileDelete(byte* requestUtf8, nuint requestLen, byte** outPtr, nuint* outLen);
+
     [LibraryImport(LibraryName, EntryPoint = "spt_locales_set")]
     internal static partial int LocalesSet(byte* jsonUtf8, nuint jsonLen, byte** outPtr, nuint* outLen);
 

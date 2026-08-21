@@ -2,6 +2,7 @@ using System.Buffers.Binary;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using SPTarkov.Server.Core.Models.Common;
 using SPTarkov.Server.Core.Models.Eft.Ragfair;
 using SPTarkov.Server.Core.Models.Enums;
 using SPTarkov.Server.Core.Native.BaseClass;
@@ -74,6 +75,13 @@ internal sealed class DbLoadResult
 
     public required Dictionary<string, ReadOnlyMemory<byte>> Files { get; init; }
 }
+
+/// <summary>
+/// One profile off disk: its bytes exactly as they were stored, <c>default</c> when the file was
+/// not there. Bytes and not a string on purpose - the profile goes straight into
+/// <c>jsonUtil.Deserialize(span, type)</c>, so tens of MB are never widened to UTF-16.
+/// </summary>
+internal readonly record struct ProfileLoadResult(bool Found, ReadOnlyMemory<byte> Utf8Json);
 
 /// <summary>
 /// Picks which of the generation exports a request goes to.
@@ -474,6 +482,223 @@ public static class SptNative
             Epoch = header.Epoch,
             Files = files,
         };
+    }
+
+    /// <summary>
+    /// Every file name in the profiles directory, sorted, the directory created when it is missing.
+    /// Nothing is filtered here - the <c>.json</c> extension and MongoId-stem gates stay in
+    /// SaveServer, verbatim.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">The read failed, or the native side misbehaved.</exception>
+    internal static Task<IReadOnlyList<string>> ProfileListAsync(string profilesDir)
+    {
+        // No CancellationToken: one bounded blocking directory read that cannot be interrupted once
+        // in flight, so accepting a token would promise cancellation it can't deliver.
+        return Task.Run(() => ProfileList(profilesDir));
+    }
+
+    private static unsafe IReadOnlyList<string> ProfileList(string profilesDir)
+    {
+        EnsureLoadable();
+
+        // Default options on purpose: scalar members only, wire names pinned by profile.rs.
+        var requestUtf8 = JsonSerializer.SerializeToUtf8Bytes(new { schema = 1, dir = profilesDir });
+        byte* outPtr = null;
+        nuint outLen = 0;
+        int status;
+
+        fixed (byte* requestPtr = requestUtf8)
+        {
+            status = NativeMethods.ProfileList(requestPtr, (nuint)requestUtf8.Length, &outPtr, &outLen);
+        }
+
+        return DecodeResult<IReadOnlyList<string>>(
+            "spt_profile_list",
+            status,
+            outPtr,
+            outLen,
+            (buffer, length) =>
+            {
+                // The response body is {"files":[...]}
+                return JsonSerializer.Deserialize<ProfileListResponse>(new ReadOnlySpan<byte>((byte*)buffer, length))?.Files
+                    ?? throw new InvalidOperationException("spt_native returned an empty spt_profile_list response.");
+            }
+        );
+    }
+
+    private sealed record ProfileListResponse([property: JsonPropertyName("files")] List<string> Files);
+
+    /// <summary>
+    /// One profile's stored bytes, or <see cref="ProfileLoadResult.Found"/> false when the file is
+    /// not there. Corrupt JSON is not detected here - the caller discovers it on deserialize and
+    /// runs its unchanged backup-recovery arm.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">The read failed, or the native side misbehaved.</exception>
+    internal static Task<ProfileLoadResult> ProfileLoadAsync(string profilesDir, MongoId sessionId)
+    {
+        // No CancellationToken: one bounded blocking file read (ProfileListAsync's reasoning).
+        return Task.Run(() => ProfileLoad(profilesDir, sessionId));
+    }
+
+    private static unsafe ProfileLoadResult ProfileLoad(string profilesDir, MongoId sessionId)
+    {
+        EnsureLoadable();
+
+        // Default options on purpose: scalar members only, wire names pinned by profile.rs.
+        var requestUtf8 = JsonSerializer.SerializeToUtf8Bytes(
+            new
+            {
+                schema = 1,
+                dir = profilesDir,
+                id = sessionId.ToString(),
+            }
+        );
+        byte* outPtr = null;
+        nuint outLen = 0;
+        int status;
+
+        fixed (byte* requestPtr = requestUtf8)
+        {
+            status = NativeMethods.ProfileLoad(requestPtr, (nuint)requestUtf8.Length, &outPtr, &outLen);
+        }
+
+        return DecodeResult(
+            "spt_profile_load",
+            status,
+            outPtr,
+            outLen,
+            (buffer, length) =>
+            {
+                return ParseProfileFrame((byte*)buffer, length);
+            }
+        );
+    }
+
+    /// <summary>
+    /// The framed profile response: a u32-LE header length, the header JSON, then the file's bytes.
+    /// The blob is copied into a managed array - the native buffer is freed as soon as this returns.
+    /// </summary>
+    private static unsafe ProfileLoadResult ParseProfileFrame(byte* buffer, int length)
+    {
+        var span = new ReadOnlySpan<byte>(buffer, length);
+        var headerLength = checked((int)BinaryPrimitives.ReadUInt32LittleEndian(span));
+        var at = 4;
+        if (headerLength > length - at)
+        {
+            throw new InvalidOperationException(
+                $"spt_native spt_profile_load claims a {headerLength}-byte header with only {length - at} bytes in the frame."
+            );
+        }
+
+        var header =
+            JsonSerializer.Deserialize<ProfileLoadHeader>(span.Slice(at, headerLength))
+            ?? throw new InvalidOperationException("spt_native returned an empty spt_profile_load header.");
+        at += headerLength;
+
+        return new ProfileLoadResult(header.Found, header.Found ? span[at..].ToArray() : default);
+    }
+
+    private sealed record ProfileLoadHeader([property: JsonPropertyName("found")] bool Found);
+
+    /// <summary>
+    /// Writes one profile through the native temp-then-rename protocol.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">The write failed, or the native side misbehaved.</exception>
+    internal static Task ProfileSaveAsync(string profilesDir, MongoId sessionId, string profileJson)
+    {
+        // No CancellationToken: one bounded blocking write+rename that cannot be interrupted once in
+        // flight; SaveServer checks its token before it gets here.
+        return Task.Run(() => ProfileSave(profilesDir, sessionId, profileJson));
+    }
+
+    private static unsafe void ProfileSave(string profilesDir, MongoId sessionId, string profileJson)
+    {
+        EnsureLoadable();
+
+        // Capacity is a UTF-16 char count sizing a UTF-8 buffer: exact for the ASCII the profile
+        // almost entirely is, one doubling for the odd non-ASCII player name. GetMaxByteCount would
+        // reserve 3x of tens of MB to avoid a realloc that costs less than the reservation.
+        using var request = new MemoryStream(profileJson.Length + 128);
+        using (var writer = new Utf8JsonWriter(request))
+        {
+            writer.WriteStartObject();
+            writer.WriteNumber("schema", 1);
+            writer.WriteString("dir", profilesDir);
+            writer.WriteString("id", sessionId.ToString());
+            writer.WritePropertyName("profile");
+            // Byte-fidelity is the contract: what jsonUtil.Serialize produced is what Rust writes to
+            // disk, and RawValue carries it verbatim. Re-serialising through a JsonNode here would
+            // re-escape every Cyrillic item name and normalise the whitespace, and the damage would
+            // land on disk. WriteRawValue embeds it without touching a byte.
+            writer.WriteRawValue(profileJson, skipInputValidation: true);
+            writer.WriteEndObject();
+        }
+
+        byte* outPtr = null;
+        nuint outLen = 0;
+        int status;
+
+        // The backing array is pinned whole and bounded by the stream's length: slicing it first
+        // would copy the entire envelope into a fresh array, which on a profile this size is the one
+        // allocation worth avoiding here.
+        fixed (byte* requestPtr = request.GetBuffer())
+        {
+            status = NativeMethods.ProfileSave(requestPtr, (nuint)request.Length, &outPtr, &outLen);
+        }
+
+        // The response body is {} - nothing to read, but the status ladder and the free still apply.
+        DecodeResult<bool>(
+            "spt_profile_save",
+            status,
+            outPtr,
+            outLen,
+            (_, _) =>
+            {
+                return true;
+            }
+        );
+    }
+
+    /// <summary>
+    /// Removes one profile. <c>true</c> = the file was there and is gone; <c>false</c> = it was not
+    /// there, which the caller logs exactly as <c>fileUtil.DeleteFile</c>'s false return does today.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">The delete failed, or the native side misbehaved.</exception>
+    internal static unsafe bool ProfileDelete(string profilesDir, MongoId sessionId)
+    {
+        EnsureLoadable();
+
+        // Default options on purpose: scalar members only, wire names pinned by profile.rs.
+        var requestUtf8 = JsonSerializer.SerializeToUtf8Bytes(
+            new
+            {
+                schema = 1,
+                dir = profilesDir,
+                id = sessionId.ToString(),
+            }
+        );
+        byte* outPtr = null;
+        nuint outLen = 0;
+        int status;
+
+        fixed (byte* requestPtr = requestUtf8)
+        {
+            status = NativeMethods.ProfileDelete(requestPtr, (nuint)requestUtf8.Length, &outPtr, &outLen);
+        }
+
+        return DecodeResult(
+            "spt_profile_delete",
+            status,
+            outPtr,
+            outLen,
+            (buffer, length) =>
+            {
+                // The response body is {"deleted":bool}
+                using var document = JsonDocument.Parse(new ReadOnlySpan<byte>((byte*)buffer, length).ToArray());
+
+                return document.RootElement.GetProperty("deleted").GetBoolean();
+            }
+        );
     }
 
     /// <summary>
