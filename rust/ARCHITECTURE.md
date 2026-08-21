@@ -29,16 +29,33 @@ Inline tests included, `src/` splits: `bot/` ~32%, `loot/` ~23%, `ragfair/` ~15%
 |-----------|-----------------|------------------|
 | `spt-native` | The port: generation families, resident DB, database verification, the log pipeline and the terminal. `cdylib` + `rlib` | `Libraries/SPTarkov.Server.Core/Native/` for everything but the log and console exports, which come from `Libraries/SPTarkov.Common/Native/NativeMethods.cs` |
 | `spectre-facade` | Emits a facade `Spectre.Console.Ansi.dll` exposing only `Spectre.Console.Color` | Built by `BuildSpectreFacade` in `SPTarkov.Common.csproj`; referenced by five C# projects |
-| `mpex-server` | Shipped launcher: hosts the CLR via netcorehost and `run_app`s the published server assembly, argv forwarded | The published `SPT.Server` assembly; `Containerfile.release`'s entrypoint. **Must not depend on `spt-native`** |
+| `mpex-server` | Shipped launcher: hosts the CLR via netcorehost and `run_app`s the published server assembly, argv forwarded. Since Phase 6b it links `spt-native` as an rlib and re-exports its symbols | The published `SPT.Server` assembly; `spt-native`; `Containerfile.release`'s entrypoint |
 
 `spectre-facade` has nothing to do with the port. It is a ~520-line `dotnetdll` program, needed because the
 frozen 4.1.2 mod surface has `Spectre.Console.Color` baked into `ISptLogger<T>`, `SptLogMessage`,
 `ClientLogRequest` and `Watermark.Draw`, and a compiled mod's typeref can only be satisfied by an assembly of
 that name. Built on every build, but incrementally. Its own header covers the fidelity gaps.
 
-`mpex-server`'s split-brain rule is load-bearing and stated in its `Cargo.toml`: it must **not** depend on
-`spt-native`. The resident DB's statics live in the cdylib the CLR loads; linking the rlib into the launcher
-would create a second, divergent copy.
+**The split-brain rule, post-6b:** exactly one linkage path may be live *per process*. `mpex-server` links
+`spt-native` as an rlib and, via `-Wl,--export-dynamic` in `.cargo/config.toml`, carries all 34
+`#[unsafe(no_mangle)]` exports in its own `.dynsym`; the resident DB's statics therefore live in the executable.
+The published Linux tree ships **no cdylib** (`ExcludeSptNativeFromPublish` in `SPTarkov.Server.csproj`), so
+there is nothing for a second copy to come from. The cdylib is still built and still lives in `bin/`, which is
+what `dotnet test` and the `SPT.Server` dev executable bind to — a different process, never this one. The C#
+resolver enforces the order; see ARCHITECTURE.md § *Native Rust layer*.
+
+Two things that follow, and that a reader will otherwise trip over:
+
+- **The launcher must reference `spt_native` in its own source.** An rlib nothing references is discarded whole
+  by the linker, taking all 34 exports with it, silently, at link time. `src/main.rs` carries a deliberate
+  anchor call and `scripts/smoke-mpex-server.sh` asserts the count. Any path reference suffices — the anchor is
+  a call only so that deleting it looks like a behaviour change rather than dead-code cleanup.
+- **`.cargo/config.toml` is discovered from the working directory, not from `--manifest-path`.** Building with
+  `--manifest-path rust/Cargo.toml` from the repo root silently drops every rustflag, including
+  `--export-dynamic`, and yields zero exports for reasons unrelated to the anchor. Always `cd rust` first.
+
+Windows is deliberately unchanged: an `.exe` has no export table without `/EXPORT:` args or a `.def` file, so
+the publish exclusion is gated on the Linux target and a Windows launcher still resolves through the cdylib.
 
 The C# side of the `spt-native` boundary is `Libraries/SPTarkov.Server.Core/Native/` — `NativeMethods.cs`,
 `SptNative.cs` and the per-family payload projections under `BaseClass/`, `Bot/`, `Db/`, `Loot/`, `Ragfair/`,
@@ -167,7 +184,8 @@ releases with `spt_buf_free`; so do `spt_console_read_line` and `spt_log_format`
   they happened through `diag::DiagSink`; the error text itself is the C# caller's to log.
 
 Adding an export means bumping `ABI_VERSION` and `SptNative.ExpectedAbiVersion` together; a test in `ffi.rs`
-asserts the constant so the bump can't be forgotten.
+asserts the constant so the bump can't be forgotten. It also changes the export count
+`scripts/smoke-mpex-server.sh` asserts against `mpex-server`'s `.dynsym` — update that in the same commit.
 
 ### `src/verify.rs`
 

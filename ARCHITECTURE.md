@@ -3,7 +3,8 @@
 ## 1. Overview Summary
 
 How the SPT server is put together — a map, not a manual. A .NET solution hosting the Escape from Tarkov
-private server, with the hot generation paths ported to a Rust `cdylib` called over C ABI. One executable host
+private server, with the hot generation paths ported to a Rust crate called over C ABI — linked into the
+shipped executable, loaded as a `cdylib` in dev and test builds. One executable host
 brings up logging, configs, mods and the JSON database, then hands every HTTP request to a single catch-all
 middleware that routes it through declarative routers to callbacks, controllers and the logic layers. For
 build/run commands see [CLAUDE.md](CLAUDE.md).
@@ -79,6 +80,11 @@ Shipped builds launch through `rust/mpex-server`, a thin Rust executable that ho
 netcorehost and `run_app`s the published server assembly with argv forwarded — the C# code,
 FFI boundary, and mod contract are unchanged, and dev builds still run the `SPT.Server`
 executable directly. `Containerfile.release`'s entrypoint is `/app/mpex-server`.
+
+Since Phase 6b that executable also *contains* the Rust crate: it links `spt-native` as an rlib and
+is linked with `-Wl,--export-dynamic`, so the resident DB, the logger and every other `static` live
+in the host process rather than in a separately-loaded shared object. A published Linux tree ships
+no cdylib as a result. See § *Native Rust layer* for how the CLR binds to those exports.
 
 ---
 
@@ -177,7 +183,7 @@ which `DatabaseImporter` verifies at startup outside DEBUG. The format is a cont
 
 ### Native Rust layer
 
-`rust/spt-native` is a `cdylib` called over C ABI from `Libraries/SPTarkov.Server.Core/Native/`
+`rust/spt-native` is called over C ABI from `Libraries/SPTarkov.Server.Core/Native/`
 (`NativeMethods.cs`, `SptNative.cs`) — and, for the log and console exports, from the twin
 `Libraries/SPTarkov.Common/Native/NativeMethods.cs`, because `SPTarkov.Common` cannot reference
 Server.Core. It owns database hash verification, the ported generation paths (location loot, reward
@@ -190,6 +196,22 @@ is a 4-byte little-endian header length, a JSON header, then the returned file b
 in header order; the profile load, framed the same way but with a `{"found":bool}` header and a
 single file body; and the log and console exports — with
 `spt_native_abi_version` handshaking against `SptNative.ExpectedAbiVersion`.
+
+**Where those exports come from depends on how the process started, and it is exactly one source per
+process.** Both `NativeMethods` classes register a `SetDllImportResolver` callback (they must both
+register: the resolver is per-assembly and Common cannot reference Server.Core, so the two bodies are
+deliberate twins and are kept byte-identical). Since Phase 6b each callback tries
+`NativeLibrary.GetMainProgramHandle()` first and takes it if `spt_native_abi_version` is exported
+there; otherwise it falls back to loading the cdylib from `AppContext.BaseDirectory`. Under
+`mpex-server` the first arm wins, because the launcher links the crate as an rlib and exports its
+symbols; under `SPT.Server`, `dotnet test`, or any Windows build the second does. Binding stays
+per-symbol and by name, so the `DllNotFoundException` / `EntryPointNotFoundException` pair the
+logging and console paths degrade on is unchanged.
+
+One non-obvious consequence, because it is invisible from the C# side: the launcher must reference
+`spt_native` in its own source or the linker discards the unreferenced rlib and *all* 34 exports with
+it. `rust/mpex-server/src/main.rs` carries a deliberate anchor call, and
+`scripts/smoke-mpex-server.sh` asserts the exported count is 34.
 
 Every ported *class* keeps its complete 4.1.2 C# implementation as a **legacy path**, taken
 automatically when a mod hooks it or forced by config, so a Rust cutover never removes a mod's
@@ -228,12 +250,12 @@ Linux-only `PropertyGroup`, so from a Windows host nothing maps and the guard in
 | External System | Integration Type | Notes |
 |-------------------|-------------------|-------|
 | Escape from Tarkov game client | Sync HTTP + async WebSocket | Every `/client/*` route; zlib both ways, responses wrapped in the `data`/`err`/`errmsg` envelope. `Models/Eft/` mirrors its wire contracts |
-| `rust/spt-native` (cdylib) | Sync FFI, C ABI | Thirty-four exports; JSON in/out except the MessagePack ragfair response, the fused database load's framed byte response (length-prefixed JSON header, then the file bodies), the profile load's (same framing, a `{"found":bool}` header and one file body), and the log and console exports. `spt_native_abi_version` handshakes `SptNative.ExpectedAbiVersion` |
+| `rust/spt-native` (rlib in the shipped exe; cdylib in dev/test/Windows) | Sync FFI, C ABI | Thirty-four exports; JSON in/out except the MessagePack ragfair response, the fused database load's framed byte response (length-prefixed JSON header, then the file bodies), the profile load's (same framing, a `{"found":bool}` header and one file body), and the log and console exports. `spt_native_abi_version` handshakes `SptNative.ExpectedAbiVersion`. The resolver picks the source: main program handle first, cdylib second — one per process |
 | `SPT_Data/` on disk | Batch read at startup | `configs/` via `ConfigLoader`, `database/` via `DatabaseImporter`, hash-verified against `checks.dat` outside DEBUG |
 | `user/profiles/` | Blocking read/write on a threadpool thread | `SaveServer` owns the JSON profiles; interval saves plus `BackupService` timers. Since Phase 5 the disk itself is `spt_profile_*` — the serialization, the MD5 dirty-check and `BackupService` stay C# |
 | `user/mods/`, `user/patchers/` | Reflective assembly load | Third-party DLLs: `[Injectable]` registrations, `IOnDIConstruct` hooks, HarmonyX patches, enum prepatchers |
 | Kestrel / HTTPS | Async, network | HTTPS-only with a self-generated certificate; the same host serves the game API, the admin panel and `/health` |
-| `.NET` CLR (shipped builds) | Process host | `rust/mpex-server` hosts the CLR via netcorehost and `run_app`s the published assembly; `Containerfile.release` entrypoint |
+| `.NET` CLR (shipped builds) | Process host | `rust/mpex-server` hosts the CLR via netcorehost and `run_app`s the published assembly; `Containerfile.release` entrypoint. Since Phase 6b it also links `spt-native` as an rlib and exports its symbols, so a published Linux tree ships no cdylib |
 
 ---
 

@@ -19,6 +19,11 @@ response, which is a framed MessagePack envelope, `spt_db_load` and `spt_profile
 responses are a JSON header frame followed by the loaded file bytes, and the log and console
 exports, which pass the fields of one line, or raw bytes, directly (current ABI 31).
 
+Since Phase 6b those exports are reached two ways, one per process. A shipped Linux build resolves
+them out of the `mpex-server` executable itself, which links the crate as an rlib; dev builds, the
+test run and Windows resolve them from the `spt_native` cdylib. The call shape is identical either
+way — `[LibraryImport]` against the name `spt_native`, with the resolver choosing the source.
+
 Native is not uniformly faster. Loot and repeatable quests win; bots, reward loot, ragfair, scav
 case, the base-class hydrate and the linked-item table are slower than the C# they replace, and
 native stays their default anyway — each case is argued where it is measured, in
@@ -357,7 +362,11 @@ silently drops camora ammo on the fifth); and the native `_type` test being
    randomness stays bit-for-bit unchanged.
 5. **FFI envelopes are internal.** Request/response types are a C#↔Rust contract shipped in lockstep
    — change them freely, bump `spt_native_abi_version` and `SptNative.ExpectedAbiVersion` together.
-   No third-party consumer of the cdylib is supported.
+   The in-tree assertion in `ffi.rs`'s `abi_version_export_matches_crate_const` is the third site and
+   must move with them. No third-party consumer of the cdylib is supported.
+   **Adding or removing an export** also changes the count `scripts/smoke-mpex-server.sh` asserts
+   against `mpex-server`'s `.dynsym` — update it in the same commit, or the smoke fails on a change
+   that is otherwise correct.
 6. **Ports keep an `[Injectable]` entry point.** A static wrapper like `SptNative` is only acceptable
    for startup-internal subsystems mods never touch. Anything patchable calls Rust from inside a
    resolved service.
@@ -1222,9 +1231,23 @@ written against, not the current file.
    the CLR via `netcorehost`, making Rust the executable). Phase 6a — the `run_app` bootstrap (`rust/mpex-server`,
    shipped by publish and the release container's entrypoint; `scripts/smoke-mpex-server.sh` is
    its e2e check) — landed 2026-08-18 (`mpex-server.exe` ships from the same wiring but has never
-   been executed on Windows); 6b (the delegate-loader shim flip, where the resident DB's
-   statics move into the exe and `SptNative.cs`'s `DllImport` layer dissolves into a vtable of
-   the existing exports) waited on Phases 3 and 5, and with both landed now waits on nothing.
+   been executed on Windows).
+   **Phase 6b landed 2026-08-21 (no ABI bump).** The resident DB's statics now live in the
+   executable: `mpex-server` links `spt-native` as an rlib and is linked with
+   `-Wl,--export-dynamic`, so all 34 exports sit in its own `.dynsym`, and the two
+   `SetDllImportResolver` callbacks try `NativeLibrary.GetMainProgramHandle()` before the cdylib.
+   The published Linux tree therefore ships no cdylib and `SPT.Server.Linux` is no longer a working
+   direct-run fallback there.
+   It is **not** the design the spec described. The planned shape — `initialize_for_runtime_config`
+   + `get_delegate_loader_for_assembly` + an `[UnmanagedCallersOnly] Init(HostVTable*)` in a shim
+   assembly, with `DllImport` replaced by a 34-slot vtable and an ABI bump to 32 — was written out
+   in full, reviewed twice, and replaced: `run_app`, `Program.Main`, `[LibraryImport]` and ABI 31
+   all stay, and the change is ~85 lines. Five spec overrides, the declined `Build.props` order flip
+   (nothing forces it: `mpex-server` links a sibling crate, not `SPT.Server.dll`) and the reasoning
+   are in the Phase 6b ledger. Carried forward: **Windows exports.** An `.exe` has no export table
+   without `/EXPORT:` args or a `.def` file, so the cdylib exclusion is Linux-gated and Windows
+   behaviour is unchanged — which also still means never executed, and `Build.props:31` still maps
+   no `win-x64` triple.
 2. Port candidates and their costing live in [todo/TODO.md](todo/TODO.md); with #1-#6
    landed, the unstarted front is tier 2. The two axes
    are independent — a flip re-homes data for something already ported, a TODO item ports
