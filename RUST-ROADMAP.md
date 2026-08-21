@@ -1081,7 +1081,8 @@ did **not** stream. `fileUtil.WriteFileAsync(filePath, jsonProfile, ct)` took th
 (`Utils/FileUtil.cs:103-107`), which does one `Encoding.UTF8.GetBytes` into a full-size `byte[]` and
 gives that to a single `fs.WriteAsync`, so peak was already `jsonProfile` (UTF-16) plus one
 full-size UTF-8 buffer. The `MemoryStream` **replaces** that buffer — same bytes plus ~128 of
-envelope — and is not an extra one. The two real new allocations are `profile.rs`'s
+envelope — and is not an extra one. The two real new costs are — "costs" and not "allocations",
+because the second turns out to be a pooled buffer — `profile.rs`'s
 `pub profile: Box<RawValue>` (`profile.rs:160`), which is **owned**, so serde scan-skips the profile
 and then copies all 26.5 MB — the one extra full-size copy at peak — and, unanticipated by the plan,
 `Utf8JsonWriter.WriteRawValue(string)` (`SptNative.cs:633`; `profileJson` is a `string`, `:614`, so
@@ -1092,7 +1093,10 @@ the shared pool *does* serve buffers this large — measured on .NET 10.0.10 by 
 1, 4, 16, 80, 128 and 512 MB — so there is no ~1 MB pooling cliff (that ceiling is
 `ArrayPool<T>.Create()`'s `ConfigurableArrayPool`, which the same probe shows pooling at 1 MB and
 not at 2 MB), and there is no guaranteed ~3x allocation per save: the first save on a thread
-allocates ~6.2x the char count and every later one on that thread ~2.0x. What keeps any of it real
+allocates ~6.2x the char count and every later one on that thread ~2.0x (both absolutes are
+harness-inclusive — the probe measured the whole `ProfileSave` wrapper, so they count the
+`MemoryStream` request buffer alongside the scratch and are not `WriteRawValue`'s share alone; the
+~4.2x *difference* is what isolates the scratch). What keeps any of it real
 is that `ProfileSaveAsync` hops through `Task.Run` (`SptNative.cs:611`) and the pool's fast path is
 a per-thread TLS slot, so a save landing on a cold threadpool thread pays the first-call price. In
 steady state the honest cost is the UTF-8 encode pass, not an allocation. The serde
@@ -1103,7 +1107,19 @@ ships**: the remedy would make `spt_profile_save` the first export off the share
 framed-request alternative is **re-opened as a named follow-up** (Roadmap item 6) rather than
 implemented here — frame the save request the way the load response is framed, and/or hand the
 wrapper UTF-8 bytes so `WriteRawValue`'s `ReadOnlySpan<byte>` overload skips the transcode.
-BENCHMARK.md § Phase 5 has the table.
+BENCHMARK.md § Phase 5 has the table. **The load side was not separately timed and no claim is made
+about its latency — but that covers timing, not allocation.** Where the save path's new buffer
+replaced an old one, the load path's are pure addition: `DeserializeFromFileAsync`
+(`Utils/JsonUtil.cs:102-113`) opened a `FileStream` with `bufferSize: 4096` and streamed it into
+`JsonSerializer.DeserializeAsync`, so no full-size buffer of the profile ever existed, where the
+native path materialises three transient ones — `fs::read` (`profile.rs:132`) into a `Vec`,
+`encode_load_frame` (`profile.rs:153-164`) copying those bytes into a second exactly-sized `Vec` so
+`write_buffer`'s `into_boxed_slice` does not realloc, and `ParseProfileFrame`'s `span[at..].ToArray()`
+(`SptNative.cs:598`) copying them a third time onto the managed heap because the native buffer is
+freed as soon as the wrapper returns. On the same 26.50 MB profile that is ~80 MB of churn per load
+against approximately zero before; at most two are live at once, so the concurrent peak is ~53 MB.
+Two of the three are native, so `GC.GetTotalAllocatedBytes` would not see them, and none of it is on
+the save-side follow-up's path.
 
 **The ported 4.1.2 quirks are documented at their call sites**, as numbered `Quirk N` comments in
 `rust/spt-native/src/quest/*.rs`, `src/scav_case/generator.rs`, `src/base_class.rs`,
