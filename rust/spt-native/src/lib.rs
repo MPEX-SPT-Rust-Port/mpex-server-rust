@@ -8,6 +8,7 @@ pub mod linked_items;
 pub mod log_sink;
 pub mod logger;
 pub mod loot;
+pub mod profile;
 pub mod quest;
 pub mod ragfair;
 pub mod runtime;

@@ -109,7 +109,7 @@ fn want(rel: &str) -> bool {
     matches!(classify(rel), FileClass::AssemblyOnly | FileClass::Eager)
 }
 
-fn strip_bom(mut bytes: Vec<u8>) -> Vec<u8> {
+pub(crate) fn strip_bom(mut bytes: Vec<u8>) -> Vec<u8> {
     if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
         bytes.drain(..3);
     }

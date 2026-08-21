@@ -23,7 +23,9 @@ serde = { version = "1", default-features = false, features = ["std", "derive"] 
 # `preserve_order`: `serde_json::Map` keeps insertion order instead of sorting, which is what the C#
 # `Dictionary`/`[JsonExtensionData]` pair it stands in for does. Without it every untyped object -
 # `Item::location`, and every mod-added field replayed out of an `Extra` map - comes back alphabetised.
-serde_json = { version = "1", default-features = false, features = ["std", "preserve_order"] }
+# `raw_value`: profile saves cross the boundary as one opaque JSON value and land on disk
+# verbatim — the file must stay byte-identical to what C# serialized, never re-encoded.
+serde_json = { version = "1", default-features = false, features = ["std", "preserve_order", "raw_value"] }
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "fs", "sync", "io-util", "macros"] }
 walkdir = { version = "2", default-features = false }
 xxhash-rust = { version = "0.8", default-features = false, features = ["xxh3"] }
