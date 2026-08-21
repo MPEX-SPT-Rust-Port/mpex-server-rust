@@ -277,8 +277,6 @@ public sealed class SaveServer(
         Stopwatch start;
         try
         {
-            var filePath = Path.Combine(profileFilepath, $"{sessionID}.json");
-
             start = Stopwatch.StartNew();
             var jsonProfile =
                 jsonUtil.Serialize(profiles[sessionID], !coreConfig.Features.CompressProfile)
@@ -286,8 +284,9 @@ public sealed class SaveServer(
             var fmd5 = await hashUtil.GenerateHashForDataAsync(HashingAlgorithm.MD5, jsonProfile, cancellationToken);
             if (!saveMd5.TryGetValue(sessionID, out var currentMd5) || currentMd5 != fmd5)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 // save profile to disk
-                await fileUtil.WriteFileAsync(filePath, jsonProfile, cancellationToken);
+                await SptNative.ProfileSaveAsync(profileFilepath, sessionID, jsonProfile);
                 // Only once the bytes are on disk does this hash describe the file.
                 saveMd5[sessionID] = fmd5;
             }
@@ -313,7 +312,7 @@ public sealed class SaveServer(
         if (profiles.ContainsKey(sessionID))
         {
             profiles.TryRemove(sessionID, out _);
-            if (!fileUtil.DeleteFile(file))
+            if (!SptNative.ProfileDelete(profileFilepath, sessionID))
             {
                 logger.Error($"Unable to delete file, not found: {file}");
             }
