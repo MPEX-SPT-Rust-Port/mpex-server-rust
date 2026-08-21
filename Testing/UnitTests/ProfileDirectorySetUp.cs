@@ -17,13 +17,25 @@ namespace UnitTests;
 /// load it is meant to precede. A zero-byte profile leaked past a previous run — the artefact
 /// <c>EmptyProfileFileTakesTheRecoveryArm</c> deliberately creates — would then redden the whole
 /// suite from inside DI construction, with an error pointing nowhere near the cause.
+///
+/// The sweep is the whole directory, not a list of ids. <c>SaveAsync()</c> writes every profile the
+/// process-wide <c>SaveServer</c> holds, including ones other fixtures created under
+/// <c>new MongoId()</c>, so a hard kill — CI timeout, Ctrl-C — leaks files no id list can name.
+/// Worse, the next run's <c>_preexistingFiles</c> snapshot would then adopt them and protect them
+/// from ever being cleaned. The test bin directory has no legitimate profiles in it, so there is
+/// nothing here to preserve.
 /// </summary>
 [SetUpFixture]
 public class ProfileDirectorySetUp
 {
+    private const string ProfileDir = "user/profiles";
+
     [OneTimeSetUp]
     public void CleanLeakedProfiles()
     {
-        SaveServerPersistenceTests.CleanOwnedFiles();
+        if (Directory.Exists(ProfileDir))
+        {
+            Directory.Delete(ProfileDir, true);
+        }
     }
 }

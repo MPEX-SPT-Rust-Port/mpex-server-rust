@@ -187,6 +187,13 @@ pub struct SaveRequest {
 /// (`RUST-ROADMAP.md` § Roadmap, the 6a item — `mpex-server.exe` ships but has never been
 /// executed).
 ///
+/// **Callers must serialize saves per id.** The temp name is fixed, so two concurrent saves of one
+/// id interleave: the second truncates the temp under the first, and the first's rename publishes
+/// the second's partial bytes. This is exact parity with the C# — `FileUtil.WriteFileAsync` used
+/// the same fixed `.bak` name — and `SaveServer`'s per-session `SemaphoreSlim` is what upholds it
+/// today. Written down because that guard now sits on the far side of the FFI, where the process
+/// inversion, a mod, or a second process cannot see it.
+///
 /// Each stage names its own path. The C# this replaces did too — a failure inside
 /// `new FileStream(tempFilePath, …)` raised an `IOException` naming `tempFilePath` — and
 /// permission and disk-full failures land on the temp, not on the live file, so blaming the
@@ -346,6 +353,22 @@ mod tests {
 
         assert_blames(&error, &temp(&dir));
         assert!(!live(&dir).exists());
+    }
+
+    /// Temp-then-rename exists so a failed save cannot damage the profile already on disk — the
+    /// whole point of the protocol, and the one property neither other failure test reaches: both
+    /// start from a directory with no live file in it.
+    #[test]
+    fn save_failure_leaves_the_previous_file_intact() {
+        let dir = TempDir::new().expect("temp dir");
+        save(save_request(&dir, ID, ODD)).expect("first save succeeds");
+        fs::create_dir(temp(&dir)).expect("temp name taken by a directory");
+
+        let error =
+            save(save_request(&dir, ID, r#"{"replacement":true}"#)).expect_err("create fails");
+
+        assert_blames(&error, &temp(&dir));
+        assert_eq!(fs::read(live(&dir)).expect("live file"), ODD.as_bytes());
     }
 
     #[test]
