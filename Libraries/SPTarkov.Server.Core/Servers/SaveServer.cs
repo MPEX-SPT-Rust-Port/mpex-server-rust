@@ -10,6 +10,7 @@ using SPTarkov.Server.Core.Models.Common;
 using SPTarkov.Server.Core.Models.Eft.Common;
 using SPTarkov.Server.Core.Models.Eft.Profile;
 using SPTarkov.Server.Core.Models.Spt.Config;
+using SPTarkov.Server.Core.Native;
 using SPTarkov.Server.Core.Services;
 using SPTarkov.Server.Core.Services.Profile;
 using SPTarkov.Server.Core.Utils;
@@ -39,13 +40,8 @@ public sealed class SaveServer(
     /// </summary>
     public async Task LoadAsync(CancellationToken cancellationToken = default)
     {
-        // get files to load
-        if (!fileUtil.DirectoryExists(profileFilepath))
-        {
-            fileUtil.CreateDirectory(profileFilepath);
-        }
-
-        var files = fileUtil.GetFiles(profileFilepath).Where(item => fileUtil.GetFileExtension(item) == "json");
+        // get files to load — the native list creates user/profiles/ when missing
+        var files = (await SptNative.ProfileListAsync(profileFilepath)).Where(item => fileUtil.GetFileExtension(item) == "json");
 
         // load profiles
         var stopwatch = Stopwatch.StartNew();
@@ -187,15 +183,16 @@ public sealed class SaveServer(
     /// <param name="sessionID"> ID of profile to store in memory </param>
     public async Task LoadProfileAsync(MongoId sessionID, CancellationToken cancellationToken = default)
     {
-        var filePath = Path.Combine(profileFilepath, $"{sessionID}.json");
-        if (fileUtil.FileExists(filePath))
+        cancellationToken.ThrowIfCancellationRequested();
+        var loaded = await SptNative.ProfileLoadAsync(profileFilepath, sessionID);
+        if (loaded.Found)
         // File found, store in profiles[]
         {
             JsonObject? profile;
 
             try
             {
-                profile = await jsonUtil.DeserializeFromFileAsync<JsonObject>(filePath, cancellationToken);
+                profile = (JsonObject?)jsonUtil.Deserialize(loaded.Utf8Json.Span, typeof(JsonObject));
             }
             catch (JsonException e)
             {
@@ -203,12 +200,14 @@ public sealed class SaveServer(
                 logger.Warning($"Failed loading profile for {sessionID.ToString()}. Attempting to load backup");
 
                 // We make a copy of the profile before overwriting it, just incase
+                var filePath = Path.Combine(profileFilepath, $"{sessionID}.json");
                 var corruptBackupPath = Path.Combine(profileFilepath, $"{sessionID}-corrupt.json");
                 File.Copy(filePath, corruptBackupPath, true);
 
                 if (backupService.RestoreProfile(sessionID))
                 {
-                    profile = await jsonUtil.DeserializeFromFileAsync<JsonObject>(filePath, cancellationToken);
+                    var restored = await SptNative.ProfileLoadAsync(profileFilepath, sessionID);
+                    profile = restored.Found ? (JsonObject?)jsonUtil.Deserialize(restored.Utf8Json.Span, typeof(JsonObject)) : null;
                     logger.Success("Profile restored from backup!");
                 }
                 else
