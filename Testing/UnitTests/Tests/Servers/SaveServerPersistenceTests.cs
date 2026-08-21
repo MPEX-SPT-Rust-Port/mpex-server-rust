@@ -17,10 +17,10 @@ namespace UnitTests.Tests.Servers;
 /// else for them to go, and <c>DI</c> runs every <c>IOnLoad</c> once per test process, which means
 /// <c>SaveCallbacks.OnLoadAsync</c> loads that directory on every run. A file leaked by one run is a
 /// file the next run tries to load, and a leaked zero-byte profile turns the whole suite red from
-/// inside DI construction. Hence: fixed ids (a leak the next run can reach), <c>CleanOwnedFiles</c>
-/// hoisted into the assembly-level <see cref="ProfileDirectorySetUp"/> so it genuinely precedes the
-/// run's first <c>LoadAsync</c>, and a snapshot of the directory so profiles that <c>SaveAsync</c>
-/// flushed on other fixtures' behalf go too.
+/// inside DI construction. Hence: fixed ids (a leak the next run can reach), the assembly-level
+/// <see cref="ProfileDirectorySetUp"/> clearing the whole directory before the run's first
+/// <c>LoadAsync</c>, and a snapshot here so profiles that <c>SaveAsync</c> flushed on other
+/// fixtures' behalf go at teardown too.
 /// </summary>
 [TestFixture]
 [NonParallelizable]
@@ -35,8 +35,22 @@ public class SaveServerPersistenceTests
     private const string BomId = "5f5f5f5f5f5f5f5f5f5f5f04";
     private const string UnwritableId = "5f5f5f5f5f5f5f5f5f5f5f05";
     private const string SurvivorId = "5f5f5f5f5f5f5f5f5f5f5f06";
+    private const string IntactId = "5f5f5f5f5f5f5f5f5f5f5f07";
+    private const string RestoredId = "5f5f5f5f5f5f5f5f5f5f5f08";
+    private const string ConcurrentId = "5f5f5f5f5f5f5f5f5f5f5f09";
 
-    private static readonly string[] OwnedIds = [SaveAndRemoveId, UnknownId, EmptyFileId, BomId, UnwritableId, SurvivorId];
+    private static readonly string[] OwnedIds =
+    [
+        SaveAndRemoveId,
+        UnknownId,
+        EmptyFileId,
+        BomId,
+        UnwritableId,
+        SurvivorId,
+        IntactId,
+        RestoredId,
+        ConcurrentId,
+    ];
 
     private SaveServer _saveServer = default!;
     private JsonUtil _jsonUtil = default!;
@@ -172,12 +186,19 @@ public class SaveServerPersistenceTests
     }
 
     /// <summary>
-    /// The autosave tick's per-profile guard. Without it the first failure propagates straight out of
-    /// <c>SaveAsync</c>, so the no-throw is the pin regardless of the order
-    /// <c>ConcurrentDictionary</c> hands the profiles over in.
+    /// The autosave tick's per-profile guard, and the retry that guard exists to make possible.
+    /// Without the guard the first failure propagates straight out of <c>SaveAsync</c>, so the
+    /// no-throw is the pin regardless of the order <c>ConcurrentDictionary</c> hands the profiles
+    /// over in.
+    ///
+    /// The second <c>SaveAsync</c> is the half with the data-loss consequence. <c>saveMd5</c> is a
+    /// content hash recorded <i>after</i> the write; record it before, as this file did until
+    /// <c>e7d3a4b</c>, and a failed write marks that version persisted, the next tick skips it, and
+    /// the profile is lost with the process while the file silently disagrees with memory. Nothing
+    /// pinned that, and reintroducing the old ordering left the suite green.
     /// </summary>
     [Test]
-    public void SaveAsyncSurvivesOneUnwritableProfile()
+    public void SaveAsyncSurvivesOneUnwritableProfileAndRetriesIt()
     {
         _saveServer.CreateProfile(new Info { ProfileId = new MongoId(UnwritableId), Username = "unwritable" });
         _saveServer.CreateProfile(new Info { ProfileId = new MongoId(SurvivorId), Username = "survivor" });
@@ -190,6 +211,89 @@ public class SaveServerPersistenceTests
 
         Assert.That(File.Exists(ProfilePath(SurvivorId)), Is.True, "the second profile was starved by the first");
         Assert.That(File.Exists(ProfilePath(UnwritableId)), Is.False, "the unwritable profile somehow landed");
+
+        // Unblock it and tick again. The profile is untouched since the failed attempt, so its md5
+        // is unchanged - the write can only happen at all if the failure left saveMd5 unpoisoned.
+        Directory.Delete(TempPath(UnwritableId), true);
+
+        Assert.DoesNotThrowAsync(async () => await _saveServer.SaveAsync());
+
+        Assert.That(File.Exists(ProfilePath(UnwritableId)), Is.True, "the failed save was recorded as persisted and never retried");
+    }
+
+    /// <summary>
+    /// What temp-then-rename is for: a save that fails must not damage the profile already on disk.
+    /// The mutation is load-bearing - an unchanged profile hashes the same and
+    /// <c>SaveProfileAsync</c> returns without writing, so without it this would pass on a path that
+    /// never attempted the overwrite.
+    /// </summary>
+    [Test]
+    public async Task FailedOverwriteLeavesThePreviousProfileIntact()
+    {
+        var id = new MongoId(IntactId);
+        _saveServer.CreateProfile(new Info { ProfileId = id, Username = "intact" });
+        await _saveServer.SaveProfileAsync(id);
+        var persisted = await File.ReadAllBytesAsync(ProfilePath(IntactId));
+
+        Directory.CreateDirectory(TempPath(IntactId));
+        _saveServer.GetProfile(id).ProfileInfo!.Username = "mutated";
+
+        Assert.ThrowsAsync<InvalidOperationException>(async () => await _saveServer.SaveProfileAsync(id));
+
+        Assert.That(
+            await File.ReadAllBytesAsync(ProfilePath(IntactId)),
+            Is.EqualTo(persisted),
+            "a failed overwrite damaged the profile already on disk"
+        );
+    }
+
+    /// <summary>
+    /// The corrupt-recovery arm's success half, which <see cref="EmptyProfileFileTakesTheRecoveryArm"/>
+    /// does not reach - it pins only the rethrow. Phase 5 changed this path: after
+    /// <c>BackupService.RestoreProfile</c> returns true the re-read goes through
+    /// <c>SptNative.ProfileLoadAsync</c> rather than the file, and nothing covered it.
+    /// </summary>
+    [Test]
+    public async Task CorruptProfileIsRestoredFromBackupThroughTheNativeReload()
+    {
+        var id = new MongoId(RestoredId);
+        _saveServer.CreateProfile(new Info { ProfileId = id, Username = "restored" });
+        await _saveServer.SaveProfileAsync(id);
+
+        // BackupService reads user/profiles/backups/<yyyy-MM-dd_HH-mm-ss>/, newest folder first.
+        Directory.CreateDirectory(BackupFolder);
+        File.Copy(ProfilePath(RestoredId), Path.Combine(BackupFolder, $"{RestoredId}.json"), true);
+
+        Assert.That(_saveServer.DeleteProfileById(id), Is.True);
+        await File.WriteAllTextAsync(ProfilePath(RestoredId), "{ not json");
+
+        Assert.DoesNotThrowAsync(async () => await _saveServer.LoadProfileAsync(id));
+
+        Assert.That(_saveServer.ProfileExists(id), Is.True, "the backup was never loaded back");
+        Assert.That(File.Exists(CorruptPath(RestoredId)), Is.True, "the corrupt copy was never written");
+    }
+
+    /// <summary>
+    /// <c>profile.rs::save</c> uses a temp name fixed per id, so two concurrent saves of one id would
+    /// interleave - the second truncating the temp under the first, the first's rename publishing
+    /// partial bytes. Exact parity with the C# it replaced, and <c>SaveProfileAsync</c>'s per-session
+    /// <c>SemaphoreSlim</c> is what prevents it; that guard now sits on the near side of an FFI call
+    /// whose write runs on a threadpool thread, which makes the interleaving more reachable, not less.
+    ///
+    /// A pass does not prove the guard is present - the race is not deterministic - but a partial
+    /// file here never parses, so this fails loudly if the lock is ever dropped.
+    /// </summary>
+    [Test]
+    public async Task ConcurrentSavesOfOneProfileLeaveAWellFormedFile()
+    {
+        var id = new MongoId(ConcurrentId);
+        _saveServer.CreateProfile(new Info { ProfileId = id, Username = "concurrent" });
+
+        await Task.WhenAll(_saveServer.SaveProfileAsync(id), _saveServer.SaveProfileAsync(id));
+
+        var written = _jsonUtil.Deserialize<JsonObject>(await File.ReadAllTextAsync(ProfilePath(ConcurrentId)));
+        Assert.That(written?["info"]?["id"]?.GetValue<string>(), Is.EqualTo(ConcurrentId));
+        Assert.That(File.Exists(TempPath(ConcurrentId)), Is.False, "the temp file outlived the save");
     }
 
     private static string ProfilePath(string id)
@@ -207,20 +311,31 @@ public class SaveServerPersistenceTests
         return Path.Combine(ProfileDir, $"{id}-corrupt.json");
     }
 
+    // BackupConfig.Directory, plus one folder named the way ExtractDateFromFolderName parses:
+    // yyyy-MM-dd_HH-mm-ss, between 1900 and five years out. Fixed, so a leak is reachable next run.
+    private static readonly string BackupFolder = Path.Combine(ProfileDir, "backups", "2020-01-01_00-00-00");
+
     private static HashSet<string> SnapshotProfileDir()
     {
         return Directory.Exists(ProfileDir) ? [.. Directory.GetFiles(ProfileDir)] : [];
     }
 
     /// <summary>
-    /// Best-effort, and called from two places: <see cref="ProfileDirectorySetUp"/> before the run's
-    /// first <c>LoadAsync</c>, and this fixture's teardown after every test.
+    /// This fixture's own teardown, after every test. The cross-run sweep is
+    /// <see cref="ProfileDirectorySetUp"/>'s and is broader — see its remarks.
     /// </summary>
-    internal static void CleanOwnedFiles()
+    private static void CleanOwnedFiles()
     {
         if (!Directory.Exists(ProfileDir))
         {
             return;
+        }
+
+        // CorruptProfileIsRestoredFromBackupThroughTheNativeReload seeds one; leaving it would let a
+        // later run's EmptyProfileFileTakesTheRecoveryArm restore instead of rethrowing.
+        if (Directory.Exists(BackupFolder))
+        {
+            Directory.Delete(BackupFolder, true);
         }
 
         var backupDir = Path.Combine(ProfileDir, "backups");
