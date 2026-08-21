@@ -10,6 +10,7 @@ using SPTarkov.Server.Core.Models.Common;
 using SPTarkov.Server.Core.Models.Eft.Common;
 using SPTarkov.Server.Core.Models.Eft.Profile;
 using SPTarkov.Server.Core.Models.Spt.Config;
+using SPTarkov.Server.Core.Native;
 using SPTarkov.Server.Core.Services;
 using SPTarkov.Server.Core.Services.Profile;
 using SPTarkov.Server.Core.Utils;
@@ -39,13 +40,8 @@ public sealed class SaveServer(
     /// </summary>
     public async Task LoadAsync(CancellationToken cancellationToken = default)
     {
-        // get files to load
-        if (!fileUtil.DirectoryExists(profileFilepath))
-        {
-            fileUtil.CreateDirectory(profileFilepath);
-        }
-
-        var files = fileUtil.GetFiles(profileFilepath).Where(item => fileUtil.GetFileExtension(item) == "json");
+        // get files to load — the native list creates user/profiles/ when missing
+        var files = (await SptNative.ProfileListAsync(profileFilepath)).Where(item => fileUtil.GetFileExtension(item) == "json");
 
         // load profiles
         var stopwatch = Stopwatch.StartNew();
@@ -75,7 +71,22 @@ public sealed class SaveServer(
         var totalTime = 0L;
         foreach (var sessionID in profiles)
         {
-            totalTime += await SaveProfileAsync(sessionID.Key, cancellationToken);
+            try
+            {
+                totalTime += await SaveProfileAsync(sessionID.Key, cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception e)
+            {
+                // One unwritable profile must not starve the others: this loop is the autosave tick.
+                // Pass the exception, not just Message: this catch absorbs more than the native
+                // failure (whose message already names the path and errno), and it is the only
+                // signal that a profile is silently not being persisted.
+                logger.Error($"Failed to save profile {sessionID.Key.ToString()}", e);
+            }
         }
 
         if (!profiles.IsEmpty && logger.IsLogEnabled(LogLevel.Debug))
@@ -187,15 +198,16 @@ public sealed class SaveServer(
     /// <param name="sessionID"> ID of profile to store in memory </param>
     public async Task LoadProfileAsync(MongoId sessionID, CancellationToken cancellationToken = default)
     {
-        var filePath = Path.Combine(profileFilepath, $"{sessionID}.json");
-        if (fileUtil.FileExists(filePath))
+        cancellationToken.ThrowIfCancellationRequested();
+        var loaded = await SptNative.ProfileLoadAsync(profileFilepath, sessionID);
+        if (loaded.Found)
         // File found, store in profiles[]
         {
             JsonObject? profile;
 
             try
             {
-                profile = await jsonUtil.DeserializeFromFileAsync<JsonObject>(filePath, cancellationToken);
+                profile = (JsonObject?)jsonUtil.Deserialize(loaded.Utf8Json.Span, typeof(JsonObject));
             }
             catch (JsonException e)
             {
@@ -203,12 +215,14 @@ public sealed class SaveServer(
                 logger.Warning($"Failed loading profile for {sessionID.ToString()}. Attempting to load backup");
 
                 // We make a copy of the profile before overwriting it, just incase
+                var filePath = Path.Combine(profileFilepath, $"{sessionID}.json");
                 var corruptBackupPath = Path.Combine(profileFilepath, $"{sessionID}-corrupt.json");
                 File.Copy(filePath, corruptBackupPath, true);
 
                 if (backupService.RestoreProfile(sessionID))
                 {
-                    profile = await jsonUtil.DeserializeFromFileAsync<JsonObject>(filePath, cancellationToken);
+                    var restored = await SptNative.ProfileLoadAsync(profileFilepath, sessionID);
+                    profile = restored.Found ? (JsonObject?)jsonUtil.Deserialize(restored.Utf8Json.Span, typeof(JsonObject)) : null;
                     logger.Success("Profile restored from backup!");
                 }
                 else
@@ -266,8 +280,6 @@ public sealed class SaveServer(
         Stopwatch start;
         try
         {
-            var filePath = Path.Combine(profileFilepath, $"{sessionID}.json");
-
             start = Stopwatch.StartNew();
             var jsonProfile =
                 jsonUtil.Serialize(profiles[sessionID], !coreConfig.Features.CompressProfile)
@@ -275,9 +287,11 @@ public sealed class SaveServer(
             var fmd5 = await hashUtil.GenerateHashForDataAsync(HashingAlgorithm.MD5, jsonProfile, cancellationToken);
             if (!saveMd5.TryGetValue(sessionID, out var currentMd5) || currentMd5 != fmd5)
             {
-                saveMd5[sessionID] = fmd5;
+                cancellationToken.ThrowIfCancellationRequested();
                 // save profile to disk
-                await fileUtil.WriteFileAsync(filePath, jsonProfile, cancellationToken);
+                await SptNative.ProfileSaveAsync(profileFilepath, sessionID, jsonProfile);
+                // Only once the bytes are on disk does this hash describe the file.
+                saveMd5[sessionID] = fmd5;
             }
 
             start.Stop();
@@ -301,7 +315,7 @@ public sealed class SaveServer(
         if (profiles.ContainsKey(sessionID))
         {
             profiles.TryRemove(sessionID, out _);
-            if (!fileUtil.DeleteFile(file))
+            if (!SptNative.ProfileDelete(profileFilepath, sessionID))
             {
                 logger.Error($"Unable to delete file, not found: {file}");
             }

@@ -14,10 +14,10 @@ selected automatically when a mod hooks it or manually via a config flag. The lo
 too, and has no legacy path: `SPTLoggerDispatcher` hands every line to the crate, and the crate owns
 the terminal outright — raw `Console.Write*`, prompts, title and clear all cross the boundary.
 
-Thirty C-ABI exports (`src/ffi.rs`) carry all of it, JSON in and JSON out — except the ragfair
-response, which is a framed MessagePack envelope, `spt_db_load`, whose response is a JSON header
-frame followed by the loaded file bytes, and the log and console exports, which pass the fields of
-one line, or raw bytes, directly (current ABI 30).
+Thirty-four C-ABI exports (`src/ffi.rs`) carry all of it, JSON in and JSON out — except the ragfair
+response, which is a framed MessagePack envelope, `spt_db_load` and `spt_profile_load`, whose
+responses are a JSON header frame followed by the loaded file bytes, and the log and console
+exports, which pass the fields of one line, or raw bytes, directly (current ABI 31).
 
 Native is not uniformly faster. Loot and repeatable quests win; bots, reward loot, ragfair, scav
 case, the base-class hydrate and the linked-item table are slower than the C# they replace, and
@@ -49,6 +49,7 @@ gap without closing it, and every lever short of the remaining state-ownership p
 | The terminal — raw `Console.Write*` (redirected into the pipeline), prompts, title, clear | `NativeConsoleWriter.Install`, `SptConsole` | `spt_console_write`, `spt_console_read_line`, `spt_console_set_title`, `spt_console_clear` |
 | The `IsLogEnabled` gate and the line a mod `ILogHandler` renders | `SPTLoggerDispatcher.IsLogEnabled`, `BaseLogHandler.FormatMessage` | `spt_log_enabled`, `spt_log_format` |
 | Generator diagnostics, localised and logged natively as they happen | `DatabaseImporter` → `SptNative.SetServerLocales` | `spt_locales_set` |
+| Profile persistence — every live listing, read, write (temp-then-rename) and delete under `user/profiles/`; serialization, the MD5 dirty-check and `BackupService` stay C# | `SaveServer.LoadAsync` / `LoadProfileAsync` / `SaveProfileAsync` / `RemoveProfile` | `spt_profile_list`, `spt_profile_load`, `spt_profile_save`, `spt_profile_delete` |
 
 Also working: mod-added fields on game data survive the round trip (`#[serde(flatten)] extra` maps
 mirroring Ceciler's `[JsonExtensionData]`); native generator diagnostics render and log themselves
@@ -184,6 +185,41 @@ entry and the inherited `ValueType.ToString()`. Scope is `Color` only — mods t
   compares the generated bots as normalised JSON. It is a plain `[Test]`, so it *does* run in
   `dotnet test`, and it caught a real derivation divergence (the flip #6 ledger's decision 2)
   that the view-by-view harness would have had to be told to look for.
+- **A Harmony patch on `FileUtil.WriteFileAsync`/`DeleteFile` no longer sees profile I/O** —
+  since Phase 5 `SaveServer`'s disk boundary is `spt_profile_*`, so a mod intercepting profile
+  writes or deletes through `FileUtil` never fires. Patches on `SaveServer`'s own members still
+  fire — its signatures are frozen and unchanged by this phase — and `BackupService`'s copies still
+  go through C#. **No escape hatch**: Decision 6 shipped no legacy path and no `forceLegacy` flag.
+  Not the `SPTLoggerDispatcher` precedent — a logger flip loses log lines and this one could lose
+  player saves, so the precedent does not carry the blast radius. The reason it holds anyway is that
+  Phase 3 kept `CoreConfig.ForceLegacyDatabaseImport` because its two arms produce *different*
+  artifacts (the fused load does assembly, parse and derivation work the legacy arm does not), while
+  Phase 5's arms produce the same bytes: on-disk format is byte-identical and the write protocol is a
+  step-for-step port, so a revert is a plain `git revert` with no stranded state and no migration. A
+  second write path here would rot untested, and a rotted fallback is worse than none. Bites only
+  mods that hook profile I/O at the `FileUtil` layer.
+- **Profile save and load cancellation is best-effort-before, never mid-flight** — a token is
+  checked before the native call and cannot interrupt a started write, where `WriteAsync` could be
+  cancelled mid-file. Atomicity is not what changed: `FileUtil.WriteFileAsync` was already
+  temp-then-rename (`Utils/FileUtil.cs:113`), so neither arm can leave a truncated live file. What
+  changed is the outcome of a cancellation that arrives after the call begins — it used to abandon
+  the save, and now the save completes. Alongside it, I/O failures on the profile paths — save, load,
+  list and delete alike — throw `InvalidOperationException` out of `SptNative.DecodeResult` where
+  they used to throw `IOException`-family types; nothing in the tree catches those specifically, so
+  this bites a mod with a `catch (IOException)` around a profile operation. No escape hatch, same
+  reason.
+- **A `user/profiles/` that cannot be `stat`ped now aborts startup instead of loading zero
+  profiles** — `spt_profile_list` raises on any non-`NotFound` `stat` failure, and `SaveServer.LoadAsync`
+  is an `IOnLoad`, so the throw reaches `SPTStartupHostedService.ExecuteAsync`'s outer catch and stops
+  the server with `Critical exception, stopping server...` plus the path and errno. The most reachable
+  cause is a `user/profiles/` that has lost `+x`: 4.1.2 C# booted normally there, because .NET's Unix
+  enumerator answers `Directory.GetFiles` from `getdents64`'s `d_type` and never `stat`s a regular
+  file, and then `File.Exists` on each child returned `false` — so the player was invited to create a
+  new profile beside intact ones. **Deliberate**: a loud stop on a `chmod`-recoverable condition beats
+  a silent one that presents as data loss. The blast radius is a startup failure, which is why it is
+  here and not only in the Phase 5 ledger.
+- **`LoadAsync` sees profiles in sorted order**, where `Directory.GetFiles` order was
+  filesystem-dependent. Strictly more deterministic; nothing downstream reads the order.
 - **A failure crosses as a message for C# to throw with** — never as a log line, so it carries no
   category. Since ABI 18 a panic crosses with its message too.
 - **Hangs are mostly undiagnosable** — ported retry loops can spin exactly as 4.1.2 does, inside an
@@ -916,6 +952,214 @@ resolution, against a budgeted ~67.7 ms. What now dominates an eligible bot send
 member or a varying one but the caller's own `templateVariants` at **83.2%** of the request.
 BENCHMARK.md § Phase 4 has all of it.
 
+**Phase 5 ledger.** Four `spt_profile_*` exports (ABI 31) own `user/profiles/`' live listing, reads,
+writes and deletes, so `SaveServer`'s disk boundary is native end to end. No resident state, no new
+root, no legacy path and no config flag: the profiles directory arrives in every request and profile
+bytes are opaque, written and read verbatim.
+
+(a) Freshness delta: **none.** Profile bytes were never resident, and every load and save still hits
+the disk through the same MD5 gate. What moved is *failure* visibility and I/O posture, in six
+places.
+
+- **Mid-write cancellation no longer exists** (Decision 7). A token is honoured before the native
+  call and never inside it, so a started write always completes, where `WriteAsync` could be
+  cancelled mid-file. Atomicity is unaffected either way — `FileUtil.WriteFileAsync` was already
+  temp-then-rename — so what changed is only whether a late cancellation abandons the save or lets
+  it finish.
+- **I/O failures throw a different type** (Decision 8). `ProfileError{BadArgs,Io}` crosses as
+  `STATUS_BAD_ARGS`/`STATUS_ERROR` and `DecodeResult` raises `InvalidOperationException`, where
+  `FileUtil.WriteFileAsync` and `JsonUtil.DeserializeFromFileAsync` raised `IOException`-family
+  types. No caller catches those specifically. **`RemoveProfile` changed the same way**:
+  `FileUtil.DeleteFile` let `File.Delete` throw `IOException`/`UnauthorizedAccessException`;
+  `SptNative.ProfileDelete` routes failures through `DecodeResult` into
+  `InvalidOperationException`. Throw-vs-no-throw and the `bool` return semantics are unchanged — a
+  missing file is still `false` and still just logged.
+- **Profile I/O is no longer on async file handles.** `FileUtil.WriteFileAsync` opened its stream
+  `useAsync: true` (`Utils/FileUtil.cs:127`) and `DeserializeFromFileAsync` read with `useAsync:
+  true` (`Utils/JsonUtil.cs:109`); behind the FFI it is a blocking syscall on a `Task.Run`
+  threadpool thread. `SaveAsync` and `LoadAsync` both loop sequentially, so exactly one thread is
+  parked at a time and there is no starvation risk — but that is a property of those two loops, not
+  parity, and a future concurrent caller would not inherit it.
+- **A `default`/empty `MongoId` now throws** (Decision 9). `MongoId.ToString()` returns
+  `string.Empty` for one, which fails Rust's 24-hex-char id gate; the old body silently probed
+  `user/profiles/.json` and answered. Unreachable in-tree, but not for the tidy reason it is
+  tempting to write down. `LoadProfileAsync` applies **no** id check of its own — it goes straight
+  to `SptNative.ProfileLoadAsync` (`SaveServer.cs:198-199`), so for loads the native gate genuinely
+  is the first thing an empty id meets, and the protection is entirely in the callers:
+  `LoadAsync` pre-filters on `MongoId.IsValidMongoId`, `LauncherV2Controller.cs:156` passes a
+  freshly minted `new MongoId()` (`:142`), and `CreateProfileService.cs:239-244` receives its id
+  from the session and cannot be reached with an empty one — its first statement,
+  `saveServer.GetProfile(sessionId)` (`:52`), throws on `IsEmpty` (`SaveServer.cs:103-106`).
+  `SaveProfileAsync` never reaches Rust with one at all: `IsProfileInvalidOrUnloadable`
+  returns `false` for an absent key (`SaveServer.cs:331-343`, it only returns `true` when the
+  lookup *succeeds* and the flag is set), so an empty id passes that guard, takes the save lock,
+  and then dies on `profiles[sessionID]` (`SaveServer.cs:282`) exactly as it did before this phase.
+  Note for a future reader: the `!sessionId.IsEmpty` guard at `LauncherV2Controller.cs:95` is on the
+  `RemoveProfile` call, not on the load/save pair, and there are more disk-reaching callers than
+  that one — `CreateProfileService.cs:239-244`, `GameCallbacks.cs:70`, `PrestigeController.cs:98`
+  and `LocationLifecycleService.cs:500,719`.
+- **Profile listing is sorted**, where `Directory.GetFiles` order was filesystem-dependent. Load
+  order is now deterministic where it previously was not — a strict improvement, but a change.
+- **UTF-8 BOM handling is now explicit, not incidental.** The `FileStream` deserialize skipped a BOM
+  for free; the `ReadOnlySpan<byte>` overload does not, so `profile.rs::load` strips it (reusing
+  `db/load.rs::strip_bom`). Net player-visible behaviour is unchanged — that is the point — but the
+  guard is now load-bearing code rather than a property of the .NET overload, and deleting it
+  silently sends hand-edited BOM'd profiles down the `-corrupt.json` + backup-rollback arm.
+
+One further behaviour change, landed as its own commit (`e7d3a4b`) ahead of the native swap:
+**autosave failure isolation changed shape.** `SaveAsync` now catches per profile (rethrowing on
+cancellation), and `saveMd5` is written *after* the write instead of before. Together: a failed
+write no longer marks that profile version as persisted, and one unwritable profile no longer
+aborts the remaining profiles for the tick. Before this phase the second property held only by
+accident, through the poisoned hash. Shipping the reorder alone would have converted a per-version
+loss into an unbounded multi-profile autosave outage, which is why the two halves are one commit;
+`SaveAsyncSurvivesOneUnwritableProfile` is the pin.
+
+**One correction to the plan's own text, recorded so it is not propagated.** Decision 5 says
+`backups/`, `-corrupt.json` and stray `.bak` files "are excluded by the same C# lines that exclude
+them today". That is right about the files and wrong about the directory. `-corrupt.json` and `.bak`
+do reach C# and are dropped by the unchanged extension filter and the `MongoId.IsValidMongoId` stem
+gate in `LoadAsync`. `backups/` is a **directory**: `profile.rs::list` keeps only entries whose
+`fs::metadata` says `is_file()`, so it never reaches C# at all. The false premise matters because it
+would later justify "simplifying away" C# filters that are in fact the only thing excluding the two
+file cases. On the same listing: `fs::metadata(entry.path())` is used and not `entry.metadata()`,
+because only the free function follows symlinks — `DirEntry::metadata` is `lstat` on Unix and would
+classify a symlink-to-a-profile as neither file nor directory. Following-then-`is_file()` matches
+`Directory.GetFiles` on the two cases that matter — measured on .NET 10.0.10, `GetFiles` returns a
+symlink to a file and `GetDirectories`, not `GetFiles`, claims a symlink to a directory — but it is
+**not exact**, and the source is the accurate account here, not this paragraph's earlier wording.
+Two `stat` failures fall outside that match, and `list` now treats them differently — the
+`unwrap_or(false)` that swallowed both is gone.
+
+A **dangling** symlink is still skipped, and `list_skips_a_dangling_symlink` pins it. It is a real
+divergence — `GetFiles` returns the link — but an inert one, and not for the reason an earlier draft
+of this ledger gave: a dangling `{id}.json` link passes *both* C# filters, so the stem gate does not
+save us. What does is `load`'s own `NotFound` arm, which answers `found: false` for that link
+regardless; skipping it at the listing just reaches the same outcome a step earlier.
+
+A **denied** `stat` is now raised instead. This is the larger divergence and the reason the code
+changed. `readdir` needs only `+r` on a directory while `stat`ping a child needs `+x`, and .NET's
+Unix enumerator answers file-vs-directory from `d_type` without `stat`ping a regular file — so on a
+`user/profiles/` that has lost `+x`, `GetFiles` returns every profile while every `fs::metadata` here
+fails `EACCES` (measured on .NET 10: `Directory.GetFiles` lists the file, `File.Exists` on that same
+child is `false`). Swallowing that reported an empty directory, and `LoadAsync` came up with zero
+profiles and offered to create a new one beside intact files. `list_raises_an_unreadable_entry`
+pins the fix; it self-guards, because root bypasses the search bit and the arm is unreachable there.
+
+**This is an improvement over the pre-phase C# too, not a parity restoration, and the distinction is
+worth keeping straight.** `GetFiles` listing the profiles is where the pre-phase advantage ended:
+`File.Exists` also returns `false` on `EACCES`, and both the guard in `LoadProfileAsync` and
+`DeserializeFromFileAsync`'s own short-circuit (`JsonUtil.cs:104-107`,
+`if (!File.Exists(file)) return default;`) are `File.Exists`. So the pre-phase path enumerated every
+profile and then silently loaded none of them — the same zero-profile presentation, one stage later.
+Raising the error is better than either state that preceded it.
+
+**One known-stale cite left in place, deliberately.** `profile.rs`'s `save` doc comment comes with a
+Windows warning — the `File` handle must drop before `fs::rename`, or `MoveFileExW` fails with a
+sharing violation — and backs it with `RUST-ROADMAP.md:974`, which no longer points at the
+"`mpex-server.exe` ships but has never been executed" sentence it was written against; this ledger's
+own insertions moved it. It was left unfixed rather than edit production Rust in the phase's docs
+commit. Same drift class as the Decision 10 pointer in (b), and the same remedy applies whenever that
+file is next touched: cite the section, not the line. The warning itself is correct and load-bearing
+— hoisting the handle out of the chain still passes every test on Linux, which is the only platform
+this repo runs today.
+
+(b) Decisions. **1, Rust is stateless and `dir` rides every request** — the `LoadRequest::dir`
+pattern, no module static. The spec's "per-profile id↔resident-copy namespace" is established by the
+wire contract (id-keyed exports), not by Rust-side state; residency waits on the profile-model port
+(`todo/TODO.md` #19). **2, serialization stays C#** — `jsonUtil.Serialize` /
+`Deserialize<JsonObject>` and `ProfileMigrationService` are untouched, and Rust is a byte-faithful
+passthrough: `RawValue` on save, raw frame bytes on load. The on-disk format is byte-identical, so
+hand-edited and shared profiles keep working and the MD5 dirty-check is unaffected. **3, the MD5
+dirty-check and the per-session save locks stay C#** — identical skip-unchanged semantics,
+`SaveProfileAsync`'s `Task<long>` unchanged in meaning. **4, `BackupService` stays C#, with the
+coexistence rule written down**: Rust owns live-file writes, deletes and the load-time listing; C#
+keeps the read-only probes (`RemoveProfile`'s final `FileExists`), the corrupt-copy, the backup copy
+loop and the restore copy. The only writer overlap is restore-during-load, already serialized inside
+`LoadProfileAsync`'s recovery arm. **5, all four exports take the standard envelope shape**
+(`{"schema":1,"dir":…}`, plus `id` on three), not-found rides the load frame header
+(`{"found":false}`) and **no new status code was added**; every filter stays in C# verbatim, so
+there is zero filter-parity risk. **6, no legacy path and no `forceLegacy` flag** — the
+`SPTLoggerDispatcher` precedent. The mod-visible consequence is a *Broken* ledger bullet, not a kill
+switch. **7, cancellation is honoured before the native call only** (the `VerifyDatabaseAsync`
+posture). **8, the error surface is `ProfileError{BadArgs,Io}`**, message naming the path and the OS
+error. **9, Rust guards the id** — 24 ASCII hex chars, mirroring `MongoId.IsValidMongoId`
+(`Extensions/MongoIdExtensions.cs:52-68`, which is where the rule lives; the static on `MongoId` is
+a one-line delegate to it). This is the path-traversal guard at the trust boundary and is
+non-negotiable even though C# always passes a typed `MongoId`; an id that passes cannot contain a
+separator, a dot, or a parent reference. **10, the `DbPublisher._currentEpoch == 0` unconditional
+republish is declined again** — it is independent of the profile disk boundary and still blocked on
+the values-not-keys mapping gate. It stays open and re-filed for its own change; the discussion is
+the **load-time-epoch follow-up in the Phase 3 ledger** above, under *Exceptions in force*. (Cited
+by section and not by line: an earlier draft of this ledger pointed at `RUST-ROADMAP.md:720-727`,
+which this very commit's Broken-ledger insertion pushed off target. Intra-file cites in this
+document name their section, because the line numbers move every phase.) **11, no benchmark fixture, but the free number was taken** — and it came
+back a regression; see (d). **12, plain synchronous `std::fs` on the calling thread** — single-file
+ops need no tokio, and C# keeps its async posture through `Task.Run`.
+
+(c) Net `Native/` + `SaveServer` delta for the phase
+(`git diff --stat 159bf3d..b1f579a -- Libraries/SPTarkov.Server.Core/Native/
+Libraries/SPTarkov.Server.Core/Servers/SaveServer.cs`): **+266/−18 across 3 files** —
+`Native/NativeMethods.cs` +12/−0 (the four `[LibraryImport]` entries),
+`Native/SptNative.cs` +226/−1 (the four wrappers, the `ProfileLoadResult` record, the frame parser;
+the single deletion is the `ExpectedAbiVersion` constant, 30 → 31) and
+`Servers/SaveServer.cs` +28/−17. Growth, and almost all of it additive: the boundary gained a
+family and nothing in `Native/` was replaced. `SaveServer.cs` is the one file that both grew and
+shrank, and roughly in balance — the `DirectoryExists`/`CreateDirectory` pair went away and the
+per-profile autosave `try`/`catch` came in. `RemoveProfile`'s `Path.Combine`/`FileExists` probe
+stays, per (b) Decision 4.
+
+(d) The measurement, because Decision 11 pre-committed to it. `SaveProfileAsync`'s returned
+milliseconds on a **26.50 MB synthetic profile**, 6 runs per pass and two passes per state:
+**~161 ms median (155–186) before, ~192 ms median (187–217) after — about 20% slower, and the
+ranges do not overlap across any of the four passes.** That is a real regression, not noise, and it
+is recorded as one rather than argued away. The profile is synthetic (no player profile of
+meaningful size exists in this environment) and the harness was throwaway, so the figure sizes the
+effect rather than pinning it. Attribution, and the naive version of it is wrong: the pre-phase path
+did **not** stream. `fileUtil.WriteFileAsync(filePath, jsonProfile, ct)` took the `string` overload
+(`Utils/FileUtil.cs:103-107`), which does one `Encoding.UTF8.GetBytes` into a full-size `byte[]` and
+gives that to a single `fs.WriteAsync`, so peak was already `jsonProfile` (UTF-16) plus one
+full-size UTF-8 buffer. The `MemoryStream` **replaces** that buffer — same bytes plus ~128 of
+envelope — and is not an extra one. The two real new costs are — "costs" and not "allocations",
+because the second turns out to be a pooled buffer — `profile.rs`'s
+`pub profile: Box<RawValue>` (`profile.rs:175`), which is **owned**, so serde scan-skips the profile
+and then copies all 26.5 MB — the one extra full-size copy at peak — and, unanticipated by the plan,
+`Utf8JsonWriter.WriteRawValue(string)` (`SptNative.cs:633`; `profileJson` is a `string`, `:614`, so
+it is the string overload delegating to the char-span one), which transcodes through a `chars × 3`
+scratch buffer rented from `ArrayPool<byte>.Shared`. That second cost is **much weaker than an
+earlier draft of this ledger claimed**, and the claim is corrected here rather than quietly dropped:
+the shared pool *does* serve buffers this large — measured on .NET 10.0.10 by reference identity at
+1, 4, 16, 80, 128 and 512 MB — so there is no ~1 MB pooling cliff (that ceiling is
+`ArrayPool<T>.Create()`'s `ConfigurableArrayPool`, which the same probe shows pooling at 1 MB and
+not at 2 MB), and there is no guaranteed ~3x allocation per save: the first save on a thread
+allocates ~6.2x the char count and every later one on that thread ~2.0x (both absolutes are
+harness-inclusive — the probe measured the whole `ProfileSave` wrapper, so they count the
+`MemoryStream` request buffer alongside the scratch and are not `WriteRawValue`'s share alone; the
+~4.2x *difference* is what isolates the scratch). What keeps any of it real
+is that `ProfileSaveAsync` hops through `Task.Run` (`SptNative.cs:611`) and the pool's fast path is
+a per-thread TLS slot, so a save landing on a cold threadpool thread pays the first-call price. In
+steady state the honest cost is the UTF-8 encode pass, not an allocation. The serde
+parse-scan of the whole request buffer and that `Task.Run` hop are new work too, neither allocating a
+full copy. **The ruling is that the regression
+ships**: the remedy would make `spt_profile_save` the first export off the shared
+`run_generator_with` ladder, at the tail of a phase whose entire value is mechanical parity. The
+framed-request alternative is **re-opened as a named follow-up** (Roadmap item 6) rather than
+implemented here — frame the save request the way the load response is framed, and/or hand the
+wrapper UTF-8 bytes so `WriteRawValue`'s `ReadOnlySpan<byte>` overload skips the transcode.
+BENCHMARK.md § Phase 5 has the table. **The load side was not separately timed and no claim is made
+about its latency — but that covers timing, not allocation.** Where the save path's new buffer
+replaced an old one, the load path's are pure addition: `DeserializeFromFileAsync`
+(`Utils/JsonUtil.cs:102-113`) opened a `FileStream` with `bufferSize: 4096` and streamed it into
+`JsonSerializer.DeserializeAsync`, so no full-size buffer of the profile ever existed, where the
+native path materialises three transient ones — `fs::read` (`profile.rs:133`) into a `Vec`,
+`encode_load_frame` (`profile.rs:154-165`) copying those bytes into a second exactly-sized `Vec` so
+`write_buffer`'s `into_boxed_slice` does not realloc, and `ParseProfileFrame`'s `span[at..].ToArray()`
+(`SptNative.cs:598`) copying them a third time onto the managed heap because the native buffer is
+freed as soon as the wrapper returns. On the same 26.50 MB profile that is ~80 MB of churn per load
+against approximately zero before; at most two are live at once, so the concurrent peak is ~53 MB.
+Two of the three are native, so `GC.GetTotalAllocatedBytes` would not see them, and none of it is on
+the save-side follow-up's path.
+
 **The ported 4.1.2 quirks are documented at their call sites**, as numbered `Quirk N` comments in
 `rust/spt-native/src/quest/*.rs`, `src/scav_case/generator.rs`, `src/base_class.rs`,
 `src/linked_items.rs` and `src/loot/container_extensions.rs`; grep case-insensitively for `quirk`,
@@ -929,7 +1173,7 @@ written against, not the current file.
 
 ## Roadmap
 
-1. **Phases 1 through 4 of the state-ownership program are complete; Phase 5 is the next front.** Phase 1 of
+1. **Phases 1 through 5 of the state-ownership program are complete; Phase 6b is the next front.** Phase 1 of
    `docs/superpowers/specs/2026-08-17-rust-state-ownership-design.md` moved every generation
    export onto the epoch protocol, one family per flip — each its own plan, own ABI bump,
    goldens passing *unchanged*, BENCHMARK.md re-measured before the next started. Landed: #1
@@ -968,14 +1212,19 @@ written against, not the current file.
    and the two loot multipliers were ruled to stay varying (in-place indexer writes the barriers
    cannot see); the pmc name lists were declined a second time. The Phase 4 ledger has the decisions
    and BENCHMARK.md § Phase 4 the numbers — the root is free, the eligible bot wire is 23% smaller.
-   Next is Phase 5 (profile persistence), then Phase 6 (process inversion: an `mpex-server` bin crate hosts
+   **Phase 5 landed 2026-08-20 (ABI 31):** four `spt_profile_*` exports own `user/profiles/`' live
+   listing, reads, writes and deletes, and `SaveServer`'s disk boundary is native end to end.
+   Serialization, the MD5 dirty-check and `BackupService` stay C#; there is no legacy path and no
+   config flag. It is a **measured save-side regression** — ~161 → ~192 ms on a 26.5 MB profile, about
+   20% — shipped deliberately, with the framed-request remedy named as a follow-up (item 6 below).
+   The Phase 5 ledger has the decisions and BENCHMARK.md § Phase 5 the number.
+   Next is Phase 6 (process inversion: an `mpex-server` bin crate hosts
    the CLR via `netcorehost`, making Rust the executable). Phase 6a — the `run_app` bootstrap (`rust/mpex-server`,
    shipped by publish and the release container's entrypoint; `scripts/smoke-mpex-server.sh` is
    its e2e check) — landed 2026-08-18 (`mpex-server.exe` ships from the same wiring but has never
    been executed on Windows); 6b (the delegate-loader shim flip, where the resident DB's
    statics move into the exe and `SptNative.cs`'s `DllImport` layer dissolves into a vtable of
-   the existing exports) waited on Phases 3 and 5, and with Phase 3 landed now waits on Phase 5
-   alone.
+   the existing exports) waited on Phases 3 and 5, and with both landed now waits on nothing.
 2. Port candidates and their costing live in [todo/TODO.md](todo/TODO.md); with #1-#6
    landed, the unstarted front is tier 2. The two axes
    are independent — a flip re-homes data for something already ported, a TODO item ports
@@ -999,3 +1248,16 @@ written against, not the current file.
    carrying just the live role+band `EquipmentMods` that `ReplayRandomisationClamps` writes, gated by
    a second-bot nighttime regression test. Worth more than item 4 by wire: 39,811 bytes per send
    against `modPoolSlotOrder`'s 26,428 (BENCHMARK.md § Phase 4).
+6. **Named by Phase 5, not delivered with it: frame the profile save request.** Phase 5 measured
+   `spt_profile_save` ~20% slower than the `FileUtil.WriteFileAsync` it replaced (~161 → ~192 ms on a
+   26.5 MB profile) and shipped it anyway. The removable costs, in the order they are worth chasing:
+   the owned `Box<RawValue>` copy in `profile.rs` — a genuine extra full-size copy at peak — and
+   `Utf8JsonWriter.WriteRawValue(string)`'s `chars × 3` transcode scratch, which is a **full UTF-8
+   encode pass** on every save but, contrary to an earlier draft of this item, is *not* a guaranteed
+   allocation: `ArrayPool<byte>.Shared` pools at that size (measured; there is no ~1 MB cliff), so it
+   allocates only on a threadpool thread whose pool cache is cold. Handing the wrapper UTF-8 bytes so
+   the `ReadOnlySpan<byte>` overload is taken still buys the encode pass; the allocation half of that
+   argument is much weaker than it was written. Framing the save request the way the load response is
+   framed is the other half and removes the `RawValue` copy. The price is that `spt_profile_save`
+   becomes the first export off the shared `run_generator_with` ladder, which is exactly why Phase 5
+   declined to do it inline. BENCHMARK.md § Phase 5 has the measurement and the pool probe.

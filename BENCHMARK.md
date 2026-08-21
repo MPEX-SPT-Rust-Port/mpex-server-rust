@@ -365,6 +365,85 @@ any re-take of this line must warm first. The pre-phase resident figures were in
 (their single-bot 589,344 B and wave-1 589,444 B differ by the same 100 bytes as this sitting's
 451,223 and 451,323), which is what makes the two comparable.
 
+## Phase 5 — profile persistence
+
+`b1f579a` — 2026-08-20. `SaveServer`'s disk boundary moved behind `spt_profile_*`. There is no
+fixture: none predates this phase, and the spec's stated value is strategic (unblocking 6b). But
+Decision 11 pre-committed to taking the cheap number rather than arguing the cost away, so
+`SaveProfileAsync`'s own returned milliseconds were read before and after, on a **26.50 MB synthetic
+profile**, 6 runs per pass and two passes per state:
+
+| state | median | range |
+|---|---|---|
+| before (`fileUtil.WriteFileAsync`) | ~161 ms | 155 – 186 ms |
+| after (native `spt_profile_save`) | ~192 ms | 187 – 217 ms |
+
+**This is a regression and it is real, not noise: ~30–40 ms, about 20% slower, and the two states'
+ranges do not overlap across any of the four passes.** The harness was throwaway and is not
+committed; the profile is synthetic because no player profile of meaningful size exists in this
+environment, so the number sizes the effect rather than pinning it.
+
+The accounting, stated exactly, because the obvious version of it is wrong. The pre-phase path did
+**not** stream: `fileUtil.WriteFileAsync(filePath, jsonProfile, ct)` took the `string` overload
+(`Utils/FileUtil.cs:103-107`), which does one `Encoding.UTF8.GetBytes` into a full-size `byte[]` and
+hands that to a single `fs.WriteAsync`. So peak was already `jsonProfile` (UTF-16) plus one
+full-size UTF-8 buffer. The `MemoryStream` **replaces** that buffer (it is the same full-size UTF-8
+bytes plus ~128 bytes of envelope); it is not an extra one. Two genuinely new costs remain — "costs"
+and not "allocations", because the second turns out to be a pooled buffer — and the second was not
+anticipated by the plan:
+
+- `profile.rs`'s `SaveRequest.profile` is an **owned** `Box<RawValue>` (`profile.rs:175`), so serde
+  scan-skips the profile and then copies all 26.5 MB into it. This is the one extra full-size copy
+  at peak.
+- `Utf8JsonWriter.WriteRawValue(string)` (`SptNative.cs:633` — `profileJson` is a `string`, `:614`,
+  so it is the string overload, which delegates to the char-span one) transcodes through a
+  `chars × 3` scratch buffer rented from `ArrayPool<byte>.Shared`. **That pool does serve buffers
+  this large**, so the steady-state cost is the UTF-8 encode pass, not a per-save allocation.
+
+On top of those, the serde parse-scan of the whole request buffer and a `Task.Run` hop are work the
+write path did not do before, neither of which allocates a full copy.
+
+**The scratch buffer is cheaper than an earlier draft of this section claimed, and the correction is
+worth stating because the wrong version is intuitive.** Measured on .NET 10.0.10 against an 8 MB
+payload: `ArrayPool<byte>.Shared` returns the *same array* after rent → return → rent at 1, 4, 16,
+80, 128 and 512 MB, so there is no ~1 MB pooling cliff — that ceiling belongs to
+`ArrayPool<T>.Create()`'s `ConfigurableArrayPool` (`DefaultMaxArrayLength = 1024*1024`), which the
+same probe shows pooling at 1 MB and *not* at 2 MB. And the allocation is a cold-start effect, not a
+per-call one: the first save on a thread allocates ~6.2x the char count, every later save on that
+thread ~2.0x, the difference being the scratch getting rented rather than allocated. (Those two
+absolutes are harness-inclusive — the probe measured the whole `ProfileSave` wrapper, so they count
+the `MemoryStream` request buffer alongside the scratch, and are not `WriteRawValue`'s share alone.
+The ~4.2x *difference* between them is what isolates the scratch.) What keeps any
+of it live is an accident this prose previously never stated — `ProfileSaveAsync` hops through
+`Task.Run` (`SptNative.cs:611`), and the shared pool's fast path is a per-thread TLS slot, so a save
+landing on a threadpool thread with a cold cache does pay the full first-call price.
+
+**The ruling: the regression ships.** Implementing the remedy now would make `spt_profile_save` the
+first export off the shared `run_generator_with` ladder, at the tail of a phase whose whole value is
+mechanical parity. The **framed-request alternative is re-opened as a named follow-up** instead —
+frame the save request the way the load response is framed, and/or hand the wrapper UTF-8 bytes so
+`WriteRawValue`'s `ReadOnlySpan<byte>` overload skips the transcode. The MD5 dirty-check gates all of
+this to profiles that actually changed.
+
+**The load side was not separately timed and no claim is made about its latency — but that covers
+timing, not allocation, and the allocation is not nothing.** Where the save path's new buffer
+replaced an old one, the load path's are pure addition: `DeserializeFromFileAsync`
+(`Utils/JsonUtil.cs:102-113`) opened a `FileStream` with `bufferSize: 4096` and streamed it into
+`JsonSerializer.DeserializeAsync`, so no full-size buffer of the profile ever existed. The native
+path materialises three, all transient:
+
+- `fs::read` (`profile.rs:133`) reads the whole file into a `Vec`;
+- `encode_load_frame` (`profile.rs:154-165`) copies those bytes into a second, exactly-sized `Vec`
+  for the frame — deliberately, so `write_buffer`'s `into_boxed_slice` does not realloc;
+- `ParseProfileFrame`'s `span[at..].ToArray()` (`SptNative.cs:598`) copies them a third time onto the
+  managed heap, because the native buffer is freed as soon as the wrapper returns.
+
+On the same 26.50 MB profile that is ~80 MB of churn per load against approximately zero before. At
+most two are live at once — the read buffer and the frame during `encode_load_frame`, then the frame
+and the managed array during `ToArray` — so the concurrent peak is ~53 MB, not ~80 MB. Two of the
+three are native, so `GC.GetTotalAllocatedBytes` would not see them; none of this is on the
+save-side follow-up's path.
+
 ## Methodology
 
 - Both paths run in one process against one live shipped database; the fixture asserts `LastPathTaken`
