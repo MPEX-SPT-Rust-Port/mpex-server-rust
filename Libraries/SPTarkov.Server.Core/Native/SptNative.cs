@@ -702,7 +702,7 @@ public static class SptNative
     }
 
     /// <summary>
-    /// The status and ownership ladder the generation exports share: decode on success, otherwise
+    /// The status and ownership ladder the buffer-returning exports share: decode on success, otherwise
     /// read the failure message out of the same buffer, and free it either way.
     /// </summary>
     private static unsafe TResult DecodeResult<TResult>(
@@ -742,7 +742,9 @@ public static class SptNative
 
             if (status == StatusError)
             {
-                throw new InvalidOperationException($"spt_native {export} generation failed: {message}");
+                // "failed", not "generation failed": the profile exports write and delete files, so
+                // the shared verb has to fit an I/O failure as well as a generation one.
+                throw new InvalidOperationException($"spt_native {export} failed: {message}");
             }
 
             if (status == StatusPanic)
@@ -753,7 +755,7 @@ public static class SptNative
             }
 
             throw new InvalidOperationException(
-                $"spt_native {export} generation failed with internal status {status}: {message}; this indicates a native library bug, not corrupt game data."
+                $"spt_native {export} failed with internal status {status}: {message}; this indicates a native library bug, not corrupt game data."
             );
         }
         finally

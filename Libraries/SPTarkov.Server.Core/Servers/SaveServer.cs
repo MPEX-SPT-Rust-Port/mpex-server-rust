@@ -82,7 +82,10 @@ public sealed class SaveServer(
             catch (Exception e)
             {
                 // One unwritable profile must not starve the others: this loop is the autosave tick.
-                logger.Error($"Failed to save profile {sessionID.Key.ToString()}: {e.Message}");
+                // Pass the exception, not just Message: this catch absorbs more than the native
+                // failure (whose message already names the path and errno), and it is the only
+                // signal that a profile is silently not being persisted.
+                logger.Error($"Failed to save profile {sessionID.Key.ToString()}", e);
             }
         }
 

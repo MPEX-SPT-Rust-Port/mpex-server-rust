@@ -111,7 +111,9 @@ registrations).
 
 ### Persistence
 
-`Servers/SaveServer.cs` owns the on-disk JSON profiles in `user/profiles/`. `SaveCallbacks` loads
+`Servers/SaveServer.cs` owns the on-disk JSON profiles in `user/profiles/`, though since Phase 5 the
+disk itself is native — listing, reads, writes and deletes go through the `spt_profile_*` exports,
+while serialization, the MD5 dirty-check and `BackupService` stay C#. `SaveCallbacks` loads
 every profile at startup and saves on the `CoreConfig.ProfileSaveIntervalInSeconds` interval;
 `BackupService` takes timer-driven backups per `BackupConfig`.
 

@@ -1,6 +1,7 @@
-//! Disk half of `Libraries/SPTarkov.Server.Core/Servers/SaveServer.cs` (`LoadAsync:40`,
-//! `LoadProfileAsync:188`, `SaveProfileAsync:253`, `RemoveProfile:298`) plus the atomic-write
-//! protocol of `Utils/FileUtil.cs::WriteFileAsync:113`. The live `SptProfile` graph, the MD5
+//! Disk half of `Libraries/SPTarkov.Server.Core/Servers/SaveServer.cs` (`LoadAsync`,
+//! `LoadProfileAsync`, `SaveProfileAsync`, `RemoveProfile` — named, not line-cited, because
+//! this phase's own edits moved all four) plus the atomic-write protocol of
+//! `Utils/FileUtil.cs::WriteFileAsync:113`. The live `SptProfile` graph, the MD5
 //! dirty-check, migration, and `BackupService` all stay C# — profile bytes are opaque here,
 //! written and read verbatim. Stateless: the profiles directory arrives in every request
 //! (`db/load.rs::LoadRequest::dir` precedent), relative to the process CWD.
@@ -183,7 +184,13 @@ pub struct SaveRequest {
 /// with `MOVEFILE_REPLACE_EXISTING` and fails with a sharing violation while the source
 /// handle is open without `FILE_SHARE_DELETE`. Do not hoist the handle out of the chain; it
 /// would still pass every test on Linux, which is the only platform this repo runs today
-/// (`RUST-ROADMAP.md:974` — `mpex-server.exe` ships but has never been executed).
+/// (`RUST-ROADMAP.md` § Roadmap, the 6a item — `mpex-server.exe` ships but has never been
+/// executed).
+///
+/// Each stage names its own path. The C# this replaces did too — a failure inside
+/// `new FileStream(tempFilePath, …)` raised an `IOException` naming `tempFilePath` — and
+/// permission and disk-full failures land on the temp, not on the live file, so blaming the
+/// live path for all three stages would misdirect exactly the triage this message exists for.
 pub fn save(req: SaveRequest) -> Result<(), ProfileError> {
     gate_schema(req.schema)?;
     gate_id(&req.id)?;
@@ -196,10 +203,11 @@ pub fn save(req: SaveRequest) -> Result<(), ProfileError> {
             file.write_all(req.profile.get().as_bytes())?;
             file.sync_all()
         })
-        .and_then(|_| fs::rename(&tmp, &live));
+        .map_err(|error| io_err(&tmp, error))
+        .and_then(|()| fs::rename(&tmp, &live).map_err(|error| io_err(&live, error)));
     if let Err(error) = written {
         let _ = fs::remove_file(&tmp);
-        return Err(io_err(&live, error));
+        return Err(error);
     }
     Ok(())
     // ponytail: data fsync only, no directory fsync — matches FileUtil.WriteFileAsync
@@ -276,6 +284,19 @@ mod tests {
         dir.path().join(format!("{ID}.json.bak"))
     }
 
+    /// `io_err` renders `{path}: {error}`. `save`'s per-stage `map_err` is only worth having if
+    /// the path named is the one that actually failed, so the failure tests assert it.
+    fn assert_blames(error: &ProfileError, path: &Path) {
+        let ProfileError::Io(message) = error else {
+            panic!("expected an Io error, got {error:?}");
+        };
+        let path = path.to_str().expect("temp paths are utf-8");
+        assert!(
+            message.starts_with(path),
+            "expected {path} to be blamed, got: {message}"
+        );
+    }
+
     const ODD: &str = "{\n  \"a\": 1,\r\n\t\"b\":[ ]\n}";
 
     #[test]
@@ -323,7 +344,7 @@ mod tests {
 
         let error = save(save_request(&dir, ID, "{}")).expect_err("create fails");
 
-        assert!(matches!(error, ProfileError::Io(_)), "{error:?}");
+        assert_blames(&error, &temp(&dir));
         assert!(!live(&dir).exists());
     }
 
@@ -334,7 +355,7 @@ mod tests {
 
         let error = save(save_request(&dir, ID, "{}")).expect_err("rename fails");
 
-        assert!(matches!(error, ProfileError::Io(_)), "{error:?}");
+        assert_blames(&error, &live(&dir));
         assert!(!temp(&dir).exists());
         assert!(live(&dir).is_dir());
     }

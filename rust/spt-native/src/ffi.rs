@@ -30,7 +30,8 @@ use crate::verify;
 pub const STATUS_OK: i32 = 0;
 pub const STATUS_BAD_ARGS: i32 = 1;
 pub const STATUS_PANIC: i32 = 2;
-/// Generation failed: the error message, not a result, is in the out-buffer.
+/// The call failed - generation, or the disk, for the profile exports: the error message, not a
+/// result, is in the out-buffer.
 pub const STATUS_ERROR: i32 = 3;
 /// A request named a resident-DB epoch this process does not hold; the caller republishes and
 /// retries.

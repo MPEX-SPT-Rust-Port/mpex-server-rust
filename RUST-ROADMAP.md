@@ -189,8 +189,15 @@ entry and the inherited `ValueType.ToString()`. Scope is `Color` only — mods t
   since Phase 5 `SaveServer`'s disk boundary is `spt_profile_*`, so a mod intercepting profile
   writes or deletes through `FileUtil` never fires. Patches on `SaveServer`'s own members still
   fire — its signatures are frozen and unchanged by this phase — and `BackupService`'s copies still
-  go through C#. **No escape hatch**: Decision 6 shipped no legacy path and no `forceLegacy` flag, the
-  `SPTLoggerDispatcher` precedent. Bites only mods that hook profile I/O at the `FileUtil` layer.
+  go through C#. **No escape hatch**: Decision 6 shipped no legacy path and no `forceLegacy` flag.
+  Not the `SPTLoggerDispatcher` precedent — a logger flip loses log lines and this one could lose
+  player saves, so the precedent does not carry the blast radius. The reason it holds anyway is that
+  Phase 3 kept `CoreConfig.ForceLegacyDatabaseImport` because its two arms produce *different*
+  artifacts (the fused load does assembly, parse and derivation work the legacy arm does not), while
+  Phase 5's arms produce the same bytes: on-disk format is byte-identical and the write protocol is a
+  step-for-step port, so a revert is a plain `git revert` with no stranded state and no migration. A
+  second write path here would rot untested, and a rotted fallback is worse than none. Bites only
+  mods that hook profile I/O at the `FileUtil` layer.
 - **Profile save and load cancellation is best-effort-before, never mid-flight** — a token is
   checked before the native call and cannot interrupt a started write, where `WriteAsync` could be
   cancelled mid-file. Atomicity is not what changed: `FileUtil.WriteFileAsync` was already
@@ -201,6 +208,18 @@ entry and the inherited `ValueType.ToString()`. Scope is `Color` only — mods t
   they used to throw `IOException`-family types; nothing in the tree catches those specifically, so
   this bites a mod with a `catch (IOException)` around a profile operation. No escape hatch, same
   reason.
+- **A `user/profiles/` that cannot be `stat`ped now aborts startup instead of loading zero
+  profiles** — `spt_profile_list` raises on any non-`NotFound` `stat` failure, and `SaveServer.LoadAsync`
+  is an `IOnLoad`, so the throw reaches `SPTStartupHostedService.ExecuteAsync`'s outer catch and stops
+  the server with `Critical exception, stopping server...` plus the path and errno. The most reachable
+  cause is a `user/profiles/` that has lost `+x`: 4.1.2 C# booted normally there, because .NET's Unix
+  enumerator answers `Directory.GetFiles` from `getdents64`'s `d_type` and never `stat`s a regular
+  file, and then `File.Exists` on each child returned `false` — so the player was invited to create a
+  new profile beside intact ones. **Deliberate**: a loud stop on a `chmod`-recoverable condition beats
+  a silent one that presents as data loss. The blast radius is a startup failure, which is why it is
+  here and not only in the Phase 5 ledger.
+- **`LoadAsync` sees profiles in sorted order**, where `Directory.GetFiles` order was
+  filesystem-dependent. Strictly more deterministic; nothing downstream reads the order.
 - **A failure crosses as a message for C# to throw with** — never as a log line, so it carries no
   category. Since ABI 18 a panic crosses with its message too.
 - **Hangs are mostly undiagnosable** — ported retry loops can spin exactly as 4.1.2 does, inside an
@@ -1086,8 +1105,9 @@ Libraries/SPTarkov.Server.Core/Servers/SaveServer.cs`): **+266/−18 across 3 fi
 the single deletion is the `ExpectedAbiVersion` constant, 30 → 31) and
 `Servers/SaveServer.cs` +28/−17. Growth, and almost all of it additive: the boundary gained a
 family and nothing in `Native/` was replaced. `SaveServer.cs` is the one file that both grew and
-shrank, and roughly in balance — the `DirectoryExists`/`CreateDirectory` pair and the
-`Path.Combine`/`FileExists` probes went away, the per-profile autosave `try`/`catch` came in.
+shrank, and roughly in balance — the `DirectoryExists`/`CreateDirectory` pair went away and the
+per-profile autosave `try`/`catch` came in. `RemoveProfile`'s `Path.Combine`/`FileExists` probe
+stays, per (b) Decision 4.
 
 (d) The measurement, because Decision 11 pre-committed to it. `SaveProfileAsync`'s returned
 milliseconds on a **26.50 MB synthetic profile**, 6 runs per pass and two passes per state:
@@ -1153,7 +1173,7 @@ written against, not the current file.
 
 ## Roadmap
 
-1. **Phases 1 through 4 of the state-ownership program are complete; Phase 5 is the next front.** Phase 1 of
+1. **Phases 1 through 5 of the state-ownership program are complete; Phase 6b is the next front.** Phase 1 of
    `docs/superpowers/specs/2026-08-17-rust-state-ownership-design.md` moved every generation
    export onto the epoch protocol, one family per flip — each its own plan, own ABI bump,
    goldens passing *unchanged*, BENCHMARK.md re-measured before the next started. Landed: #1
