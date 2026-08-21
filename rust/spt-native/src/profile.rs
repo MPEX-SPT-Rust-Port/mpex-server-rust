@@ -83,8 +83,9 @@ pub fn list(req: ListRequest) -> Result<Vec<String>, ProfileError> {
         let entry = entry.map_err(|e| io_err(dir, e))?;
         let is_file = match fs::metadata(entry.path()) {
             Ok(metadata) => metadata.is_file(),
-            // A dangling symlink: `Directory.GetFiles` lists it, the C# extension and stem
-            // filters drop it, and it has no bytes to load. Skipping matches the outcome.
+            // A dangling symlink: `Directory.GetFiles` lists it, and a `{id}.json` link passes
+            // both C# filters. What makes skipping it safe is `load`'s own `NotFound` arm,
+            // which answers `found: false` — this just reaches that outcome one step earlier.
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
             Err(error) => return Err(io_err(&entry.path(), error)),
         };
@@ -421,8 +422,8 @@ mod tests {
         assert!(!files.contains(&"dirlink".to_owned()), "{files:?}");
     }
 
-    /// The one `stat` failure that stays silent: a dangling link has no bytes to load and the
-    /// C# filters would drop it anyway, so skipping it reaches `Directory.GetFiles`' outcome.
+    /// The one `stat` failure that stays silent. Not because the C# filters would catch it — a
+    /// `{id}.json` link passes both — but because `load` answers `found: false` for it anyway.
     #[cfg(unix)]
     #[test]
     fn list_skips_a_dangling_symlink() {

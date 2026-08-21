@@ -392,7 +392,7 @@ bytes plus ~128 bytes of envelope); it is not an extra one. Two genuinely new co
 and not "allocations", because the second turns out to be a pooled buffer — and the second was not
 anticipated by the plan:
 
-- `profile.rs`'s `SaveRequest.profile` is an **owned** `Box<RawValue>` (`profile.rs:160`), so serde
+- `profile.rs`'s `SaveRequest.profile` is an **owned** `Box<RawValue>` (`profile.rs:175`), so serde
   scan-skips the profile and then copies all 26.5 MB into it. This is the one extra full-size copy
   at peak.
 - `Utf8JsonWriter.WriteRawValue(string)` (`SptNative.cs:633` — `profileJson` is a `string`, `:614`,
@@ -432,8 +432,8 @@ replaced an old one, the load path's are pure addition: `DeserializeFromFileAsyn
 `JsonSerializer.DeserializeAsync`, so no full-size buffer of the profile ever existed. The native
 path materialises three, all transient:
 
-- `fs::read` (`profile.rs:132`) reads the whole file into a `Vec`;
-- `encode_load_frame` (`profile.rs:153-164`) copies those bytes into a second, exactly-sized `Vec`
+- `fs::read` (`profile.rs:133`) reads the whole file into a `Vec`;
+- `encode_load_frame` (`profile.rs:154-165`) copies those bytes into a second, exactly-sized `Vec`
   for the frame — deliberately, so `write_buffer`'s `into_boxed_slice` does not realloc;
 - `ParseProfileFrame`'s `span[at..].ToArray()` (`SptNative.cs:598`) copies them a third time onto the
   managed heap, because the native buffer is freed as soon as the wrapper returns.

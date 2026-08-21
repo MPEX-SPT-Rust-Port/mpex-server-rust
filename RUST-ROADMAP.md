@@ -1009,12 +1009,31 @@ classify a symlink-to-a-profile as neither file nor directory. Following-then-`i
 `Directory.GetFiles` on the two cases that matter — measured on .NET 10.0.10, `GetFiles` returns a
 symlink to a file and `GetDirectories`, not `GetFiles`, claims a symlink to a directory — but it is
 **not exact**, and the source is the accurate account here, not this paragraph's earlier wording.
-`GetFiles` also returns a **dangling** symlink, where `fs::metadata` fails the `stat` and
-`unwrap_or(false)` drops it (`profile.rs:74-77`, deviation documented at `:65-66`). Harmless: a
-dangling `{id}.json` link would have failed the subsequent read anyway, and the C# stem gate never
-sees it. Worth knowing because it is the one listing divergence, and it is the one case
-`list_follows_symlinks_like_getfiles` does not cover — that test pins the file-link and dir-link
-arms only.
+Two `stat` failures fall outside that match, and `list` now treats them differently — the
+`unwrap_or(false)` that swallowed both is gone.
+
+A **dangling** symlink is still skipped, and `list_skips_a_dangling_symlink` pins it. It is a real
+divergence — `GetFiles` returns the link — but an inert one, and not for the reason an earlier draft
+of this ledger gave: a dangling `{id}.json` link passes *both* C# filters, so the stem gate does not
+save us. What does is `load`'s own `NotFound` arm, which answers `found: false` for that link
+regardless; skipping it at the listing just reaches the same outcome a step earlier.
+
+A **denied** `stat` is now raised instead. This is the larger divergence and the reason the code
+changed. `readdir` needs only `+r` on a directory while `stat`ping a child needs `+x`, and .NET's
+Unix enumerator answers file-vs-directory from `d_type` without `stat`ping a regular file — so on a
+`user/profiles/` that has lost `+x`, `GetFiles` returns every profile while every `fs::metadata` here
+fails `EACCES` (measured on .NET 10: `Directory.GetFiles` lists the file, `File.Exists` on that same
+child is `false`). Swallowing that reported an empty directory, and `LoadAsync` came up with zero
+profiles and offered to create a new one beside intact files. `list_raises_an_unreadable_entry`
+pins the fix; it self-guards, because root bypasses the search bit and the arm is unreachable there.
+
+**This is an improvement over the pre-phase C# too, not a parity restoration, and the distinction is
+worth keeping straight.** `GetFiles` listing the profiles is where the pre-phase advantage ended:
+`File.Exists` also returns `false` on `EACCES`, and both the guard in `LoadProfileAsync` and
+`DeserializeFromFileAsync`'s own short-circuit (`JsonUtil.cs:104-107`,
+`if (!File.Exists(file)) return default;`) are `File.Exists`. So the pre-phase path enumerated every
+profile and then silently loaded none of them — the same zero-profile presentation, one stage later.
+Raising the error is better than either state that preceded it.
 
 **One known-stale cite left in place, deliberately.** `profile.rs`'s `save` doc comment comes with a
 Windows warning — the `File` handle must drop before `fs::rename`, or `MoveFileExW` fails with a
@@ -1083,7 +1102,7 @@ gives that to a single `fs.WriteAsync`, so peak was already `jsonProfile` (UTF-1
 full-size UTF-8 buffer. The `MemoryStream` **replaces** that buffer — same bytes plus ~128 of
 envelope — and is not an extra one. The two real new costs are — "costs" and not "allocations",
 because the second turns out to be a pooled buffer — `profile.rs`'s
-`pub profile: Box<RawValue>` (`profile.rs:160`), which is **owned**, so serde scan-skips the profile
+`pub profile: Box<RawValue>` (`profile.rs:175`), which is **owned**, so serde scan-skips the profile
 and then copies all 26.5 MB — the one extra full-size copy at peak — and, unanticipated by the plan,
 `Utf8JsonWriter.WriteRawValue(string)` (`SptNative.cs:633`; `profileJson` is a `string`, `:614`, so
 it is the string overload delegating to the char-span one), which transcodes through a `chars × 3`
@@ -1112,8 +1131,8 @@ about its latency — but that covers timing, not allocation.** Where the save p
 replaced an old one, the load path's are pure addition: `DeserializeFromFileAsync`
 (`Utils/JsonUtil.cs:102-113`) opened a `FileStream` with `bufferSize: 4096` and streamed it into
 `JsonSerializer.DeserializeAsync`, so no full-size buffer of the profile ever existed, where the
-native path materialises three transient ones — `fs::read` (`profile.rs:132`) into a `Vec`,
-`encode_load_frame` (`profile.rs:153-164`) copying those bytes into a second exactly-sized `Vec` so
+native path materialises three transient ones — `fs::read` (`profile.rs:133`) into a `Vec`,
+`encode_load_frame` (`profile.rs:154-165`) copying those bytes into a second exactly-sized `Vec` so
 `write_buffer`'s `into_boxed_slice` does not realloc, and `ParseProfileFrame`'s `span[at..].ToArray()`
 (`SptNative.cs:598`) copying them a third time onto the managed heap because the native buffer is
 freed as soon as the wrapper returns. On the same 26.50 MB profile that is ~80 MB of churn per load
