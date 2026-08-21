@@ -52,6 +52,20 @@ fn run() -> Result<i32, String> {
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| format!("argument is not a valid host string: {e}"))?;
 
+    // The linker drops an rlib nothing references, taking all 34 #[no_mangle] spt_* exports with
+    // it — and a `const` reference is not enough, it inlines. This call is the anchor that keeps
+    // them in .dynsym where NativeLibrary.GetMainProgramHandle() can find them.
+    // Anchor: the linker drops an rlib the binary never references, taking all 34 #[no_mangle]
+    // spt_* exports with it. Any path reference keeps them; this one is a call, so it also checks
+    // that the linked crate and its own export agree. scripts/smoke-mpex-server.sh gates the count.
+    let linked_abi = spt_native::ffi::spt_native_abi_version();
+    if linked_abi != spt_native::ABI_VERSION {
+        return Err(format!(
+            "linked spt-native is inconsistent: export says {linked_abi}, crate says {}",
+            spt_native::ABI_VERSION
+        ));
+    }
+
     let context = hostfxr
         .initialize_for_dotnet_command_line_with_args(&app_dll, args.iter().map(AsRef::as_ref))
         .map_err(|e| format!("runtime initialization failed: {e:?}"))?;
