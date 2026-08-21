@@ -164,6 +164,23 @@ impl FfiFailure for crate::db::load::LoadError {
     }
 }
 
+impl FfiFailure for crate::profile::ProfileError {
+    fn status(&self) -> i32 {
+        match self {
+            crate::profile::ProfileError::BadArgs(_) => STATUS_BAD_ARGS,
+            crate::profile::ProfileError::Io(_) => STATUS_ERROR,
+        }
+    }
+
+    fn into_message(self) -> String {
+        match self {
+            // Both already name their culprit: the id/schema, or the path that failed.
+            crate::profile::ProfileError::BadArgs(message)
+            | crate::profile::ProfileError::Io(message) => message,
+        }
+    }
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn spt_native_abi_version() -> u32 {
     crate::ABI_VERSION
@@ -754,6 +771,101 @@ pub unsafe extern "C" fn spt_db_load(
             out_len,
             db_load_blocking,
             encode_load_response,
+        )
+    }
+}
+
+/// Every file name in the profiles directory as `{"files":[…]}`, the directory created when
+/// missing. Contract in `profile.rs`.
+///
+/// # Safety
+/// See `spt_generate_static_containers`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn spt_profile_list(
+    req_ptr: *const u8,
+    req_len: usize,
+    out_ptr: *mut *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    unsafe {
+        run_generator_with(
+            req_ptr,
+            req_len,
+            out_ptr,
+            out_len,
+            crate::profile::list,
+            crate::profile::encode_list,
+        )
+    }
+}
+
+/// One profile's bytes, framed `[u32-LE header length][header JSON][file bytes]` with the header
+/// `{"found":true}` or `{"found":false}` — the bytes cross as bytes, never as an escaped string.
+///
+/// # Safety
+/// See `spt_generate_static_containers`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn spt_profile_load(
+    req_ptr: *const u8,
+    req_len: usize,
+    out_ptr: *mut *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    unsafe {
+        run_generator_with(
+            req_ptr,
+            req_len,
+            out_ptr,
+            out_len,
+            crate::profile::load,
+            crate::profile::encode_load_frame,
+        )
+    }
+}
+
+/// Writes one profile through the temp-then-rename protocol; answers the empty envelope `{}`.
+///
+/// # Safety
+/// See `spt_generate_static_containers`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn spt_profile_save(
+    req_ptr: *const u8,
+    req_len: usize,
+    out_ptr: *mut *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    unsafe {
+        run_generator_with(
+            req_ptr,
+            req_len,
+            out_ptr,
+            out_len,
+            crate::profile::save,
+            |()| b"{}".to_vec(),
+        )
+    }
+}
+
+/// Removes one profile; `{"deleted":true}` when the file was there, `{"deleted":false}` when it
+/// was not. A missing file is not an error.
+///
+/// # Safety
+/// See `spt_generate_static_containers`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn spt_profile_delete(
+    req_ptr: *const u8,
+    req_len: usize,
+    out_ptr: *mut *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    unsafe {
+        run_generator_with(
+            req_ptr,
+            req_len,
+            out_ptr,
+            out_len,
+            crate::profile::delete,
+            |deleted| format!("{{\"deleted\":{deleted}}}").into_bytes(),
         )
     }
 }
@@ -1424,7 +1536,7 @@ mod tests {
         assert_eq!(spt_native_abi_version(), crate::ABI_VERSION);
         assert_eq!(
             crate::ABI_VERSION,
-            30,
+            31,
             "bump SptNative.ExpectedAbiVersion too"
         );
     }
@@ -3271,5 +3383,181 @@ mod tests {
             STATUS_BAD_ARGS
         );
         assert_eq!(unsafe { spt_console_clear() }, STATUS_OK);
+    }
+
+    // The profile exports below work a directory named in every request and touch no
+    // process-global state, so — unlike the db exports — none of these take `db_lock`.
+
+    /// A valid MongoId: the only id shape the exports accept.
+    const PROFILE_ID: &str = "6889d9d1f8ee8ab88c0b8e11";
+
+    /// The tempdir path as a JSON string literal, ready to splice into an envelope.
+    fn profile_dir(dir: &TempDir) -> String {
+        serde_json::to_string(dir.path().to_str().unwrap()).unwrap()
+    }
+
+    fn profile_exports() -> [Export; 4] {
+        [
+            spt_profile_list,
+            spt_profile_load,
+            spt_profile_save,
+            spt_profile_delete,
+        ]
+    }
+
+    #[test]
+    fn profile_save_then_load_round_trips_bytes() {
+        let dir = TempDir::new().unwrap();
+        // Spliced raw into the envelope, not as a JSON string: whatever `RawValue` swallows here
+        // is what has to land on disk, indentation and CRLF included.
+        let profile = "{\n  \"a\": 1,\r\n\t\"b\":[ ]\n}";
+        let request = format!(
+            r#"{{"schema":1,"dir":{},"id":"{PROFILE_ID}","profile":{profile}}}"#,
+            profile_dir(&dir)
+        );
+
+        let (status, out) = call_generate(spt_profile_save, request.as_bytes());
+        assert_eq!(status, STATUS_OK);
+        assert_eq!(String::from_utf8(out).unwrap(), "{}");
+
+        let request = format!(
+            r#"{{"schema":1,"dir":{},"id":"{PROFILE_ID}"}}"#,
+            profile_dir(&dir)
+        );
+        let (status, out) = call_generate(spt_profile_load, request.as_bytes());
+
+        assert_eq!(status, STATUS_OK);
+        let header_len = u32::from_le_bytes(out[..4].try_into().unwrap()) as usize;
+        let header: serde_json::Value = serde_json::from_slice(&out[4..4 + header_len]).unwrap();
+        assert_eq!(header, serde_json::json!({"found": true}));
+        assert_eq!(&out[4 + header_len..], profile.as_bytes());
+    }
+
+    #[test]
+    fn profile_load_missing_reports_found_false() {
+        let dir = TempDir::new().unwrap();
+        let request = format!(
+            r#"{{"schema":1,"dir":{},"id":"{PROFILE_ID}"}}"#,
+            profile_dir(&dir)
+        );
+
+        let (status, out) = call_generate(spt_profile_load, request.as_bytes());
+
+        assert_eq!(status, STATUS_OK);
+        let header_len = u32::from_le_bytes(out[..4].try_into().unwrap()) as usize;
+        let header: serde_json::Value = serde_json::from_slice(&out[4..4 + header_len]).unwrap();
+        assert_eq!(header, serde_json::json!({"found": false}));
+        assert_eq!(out.len(), 4 + header_len, "a miss carries no blob");
+    }
+
+    #[test]
+    fn profile_list_names_files() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("a.json"), b"{}").unwrap();
+        fs::create_dir(dir.path().join("backups")).unwrap();
+        let request = format!(r#"{{"schema":1,"dir":{}}}"#, profile_dir(&dir));
+
+        let (status, out) = call_generate(spt_profile_list, request.as_bytes());
+
+        assert_eq!(status, STATUS_OK);
+        let body: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(body, serde_json::json!({"files": ["a.json"]}));
+    }
+
+    #[test]
+    fn profile_delete_reports_deleted() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join(format!("{PROFILE_ID}.json")), b"{}").unwrap();
+        let request = format!(
+            r#"{{"schema":1,"dir":{},"id":"{PROFILE_ID}"}}"#,
+            profile_dir(&dir)
+        );
+
+        let (status, out) = call_generate(spt_profile_delete, request.as_bytes());
+        assert_eq!(status, STATUS_OK);
+        assert_eq!(String::from_utf8(out).unwrap(), r#"{"deleted":true}"#);
+
+        let (status, out) = call_generate(spt_profile_delete, request.as_bytes());
+        assert_eq!(status, STATUS_OK);
+        assert_eq!(String::from_utf8(out).unwrap(), r#"{"deleted":false}"#);
+    }
+
+    #[test]
+    fn profile_exports_reject_junk_envelopes_as_bad_args() {
+        for export in profile_exports() {
+            let (status, out) = call_generate(export, b"not json");
+
+            assert_eq!(status, STATUS_BAD_ARGS);
+            assert!(!out.is_empty(), "the serde error message is missing");
+        }
+    }
+
+    #[test]
+    fn profile_exports_reject_traversal_ids() {
+        let dir = TempDir::new().unwrap();
+        let id = "../../etc/passwd";
+        let addressed = format!(r#"{{"schema":1,"dir":{},"id":{id:?}}}"#, profile_dir(&dir));
+        let saved = format!(
+            r#"{{"schema":1,"dir":{},"id":{id:?},"profile":{{}}}}"#,
+            profile_dir(&dir)
+        );
+
+        for (export, request) in [
+            (spt_profile_load as Export, &addressed),
+            (spt_profile_save as Export, &saved),
+            (spt_profile_delete as Export, &addressed),
+        ] {
+            let (status, out) = call_generate(export, request.as_bytes());
+
+            assert_eq!(status, STATUS_BAD_ARGS);
+            let message = String::from_utf8(out).unwrap();
+            assert!(
+                message.contains(id),
+                "the message must name it, got: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn profile_wrong_schema_is_bad_args() {
+        let dir = TempDir::new().unwrap();
+        let request = format!(r#"{{"schema":2,"dir":{}}}"#, profile_dir(&dir));
+
+        let (status, out) = call_generate(spt_profile_list, request.as_bytes());
+
+        assert_eq!(status, STATUS_BAD_ARGS);
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "unsupported schema 2, expected 1"
+        );
+    }
+
+    /// The other half of `ProfileError`'s status mapping: a real disk failure is STATUS_ERROR, not
+    /// a caller's bad request.
+    #[test]
+    fn profile_io_failure_is_status_error() {
+        let dir = TempDir::new().unwrap();
+        fs::create_dir(dir.path().join(format!("{PROFILE_ID}.json"))).unwrap();
+        let request = format!(
+            r#"{{"schema":1,"dir":{},"id":"{PROFILE_ID}","profile":{{}}}}"#,
+            profile_dir(&dir)
+        );
+
+        let (status, out) = call_generate(spt_profile_save, request.as_bytes());
+
+        assert_eq!(status, STATUS_ERROR);
+        assert!(!out.is_empty(), "the io error message is missing");
+    }
+
+    #[test]
+    fn profile_null_args_are_bad_args_without_a_buffer() {
+        for export in profile_exports() {
+            let mut out_len: usize = 0;
+
+            let status = unsafe { export(std::ptr::null(), 0, std::ptr::null_mut(), &mut out_len) };
+
+            assert_eq!(status, STATUS_BAD_ARGS);
+            assert_eq!(out_len, 0, "nothing may be written when out_ptr is null");
+        }
     }
 }
