@@ -107,6 +107,24 @@
       </ResolvedFileToPublish>
     </ItemGroup>
   </Target>
+  <!-- Phase 6b: on Linux the shipped launcher links spt-native as an rlib and exports its symbols
+       (rust/.cargo/config.toml), so the published tree must not also carry the cdylib - that is the
+       split-brain rule, and shipping both would let a lost export anchor fall back silently instead
+       of failing the boot. The build output keeps it: `dotnet test` and the SPT.Server dev
+       executable bind through it.
+       Windows is excluded deliberately: an .exe has no export table without /EXPORT: args or a .def
+       file, so a Windows launcher still needs the cdylib. -->
+  <PropertyGroup>
+    <SptNativeExportsFromLauncher Condition="'$(SptNativeTargetTriple)' == 'x86_64-unknown-linux-gnu'">true</SptNativeExportsFromLauncher>
+    <SptNativeExportsFromLauncher
+      Condition="'$(SptNativeExportsFromLauncher)' == '' and '$(SptNativeRid)' == '' and $([MSBuild]::IsOSPlatform('Linux'))"
+      >true</SptNativeExportsFromLauncher>
+  </PropertyGroup>
+  <Target Name="ExcludeSptNativeFromPublish" AfterTargets="ComputeFilesToPublish" Condition="'$(SptNativeExportsFromLauncher)' == 'true'">
+    <ItemGroup>
+      <ResolvedFileToPublish Remove="@(ResolvedFileToPublish->WithMetadataValue('Filename','libspt_native'))" />
+    </ItemGroup>
+  </Target>
   <Target Name="RelocateSatelliteAssemblies" AfterTargets="ResolveAssemblyReferences">
     <ItemGroup>
       <_RelocatedSatelliteCulture

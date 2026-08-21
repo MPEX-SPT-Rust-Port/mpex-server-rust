@@ -19,6 +19,20 @@ trap '{ kill "$server_pid" && wait "$server_pid"; } 2>/dev/null || true; rm -rf 
 # smoke fails if that wiring regresses — no separate cargo invocation or copy needed.
 dotnet publish "$root/SPTarkov.Server/SPTarkov.Server.csproj" -c Debug -o "$out"
 
+# Phase 6b: the published tree must be single-linkage. mpex-server carries spt-native as an rlib and
+# exports its symbols; a cdylib beside it would be a second copy of every static.
+exported="$(nm -D --defined-only "$out/mpex-server" | grep -c ' T spt_' || true)"
+if [ "$exported" -ne 34 ]; then
+    echo "SMOKE FAIL: mpex-server exports $exported spt_* symbols, expected 34." >&2
+    echo "  The usual cause is that main.rs lost its reference to spt_native, so the linker" >&2
+    echo "  dropped the rlib. See Task 1 Step 3 of the Phase 6b plan." >&2
+    exit 1
+fi
+if [ -e "$out/libspt_native.so" ]; then
+    echo "SMOKE FAIL: publish shipped a cdylib alongside the rlib-linked launcher" >&2
+    exit 1
+fi
+
 cd "$out"   # sptLogger.Development.json lands here; the server requires it in CWD
 ./mpex-server &
 server_pid=$!
