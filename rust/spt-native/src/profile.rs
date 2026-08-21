@@ -62,8 +62,18 @@ pub struct ListRequest {
 /// follows symlinks — both `DirEntry` methods report the link itself (`lstat` on Unix) and
 /// would call a symlink-to-a-profile neither file nor directory. `Directory.GetFiles` returns
 /// symlinks to files and omits symlinks to directories, which is exactly what
-/// following-then-`is_file()` reproduces; a broken link fails the `stat` and is skipped by the
-/// `unwrap_or(false)`.
+/// following-then-`is_file()` reproduces.
+///
+/// Only `NotFound` is swallowed, and every other `stat` failure is raised, because this is
+/// where `stat`-per-entry stops matching `Directory.GetFiles`. `readdir` needs only read
+/// (`+r`) on the directory; `stat`ping a child needs search (`+x`). .NET's Unix enumerator
+/// answers file-vs-directory from `getdents64`'s `d_type` and never `stat`s a `DT_REG` entry,
+/// so on a `user/profiles/` that has lost `+x` it still lists every profile (measured on .NET
+/// 10: `Directory.GetFiles` returns the file while `File.Exists` on that same child is
+/// `false`). Here every entry's `stat` fails `EACCES` instead. Swallowing that would report an
+/// empty directory, and `LoadAsync` would come up with zero profiles and invite the player to
+/// create a new one beside intact files — the worst presentation of a `chmod`-recoverable
+/// condition. Failing the call names the directory and the errno.
 pub fn list(req: ListRequest) -> Result<Vec<String>, ProfileError> {
     gate_schema(req.schema)?;
     let dir = Path::new(&req.dir);
@@ -71,10 +81,14 @@ pub fn list(req: ListRequest) -> Result<Vec<String>, ProfileError> {
     let mut files = Vec::new();
     for entry in fs::read_dir(dir).map_err(|e| io_err(dir, e))? {
         let entry = entry.map_err(|e| io_err(dir, e))?;
-        if fs::metadata(entry.path())
-            .map(|m| m.is_file())
-            .unwrap_or(false)
-        {
+        let is_file = match fs::metadata(entry.path()) {
+            Ok(metadata) => metadata.is_file(),
+            // A dangling symlink: `Directory.GetFiles` lists it, the C# extension and stem
+            // filters drop it, and it has no bytes to load. Skipping matches the outcome.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => return Err(io_err(&entry.path(), error)),
+        };
+        if is_file {
             files.push(entry.file_name().to_string_lossy().into_owned());
         }
     }
@@ -405,6 +419,54 @@ mod tests {
 
         assert!(files.contains(&"link.json".to_owned()), "{files:?}");
         assert!(!files.contains(&"dirlink".to_owned()), "{files:?}");
+    }
+
+    /// The one `stat` failure that stays silent: a dangling link has no bytes to load and the
+    /// C# filters would drop it anyway, so skipping it reaches `Directory.GetFiles`' outcome.
+    #[cfg(unix)]
+    #[test]
+    fn list_skips_a_dangling_symlink() {
+        let dir = TempDir::new().expect("temp dir");
+        fs::write(dir.path().join("real.json"), b"{}").expect("seed");
+        std::os::unix::fs::symlink(dir.path().join("gone.json"), dir.path().join("dead.json"))
+            .expect("dangling symlink");
+
+        let files = list(ListRequest {
+            schema: 1,
+            dir: dir_arg(&dir),
+        })
+        .expect("a dangling link is not an error");
+
+        assert_eq!(files, vec!["real.json".to_owned()]);
+    }
+
+    /// A profiles directory that has lost `+x` still `readdir`s but denies every child `stat`.
+    /// `Directory.GetFiles` listed the profiles here (it reads `d_type` and never `stat`s a
+    /// regular file); reporting an empty directory instead would have `LoadAsync` come up with
+    /// zero profiles and offer to create a new one beside them. It has to fail loudly.
+    #[cfg(unix)]
+    #[test]
+    fn list_raises_an_unreadable_entry() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = TempDir::new().expect("temp dir");
+        fs::write(dir.path().join("real.json"), b"{}").expect("seed");
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o444)).expect("drop +x");
+
+        // Root bypasses the search bit, so the arm under test is unreachable there.
+        let denied = fs::metadata(dir.path().join("real.json")).is_err();
+        let result = list(ListRequest {
+            schema: 1,
+            dir: dir_arg(&dir),
+        });
+
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o755)).expect("restore +x");
+        if denied {
+            assert!(
+                matches!(result, Err(ProfileError::Io(_))),
+                "an EACCES entry was swallowed: {result:?}"
+            );
+        }
     }
 
     #[test]

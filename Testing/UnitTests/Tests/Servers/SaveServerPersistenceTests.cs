@@ -17,9 +17,10 @@ namespace UnitTests.Tests.Servers;
 /// else for them to go, and <c>DI</c> runs every <c>IOnLoad</c> once per test process, which means
 /// <c>SaveCallbacks.OnLoadAsync</c> loads that directory on every run. A file leaked by one run is a
 /// file the next run tries to load, and a leaked zero-byte profile turns the whole suite red from
-/// inside DI construction. Hence: fixed ids (a leak the next run's setup can reach), cleanup in
-/// <c>[OneTimeSetUp]</c> as well as teardown, and a snapshot of the directory so profiles that
-/// <c>SaveAsync</c> flushed on other fixtures' behalf go too.
+/// inside DI construction. Hence: fixed ids (a leak the next run can reach), <c>CleanOwnedFiles</c>
+/// hoisted into the assembly-level <see cref="ProfileDirectorySetUp"/> so it genuinely precedes the
+/// run's first <c>LoadAsync</c>, and a snapshot of the directory so profiles that <c>SaveAsync</c>
+/// flushed on other fixtures' behalf go too.
 /// </summary>
 [TestFixture]
 [NonParallelizable]
@@ -44,9 +45,8 @@ public class SaveServerPersistenceTests
     [OneTimeSetUp]
     public void Initialize()
     {
-        // Ahead of DI, so run N+1 self-heals before LoadAsync ever sees run N's mess.
-        CleanOwnedFiles();
-
+        // The leaked-file sweep is ProfileDirectorySetUp's: by the time this runs, DI has very
+        // likely already been built - and with it LoadAsync - by an earlier fixture.
         var di = DI.GetInstance();
         _saveServer = di.GetService<SaveServer>();
         _jsonUtil = di.GetService<JsonUtil>();
@@ -68,15 +68,23 @@ public class SaveServerPersistenceTests
             _saveServer.DeleteProfileById(new MongoId(id));
         }
 
-        CleanOwnedFiles();
-
-        // SaveAsync writes every in-memory profile, including ones other fixtures created under
-        // random ids that no fixed-id cleanup could reach.
-        foreach (var file in SnapshotProfileDir())
+        // CleanOwnedFiles can throw - Directory.Delete on the parked .json.bak, File.Delete on a
+        // locked path - and the sweep below is the only cleanup that reaches the random-id
+        // profiles, so it must not be conditional on the fixed-id one succeeding.
+        try
         {
-            if (!_preexistingFiles.Contains(file))
+            CleanOwnedFiles();
+        }
+        finally
+        {
+            // SaveAsync writes every in-memory profile, including ones other fixtures created under
+            // random ids that no fixed-id cleanup could reach.
+            foreach (var file in SnapshotProfileDir())
             {
-                File.Delete(file);
+                if (!_preexistingFiles.Contains(file))
+                {
+                    File.Delete(file);
+                }
             }
         }
     }
@@ -204,7 +212,11 @@ public class SaveServerPersistenceTests
         return Directory.Exists(ProfileDir) ? [.. Directory.GetFiles(ProfileDir)] : [];
     }
 
-    private static void CleanOwnedFiles()
+    /// <summary>
+    /// Best-effort, and called from two places: <see cref="ProfileDirectorySetUp"/> before the run's
+    /// first <c>LoadAsync</c>, and this fixture's teardown after every test.
+    /// </summary>
+    internal static void CleanOwnedFiles()
     {
         if (!Directory.Exists(ProfileDir))
         {
