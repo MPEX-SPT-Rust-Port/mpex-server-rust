@@ -177,15 +177,31 @@ public class BotInventoryGenerator(
     }
 
     /// <summary>
-    ///     The 4.1.2 members a mod can Harmony-patch, across the four classes the native path
-    ///     replaces: this one plus the three generators it drives. Public, protected and
-    ///     protected-internal methods declared on each - exactly the surface the apicompat gate
-    ///     freezes, statics included. <see cref="GenerateInventory"/> itself is excluded: a patch on
-    ///     the dispatcher wraps whichever path runs and does not need the legacy body.
+    ///     The 4.1.2 members a mod can Harmony-patch, across five types: the four classes the native
+    ///     path replaces - this one plus the three generators it drives - and
+    ///     <see cref="BotEquipmentModPoolService"/>, a service it does not replace but no longer
+    ///     consults either, Rust having owned the mod pools outright since ABI 32. Public, protected
+    ///     and protected-internal methods declared on each, statics included; across the four
+    ///     generators that is exactly the surface the apicompat gate freezes.
+    ///     <see cref="GenerateInventory"/> itself is excluded: a patch on the dispatcher wraps
+    ///     whichever path runs and does not need the legacy body.
     /// </summary>
     private static readonly List<MethodBase> _hookableMembers =
     [
-        .. new[] { typeof(BotInventoryGenerator), typeof(BotEquipmentModGenerator), typeof(BotWeaponGenerator), typeof(BotLootGenerator) }
+        .. new[]
+        {
+            typeof(BotInventoryGenerator),
+            typeof(BotEquipmentModGenerator),
+            typeof(BotWeaponGenerator),
+            typeof(BotLootGenerator),
+            // Rust owns the pools outright since ABI 32, so a patch here can only take effect on
+            // the legacy path. Whole-type rather than member-scoped: all eight methods either build
+            // a pool or read one, and ResetWeaponPool exists only to invalidate them. Not fully
+            // closed: the !IsSpecialName filter below excludes property accessors, so patches on
+            // the protected GearModPool/WeaponModPool - the state the getters read - stay
+            // undetected. Recorded as a residual in RUST-ROADMAP.md's Broken ledger.
+            typeof(BotEquipmentModPoolService),
+        }
             .SelectMany(type =>
                 type.GetMethods(
                     BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly
