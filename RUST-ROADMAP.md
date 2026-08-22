@@ -108,8 +108,10 @@ entry and the inherited `ValueType.ToString()`. Scope is `Color` only — mods t
   consumption, so no order-insensitive comparison would pass, and the golden that was to replace the
   cross-arm assertion is unimplementable for the reason in the next entry. (The level-1 matrix is
   untouched — `TheSameSeedGeneratesEquivalentInventoryOnBothPaths` still deep-compares whole
-  inventories cross-arm over 4 roles × 2 seeds, and those do run through the native pool, which the
-  gear and weapon mod generators call unconditionally of level.) **The exact-output coverage the
+  inventories cross-arm over 4 roles × 2 seeds. Those do still reach the native pool at level 1, but
+  only by its **required-mods** path: the gear call site and both randomisable-slot call sites sit
+  behind randomisation gates the level-1 roles never trigger. That is the same branch
+  `BotHookLivenessTests` patches, for the same reason.) **The exact-output coverage the
   randomised-level matrix carried is therefore gone on both arms, not moved.** What stands in its
   place,
   `BotParityTests.TheNativePathGeneratesAtRandomisedLevels`, is a smoke case over the same 44 cases
