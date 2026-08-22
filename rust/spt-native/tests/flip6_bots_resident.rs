@@ -426,16 +426,29 @@ fn single_request(epoch: u64, views_override: Option<Value>) -> Vec<u8> {
 }
 
 /// xxh3-128 of the resident batch response with minted ids stripped: an exact-output golden over
-/// all three bots — both PMC level bands, the seeded weapon mod draw whose slot order this crate now
-/// owns, and band B's preset fallback. Any change to what the native arm generates from this fixture
-/// moves it.
+/// all three bots at fixed seeds — both PMC level bands and band B's preset fallback. Any change to
+/// what the native arm generates from this fixture moves it, so it is end-to-end drift detection
+/// over the bot FFI pipeline.
 ///
-/// It is a *Rust-side* golden because the C#-side one is impossible: `MongoId.GetHashCode()`
+/// **What it does not cover.** It does not exercise `mod_pool_service::derive_pool`, the slot
+/// ordering ABI 32 moved into this crate. Both routes there are gated on a populated
+/// `EquipmentFilters::randomisation` —
+/// `is_randomisable_slot` for weapons, `randomised_armor_slots` for gear — and [`shared`] supplies a
+/// `blacklist` band only, so `get_bot_randomization_details` answers `None` and every gated call
+/// site is dead code here. (Verified by making `derive_pool` panic unconditionally: this test still
+/// passed.) The one weapon slot drawn, `mod_magazine`, comes from [`template`]'s static `mods` entry
+/// with a single candidate, so no ordering would be observable even if the gate opened. Giving
+/// [`template`] a `randomisation` band with a multi-candidate randomised slot is the upgrade that
+/// would extend this golden to the ordering itself.
+///
+/// It is a *Rust-side* golden because a C#-side one is impossible: `MongoId.GetHashCode()`
 /// (`MongoId.cs:325`) is `HashCode.Combine(...)`, which .NET seeds per process, so every
 /// `Dictionary<MongoId, …>` the C# projection serialises enumerates in a process-random order that
 /// the seeded draw then walks. Nothing here has that problem — this fixture drives the exports in
-/// its own process, and `src/bot/` has no `HashMap` at all, its three `HashSet`s being
+/// its own process, and `src/bot/` has no `HashMap` at all, its four `HashSet`s being
 /// membership-tested rather than iterated; everything the draw walks is an `IndexMap`/`IndexSet`.
+/// That is the load-bearing result: a Rust-side golden *does* hold across processes where a C#-side
+/// one cannot, which is what makes the upgrade above a viable path rather than a dead end.
 ///
 /// To regenerate after a deliberate generation change: put any wrong value here, run
 /// `cargo test --test flip6_bots_resident`, and paste the `left:` value from the failure.

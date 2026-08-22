@@ -132,18 +132,24 @@ entry and the inherited `ValueType.ToString()`. Scope is `Color` only — mods t
   merely in ordering, so no normaliser absorbs it. ABI 32 does not change this and did not cause it:
   `MongoId.cs` is untouched by that work, and the cross-arm tests that were immune were immune only
   because they compared native to legacy *inside a single process*. **The limit is C#-side only, and
-  the golden lives in Rust instead:** `flip6_bots_resident.rs` drives both bot exports through the
-  FFI in its own process off a synthetic DB, and `src/bot/` has no equivalent hazard — no `HashMap`
-  anywhere in it, its three `HashSet`s membership-tested rather than iterated, everything the draw
-  walks an `IndexMap`/`IndexSet`. Its `RESIDENT_BATCH_GOLDEN` therefore pins the exact bytes of a
-  three-bot batch — both PMC level bands, the seeded weapon mod draw whose slot order this change
-  moved, and the preset fallback — and held across four separate processes and both build profiles.
-  The draw is pinned where the algorithm actually lives. The C#-side fix —
-  sorting the projection's `MongoId`-keyed dictionaries before serialising — would work and is
-  deliberately not taken here, because it changes the draw order on **every** native path and so
-  alters generated bots server-wide: a live-wire behaviour change owing its own spec and parity
-  gate, not a test repair. Deferring is safe because this is a testability limit rather than a
-  production defect — bots are random by design and no consumer asks two processes to agree.
+  a Rust-side golden does hold:** `flip6_bots_resident.rs` drives both bot exports through the FFI
+  in its own process off a synthetic DB, and `src/bot/` has no equivalent hazard — no `HashMap`
+  anywhere in it, its four `HashSet`s membership-tested rather than iterated, everything the draw
+  walks an `IndexMap`/`IndexSet`. Its `RESIDENT_BATCH_GOLDEN` pins the exact bytes of a three-bot
+  batch at fixed seeds — both PMC level bands and the preset fallback — and held across four
+  separate processes and both build profiles. **It does not, however, reach `derive_pool`**, the
+  ordering this change moved: both routes there are gated on a populated
+  `EquipmentFilters.randomisation`, that fixture supplies a `blacklist` band only, and its one drawn
+  weapon slot has a single candidate (confirmed by making `derive_pool` panic unconditionally — the
+  test still passed). So the golden is end-to-end drift detection over the bot pipeline, not an
+  ordering pin. **The named upgrade:** give the fixture a `randomisation` band with a
+  multi-candidate randomised slot and the same golden covers the ordering too — viable precisely
+  because the spike proved Rust-side goldens reproduce across processes where a C#-side one cannot.
+  The C#-side fix — sorting the projection's `MongoId`-keyed dictionaries before serialising — would
+  work and is deliberately not taken here, because it changes the draw order on **every** native
+  path and so alters generated bots server-wide: a live-wire behaviour change owing its own spec and
+  parity gate, not a test repair. Deferring is safe because this is a testability limit rather than
+  a production defect — bots are random by design and no consumer asks two processes to agree.
 - **Templates without `_props` read as "not in the db"** on the native *generator* paths — they are
   dropped from `itemsView`. Only bites mod-added props-less templates. The base-class hydrate
   projects the whole table and is unaffected.
