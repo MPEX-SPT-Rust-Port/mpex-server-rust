@@ -21,6 +21,11 @@
 //! Deriving on demand is what makes `ResetWeaponPool()` irrelevant here — there is no stale state
 //! for a mod to invalidate.
 //!
+//! **Deviation:** the C# input filter is `_type == "Item" && IsOfBaseclasses(...)`. The type half is
+//! applied only when the payload carries `type` at all, so an items view built without it still
+//! answers from the base-class half rather than going silently empty. The half exists to keep
+//! base-class *nodes* out of the pool, and no call site looks a node up.
+//!
 //! # Ordering
 //!
 //! The pool enumerates in the template's own `Properties.Slots` order, and that is Rust's own
@@ -30,11 +35,6 @@
 //! so it varied by host and was never a contract worth reproducing. Consequence: the native and
 //! legacy arms draw in different orders at randomised levels, recorded in RUST-ROADMAP.md's
 //! *Broken* ledger.
-//!
-//! **Deviation:** the C# input filter is `_type == "Item" && IsOfBaseclasses(...)`. The type half is
-//! applied only when the payload carries `type` at all, so an items view built without it still
-//! answers from the base-class half rather than going silently empty. The half exists to keep
-//! base-class *nodes* out of the pool, and no call site looks a node up.
 //!
 //! # RNG calls
 //!

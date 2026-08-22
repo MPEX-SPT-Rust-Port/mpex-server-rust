@@ -1,4 +1,3 @@
-using System.Text.Json.Nodes;
 using NUnit.Framework;
 using SPTarkov.Server.Core.Generators.Bot;
 using SPTarkov.Server.Core.Generators.Loot;
@@ -146,10 +145,11 @@ public class BotParityTests
     {
         PreWarmLootCache(role);
 
-        var native = Generate(role, seed, forceLegacy: false, LootGenerationPath.Native);
-        var items = JsonNode.Parse(native.Inventory)!["items"]!.AsArray();
-
-        Assert.That(items, Is.Not.Empty, $"native generated an empty inventory for role={role} seed={seed}");
+        // No assertion here on purpose: Generate already pins the path at :262 and asserts a
+        // non-trivial inventory at :267, so this case earns its keep by exercising the native
+        // randomised-level path over the full seed matrix - it fails on a throw or a silent
+        // fallback to legacy, and nothing weaker belongs on top of that.
+        Generate(role, seed, forceLegacy: false, LootGenerationPath.Native);
     }
 
     /// <summary>
