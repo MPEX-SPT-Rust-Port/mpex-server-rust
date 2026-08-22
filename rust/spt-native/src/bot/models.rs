@@ -741,13 +741,6 @@ pub struct SharedBotVaryingWire {
     /// so the resident copy would freeze at the published values — see
     /// [`crate::db::models::BotConfigLift`].
     pub equipment: IndexMap<String, EquipmentFilters>,
-    /// The C# `BotEquipmentModPoolService` pools' slot-name enumeration order per template, as
-    /// indices into that template's projected `slots` array. On the *varying* block rather than
-    /// the views: the order is an emergent artifact of the live C# service's
-    /// `ConcurrentDictionary` (process-local bucket layout, not derivable from the database), so
-    /// it rides every send. `#[serde(default)]` so an absent field means database order.
-    #[serde(default)]
-    pub mod_pool_slot_order: IndexMap<String, Vec<usize>>,
     /// The wave's level-draw inputs. Present iff the wave is PMC: every other bot takes the
     /// constant `(1, 0)` without drawing (`BotLevelGenerator.cs:23-26`), so there is nothing to
     /// send. A PMC slice that arrives without it is an error envelope, never a panic.
@@ -936,8 +929,7 @@ mod tests {
                 "randomisedArmorSlots":["Headwear"],"equipmentMods":{"mod_nvg":40},
                 "nighttimeChanges":{"equipmentModsModifiers":{"mod_nvg":90}}}],
             "blacklist":[{"levelRange":{"min":1,"max":99},
-                "equipment":{"Headwear":["aaaaaaaaaaaaaaaaaaaaaaa9"]}}]}},
-        "modPoolSlotOrder":{"aaaaaaaaaaaaaaaaaaaaaaa5":[1,0]}},
+                "equipment":{"Headwear":["aaaaaaaaaaaaaaaaaaaaaaa9"]}}]}}},
         "lootPools":{"backpackLoot":{"aaaaaaaaaaaaaaaaaaaaaab1":4}}
     }"#;
 
@@ -1051,11 +1043,6 @@ mod tests {
         );
         // Pools the payload omits deserialize empty, not missing.
         assert!(parsed.loot_pools.combined_pool_loot.is_empty());
-        // The mod-pool slot order rides the varying block, not the views.
-        assert_eq!(
-            parsed.shared.mod_pool_slot_order["aaaaaaaaaaaaaaaaaaaaaaa5"],
-            vec![1, 0]
-        );
 
         let views = parsed.views_override.as_ref().unwrap();
         // The twelve config members that went resident: on the views block on this arm, off the
@@ -1205,22 +1192,16 @@ mod tests {
         assert_eq!(views.handbook_prices["aaaaaaaaaaaaaaaaaaaaaab4"], 12500.5);
         assert_eq!(views.exp_table, vec![10]);
 
-        // The view members a C# override send may omit parse to their empty defaults, and so
-        // does the varying block's slot order.
+        // The view members a C# override send may omit parse to their empty defaults.
         let mut json = batch_request_json(None);
         let views = json["viewsOverride"].as_object_mut().unwrap();
         for key in ["handbookPrices", "expTable"] {
             views.remove(key);
         }
-        json["shared"]
-            .as_object_mut()
-            .unwrap()
-            .remove("modPoolSlotOrder");
         let parsed: GenerateBotInventoryBatchRequest = serde_json::from_value(json).unwrap();
         let views = parsed.views_override.as_ref().unwrap();
         assert!(views.handbook_prices.is_empty());
         assert!(views.exp_table.is_empty());
-        assert!(parsed.shared.mod_pool_slot_order.is_empty());
     }
 
     #[test]

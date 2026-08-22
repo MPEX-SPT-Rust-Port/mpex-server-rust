@@ -1,5 +1,5 @@
 //! Resident-arm integration for the bot generation flip (#6): publish a minimal
-//! templates+traders+globals DB — a rifle whose slots make `modPoolSlotOrder` non-trivial, two
+//! templates+traders+globals DB — a rifle whose slots give it a multi-entry mod pool, two
 //! presets (one default via `_encyclopedia`), and a three-band exp table — then prove an
 //! `{epoch}` send generates identically to the same data sent as `viewsOverride`, for both bot
 //! exports, and that a wrong epoch is a stale error, not a wrong answer.
@@ -36,7 +36,7 @@ const AMMO_TPL: &str = "ammo_ps";
 const CALIBER: &str = "Caliber762x39";
 
 /// In a rifle slot filter but in no pool and no items table: it keeps `mod_scope` in the slot
-/// pool so the derived `modPoolSlotOrder` has two entries at non-zero indices ([1, 2]).
+/// pool, so the rifle's pool holds more than one entry and the mod draw has something to walk.
 const SCOPE_GHOST: &str = "scope_ghost";
 
 /// Per-slice seeds. The two PMC draws are the first thing on each bot's seeded stream, so the
@@ -106,9 +106,9 @@ fn preset_p2_items() -> Value {
     json!([{"_id": "root_p2", "_tpl": RIFLE_TPL}])
 }
 
-/// The raw `templates.items` the publish carries. The rifle's slots are the `modPoolSlotOrder`
-/// fixture: `mod_stock`'s filter is empty (never pooled), so the pooled pair sits at slot
-/// indices 1 and 2 — a derived order that is not the identity.
+/// The raw `templates.items` the publish carries. The rifle's slots are the mod-pool fixture:
+/// `mod_stock`'s filter is empty (never pooled), so the pool holds the other two slots and the
+/// pooled pair sits behind a slot the pool drops.
 fn raw_items() -> Value {
     json!({
         WEAPON: {"_name": "weapon", "_type": "Node", "_parent": "", "_props": {}},
@@ -365,9 +365,6 @@ fn shared() -> Value {
         "generatingPlayerLevel": 20,
         "isNightTime": false,
         "equipment": {"assault": filters, "pmc": filters},
-        // The rifle's non-identity slot order, shared verbatim by both arms - live C# service
-        // state, so it rides every send rather than the views
-        "modPoolSlotOrder": {RIFLE_TPL: [1, 2]},
     })
 }
 

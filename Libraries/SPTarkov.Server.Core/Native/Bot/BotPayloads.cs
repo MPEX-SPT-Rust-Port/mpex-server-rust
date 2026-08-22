@@ -208,17 +208,6 @@ internal record SharedBotVarying
     public required Dictionary<string, EquipmentFilters> Equipment { get; set; }
 
     /// <summary>
-    /// <c>BotEquipmentModPoolService</c>'s pools' slot-name enumeration order per template, as
-    /// indices into that template's <see cref="ItemView.Slots"/>. Only templates whose pool holds
-    /// two or more slot names are listed - order cannot matter below two. Membership stays derived
-    /// on the native side; this carries order alone. On the varying block rather than the views:
-    /// the order is an emergent artifact of the live service's <c>ConcurrentDictionary</c>
-    /// (process-local, not derivable from the database), so it rides every send.
-    /// </summary>
-    [JsonPropertyName("modPoolSlotOrder")]
-    public required Dictionary<MongoId, List<int>> ModPoolSlotOrder { get; set; }
-
-    /// <summary>
     /// The wave's level-draw inputs, for the native side to draw each bot's level with. Set only
     /// when the wave is PMC - every other bot takes the constant level 1 without drawing
     /// (<c>BotLevelGenerator.cs:23-26</c>), so there is nothing to send and this stays null, which

@@ -358,7 +358,6 @@ fn generate_prepared(
         generating_player_level,
         is_night_time,
         equipment,
-        mod_pool_slot_order,
         ..
     } = shared;
 
@@ -380,7 +379,6 @@ fn generate_prepared(
     let pmc_config = views.pmc_config();
     let mut ctx = BotContext {
         items: views.items(),
-        mod_pool_slot_order,
         bosses: views.bosses(),
         durability: views.durability(),
         equipment,

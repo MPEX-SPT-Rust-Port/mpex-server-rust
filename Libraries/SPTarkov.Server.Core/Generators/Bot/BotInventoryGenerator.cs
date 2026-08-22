@@ -298,9 +298,7 @@ public class BotInventoryGenerator(
             profileHelper,
             profileActivityService,
             weatherHelper,
-            botEquipmentModPoolService,
             botLootGenerator.BotLootCacheService,
-            itemHelper,
             botConfig,
             pmcConfig
         );

@@ -34,9 +34,7 @@ internal static class BotPayloadProjection
         ProfileHelper profileHelper,
         ProfileActivityService profileActivityService,
         WeatherHelper weatherHelper,
-        BotEquipmentModPoolService botEquipmentModPoolService,
         BotLootCacheService botLootCacheService,
-        ItemHelper itemHelper,
         BotConfig botConfig,
         PmcConfig pmcConfig
     )
@@ -51,8 +49,6 @@ internal static class BotPayloadProjection
                 profileHelper,
                 profileActivityService,
                 weatherHelper,
-                botEquipmentModPoolService,
-                itemHelper,
                 botConfig,
                 // The single-bot path keeps C# level generation and C# filtering: no draw, no
                 // variant pick, so neither block rides the wire
@@ -67,18 +63,17 @@ internal static class BotPayloadProjection
 
     /// <summary>
     /// The request members that do not vary between the bots of one wave, built once for the
-    /// whole wave: live C# process state plus <c>BotConfig.Equipment</c>, which a runtime writer
-    /// keeps off the resident DB. The level inputs and the band variants are the caller's - only it
-    /// knows the wave's level range and the bands it splits into. Every other config slice, and
-    /// every database view, lives on <see cref="BuildViewsOverride"/> or the resident DB.
+    /// whole wave: the generating player's level, the raid's daylight, <c>BotConfig.Equipment</c>
+    /// (which a runtime writer keeps off the resident DB), and the caller's level inputs and band
+    /// variants - only the caller knows the wave's level range and the bands it splits into. Every
+    /// other config slice, and every database view, lives on <see cref="BuildViewsOverride"/> or
+    /// the resident DB.
     /// </summary>
     internal static SharedBotVarying BuildSharedVarying(
         MongoId sessionId,
         ProfileHelper profileHelper,
         ProfileActivityService profileActivityService,
         WeatherHelper weatherHelper,
-        BotEquipmentModPoolService botEquipmentModPoolService,
-        ItemHelper itemHelper,
         BotConfig botConfig,
         LevelGenerationView? levelGeneration,
         List<BotTemplateVariantView>? templateVariants
@@ -101,9 +96,6 @@ internal static class BotPayloadProjection
             // A null entry is a role the legacy path would have thrown on; dropping it makes the
             // native side take its "no equipment filters for role" exit instead
             Equipment = botConfig.Equipment.Where(role => role.Value is not null).ToDictionary(role => role.Key, role => role.Value!),
-            // Live service state, not a database view: the enumeration order of the pool
-            // service's ConcurrentDictionary is process-local, so it rides every send
-            ModPoolSlotOrder = BuildModPoolSlotOrder(botEquipmentModPoolService, itemHelper.TemplateTable.Items),
             LevelGeneration = levelGeneration,
             TemplateVariants = templateVariants,
         };
@@ -278,64 +270,6 @@ internal static class BotPayloadProjection
         }
 
         return prices;
-    }
-
-    /// <summary>
-    /// The slot-name enumeration order of <c>BotEquipmentModPoolService</c>'s pools, per template,
-    /// as indices into the template's slots (the projected <c>slots</c> array is a 1:1
-    /// <c>Select</c> of <c>Properties.Slots</c>, so the indices line up). Both consumers freeze
-    /// the ConcurrentDictionary's order with <c>ToDictionary</c> before the draw loops walk it, so
-    /// enumerating the dictionary here reads exactly the order the native side must draw in. A
-    /// template present in both pools has the same inner-dictionary construction history in each -
-    /// same slots, same insertion sequence, same comparer - so one map serves both.
-    /// </summary>
-    private static Dictionary<MongoId, List<int>> BuildModPoolSlotOrder(
-        BotEquipmentModPoolService botEquipmentModPoolService,
-        Dictionary<MongoId, TemplateItem> templates
-    )
-    {
-        var order = new Dictionary<MongoId, List<int>>();
-
-        foreach (var (tpl, template) in templates)
-        {
-            var pool = botEquipmentModPoolService.GetModsForGearSlot(tpl);
-            if (pool.IsEmpty)
-            {
-                pool = botEquipmentModPoolService.GetModsForWeaponSlot(tpl);
-            }
-
-            // Order cannot matter below two slot names, and a pool that size subsumes the
-            // "template has two or more slots" check
-            if (pool.Count < 2)
-            {
-                continue;
-            }
-
-            // `Properties.Slots` is an IEnumerable, so it has to be materialised to be indexed
-            var slots = template.Properties?.Slots?.ToList();
-            if (slots is null)
-            {
-                continue;
-            }
-
-            var indices = new List<int>(pool.Count);
-            foreach (var (slotName, _) in pool)
-            {
-                // First occurrence, matching the GetOrAdd merge of same-named slots
-                for (var index = 0; index < slots.Count; index++)
-                {
-                    if (slots[index].Name == slotName)
-                    {
-                        indices.Add(index);
-                        break;
-                    }
-                }
-            }
-
-            order[tpl] = indices;
-        }
-
-        return order;
     }
 
     private static IEnumerable<Dictionary<MongoId, double>> EnumeratePools(BotLootCache lootPools)
