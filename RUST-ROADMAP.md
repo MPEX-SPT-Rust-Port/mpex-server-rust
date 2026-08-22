@@ -91,9 +91,9 @@ entry and the inherited `ValueType.ToString()`. Scope is `Color` only — mods t
   only, because the batch re-times them per level band. A patch there de-batches the wave to the
   per-bot path, where the strip runs in C# and the patch takes effect; every other use of the type,
   ragfair's included, stays undetected. And `BotEquipmentModPoolService` is detected **whole-type**
-  by `BotInventoryGenerator` since ABI 32 — all eight of its methods either build a pool or read
-  one, and Rust owns the pools outright now, so a patch on any of them can only take effect on the
-  legacy path and routes there. Narrowed, not closed: the type's two `protected` pool properties
+  by `BotInventoryGenerator` since ABI 32 — seven of its eight methods build a pool or read one and
+  the eighth, `ResetWeaponPool`, clears one, and Rust owns the pools outright now, so a patch on any
+  of them can only take effect on the legacy path and routes there. Narrowed, not closed: the type's two `protected` pool properties
   (`GearModPool`, `WeaponModPool`) stay undetected, because `_hookableMembers` filters on
   `!method.IsSpecialName` and property accessors are `IsSpecialName`. Those properties are the
   backing state the getters read — exactly where a mod would inject pool contents — so the residual
@@ -102,14 +102,18 @@ entry and the inherited `ValueType.ToString()`. Scope is `Color` only — mods t
   ABI 32 the native pool enumerates in the template's own `Properties.Slots` order; legacy
   enumerates `BotEquipmentModPoolService`'s `ConcurrentDictionary`, whose bucket count is sized from
   `Environment.ProcessorCount` (measured moving at 13 real slot names between 8 and 16 cores). So
-  the two arms produce different — not wrong — bots for one seed, and only the native side is
-  reproducible across machines. Nothing cross-arm covers the mod pool now, and nothing covers native
-  on its own either: a different draw order means different RNG consumption, so no order-insensitive
-  comparison would pass, and the golden that was to replace the cross-arm assertion is
-  unimplementable for the reason in the next entry. **The exact-output coverage the randomised-level
-  matrix carried is therefore gone on both arms, not moved.** What stands in its place,
+  the two arms produce different — not wrong — bots for one seed, and only the native side's
+  *order* is machine-independent. Nothing cross-arm covers the mod pool **at randomised levels** now,
+  and nothing covers native there on its own either: a different draw order means different RNG
+  consumption, so no order-insensitive comparison would pass, and the golden that was to replace the
+  cross-arm assertion is unimplementable for the reason in the next entry. (The level-1 matrix is
+  untouched — `TheSameSeedGeneratesEquivalentInventoryOnBothPaths` still deep-compares whole
+  inventories cross-arm over 4 roles × 2 seeds, and those do run through the native pool, which the
+  gear and weapon mod generators call unconditionally of level.) **The exact-output coverage the
+  randomised-level matrix carried is therefore gone on both arms, not moved.** What stands in its
+  place,
   `BotParityTests.TheNativePathGeneratesAtRandomisedLevels`, is a smoke case over the same 44 cases
-  (2 roles × 22 seeds) and says so in its own doc comment: it asserts that generation completes, that
+  (2 roles × 22 seeds) and says so in its own comments: it asserts that generation completes, that
   the native path ran rather than falling back to legacy, and that the inventory is non-trivial —
   nothing about *which* items came out. The nighttime clamp's *effect on the inventory* is
   uncovered on both arms as a result —
@@ -376,11 +380,17 @@ silently drops camora ammo on the fifth); and the native `_type` test being
    hidden — plenty of them are public (`Native/Loot/LootPayloads.cs`,
    `Native/BaseClass/ItemBaseClassPayloads.cs`, `DbPublisher`). A future flip reshaping one of those
    should expect a clean run for that reason, not from a visibility rule that does not hold.
-   The same exemption reaches post-baseline types outside `Native/`, settled by measurement at ABI
-   32: `BotWaveBatcher` (`Generators/Bot/`) **lost a constructor parameter** and apicompat, invoked
-   directly against the frozen 4.1.2 baseline for `SPTarkov.Server.Core`, returned
-   `APICompat ran successfully without finding any breaking changes.` — exit 0, no CP0002. The rule
-   is the type's age against the baseline, not the directory it sits in.
+   The same exemption reaches post-baseline types outside `Native/`, spot-checked at ABI 32:
+   `BotWaveBatcher` (`Generators/Bot/`) **lost a constructor parameter** and came back clean —
+   `APICompat ran successfully without finding any breaking changes.`, exit 0, no CP0002. That was
+   the apicompat tool invoked **directly**, for the single `SPTarkov.Server.Core` assembly against
+   the sibling repo's frozen 4.1.2 baseline DLLs; it is not a gate pass and says nothing about the
+   other assemblies. The rule is the type's age against the baseline, not the directory it sits in.
+   **Second gotcha, worth more than the exit code:** `mpex-api-compat/ci/check-api-compat.sh`
+   resolves its local dotnet tool manifest from the *current working directory*, so anywhere cwd
+   does not persist between shell invocations (an agent session, most CI shims) the script reports
+   every assembly as failed. That looks exactly like the known baseline failure and actually means
+   no analysis ran at all — invoke the tool directly when you cannot guarantee cwd.
 2. **Override contract.** Detect Harmony patches on the frozen members (`Harmony.GetPatchInfo`) and
    route to legacy so hooks fire with baseline semantics. Add a `forceLegacy...` config flag as the
    escape hatch for hooks detection can't see. A port that kept no legacy path under guideline 1 has
@@ -1337,7 +1347,9 @@ written against, not the current file.
    ownership); the "~6 ms of the measured 6.06 ms" this item used to claim was an estimate and never
    a measurement. What it bought beyond the wire and the time: the C# order was sized from
    `Environment.ProcessorCount` (13 real slot names moved between 8 and 16 cores), so it was never
-   machine-independent, and native output is the reproducible-across-machines one now. What it cost:
+   machine-independent; the native draw **order** is host-independent now. The *output* still is not
+   reproducible across processes, for a reason older than this change (see the *Broken* ledger's
+   second bot entry). What it cost:
    the two arms draw in different orders at randomised levels, and the exact-output coverage there is
    gone on **both** — booked in the *Broken* ledger, together with the process-nondeterminism finding
    that made a native-only golden unimplementable. `BotEquipmentModPoolService` gained a whole-type

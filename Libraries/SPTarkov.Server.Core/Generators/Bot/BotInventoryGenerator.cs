@@ -179,9 +179,10 @@ public class BotInventoryGenerator(
     /// <summary>
     ///     The 4.1.2 members a mod can Harmony-patch, across five types: the four classes the native
     ///     path replaces - this one plus the three generators it drives - and
-    ///     <see cref="BotEquipmentModPoolService"/>, a service it does not replace but no longer
-    ///     consults either, Rust having owned the mod pools outright since ABI 32. Public, protected
-    ///     and protected-internal methods declared on each, statics included; across the four
+    ///     <see cref="BotEquipmentModPoolService"/>, a service the native path does not replace but
+    ///     no longer consults either, Rust having owned the mod pools outright since ABI 32 (the
+    ///     legacy body below still consults it). Public, protected and protected-internal methods
+    ///     declared on each, statics included; across the four
     ///     generators that is exactly the surface the apicompat gate freezes.
     ///     <see cref="GenerateInventory"/> itself is excluded: a patch on the dispatcher wraps
     ///     whichever path runs and does not need the legacy body.
@@ -195,8 +196,10 @@ public class BotInventoryGenerator(
             typeof(BotWeaponGenerator),
             typeof(BotLootGenerator),
             // Rust owns the pools outright since ABI 32, so a patch here can only take effect on
-            // the legacy path. Whole-type rather than member-scoped: all eight methods either build
-            // a pool or read one, and ResetWeaponPool exists only to invalidate them. Not fully
+            // the legacy path. Whole-type rather than member-scoped: seven of the eight methods
+            // build a pool or read one, and the eighth, ResetWeaponPool, clears the weapon pool in
+            // place - WeaponModPool.Clear() leaves _weaponModPool non-null, so the getter's ??=
+            // never regenerates it and the pool stays empty rather than being invalidated. Not fully
             // closed: the !IsSpecialName filter below excludes property accessors, so patches on
             // the protected GearModPool/WeaponModPool - the state the getters read - stay
             // undetected. Recorded as a residual in RUST-ROADMAP.md's Broken ledger.

@@ -680,9 +680,13 @@ assault BuildRequest only    n=20  mean=5.30 ms  median=5.19 ms  min=3.82 ms  ma
 assault BuildRequest only    n=20  mean=0.27 ms  median=0.23 ms  min=0.21 ms  max=0.41 ms   (875b2c9, after)
 ```
 
-**5.19 → 0.23 ms, 22.6x.** The two ranges do not overlap — the after-max (0.41 ms) is an order of
-magnitude below the before-min (3.82 ms) — so unlike most deltas in this file this one is not a
-reading of noise. What left `BuildRequest` is `BuildModPoolSlotOrder`: a walk of the whole
+**5.19 → 0.23 ms, 22.6x.** One run of n=20 per arm on each date, not a repeated invocation like the
+tables above. The two ranges do not overlap — the after-max (0.41 ms) is an order of magnitude below
+the before-min (3.82 ms) — so unlike most deltas in this file this one is not a reading of noise.
+The control is the native arm rather than an unchanged-code one: it fell 9.14 → 3.47 ms over the
+same pair of runs, a 5.67 ms drop against `BuildRequest`'s 4.96 ms, and the ~0.7 ms balance is the
+serialise/deserialise of the 26,428 B that left the wire with it. A host that had simply got faster
+would not produce that arithmetic. What left `BuildRequest` is `BuildModPoolSlotOrder`: a walk of the whole
 `ItemHelper.TemplateTable.Items` table, one `GetModsForGearSlot` per tpl plus a
 `GetModsForWeaponSlot` behind an empty-gear-pool check.
 
