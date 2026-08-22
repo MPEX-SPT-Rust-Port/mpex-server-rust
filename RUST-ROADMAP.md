@@ -321,8 +321,17 @@ silently drops camora ammo on the fifth); and the native `_type` test being
 ## Guidelines
 
 1. **Frozen surface.** Preserve the ported class's entire 4.1.2 public *and protected* surface —
-   constructor including parameter names, methods, DTOs. Keep the C# implementation verbatim as the
-   legacy path; never delete it. Enforced by `dotnet apicompat` in the sibling `mpex-api-compat` repo.
+   constructor including parameter names, methods, DTOs. Enforced by `dotnet apicompat` in the
+   sibling `mpex-api-compat` repo. The *surface* is frozen unconditionally; the *body* is not.
+   Keep the C# implementation as the legacy path **only where Rust cannot reliably replace it**,
+   which holds when either condition fails: (a) both arms produce identical observable output, so
+   deleting the C# body strands nothing and a revert is clean, and (b) nothing mod-visible needs
+   that body as guideline 2's patch-routing target. Both shipped precedents read this way: Phase 5's
+   profile persistence dropped legacy because both arms emit identical bytes and the disk boundary
+   is not a hookable algorithm, while Phase 3's database import kept `ForceLegacyDatabaseImport`
+   because its two arms produce different artifacts. Every generator family fails (b) — legacy is
+   what a detected patch routes to — so this changes nothing for the six of them. A family that
+   keeps no legacy path argues it in its ledger.
    **Why the `Native/` payload reshapes never flag it:** the whole tree post-dates the 4.1.2
    baseline, so its members are *additions*, which apicompat does not report — not because they are
    hidden — plenty of them are public (`Native/Loot/LootPayloads.cs`,
@@ -330,7 +339,9 @@ silently drops camora ammo on the fifth); and the native `_type` test being
    should expect a clean run for that reason, not from a visibility rule that does not hold.
 2. **Override contract.** Detect Harmony patches on the frozen members (`Harmony.GetPatchInfo`) and
    route to legacy so hooks fire with baseline semantics. Add a `forceLegacy...` config flag as the
-   escape hatch for hooks detection can't see.
+   escape hatch for hooks detection can't see. A port that kept no legacy path under guideline 1 has
+   no routing target, so it carries neither detection nor a flag — the log pipeline and profile
+   persistence are the two shipped examples.
 3. **Resident DB epoch, publish on dirty.** DB-derived state lives resident on the Rust side:
    `DbPublisher` republishes every supported root when the global `DatabaseMutationStamp` has moved
    and stamps the returned epoch into each request. The published set is **six roots** since Phase 4
