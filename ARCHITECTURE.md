@@ -211,7 +211,7 @@ logging and console paths degrade on is unchanged.
 One non-obvious consequence, because it is invisible from the C# side: the launcher must reference
 `spt_native` in its own source or the linker discards the unreferenced rlib and *all* 34 exports with
 it. `rust/mpex-server/src/main.rs` carries a deliberate anchor call, and
-`scripts/smoke-mpex-server.sh` asserts the exported count is 34.
+`scripts/smoke-mpex-server.sh` checks the published launcher still exports them.
 
 Every ported *class* keeps its complete 4.1.2 C# implementation as a **legacy path**, taken
 automatically when a mod hooks it or forced by config, so a Rust cutover never removes a mod's

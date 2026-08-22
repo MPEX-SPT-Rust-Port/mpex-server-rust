@@ -21,11 +21,16 @@ dotnet publish "$root/SPTarkov.Server/SPTarkov.Server.csproj" -c Debug -o "$out"
 
 # Phase 6b: the published tree must be single-linkage. mpex-server carries spt-native as an rlib and
 # exports its symbols; a cdylib beside it would be a second copy of every static.
+# Retention is all-or-nothing - the linker keeps the referenced rlib whole or discards it whole -
+# so any count above zero means the anchor held. Asserting an exact count would only add a site to
+# update whenever an export is added.
 exported="$(nm -D --defined-only "$out/mpex-server" | grep -c ' T spt_' || true)"
-if [ "$exported" -ne 34 ]; then
-    echo "SMOKE FAIL: mpex-server exports $exported spt_* symbols, expected 34." >&2
-    echo "  The usual cause is that main.rs lost its reference to spt_native, so the linker" >&2
-    echo "  dropped the rlib. See Task 1 Step 3 of the Phase 6b plan." >&2
+if [ "$exported" -eq 0 ]; then
+    echo "SMOKE FAIL: mpex-server exports no spt_* symbols." >&2
+    echo "  The usual cause is that rust/mpex-server/src/main.rs lost its reference to spt_native," >&2
+    echo "  so the linker dropped the rlib; restore the anchor call in run(). If that is intact," >&2
+    echo "  check that --export-dynamic survived into the link: cd rust && cargo build -v 2>&1 |" >&2
+    echo "  grep -c export-dynamic  (rust/.cargo/config.toml is read from the working directory)." >&2
     exit 1
 fi
 if [ -e "$out/libspt_native.so" ]; then

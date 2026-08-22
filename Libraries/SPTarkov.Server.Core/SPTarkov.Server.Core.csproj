@@ -91,8 +91,12 @@
       >$(SptNativeDir)/target/$(SptNativeTargetTriple)/$(CargoProfile)/$(SptNativeLibName)</SptNativeLibPath>
   </PropertyGroup>
   <ItemGroup>
+    <!-- .cargo/config.toml is an input, not just tuning: since Phase 6b it carries the
+         export-dynamic link arg that puts spt-native's exports into the mpex-server launcher.
+         Editing it alone would otherwise leave this target up to date, shipping a launcher
+         built without the flag. -->
     <SptNativeSource
-      Include="$(SptNativeDir)/**/*.rs;$(SptNativeDir)/**/Cargo.toml;$(SptNativeDir)/Cargo.lock"
+      Include="$(SptNativeDir)/**/*.rs;$(SptNativeDir)/**/Cargo.toml;$(SptNativeDir)/Cargo.lock;$(SptNativeDir)/.cargo/config.toml"
       Exclude="$(SptNativeDir)/target/**"
     />
   </ItemGroup>

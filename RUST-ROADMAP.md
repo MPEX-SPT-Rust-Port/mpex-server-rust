@@ -364,9 +364,6 @@ silently drops camora ammo on the fifth); and the native `_type` test being
    — change them freely, bump `spt_native_abi_version` and `SptNative.ExpectedAbiVersion` together.
    The in-tree assertion in `ffi.rs`'s `abi_version_export_matches_crate_const` is the third site and
    must move with them. No third-party consumer of the cdylib is supported.
-   **Adding or removing an export** also changes the count `scripts/smoke-mpex-server.sh` asserts
-   against `mpex-server`'s `.dynsym` — update it in the same commit, or the smoke fails on a change
-   that is otherwise correct.
 6. **Ports keep an `[Injectable]` entry point.** A static wrapper like `SptNative` is only acceptable
    for startup-internal subsystems mods never touch. Anything patchable calls Rust from inside a
    resolved service.
@@ -1244,10 +1241,18 @@ written against, not the current file.
    in full, reviewed twice, and replaced: `run_app`, `Program.Main`, `[LibraryImport]` and ABI 31
    all stay, and the change is ~85 lines. Five spec overrides, the declined `Build.props` order flip
    (nothing forces it: `mpex-server` links a sibling crate, not `SPT.Server.dll`) and the reasoning
-   are in the Phase 6b ledger. Carried forward: **Windows exports.** An `.exe` has no export table
-   without `/EXPORT:` args or a `.def` file, so the cdylib exclusion is Linux-gated and Windows
-   behaviour is unchanged — which also still means never executed, and `Build.props:31` still maps
-   no `win-x64` triple.
+   are in the Phase 6b ledger. Carried forward:
+   **Windows exports.** An `.exe` has no export table without `/EXPORT:` args or a `.def` file, so
+   the cdylib exclusion is Linux-gated and Windows behaviour is unchanged — which also still means
+   never executed, and `Build.props:31` still maps no `win-x64` triple.
+   **The one-linkage-path-per-process rule is enforced by publish layout, not structurally.** The
+   published tree has no cdylib, so a lost export anchor is a loud boot failure there; a `bin/` tree
+   keeps one for `dotnet test`, so the same mistake under a locally-built launcher falls through and
+   boots silently with the statics in the cdylib. Nothing at runtime can distinguish the two —
+   `GetMainProgramHandle()` is a `dlopen(NULL)` pseudo-handle.
+   **The launcher arm has no end-to-end gate outside `scripts/smoke-mpex-server.sh`,** and this fork
+   has no CI to run it. `dotnet test` always takes the cdylib arm, so the suite says nothing about
+   the launcher one; `DllImportResolverTests` pins only that the test host correctly declines it.
 2. Port candidates and their costing live in [todo/TODO.md](todo/TODO.md); with #1-#6
    landed, the unstarted front is tier 2. The two axes
    are independent — a flip re-homes data for something already ported, a TODO item ports

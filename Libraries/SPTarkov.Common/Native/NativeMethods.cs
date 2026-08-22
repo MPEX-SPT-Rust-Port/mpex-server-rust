@@ -26,10 +26,12 @@ internal static partial class NativeMethods
                     return IntPtr.Zero;
                 }
 
-                // SPIKE: mpex-server links spt-native as an rlib and re-exports the symbols from
-                // the executable itself, so the resident DB's statics live in the host process.
-                // A process started any other way (SPT.Server, dotnet test) has no such exports
-                // and falls through to the cdylib beside the assembly.
+                // Phase 6b: mpex-server links spt-native as an rlib, so the exports live in the
+                // executable itself and the resident DB's statics live in the host process.
+                // GetMainProgramHandle is dlopen(NULL) - it probes the process's global symbol
+                // scope, not the executable alone - but .NET loads native libraries RTLD_LOCAL, so
+                // a cdylib loaded by the arm below can never answer here. A process started any
+                // other way (SPT.Server, dotnet test, any Windows build) falls through to it.
                 var mainProgram = NativeLibrary.GetMainProgramHandle();
                 if (NativeLibrary.TryGetExport(mainProgram, "spt_native_abi_version", out _))
                 {

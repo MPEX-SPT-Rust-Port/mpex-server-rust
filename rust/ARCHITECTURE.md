@@ -44,12 +44,21 @@ there is nothing for a second copy to come from. The cdylib is still built and s
 what `dotnet test` and the `SPT.Server` dev executable bind to — a different process, never this one. The C#
 resolver enforces the order; see ARCHITECTURE.md § *Native Rust layer*.
 
+What enforces the rule is the **absence of the file**, not a runtime assertion: `GetMainProgramHandle()` hands
+back a `dlopen(NULL)` pseudo-handle, so nothing on the C# side can tell which copy a symbol came from. That
+matters for exactly one case — running `rust/target/<profile>/mpex-server` against a `bin/` tree, where the
+cdylib is present by design. A lost anchor there falls through to it and boots *silently* with the statics in
+the wrong place; in a published tree the same mistake is a hard boot failure. The smoke covers the published
+tree only.
+
 Two things that follow, and that a reader will otherwise trip over:
 
 - **The launcher must reference `spt_native` in its own source.** An rlib nothing references is discarded whole
   by the linker, taking all 34 exports with it, silently, at link time. `src/main.rs` carries a deliberate
-  anchor call and `scripts/smoke-mpex-server.sh` asserts the count. Any path reference suffices — the anchor is
-  a call only so that deleting it looks like a behaviour change rather than dead-code cleanup.
+  anchor call and `scripts/smoke-mpex-server.sh` checks the launcher still exports them — retention is
+  all-or-nothing, so a nonzero count is the whole check and no export count needs maintaining. Any path
+  reference suffices; the anchor is a call behind `black_box` only so that deleting it looks like a behaviour
+  change rather than dead-code cleanup.
 - **`.cargo/config.toml` is discovered from the working directory, not from `--manifest-path`.** Building with
   `--manifest-path rust/Cargo.toml` from the repo root silently drops every rustflag, including
   `--export-dynamic`, and yields zero exports for reasons unrelated to the anchor. Always `cd rust` first.
@@ -184,8 +193,7 @@ releases with `spt_buf_free`; so do `spt_console_read_line` and `spt_log_format`
   they happened through `diag::DiagSink`; the error text itself is the C# caller's to log.
 
 Adding an export means bumping `ABI_VERSION` and `SptNative.ExpectedAbiVersion` together; a test in `ffi.rs`
-asserts the constant so the bump can't be forgotten. It also changes the export count
-`scripts/smoke-mpex-server.sh` asserts against `mpex-server`'s `.dynsym` — update that in the same commit.
+asserts the constant so the bump can't be forgotten.
 
 ### `src/verify.rs`
 
