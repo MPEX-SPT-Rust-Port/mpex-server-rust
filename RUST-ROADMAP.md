@@ -93,11 +93,11 @@ entry and the inherited `ValueType.ToString()`. Scope is `Color` only — mods t
   ragfair's included, stays undetected. And `BotEquipmentModPoolService` is detected **whole-type**
   by `BotInventoryGenerator` since ABI 32 — seven of its eight methods build a pool or read one and
   the eighth, `ResetWeaponPool`, clears one, and Rust owns the pools outright now, so a patch on any
-  of them can only take effect on the legacy path and routes there. Narrowed, not closed: the type's two `protected` pool properties
-  (`GearModPool`, `WeaponModPool`) stay undetected, because `_hookableMembers` filters on
-  `!method.IsSpecialName` and property accessors are `IsSpecialName`. Those properties are the
-  backing state the getters read — exactly where a mod would inject pool contents — so the residual
-  is the one shape of patch that most wants detecting.
+  of them can only take effect on the legacy path and routes there. Narrowed, not closed: the type's
+  two `protected` pool properties (`GearModPool`, `WeaponModPool`) stay undetected, because
+  `_hookableMembers` filters on `!method.IsSpecialName` and property accessors are `IsSpecialName`.
+  Those properties are the backing state the getters read — exactly where a mod would inject pool
+  contents — so the residual is the one shape of patch that most wants detecting.
 - **The native and legacy bot paths draw mod slots in different orders at randomised levels.** Since
   ABI 32 the native pool enumerates in the template's own `Properties.Slots` order; legacy
   enumerates `BotEquipmentModPoolService`'s `ConcurrentDictionary`, whose bucket count is sized from
@@ -105,24 +105,25 @@ entry and the inherited `ValueType.ToString()`. Scope is `Color` only — mods t
   the two arms produce different — not wrong — bots for one seed, and only the native side's
   *order* is machine-independent. Nothing cross-arm covers the mod pool **at randomised levels** now,
   and nothing covers native there on its own either: a different draw order means different RNG
-  consumption, so no order-insensitive comparison would pass, and the golden that was to replace the
-  cross-arm assertion is unimplementable for the reason in the next entry. (The level-1 matrix is
-  untouched — `TheSameSeedGeneratesEquivalentInventoryOnBothPaths` still deep-compares whole
-  inventories cross-arm over 4 roles × 2 seeds. Those do still reach the native pool at level 1, but
-  only by its **required-mods** path: the gear call site and both randomisable-slot call sites sit
-  behind randomisation gates the level-1 roles never trigger. That is the same branch
-  `BotHookLivenessTests` patches, for the same reason.) **The exact-output coverage the
-  randomised-level matrix carried is therefore gone on both arms, not moved.** What stands in its
-  place,
-  `BotParityTests.TheNativePathGeneratesAtRandomisedLevels`, is a smoke case over the same 44 cases
-  (2 roles × 22 seeds) and says so in its own comments: it asserts that generation completes, that
-  the native path ran rather than falling back to legacy, and that the inventory is non-trivial —
-  nothing about *which* items came out. The nighttime clamp's *effect on the inventory* is
-  uncovered on both arms as a result —
+  consumption, so no order-insensitive comparison would pass, and the C#-side golden that was to
+  replace the cross-arm assertion is unimplementable for the reason in the next entry. (The level-1
+  matrix is untouched — `TheSameSeedGeneratesEquivalentInventoryOnBothPaths` still deep-compares
+  whole inventories cross-arm over 4 roles × 2 seeds. Those cases do still reach the module at level
+  1, but only through `get_required_mods_for_weapon_slot`, which reads the template's slots directly
+  and never `derive_pool` — the three call sites that *do* build a pool (`bot_inventory_generator`
+  `:970`, `bot_equipment_mod_generator` `:1020` and `:1574`) each sit behind a randomisation gate
+  the level-1 roles never trigger. So **no cross-arm case at any level** covers the ordering this
+  change moved. That required-mods method is the same one `BotHookLivenessTests` patches, for the
+  same reason.) **The exact-output coverage the randomised-level matrix carried is therefore gone on
+  both arms, not moved.** In its place `BotParityTests.TheNativePathGeneratesAtRandomisedLevels` is
+  a smoke case over the same 44 cases (2 roles × 22 seeds), and says so in its own comments: it
+  asserts that generation completes, that the native path ran rather than falling back to legacy,
+  and that the inventory is non-trivial — nothing about *which* items came out. The nighttime
+  clamp's *effect on the inventory* is uncovered on both arms as a result, though
   `TheNighttimeRandomisationClampIsReplayedOnBothPaths` still pins the clamp write itself, which is
   what that case was built for. A patch on the pool service declines to legacy (guideline 2), which
   is where the machine-dependent order still applies.
-- **Native bot output is not reproducible across processes**, so no absolute golden can pin it —
+- **Native bot output is not reproducible across processes**, so no *C#-side* golden can pin it —
   pre-existing, wider than the mod pool, and surfaced by the ABI 32 work rather than caused by it.
   `MongoId.GetHashCode` (`Models/Common/MongoId.cs:325`) is `HashCode.Combine`, which .NET seeds
   from a per-process random value, so every `Dictionary<MongoId, …>` the bot projection serialises
@@ -130,12 +131,19 @@ entry and the inherited `ValueType.ToString()`. Scope is `Color` only — mods t
   runs of one isolated fixture produced inventories differing in item **count** (69 → 68), not
   merely in ordering, so no normaliser absorbs it. ABI 32 does not change this and did not cause it:
   `MongoId.cs` is untouched by that work, and the cross-arm tests that were immune were immune only
-  because they compared native to legacy *inside a single process*. The fix — sorting the
-  projection's `MongoId`-keyed dictionaries before serialising — would work and is deliberately not
-  taken here, because it changes the draw order on **every** native path and so alters generated
-  bots server-wide: a live-wire behaviour change owing its own spec and parity gate, not a test
-  repair. Deferring is safe because this is a testability limit rather than a production defect —
-  bots are random by design and no consumer asks two processes to agree.
+  because they compared native to legacy *inside a single process*. **The limit is C#-side only, and
+  the golden lives in Rust instead:** `flip6_bots_resident.rs` drives both bot exports through the
+  FFI in its own process off a synthetic DB, and `src/bot/` has no equivalent hazard — no `HashMap`
+  anywhere in it, its three `HashSet`s membership-tested rather than iterated, everything the draw
+  walks an `IndexMap`/`IndexSet`. Its `RESIDENT_BATCH_GOLDEN` therefore pins the exact bytes of a
+  three-bot batch — both PMC level bands, the seeded weapon mod draw whose slot order this change
+  moved, and the preset fallback — and held across four separate processes and both build profiles.
+  The draw is pinned where the algorithm actually lives. The C#-side fix —
+  sorting the projection's `MongoId`-keyed dictionaries before serialising — would work and is
+  deliberately not taken here, because it changes the draw order on **every** native path and so
+  alters generated bots server-wide: a live-wire behaviour change owing its own spec and parity
+  gate, not a test repair. Deferring is safe because this is a testability limit rather than a
+  production defect — bots are random by design and no consumer asks two processes to agree.
 - **Templates without `_props` read as "not in the db"** on the native *generator* paths — they are
   dropped from `itemsView`. Only bites mod-added props-less templates. The base-class hydrate
   projects the whole table and is unaffected.
@@ -781,10 +789,11 @@ the divergence the plan itself ranked first, and the root cause is not port drif
 the enumeration order of the live `BotEquipmentModPoolService`'s `ConcurrentDictionary`, which is
 process-local (bucket layout, `ProcessorCount`-dependent growth) and not a function of the database
 at all. The Rust derivation was deleted and the field moved into `SharedBotVarying`/
-`SharedBotVaryingWire`, riding the per-call varying block on **both** arms at 26,428 bytes
+`SharedBotVaryingWire`, where it rode the per-call varying block on **both** arms at 26,428 bytes
 (BENCHMARK.md) under the spec's standing service-backed carve-out — but *not* the same class as
 ragfair's config-derived fields or quest's config-backed sets, which Phase 4 took resident while
-this one has no resident home at all (roadmap item 4 is its only exit). The claim that followed here
+this one had no resident home at all (roadmap item 4 was its only exit, and took it at ABI 32: the
+member left the wire rather than being re-homed). The claim that followed here
 — that it is the largest single member still crossing per bot — was wrong when written and stayed
 wrong: `equipment` is 39,811 B against its 26,428 B, off a projection neither flip touched, and both
 are dwarfed by the caller's own `templateVariants` (BENCHMARK.md § Phase 4).

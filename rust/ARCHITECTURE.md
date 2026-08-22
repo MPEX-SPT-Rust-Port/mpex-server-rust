@@ -165,8 +165,7 @@ releases with `spt_buf_free`; so do `spt_console_read_line` and `spt_log_format`
   does not hold returns `STATUS_STALE_EPOCH`, and the C# caller force-publishes and retries once; an
   ineligible caller (mods loaded without trust, or the kill switch) instead sends the views inline with
   `epoch: 0`, a wire contract that is documented, not runtime-enforced. Which views each family borrows, and
-  why loose loot and `staticAmmoDist` deliberately stayed per-call, is
-  in RUST-ROADMAP.md's flip ledgers.
+  why loose loot and `staticAmmoDist` deliberately stayed per-call, is in RUST-ROADMAP.md's flip ledgers.
 - **The `configs` root is keyed by kind string, and no view derives from it.** All 28 loaded configs arrive
   under their own `Kind` (`"spt-item"`, `"spt-bot"`, …) rather than a type or file name, and families read
   them per call the way scav case reads its recipes. Only the stems some family actually reads are lifted

@@ -686,8 +686,8 @@ the before-min (3.82 ms) — so unlike most deltas in this file this one is not 
 The control is the native arm rather than an unchanged-code one: it fell 9.14 → 3.47 ms over the
 same pair of runs, a 5.67 ms drop against `BuildRequest`'s 4.96 ms, and the ~0.7 ms balance is the
 serialise/deserialise of the 26,428 B that left the wire with it. A host that had simply got faster
-would not produce that arithmetic. What left `BuildRequest` is `BuildModPoolSlotOrder`: a walk of the whole
-`ItemHelper.TemplateTable.Items` table, one `GetModsForGearSlot` per tpl plus a
+would not produce that arithmetic. What left `BuildRequest` is `BuildModPoolSlotOrder`: a walk of
+the whole `ItemHelper.TemplateTable.Items` table, one `GetModsForGearSlot` per tpl plus a
 `GetModsForWeaponSlot` behind an empty-gear-pool check.
 
 **This is the single-bot path only.** `BotWaveBatcher` calls `BotPayloadProjection.BuildSharedVarying`
