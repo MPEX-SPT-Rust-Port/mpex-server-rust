@@ -145,8 +145,8 @@ public class BotParityTests
     {
         PreWarmLootCache(role);
 
-        // No assertion here on purpose: Generate already pins the path at :262 and asserts a
-        // non-trivial inventory at :267, so this case earns its keep by exercising the native
+        // No assertion here on purpose: Generate already asserts LastPathTaken against the expected
+        // path and Items.Count > 6, so this case earns its keep by exercising the native
         // randomised-level path over the full seed matrix - it fails on a throw or a silent
         // fallback to legacy, and nothing weaker belongs on top of that.
         Generate(role, seed, forceLegacy: false, LootGenerationPath.Native);

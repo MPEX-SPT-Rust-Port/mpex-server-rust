@@ -425,6 +425,22 @@ fn single_request(epoch: u64, views_override: Option<Value>) -> Vec<u8> {
     serde_json::to_vec(&request).unwrap()
 }
 
+/// xxh3-128 of the resident batch response with minted ids stripped: an exact-output golden over
+/// all three bots — both PMC level bands, the seeded weapon mod draw whose slot order this crate now
+/// owns, and band B's preset fallback. Any change to what the native arm generates from this fixture
+/// moves it.
+///
+/// It is a *Rust-side* golden because the C#-side one is impossible: `MongoId.GetHashCode()`
+/// (`MongoId.cs:325`) is `HashCode.Combine(...)`, which .NET seeds per process, so every
+/// `Dictionary<MongoId, …>` the C# projection serialises enumerates in a process-random order that
+/// the seeded draw then walks. Nothing here has that problem — this fixture drives the exports in
+/// its own process, and `src/bot/` has no `HashMap` at all, its three `HashSet`s being
+/// membership-tested rather than iterated; everything the draw walks is an `IndexMap`/`IndexSet`.
+///
+/// To regenerate after a deliberate generation change: put any wrong value here, run
+/// `cargo test --test flip6_bots_resident`, and paste the `left:` value from the failure.
+const RESIDENT_BATCH_GOLDEN: &str = "414271736AB788CFE27F41CF13A0E255";
+
 #[test]
 fn a_resident_send_matches_the_override_send_and_a_wrong_epoch_is_stale() {
     // (1) The smallest publish that derives the bot views: templates + globals for the views
@@ -524,9 +540,19 @@ fn a_resident_send_matches_the_override_send_and_a_wrong_epoch_is_stale() {
     );
 
     // The flip's promise: identical generation off either arm, minted ids aside.
+    let resident_stripped = strip_mongo_ids(&resident);
     assert_eq!(
-        strip_mongo_ids(&resident),
+        resident_stripped,
         strip_mongo_ids(&String::from_utf8(override_send).unwrap())
+    );
+
+    // …and the exact-output pin over those same bytes — see [`RESIDENT_BATCH_GOLDEN`].
+    assert_eq!(
+        format!(
+            "{:032X}",
+            xxhash_rust::xxh3::xxh3_128(resident_stripped.as_bytes())
+        ),
+        RESIDENT_BATCH_GOLDEN
     );
 
     // (4) The single-bot export, same resident-vs-override comparison.

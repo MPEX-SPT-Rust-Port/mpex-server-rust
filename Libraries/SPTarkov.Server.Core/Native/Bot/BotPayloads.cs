@@ -170,10 +170,10 @@ internal record BotViewsOverride
 
 /// <summary>
 /// The request members that do not vary between the bots of one wave and are not database views:
-/// live C# process state (the player's level, the raid's daylight, the mod-pool slot order), the
-/// one config slice a runtime writer keeps out of the resident DB (<see cref="Equipment"/>), and
-/// (as <see cref="TemplateVariants"/>) the templates and loot pools, which vary by level band
-/// rather than by bot. Every other config slice, and every database view, lives on
+/// live C# process state (the player's level, the raid's daylight), the one config slice a runtime
+/// writer keeps out of the resident DB (<see cref="Equipment"/>), and (as
+/// <see cref="TemplateVariants"/>) the templates and loot pools, which vary by level band rather
+/// than by bot. Every other config slice, and every database view, lives on
 /// <see cref="BotViewsOverride"/> or the resident DB.
 /// </summary>
 internal record SharedBotVarying

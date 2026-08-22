@@ -146,7 +146,8 @@ public class BotBenchmarkTests
 
     /// <summary>
     /// The projection half of the native path on its own - the resident arm's per-call varying block
-    /// (config, blacklists, equipment filters), rebuilt per bot.
+    /// (the player's level, the raid's daylight, BotConfig.Equipment, and the caller's level inputs
+    /// and band variants), rebuilt per bot.
     /// </summary>
     private List<double> MeasureProjection(string role)
     {
