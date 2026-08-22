@@ -17,7 +17,7 @@ the terminal outright — raw `Console.Write*`, prompts, title and clear all cro
 Thirty-four C-ABI exports (`src/ffi.rs`) carry all of it, JSON in and JSON out — except the ragfair
 response, which is a framed MessagePack envelope, `spt_db_load` and `spt_profile_load`, whose
 responses are a JSON header frame followed by the loaded file bytes, and the log and console
-exports, which pass the fields of one line, or raw bytes, directly (current ABI 31).
+exports, which pass the fields of one line, or raw bytes, directly (current ABI 32).
 
 Since Phase 6b those exports are reached two ways, one per process. A shipped Linux build resolves
 them out of the `mpex-server` executable itself, which links the crate as an rlib; dev builds, the
@@ -82,15 +82,54 @@ entry and the inherited `ValueType.ToString()`. Scope is `Color` only — mods t
 - **Patches on collaborators do not reach the native path** and do not flip to legacy — only the
   ported classes' own members are detected. Affected: `RandomUtil`, `ItemHelper`,
   `CounterTrackerHelper`, `BotGeneratorHelper`, `DurabilityLimitsHelper`, `RepairService.AddBuff`,
-  `BotWeaponGeneratorHelper`, `BotEquipmentModPoolService`, `BotLootCacheService`,
-  `WeightedRandomHelper`, `ItemFilterService`/`PresetHelper` predicates, `ICloner`, plus ragfair's
+  `BotWeaponGeneratorHelper`, `BotLootCacheService`, `WeightedRandomHelper`,
+  `ItemFilterService`/`PresetHelper` predicates, `ICloner`, plus ragfair's
   `HandbookHelper`, `PaymentHelper`, `BotHelper`, `TraderHelper`, `SeasonalEventService`, quests'
   `MathUtil` and scav case's `RagfairPriceService.GetStaticPriceForItem` and `HideoutTable` reads.
-  One partial exception: `SeasonalEventService.ChristmasEventEnabled` and
+  Two partial exceptions. `SeasonalEventService.ChristmasEventEnabled` and
   `RemoveChristmasItemsFromBotInventory` *are* detected — member-scoped, by the bot wave batcher
   only, because the batch re-times them per level band. A patch there de-batches the wave to the
   per-bot path, where the strip runs in C# and the patch takes effect; every other use of the type,
-  ragfair's included, stays undetected.
+  ragfair's included, stays undetected. And `BotEquipmentModPoolService` is detected **whole-type**
+  by `BotInventoryGenerator` since ABI 32 — all eight of its methods either build a pool or read
+  one, and Rust owns the pools outright now, so a patch on any of them can only take effect on the
+  legacy path and routes there. Narrowed, not closed: the type's two `protected` pool properties
+  (`GearModPool`, `WeaponModPool`) stay undetected, because `_hookableMembers` filters on
+  `!method.IsSpecialName` and property accessors are `IsSpecialName`. Those properties are the
+  backing state the getters read — exactly where a mod would inject pool contents — so the residual
+  is the one shape of patch that most wants detecting.
+- **The native and legacy bot paths draw mod slots in different orders at randomised levels.** Since
+  ABI 32 the native pool enumerates in the template's own `Properties.Slots` order; legacy
+  enumerates `BotEquipmentModPoolService`'s `ConcurrentDictionary`, whose bucket count is sized from
+  `Environment.ProcessorCount` (measured moving at 13 real slot names between 8 and 16 cores). So
+  the two arms produce different — not wrong — bots for one seed, and only the native side is
+  reproducible across machines. Nothing cross-arm covers the mod pool now, and nothing covers native
+  on its own either: a different draw order means different RNG consumption, so no order-insensitive
+  comparison would pass, and the golden that was to replace the cross-arm assertion is
+  unimplementable for the reason in the next entry. **The exact-output coverage the randomised-level
+  matrix carried is therefore gone on both arms, not moved.** What stands in its place,
+  `BotParityTests.TheNativePathGeneratesAtRandomisedLevels`, is a smoke case over the same 44 cases
+  (2 roles × 22 seeds) and says so in its own doc comment: it asserts that generation completes, that
+  the native path ran rather than falling back to legacy, and that the inventory is non-trivial —
+  nothing about *which* items came out. The nighttime clamp's *effect on the inventory* is
+  uncovered on both arms as a result —
+  `TheNighttimeRandomisationClampIsReplayedOnBothPaths` still pins the clamp write itself, which is
+  what that case was built for. A patch on the pool service declines to legacy (guideline 2), which
+  is where the machine-dependent order still applies.
+- **Native bot output is not reproducible across processes**, so no absolute golden can pin it —
+  pre-existing, wider than the mod pool, and surfaced by the ABI 32 work rather than caused by it.
+  `MongoId.GetHashCode` (`Models/Common/MongoId.cs:325`) is `HashCode.Combine`, which .NET seeds
+  from a per-process random value, so every `Dictionary<MongoId, …>` the bot projection serialises
+  enumerates in a process-random order and the seeded native draw walks that order. Two back-to-back
+  runs of one isolated fixture produced inventories differing in item **count** (69 → 68), not
+  merely in ordering, so no normaliser absorbs it. ABI 32 does not change this and did not cause it:
+  `MongoId.cs` is untouched by that work, and the cross-arm tests that were immune were immune only
+  because they compared native to legacy *inside a single process*. The fix — sorting the
+  projection's `MongoId`-keyed dictionaries before serialising — would work and is deliberately not
+  taken here, because it changes the draw order on **every** native path and so alters generated
+  bots server-wide: a live-wire behaviour change owing its own spec and parity gate, not a test
+  repair. Deferring is safe because this is a testability limit rather than a production defect —
+  bots are random by design and no consumer asks two processes to agree.
 - **Templates without `_props` read as "not in the db"** on the native *generator* paths — they are
   dropped from `itemsView`. Only bites mod-added props-less templates. The base-class hydrate
   projects the whole table and is unaffected.
@@ -337,6 +376,11 @@ silently drops camora ammo on the fifth); and the native `_type` test being
    hidden — plenty of them are public (`Native/Loot/LootPayloads.cs`,
    `Native/BaseClass/ItemBaseClassPayloads.cs`, `DbPublisher`). A future flip reshaping one of those
    should expect a clean run for that reason, not from a visibility rule that does not hold.
+   The same exemption reaches post-baseline types outside `Native/`, settled by measurement at ABI
+   32: `BotWaveBatcher` (`Generators/Bot/`) **lost a constructor parameter** and apicompat, invoked
+   directly against the frozen 4.1.2 baseline for `SPTarkov.Server.Core`, returned
+   `APICompat ran successfully without finding any breaking changes.` — exit 0, no CP0002. The rule
+   is the type's age against the baseline, not the directory it sits in.
 2. **Override contract.** Detect Harmony patches on the frozen members (`Harmony.GetPatchInfo`) and
    route to legacy so hooks fire with baseline semantics. Add a `forceLegacy...` config flag as the
    escape hatch for hooks detection can't see. A port that kept no legacy path under guideline 1 has
@@ -351,7 +395,13 @@ silently drops camora ammo on the fifth); and the native `_type` test being
    Ceciler-injected write barriers on the model setters reachable from the published roots, with
    eight hand-written bump sites left for the container writes barriers cannot see. Only the varying
    block — per-call **service** state, plus whatever the caller itself selected — and the optional
-   `viewsOverride` remain per-call; config state left the varying block in Phase 4.
+   `viewsOverride` remain per-call; config state left the varying block in Phase 4. For the bot
+   family the "service state" half of that clause is now **vacuous**: ABI 32 took the last cached
+   service state off `SharedBotVarying`, leaving `generatingPlayerLevel` and `isNightTime` (live
+   `ProfileHelper` / `WeatherHelper` reads, resolved per call by definition), `equipment` (held off
+   the resident DB by a runtime writer, not by being a service's cache) and the caller-selected
+   `levelGeneration` / `templateVariants`. The other families' service-backed fields (decision 10
+   below) are untouched.
    Ineligible callers — mods loaded where `TrustNativeRequestCacheWithMods` does not hold (it defaults
    **on** since Phase 2, and counts only where `WriteBarrier.Installed`, i.e. Release and publish
    builds), or anyone with `DisableNativeRequestCache` — send the C#-built
@@ -563,8 +613,9 @@ resident (it embeds `RagfairDbViews` by `Arc`, the quest views' precedent, and a
 `viewsOverride` on the ineligible arm, the rest was renamed `SharedBotVarying` — and the bot
 family's varying carve-out was `modPoolSlotOrder` plus the config and service-backed blocks
 (`equipment`, `bosses`, `durability`, the two equipment blacklists, `configBlacklist`, the
-`pmcConfig`/`repairKitWeapon` lifts); since Phase 4 it is `modPoolSlotOrder` and `equipment` alone,
-the two equipment blacklists having left the wire entirely. Each bot's `template` and `lootPools`
+`pmcConfig`/`repairKitWeapon` lifts); Phase 4 cut that to `modPoolSlotOrder` and `equipment` alone,
+the two equipment blacklists having left the wire entirely, and ABI 32 cut it again to `equipment`
+alone when Rust took the mod pools. Each bot's `template` and `lootPools`
 stay caller-supplied on both arms — the batch ships them per level band — because the filtered
 template is the caller's own product, not a database view.
 **A mod writing an injected table's dictionaries directly is still invisible to the stamp** — its
@@ -918,7 +969,8 @@ carries, so neither needed a resident home. **10, the pmc name lists stay varyin
 revisit answered declined a second time.** Config residency removes only half the blocker:
 `GatherPmcNamesOfLength` still reads the bot *table*, which has no root, and flip #6 already priced
 one at 5.7 MiB and ~94.6 ms per publish to serve two lists. A names-only mini-root is the standing
-upgrade if the varying cost ever measures. The same answer covers `modPoolSlotOrder` and every
+upgrade if the varying cost ever measures. The same answer covered `modPoolSlotOrder` — until ABI 32
+took a third route out and deleted the member rather than re-homing it — and still covers every
 `SeasonalEventService` / `ItemBlacklistCache` / `LootableItemBlacklistCache` /
 `RagfairLinkedItemService` / `GetMoneyTpls`-backed field: those are **service state, not config**,
 and no phase currently owns them. The carve-out paragraph above was rewritten to say so — its
@@ -944,8 +996,9 @@ on-disk values and diverge from bot 2 of a nighttime raid on. Eleven of the twel
 landed. The **named upgrade path** is to lift `equipment` resident and carry one varying member
 holding just the live role+band `EquipmentMods`, gated by a second-bot nighttime regression test —
 worth doing, because at 39,811 B `equipment` is the largest member of genuinely varying process
-state on a bot send, ahead of `modPoolSlotOrder`'s 26,428 B (the caller-supplied `templateVariants`
-is bigger than both, but it is not state anyone owns resident).
+state on a bot send — it led `modPoolSlotOrder`'s 26,428 B when this was written and is now the only
+one of the two left, ABI 32 having taken the mod-pool member off the wire (the caller-supplied
+`templateVariants` is bigger than both, but it is not state anyone owns resident).
 **`ItemConfigLift.blacklist` is a `HashSet<String>`, not the plan's
 `IndexSet`** — the override wire mirrors C#'s `HashSet`, so both arms read one shape, and there is
 no iteration site to observe an order. Test hygiene, for the record: zero `[Test]` bodies,
@@ -1271,22 +1324,30 @@ written against, not the current file.
 3. Convert `is_valid_reward_item`'s trader whitelist (`quest/reward_generator.rs:869`, a `Vec<&str>`
    of up to 14 candidates) to `ItemBaseClassCache::is_of_baseclasses_set` and measure whether 14 is
    long enough for the set form to pay. Narrow and unmeasured.
-4. **Enabled by Phase 2, not delivered with it: `BotPayloadProjection.BuildModPoolSlotOrder`.**
-   With the bot database half
-   resident (flip #6), this is the dominant irreducible per-call C# cost left on the single-bot
-   resident path — a full items-table walk with two `BotEquipmentModPoolService` lookups per tpl,
-   ~6 ms of the measured 6.06 ms `BuildRequest` (BENCHMARK.md, assault) — and a member that
-   structurally *cannot* go resident under the current service design: the flip #6
-   ledger's decision 2 shows the order is the live service's `ConcurrentDictionary` enumeration
-   order, process-local and not a function of the database. Phase 2's write barriers are what made
-   the alternative safe — own the pools rather than observe them, so the order is Rust's own and the
-   member leaves the wire entirely — but the work itself is unstarted. Until then it rides both arms
-   at 26,428 bytes per send.
+4. **Delivered at ABI 32: `BotPayloadProjection.BuildModPoolSlotOrder` is gone.** The member could
+   never go resident — flip #6's decision 2 showed the order is the live
+   `BotEquipmentModPoolService`'s `ConcurrentDictionary` enumeration order, process-local and not a
+   function of the database — so the exit taken was the other one Phase 2's write barriers made
+   safe: **own the pools rather than observe them.** The native pool now enumerates the template's
+   own `Properties.Slots`, the order is Rust's own, and the 26,428 bytes per send left the wire
+   entirely on both arms. This item's "own the pools" framing was already half-true when written:
+   pool *contents* were derived natively from the bot port onward (`mod_pool_service.rs`, 2026-08-13) and
+   only the *ordering* was ever observed from C#, which is why the change is a **deletion** on the C#
+   side rather than a port. `BuildRequest` fell **5.19 → 0.23 ms** (assault, BENCHMARK.md § Mod-pool
+   ownership); the "~6 ms of the measured 6.06 ms" this item used to claim was an estimate and never
+   a measurement. What it bought beyond the wire and the time: the C# order was sized from
+   `Environment.ProcessorCount` (13 real slot names moved between 8 and 16 cores), so it was never
+   machine-independent, and native output is the reproducible-across-machines one now. What it cost:
+   the two arms draw in different orders at randomised levels, and the exact-output coverage there is
+   gone on **both** — booked in the *Broken* ledger, together with the process-nondeterminism finding
+   that made a native-only golden unimplementable. `BotEquipmentModPoolService` gained a whole-type
+   decline entry (guideline 2), Rust no longer consulting it.
 5. **Named by Phase 4, not delivered with it: split `BotConfig.Equipment`.** The Phase 4 ledger's
    third amendment — lift `equipment` onto the resident configs root and keep one varying member
    carrying just the live role+band `EquipmentMods` that `ReplayRandomisationClamps` writes, gated by
-   a second-bot nighttime regression test. Worth more than item 4 by wire: 39,811 bytes per send
-   against `modPoolSlotOrder`'s 26,428 (BENCHMARK.md § Phase 4).
+   a second-bot nighttime regression test. Now the **largest** member of genuinely varying process
+   state on a bot send and the only one left: 39,811 bytes, with item 4's 26,428 off the wire
+   (BENCHMARK.md § Phase 4).
 6. **Named by Phase 5, not delivered with it: frame the profile save request.** Phase 5 measured
    `spt_profile_save` ~20% slower than the `FileUtil.WriteFileAsync` it replaced (~161 → ~192 ms on a
    26.5 MB profile) and shipped it anyway. The removable costs, in the order they are worth chasing:
