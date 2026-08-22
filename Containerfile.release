@@ -64,6 +64,8 @@ USER spt
 WORKDIR /app
 EXPOSE 6969
 VOLUME /app/user
-# Phase 6a: the Rust launcher is the executable; it hosts the CLR and runs the server
-# (SPT.Server.Linux remains beside it as a direct-run fallback).
+# Phase 6a: the Rust launcher is the executable; it hosts the CLR and runs the server.
+# Phase 6b: it also carries spt-native as a linked rlib and exports its symbols, so this image
+# ships no libspt_native.so and SPT.Server.Linux is no longer a working direct-run fallback -
+# the assembly is still here, but it has no native library to bind to.
 ENTRYPOINT ["/app/mpex-server"]

@@ -1,5 +1,19 @@
 [target.x86_64-unknown-linux-gnu]
-rustflags = ["-C", "target-cpu=x86-64-v3", "-C", "link-arg=-fuse-ld=mold"]
+rustflags = [
+    "-C",
+    "target-cpu=x86-64-v3",
+    "-C",
+    "link-arg=-fuse-ld=mold",
+    # Phase 6b: mpex-server links spt-native as an rlib; --export-dynamic puts the #[no_mangle]
+    # spt_* exports into the executable's .dynsym so the CLR can reach them through
+    # NativeLibrary.GetMainProgramHandle() instead of a cdylib. Load-bearing, not tuning - this
+    # file is an MSBuild input to BuildSptNative for that reason. It is not the shotgun it looks
+    # like: Rust's default hidden visibility means a release launcher's .dynsym is the 34 spt_*
+    # exports plus a handful of runtime symbols, so nothing statically linked here (zstd, ring,
+    # bzip2) can interpose on the CLR's own copies.
+    "-C",
+    "link-arg=-Wl,--export-dynamic",
+]
 
 [target.x86_64-pc-windows-msvc]
 rustflags = ["-C", "target-cpu=x86-64-v3"]

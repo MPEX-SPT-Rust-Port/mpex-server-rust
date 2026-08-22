@@ -4,10 +4,13 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
-# Split-brain rule (rust-state-ownership spec, "Inversion compatibility"): this crate must NOT
-# depend on spt-native. The resident DB's statics live in the cdylib the CLR loads; linking the
-# rlib here would create a second, divergent copy.
+# Split-brain rule (rust-state-ownership spec, "Inversion compatibility"), as amended by Phase 6b:
+# exactly one linkage path may be live per *process*. This crate links spt-native as an rlib so the
+# resident DB's statics live in the executable; the CLR reaches them through GetMainProgramHandle()
+# and the published Linux tree ships no cdylib for a second copy to come from. Do not remove this
+# dependency: main.rs's anchor call and this line are what keep the 34 exports in .dynsym.
 [dependencies]
+spt-native = { path = "../spt-native" }
 # ponytail: nethost-download fetches libnethost from NuGet at build time; vendor the lib if an
 # offline build environment ever appears.
 netcorehost = { version = "0.22", features = ["nethost-download"] }

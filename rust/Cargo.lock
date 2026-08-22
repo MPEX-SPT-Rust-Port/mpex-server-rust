@@ -911,6 +911,7 @@ name = "mpex-server"
 version = "0.1.0"
 dependencies = [
  "netcorehost",
+ "spt-native",
  "tempfile",
 ]
 

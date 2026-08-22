@@ -21,6 +21,18 @@ internal static unsafe partial class NativeMethods
                     return IntPtr.Zero;
                 }
 
+                // Phase 6b: mpex-server links spt-native as an rlib, so the exports live in the
+                // executable itself and the resident DB's statics live in the host process.
+                // GetMainProgramHandle is dlopen(NULL) - it probes the process's global symbol
+                // scope, not the executable alone - but .NET loads native libraries RTLD_LOCAL, so
+                // a cdylib loaded by the arm below can never answer here. A process started any
+                // other way (SPT.Server, dotnet test, any Windows build) falls through to it.
+                var mainProgram = NativeLibrary.GetMainProgramHandle();
+                if (NativeLibrary.TryGetExport(mainProgram, "spt_native_abi_version", out _))
+                {
+                    return mainProgram;
+                }
+
                 var fileName =
                     OperatingSystem.IsWindows() ? "spt_native.dll"
                     : OperatingSystem.IsMacOS() ? "libspt_native.dylib"
