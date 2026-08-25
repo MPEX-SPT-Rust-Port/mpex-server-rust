@@ -91,13 +91,20 @@ entry and the inherited `ValueType.ToString()`. Scope is `Color` only — mods t
   only, because the batch re-times them per level band. A patch there de-batches the wave to the
   per-bot path, where the strip runs in C# and the patch takes effect; every other use of the type,
   ragfair's included, stays undetected. And `BotEquipmentModPoolService` is detected **whole-type**
-  by `BotInventoryGenerator` since ABI 32 — seven of its eight methods build a pool or read one and
-  the eighth, `ResetWeaponPool`, clears one, and Rust owns the pools outright now, so a patch on any
-  of them can only take effect on the legacy path and routes there. Narrowed, not closed: the type's
-  two `protected` pool properties (`GearModPool`, `WeaponModPool`) stay undetected, because
-  `_hookableMembers` filters on `!method.IsSpecialName` and property accessors are `IsSpecialName`.
-  Those properties are the backing state the getters read — exactly where a mod would inject pool
-  contents — so the residual is the one shape of patch that most wants detecting.
+  by `BotInventoryGenerator` since ABI 32 — six of its eight methods build a pool or read one,
+  `ResetWeaponPool` clears one, and `GetRequiredModsForWeaponSlot` reads the template rather than a
+  pool but is still a read the legacy draw consumes, and Rust owns the pools outright now, so a
+  patch on any of them can only take effect on the legacy path and routes there. The type's
+  two `protected` pool-property getters (`GearModPool`, `WeaponModPool`) are `IsSpecialName`, which
+  the `_hookableMembers` method sweep filters out, so they are re-admitted to the set explicitly —
+  those properties are the backing state every pool method reads, exactly where a mod would inject
+  pool contents — and a mod-registered subclass of the service declines through the same `GetType`
+  check as the three sibling generators. Still open, and invisible to detection in principle: a
+  constructor patch (`GetMethods` never returns constructors — the same pre-existing exclusion as
+  the four generator types) and plain runtime calls into the public surface (`ResetWeaponPool()`,
+  or mutating the live collections the `GetModsFor*Slot` methods return) shape the legacy pools
+  with no patch or substitution to detect; guideline 2's `forceLegacy` flag is the standing escape
+  hatch for a mod that needs those semantics.
 - **The native and legacy bot paths draw mod slots in different orders at randomised levels.** Since
   ABI 32 the native pool enumerates in the template's own `Properties.Slots` order; legacy
   enumerates `BotEquipmentModPoolService`'s `ConcurrentDictionary`, whose bucket count is sized from

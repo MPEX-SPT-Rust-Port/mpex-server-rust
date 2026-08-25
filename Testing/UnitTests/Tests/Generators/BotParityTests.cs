@@ -19,9 +19,12 @@ using ProfileInfo = SPTarkov.Server.Core.Models.Eft.Profile.Info;
 namespace UnitTests.Tests.Generators;
 
 /// <summary>
-/// Golden parity gate on the bot generation port: the same seed must make the legacy 4.1.2 C# path
-/// and the spt-native path build an equivalent bot inventory (deep-equal after LootIdNormalizer),
-/// and must leave the shared randomisation config in the same state afterwards. Mutates the shared
+/// Parity gate on the bot generation port. At level 1 the same seed must make the legacy 4.1.2 C#
+/// path and the spt-native path build an equivalent bot inventory (deep-equal after
+/// LootIdNormalizer); at randomised levels the two arms deliberately draw mod slots in different
+/// orders (Rust owns the mod-pool order since ABI 32), so those cases assert completion and
+/// routing, not output. Both arms must always leave the shared randomisation config in the same
+/// state afterwards. Mutates the shared
 /// config singleton, the RandomUtil seam and the ProbabilityRandomSource static, so it restores all
 /// of them and never runs in parallel with other fixtures.
 /// </summary>
@@ -94,31 +97,7 @@ public class BotParityTests
     }
 
     private static readonly string[] _randomisedRoles = ["usec-level20", "bear-level20"];
-    private static readonly ulong[] _randomisedPassingSeeds =
-    [
-        1,
-        2,
-        3,
-        4,
-        5,
-        6,
-        7,
-        8,
-        9,
-        10,
-        11,
-        12,
-        13,
-        14,
-        15,
-        16,
-        17,
-        18,
-        19,
-        20,
-        42,
-        1337,
-    ];
+    private static readonly ulong[] _randomisedSeeds = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 42, 1337];
 
     /// <summary>
     /// The randomised-level matrix the cross-arm assertion used to cover. This asserts only that
@@ -140,7 +119,7 @@ public class BotParityTests
     [Test]
     public void TheNativePathGeneratesAtRandomisedLevels(
         [ValueSource(nameof(_randomisedRoles))] string role,
-        [ValueSource(nameof(_randomisedPassingSeeds))] ulong seed
+        [ValueSource(nameof(_randomisedSeeds))] ulong seed
     )
     {
         PreWarmLootCache(role);
