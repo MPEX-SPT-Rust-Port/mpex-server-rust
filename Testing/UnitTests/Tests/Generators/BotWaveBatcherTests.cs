@@ -307,6 +307,33 @@ public class BotWaveBatcherTests
     }
 
     /// <summary>
+    /// The batch inherits BotInventoryGenerator's whole decline set through UseLegacyPath
+    /// (BotWaveBatcher.CanBatch), so a patch on the pool service - a member of that set, not of the
+    /// batcher's own wave members - must de-batch the wave too. Pinned directly because the
+    /// composition ("pool patch forces UseLegacyPath" plus "UseLegacyPath declines the batch") is
+    /// otherwise proven only by two separate tests, which a member-scoped UseLegacyPath refactor
+    /// could break without failing either.
+    /// </summary>
+    [Test]
+    public void AHarmonyPatchOnTheModPoolServiceDeclinesTheBatch()
+    {
+        var harmony = new Harmony("unit-tests.botwave-batcher.GetRequiredModsForWeaponSlot");
+        var member = typeof(BotEquipmentModPoolService).GetMethod(nameof(BotEquipmentModPoolService.GetRequiredModsForWeaponSlot));
+        Assert.That(member, Is.Not.Null, "frozen member BotEquipmentModPoolService.GetRequiredModsForWeaponSlot not found");
+
+        try
+        {
+            harmony.Patch(member, prefix: new HarmonyMethod(typeof(BotWaveBatcherTests), nameof(Prefix)));
+
+            Assert.That(_batcher.TryGenerateWave(_sessionId, BuildWaveDetails()), Is.Null, "a pool-service patch must de-batch the wave");
+        }
+        finally
+        {
+            harmony.UnpatchSelf();
+        }
+    }
+
+    /// <summary>
     /// The nighttime equipment clamp is a cross-bot feedback loop through the live BotConfig that
     /// only the per-bot path replays, so a nighttime wave whose role carries nighttime modifiers
     /// declines. The same config by day still batches - the decline is about the clamp firing, not

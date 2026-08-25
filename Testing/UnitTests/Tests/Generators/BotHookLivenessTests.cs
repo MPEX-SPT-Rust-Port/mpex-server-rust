@@ -1,3 +1,4 @@
+using System.Reflection;
 using HarmonyLib;
 using NUnit.Framework;
 using SPTarkov.Server.Core.Generators.Bot;
@@ -14,11 +15,14 @@ using ProfileInfo = SPTarkov.Server.Core.Models.Eft.Profile.Info;
 namespace UnitTests.Tests.Generators;
 
 /// <summary>
-/// Pins the mod hook contract across all four classes the native bot path replaces: a Harmony patch
-/// on a frozen 4.1.2 member of any of them must actually fire during generation - patch detection
-/// routes the call to the legacy path. A patch on the dispatcher itself is the exception, it wraps
-/// whichever path runs. Harmony patches are process-wide, so every patch is removed in a finally and
-/// the fixture never runs in parallel with others.
+/// Pins the mod hook contract across the five types in the decline set - the four classes the native
+/// bot path replaces, plus BotEquipmentModPoolService, which that native path no longer consults now
+/// that Rust owns the mod pools: a Harmony patch on a hookable member of any of them must actually
+/// fire during generation - patch detection routes the call to the legacy path. Two exceptions: a
+/// patch on the dispatcher wraps whichever path runs, and the pool-property getters are
+/// detection-only here, their legacy reads sitting behind randomisation gates this fixture's
+/// level-1 bots never open. Harmony patches are process-wide, so every patch
+/// is removed in a finally and the fixture never runs in parallel with others.
 /// </summary>
 [TestFixture]
 [NonParallelizable]
@@ -79,6 +83,57 @@ public class BotHookLivenessTests
     public void HarmonyPatchOnBotInventoryGeneratorFiresAndForcesTheLegacyPath()
     {
         AssertPatchForcesLegacyPath(typeof(BotInventoryGenerator), nameof(BotInventoryGenerator.GenerateEquipment));
+    }
+
+    /// <summary>
+    /// Rust owns the mod pools outright since ABI 32 - contents and ordering both - so a mod
+    /// patching the service can only take effect on the legacy path. Before ABI 32 such a patch was
+    /// silently ignored, which is the Broken-ledger entry this closes.
+    /// </summary>
+    [Test]
+    public void HarmonyPatchOnBotEquipmentModPoolServiceFiresAndForcesTheLegacyPath()
+    {
+        // GetRequiredModsForWeaponSlot, not one of the other three getters: this fixture builds a
+        // level-1 assault, bot.json gives assault no randomisation block at all, and every other
+        // legacy reach into the service is behind a randomisation gate. This one sits on the
+        // complementary !isRandomisableSlot branch, which is the branch this bot takes.
+        AssertPatchForcesLegacyPath(typeof(BotEquipmentModPoolService), nameof(BotEquipmentModPoolService.GetRequiredModsForWeaponSlot));
+    }
+
+    /// <summary>
+    /// The two protected pool-property getters are IsSpecialName, so the hookable-member method
+    /// sweep cannot see them; they are re-admitted explicitly because a patch there is a pool-state
+    /// injection - the state every pool method reads. Detection-only, unlike the cases above: every
+    /// legacy read of GearModPool/WeaponModPool sits behind a randomisation gate this level-1
+    /// fixture never opens, so the patch cannot also be asserted to fire here.
+    /// </summary>
+    [Test]
+    public void HarmonyPatchOnAPoolPropertyGetterForcesTheLegacyPath()
+    {
+        string[] properties = ["GearModPool", "WeaponModPool"];
+        foreach (var name in properties)
+        {
+            var harmony = new Harmony($"unit-tests.bot-hook-liveness.{name}");
+            var getter = typeof(BotEquipmentModPoolService).GetProperty(name, BindingFlags.Instance | BindingFlags.NonPublic)?.GetMethod;
+            Assert.That(getter, Is.Not.Null, $"pool property {name} getter not found");
+
+            try
+            {
+                harmony.Patch(getter, postfix: new HarmonyMethod(typeof(BotHookLivenessTests), nameof(PatchFired)));
+
+                Generate();
+
+                Assert.That(
+                    _botInventoryGenerator.LastPathTaken,
+                    Is.EqualTo(LootGenerationPath.Legacy),
+                    $"a patch on {name}'s getter did not force the legacy path"
+                );
+            }
+            finally
+            {
+                harmony.UnpatchSelf();
+            }
+        }
     }
 
     /// <summary>

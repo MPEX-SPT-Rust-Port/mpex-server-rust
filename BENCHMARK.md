@@ -645,8 +645,9 @@ these medians are read against.
 
 Wire volume, one `pmcUSEC` bot: **589,344 bytes (0.56 MiB)** on the eligible arm against
 **4,208,129 bytes (4.01 MiB)** with the views override — **7.1x**. Of what remains, the mod-pool
-slot order is 26,428 bytes (25.8 KiB), the single largest member still crossing per call and the
-one the Phase 2/4 carve-out is holding. (Measured once off
+slot order was 26,428 bytes (25.8 KiB) — called the single largest member still crossing per call
+here, which was wrong when written and is retracted two paragraphs down, and off the wire entirely
+since ABI 32 (§ Mod-pool ownership). (Measured once off
 `BotPayloadProjection.BuildRequest(...)` serialised with and without
 `BuildViewsOverride`; no committed fixture reports it — `BotPayloadSizeTests` pins the *override*
 arm's budget by design, since that is the wire a regression would inflate.)
@@ -666,6 +667,41 @@ the wire because `ReplayRandomisationClamps` writes into it after every send —
 the block above: `modPoolSlotOrder` was never the largest member crossing per call, since `equipment`
 measures 39,811 B off a projection expression that is character-identical at `9011794`, so it led
 there too and the Phase 4 reading is not a new lead.
+
+### Mod-pool ownership (ABI 32)
+
+`875b2c9` — 2026-08-22, after Rust took the mod pools outright. `BotBenchmarkTests`, assault,
+`BuildRequest` only, n=20 after 2 warmups. The "before" half is a **fresh reading taken at
+`07ecc91`**, not the `9011794` table's 6.06 ms: the pair below is one machine, one day apart, one
+command, and is comparable to itself rather than to the blocks above.
+
+```
+assault BuildRequest only    n=20  mean=5.30 ms  median=5.19 ms  min=3.82 ms  max=7.17 ms   (07ecc91, before)
+assault BuildRequest only    n=20  mean=0.27 ms  median=0.23 ms  min=0.21 ms  max=0.41 ms   (875b2c9, after)
+```
+
+**5.19 → 0.23 ms, 22.6x.** One run of n=20 per arm on each date, not a repeated invocation like the
+tables above. The two ranges do not overlap — the after-max (0.41 ms) is an order of magnitude below
+the before-min (3.82 ms) — so unlike most deltas in this file this one is not a reading of noise.
+The control is the native arm rather than an unchanged-code one: it fell 9.14 → 3.47 ms over the
+same pair of runs, a 5.67 ms drop against `BuildRequest`'s 4.96 ms, and the ~0.7 ms balance is the
+serialise/deserialise of the 26,428 B that left the wire with it. A host that had simply got faster
+would not produce that arithmetic. What left `BuildRequest` is `BuildModPoolSlotOrder`: a walk of
+the whole `ItemHelper.TemplateTable.Items` table, one `GetModsForGearSlot` per tpl plus a
+`GetModsForWeaponSlot` behind an empty-gear-pool check.
+
+**This is the single-bot path only.** `BotWaveBatcher` calls `BotPayloadProjection.BuildSharedVarying`
+directly and never `BuildRequest` (`BotWaveBatcher.cs:460`), so the batch arm's saving — the same
+walk, once per wave instead of once per bot — is not in this number, and no fixture reports it.
+
+Wire, by arithmetic rather than a fresh probe: `shared.modPoolSlotOrder` measured 26,428 B (the
+Phase 4 member table above) and the member no longer exists, so 26,428 B leaves the shared varying
+block per send. A send is one FFI call, so that is per bot on the single-bot path and per wave on
+the batch one.
+
+The time share of `BuildModPoolSlotOrder` had never been measured separately from the rest of
+`BuildRequest`, so the before/after pair above is the first decomposition of that projection into a
+member and a remainder — and the remainder is 0.23 ms, which is the more useful half of the result.
 
 ### Batched wave
 
@@ -717,7 +753,8 @@ and the single-bot block above as the eligible one.
 All figures ms per bot; request bytes per bot unchanged at 3.81 MiB single-bot against 0.08 (wave
 45), 0.19 (20), 0.38 (10), 0.76 (5) MiB batched — the override arm's wire did not move, because
 every member the flip touched was renamed or re-parented, not added or dropped: the database half
-became `viewsOverride`, the rest became `SharedBotVarying`, and `modPoolSlotOrder` went with it.
+became `viewsOverride`, the rest became `SharedBotVarying`, and `modPoolSlotOrder` went with it (it
+left the wire entirely at ABI 32 — § Mod-pool ownership).
 The timings are **not** flatly "within spread", and the direction is worth recording: against
 `ae325d8` the two unchanged-code arms fell in **10 of 10** cells each (serial to 46-47 ms from
 48-50, parallel to 13-14 from 15-16) while the batched arm — the only one this flip reshaped — rose

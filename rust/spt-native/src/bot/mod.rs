@@ -375,12 +375,6 @@ pub struct BotContext<'a> {
     pub repair_kit_weapon: &'a BonusSettings,
     /// `BotConfig.SecureContainerAmmoStackCount` (`BotConfig.cs:85`).
     pub secure_container_ammo_stack_count: i32,
-    /// `modPoolSlotOrder` — the C# `BotEquipmentModPoolService` pools' slot-name enumeration
-    /// order per template, as indices into that template's `slots`. Only order crosses the wire;
-    /// membership is still derived by [`crate::bot::mod_pool_service`]. Rides the shared varying
-    /// block on every send (it is live C# service state, not database data). Missing entry =
-    /// database order.
-    pub mod_pool_slot_order: &'a IndexMap<String, Vec<usize>>,
     pub diagnostics: DiagSink,
 }
 
@@ -393,9 +387,6 @@ pub(crate) static NO_PRESETS: std::sync::LazyLock<IndexMap<String, PresetView>> 
     std::sync::LazyLock::new(IndexMap::new);
 #[cfg(test)]
 pub(crate) static NO_DEFAULT_PRESETS: std::sync::LazyLock<IndexMap<String, String>> =
-    std::sync::LazyLock::new(IndexMap::new);
-#[cfg(test)]
-pub(crate) static NO_MOD_POOL_ORDER: std::sync::LazyLock<IndexMap<String, Vec<usize>>> =
     std::sync::LazyLock::new(IndexMap::new);
 #[cfg(test)]
 pub(crate) static NO_BUFFS: std::sync::LazyLock<BonusSettings> = std::sync::LazyLock::new(|| {

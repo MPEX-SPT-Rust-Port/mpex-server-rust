@@ -15,11 +15,9 @@ use crate::db::models::GlobalsRoot;
 use crate::ragfair::views::RagfairDbViews;
 
 /// The bot-family database views derived at publish — only what the resident roots determine
-/// lives here; the config and per-request members keep crossing per call. The mod-pool slot
-/// order is deliberately absent: it is an emergent artifact of the live C#
-/// `BotEquipmentModPoolService`'s `ConcurrentDictionary` (process-local bucket layout, not
-/// derivable from the database), so it rides every send on the shared varying block instead
-/// ([`crate::bot::models::SharedBotVaryingWire::mod_pool_slot_order`]).
+/// lives here; the config and per-request members keep crossing per call. The mod-pool slot order
+/// is not among them: it is the template's own `Properties.Slots` order, derived where the pool is
+/// ([`crate::bot::mod_pool_service`]), so there is nothing to project.
 #[derive(Debug)]
 pub struct BotDbViews {
     /// The views the bot family shares with ragfair (`items`, `item_presets`,

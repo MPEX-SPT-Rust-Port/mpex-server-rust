@@ -5,7 +5,6 @@ using SPTarkov.Server.Core.Generators.Loot;
 using SPTarkov.Server.Core.Generators.Weapons;
 using SPTarkov.Server.Core.Helpers;
 using SPTarkov.Server.Core.Helpers.InRaid;
-using SPTarkov.Server.Core.Helpers.Items;
 using SPTarkov.Server.Core.Helpers.Profile;
 using SPTarkov.Server.Core.Models.Common;
 using SPTarkov.Server.Core.Models.Eft.Common.Tables;
@@ -45,11 +44,9 @@ public class BotBenchmarkTests
     private BotLootGenerator _botLootGenerator = default!;
     private BotEquipmentModGenerator _botEquipmentModGenerator = default!;
     private ProfileHelper _profileHelper = default!;
-    private ItemHelper _itemHelper = default!;
     private WeatherHelper _weatherHelper = default!;
     private ProfileActivityService _profileActivityService = default!;
     private BotEquipmentFilterService _botEquipmentFilterService = default!;
-    private BotEquipmentModPoolService _botEquipmentModPoolService = default!;
     private BotInventoryContainerService _botInventoryContainerService = default!;
     private BotConfig _botConfig = default!;
     private PmcConfig _pmcConfig = default!;
@@ -68,11 +65,9 @@ public class BotBenchmarkTests
         _botLootGenerator = di.GetService<BotLootGenerator>();
         _botEquipmentModGenerator = di.GetService<BotEquipmentModGenerator>();
         _profileHelper = di.GetService<ProfileHelper>();
-        _itemHelper = di.GetService<ItemHelper>();
         _weatherHelper = di.GetService<WeatherHelper>();
         _profileActivityService = di.GetService<ProfileActivityService>();
         _botEquipmentFilterService = di.GetService<BotEquipmentFilterService>();
-        _botEquipmentModPoolService = di.GetService<BotEquipmentModPoolService>();
         _botInventoryContainerService = di.GetService<BotInventoryContainerService>();
         _botConfig = di.GetService<BotConfig>();
         _pmcConfig = di.GetService<PmcConfig>();
@@ -151,7 +146,8 @@ public class BotBenchmarkTests
 
     /// <summary>
     /// The projection half of the native path on its own - the resident arm's per-call varying block
-    /// (config, blacklists, equipment filters, the mod-pool slot order), rebuilt per bot.
+    /// (the player's level, the raid's daylight, BotConfig.Equipment, and the caller's level inputs
+    /// and band variants), rebuilt per bot.
     /// </summary>
     private List<double> MeasureProjection(string role)
     {
@@ -198,9 +194,7 @@ public class BotBenchmarkTests
             _profileHelper,
             _profileActivityService,
             _weatherHelper,
-            _botEquipmentModPoolService,
             _botLootGenerator.BotLootCacheService,
-            _itemHelper,
             _botConfig,
             _pmcConfig
         );

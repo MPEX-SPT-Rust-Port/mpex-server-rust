@@ -170,10 +170,10 @@ internal record BotViewsOverride
 
 /// <summary>
 /// The request members that do not vary between the bots of one wave and are not database views:
-/// live C# process state (the player's level, the raid's daylight, the mod-pool slot order), the
-/// one config slice a runtime writer keeps out of the resident DB (<see cref="Equipment"/>), and
-/// (as <see cref="TemplateVariants"/>) the templates and loot pools, which vary by level band
-/// rather than by bot. Every other config slice, and every database view, lives on
+/// live C# process state (the player's level, the raid's daylight), the one config slice a runtime
+/// writer keeps out of the resident DB (<see cref="Equipment"/>), and (as
+/// <see cref="TemplateVariants"/>) the templates and loot pools, which vary by level band rather
+/// than by bot. Every other config slice, and every database view, lives on
 /// <see cref="BotViewsOverride"/> or the resident DB.
 /// </summary>
 internal record SharedBotVarying
@@ -206,17 +206,6 @@ internal record SharedBotVarying
     /// </summary>
     [JsonPropertyName("equipment")]
     public required Dictionary<string, EquipmentFilters> Equipment { get; set; }
-
-    /// <summary>
-    /// <c>BotEquipmentModPoolService</c>'s pools' slot-name enumeration order per template, as
-    /// indices into that template's <see cref="ItemView.Slots"/>. Only templates whose pool holds
-    /// two or more slot names are listed - order cannot matter below two. Membership stays derived
-    /// on the native side; this carries order alone. On the varying block rather than the views:
-    /// the order is an emergent artifact of the live service's <c>ConcurrentDictionary</c>
-    /// (process-local, not derivable from the database), so it rides every send.
-    /// </summary>
-    [JsonPropertyName("modPoolSlotOrder")]
-    public required Dictionary<MongoId, List<int>> ModPoolSlotOrder { get; set; }
 
     /// <summary>
     /// The wave's level-draw inputs, for the native side to draw each bot's level with. Set only

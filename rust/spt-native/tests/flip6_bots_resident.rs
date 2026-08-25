@@ -1,8 +1,9 @@
 //! Resident-arm integration for the bot generation flip (#6): publish a minimal
-//! templates+traders+globals DB — a rifle whose slots make `modPoolSlotOrder` non-trivial, two
-//! presets (one default via `_encyclopedia`), and a three-band exp table — then prove an
-//! `{epoch}` send generates identically to the same data sent as `viewsOverride`, for both bot
-//! exports, and that a wrong epoch is a stale error, not a wrong answer.
+//! templates+traders+globals DB — a rifle whose slots give it a multi-entry mod pool (one slot
+//! randomised, so the draw walks `derive_pool`), two presets (one default via `_encyclopedia`),
+//! and a three-band exp table — then prove an `{epoch}` send generates identically to the same
+//! data sent as `viewsOverride`, for both bot exports, and that a wrong epoch is a stale error,
+//! not a wrong answer.
 //!
 //! Its own process (integration tests build their own binary), so the process-global store races
 //! with nothing; the whole protocol lives in one `#[test]` fn, sequential, to keep it that way.
@@ -15,7 +16,7 @@ use spt_native::ffi::{
     STATUS_OK, STATUS_STALE_EPOCH, spt_buf_free, spt_db_publish, spt_generate_bot_inventory,
     spt_generate_bot_inventory_batch,
 };
-use spt_native::loot::item_helper::{AMMO, MAGAZINE, WEAPON};
+use spt_native::loot::item_helper::{AMMO, MAGAZINE, MOD, WEAPON};
 
 // Deliberately non-hex so `strip_mongo_ids` leaves them visible — a draw that diverged between
 // the two arms would then fail the byte comparison.
@@ -36,8 +37,17 @@ const AMMO_TPL: &str = "ammo_ps";
 const CALIBER: &str = "Caliber762x39";
 
 /// In a rifle slot filter but in no pool and no items table: it keeps `mod_scope` in the slot
-/// pool so the derived `modPoolSlotOrder` has two entries at non-zero indices ([1, 2]).
+/// pool, so the rifle's pool holds more than one entry and the mod draw has something to walk.
 const SCOPE_GHOST: &str = "scope_ghost";
+
+// The randomised-slot fixture (`mod_mount` on the rifle): a mount whose own two slots make the
+// recursion iterate a `derive_pool`-derived entry, with a multi-candidate slot so the drawn grip
+// depends on the inner set order as well. All non-hex, so a drifted draw stays visible through
+// `strip_mongo_ids`.
+const MOUNT_TPL: &str = "mount_rail";
+const LIGHT_TPL: &str = "light_torch";
+const GRIP_STUBBY_TPL: &str = "grip_stubby";
+const GRIP_LONG_TPL: &str = "grip_long";
 
 /// Per-slice seeds. The two PMC draws are the first thing on each bot's seeded stream, so the
 /// drawn level is a pure function of the seed: 4 lands on level 1 (band A, fractional exp draw)
@@ -106,14 +116,15 @@ fn preset_p2_items() -> Value {
     json!([{"_id": "root_p2", "_tpl": RIFLE_TPL}])
 }
 
-/// The raw `templates.items` the publish carries. The rifle's slots are the `modPoolSlotOrder`
-/// fixture: `mod_stock`'s filter is empty (never pooled), so the pooled pair sits at slot
-/// indices 1 and 2 — a derived order that is not the identity.
+/// The raw `templates.items` the publish carries. The rifle's slots are the mod-pool fixture:
+/// `mod_stock`'s filter is empty (never pooled), so the pool holds the other two slots and the
+/// pooled pair sits behind a slot the pool drops.
 fn raw_items() -> Value {
     json!({
         WEAPON: {"_name": "weapon", "_type": "Node", "_parent": "", "_props": {}},
         MAGAZINE: {"_name": "magazine", "_type": "Node", "_parent": "", "_props": {}},
         AMMO: {"_name": "ammo", "_type": "Node", "_parent": "", "_props": {}},
+        MOD: {"_name": "mod", "_type": "Node", "_parent": "", "_props": {}},
         HEADWEAR_TPL: {"_name": "cap", "_type": "Item",
             "_props": {"Width": 1, "Height": 1}},
         EARPIECE_TPL: {"_name": "comtac", "_type": "Item",
@@ -152,6 +163,7 @@ fn raw_items() -> Value {
                 {"_name": "mod_magazine", "_required": true,
                  "_props": {"filters": [{"Filter": [MAG_TPL]}]}},
                 {"_name": "mod_scope", "_props": {"filters": [{"Filter": [SCOPE_GHOST]}]}},
+                {"_name": "mod_mount", "_props": {"filters": [{"Filter": [MOUNT_TPL]}]}},
             ]}},
         MAG_TPL: {"_name": "akm mag", "_type": "Item", "_parent": MAGAZINE, "_props": {
             "Width": 1, "Height": 1, "ReloadMagType": "ExternalMagazine",
@@ -160,6 +172,19 @@ fn raw_items() -> Value {
         AMMO_TPL: {"_name": "PS", "_type": "Item", "_parent": AMMO, "_props": {
             "Width": 1, "Height": 1, "Caliber": CALIBER,
             "StackMaxSize": 60, "StackMinRandom": 30, "StackMaxRandom": 30}},
+        MOUNT_TPL: {"_name": "rail mount", "_type": "Item", "_parent": MOD, "_props": {
+            "Width": 1, "Height": 1,
+            "Slots": [
+                {"_name": "mod_flashlight", "_props": {"filters": [{"Filter": [LIGHT_TPL]}]}},
+                {"_name": "mod_foregrip",
+                 "_props": {"filters": [{"Filter": [GRIP_STUBBY_TPL, GRIP_LONG_TPL]}]}},
+            ]}},
+        LIGHT_TPL: {"_name": "torch", "_type": "Item", "_parent": MOD,
+            "_props": {"Width": 1, "Height": 1}},
+        GRIP_STUBBY_TPL: {"_name": "stubby grip", "_type": "Item", "_parent": MOD,
+            "_props": {"Width": 1, "Height": 1}},
+        GRIP_LONG_TPL: {"_name": "long grip", "_type": "Item", "_parent": MOD,
+            "_props": {"Width": 1, "Height": 1}},
     })
 }
 
@@ -170,6 +195,7 @@ fn view_items() -> Value {
         WEAPON: {"name": "weapon", "type": "Node"},
         MAGAZINE: {"name": "magazine", "type": "Node"},
         AMMO: {"name": "ammo", "type": "Node"},
+        MOD: {"name": "mod", "type": "Node"},
         HEADWEAR_TPL: {"name": "cap", "type": "Item", "width": 1, "height": 1},
         EARPIECE_TPL: {"name": "comtac", "type": "Item", "width": 1, "height": 1},
         FACE_COVER_TPL: {"name": "shemagh", "type": "Item", "width": 1, "height": 1},
@@ -201,6 +227,7 @@ fn view_items() -> Value {
                 {"name": "mod_stock", "filter": []},
                 {"name": "mod_magazine", "required": true, "filter": [MAG_TPL]},
                 {"name": "mod_scope", "filter": [SCOPE_GHOST]},
+                {"name": "mod_mount", "filter": [MOUNT_TPL]},
             ]},
         MAG_TPL: {"parent": MAGAZINE, "name": "akm mag", "type": "Item",
             "width": 1, "height": 1, "reloadMagType": "ExternalMagazine",
@@ -209,6 +236,17 @@ fn view_items() -> Value {
         AMMO_TPL: {"parent": AMMO, "name": "PS", "type": "Item", "width": 1, "height": 1,
             "caliber": CALIBER,
             "stackMaxSize": 60, "stackMinRandom": 30, "stackMaxRandom": 30},
+        MOUNT_TPL: {"parent": MOD, "name": "rail mount", "type": "Item",
+            "width": 1, "height": 1,
+            "slots": [
+                {"name": "mod_flashlight", "filter": [LIGHT_TPL]},
+                {"name": "mod_foregrip", "filter": [GRIP_STUBBY_TPL, GRIP_LONG_TPL]},
+            ]},
+        LIGHT_TPL: {"parent": MOD, "name": "torch", "type": "Item", "width": 1, "height": 1},
+        GRIP_STUBBY_TPL: {"parent": MOD, "name": "stubby grip", "type": "Item",
+            "width": 1, "height": 1},
+        GRIP_LONG_TPL: {"parent": MOD, "name": "long grip", "type": "Item",
+            "width": 1, "height": 1},
     })
 }
 
@@ -245,11 +283,12 @@ fn views_override() -> Value {
         },
         "defaultPresetsByTpl": {RIFLE_TPL: "p1"},
         "handbookPrices": {
-            WEAPON: 0.0, MAGAZINE: 0.0, AMMO: 0.0,
+            WEAPON: 0.0, MAGAZINE: 0.0, AMMO: 0.0, MOD: 0.0,
             HEADWEAR_TPL: 0.0, EARPIECE_TPL: 0.0, FACE_COVER_TPL: 0.0, ARMOR_TPL: 0.0,
             VEST_ARMORED_TPL: 0.0, VEST_PLAIN_TPL: 0.0, PLATE_TPL: 0.0, BACKPACK_TPL: 0.0,
             POCKETS_TPL: 0.0, SECURE_TPL: 0.0, ARMBAND_TPL: 0.0,
             RIFLE_TPL: 50000.0, MAG_TPL: 500.0, AMMO_TPL: 50.0,
+            MOUNT_TPL: 0.0, LIGHT_TPL: 0.0, GRIP_STUBBY_TPL: 0.0, GRIP_LONG_TPL: 0.0,
         },
         "expTable": [100, 200, 400],
         "bosses": [],
@@ -310,9 +349,13 @@ fn zero_loot_counts() -> Value {
 /// One bot template. `with_weapon_mod_pool: false` empties `mods`, so `GenerateModsForWeapon` is
 /// skipped, the rifle misses its required magazine, and the preset fallback dresses it from p1 —
 /// the band-B template below, making the preset views a consumed input, not just a mirrored one.
+///
+/// `mod_mount` is the randomised slot ([`shared`]'s band): its template pool entry here is what
+/// puts the slot on the draw's iteration path, but the candidates come from
+/// `mod_pool_service::derive_pool` instead, and so do the mount's own two sub-slots.
 fn template(with_weapon_mod_pool: bool) -> Value {
     let mods = if with_weapon_mod_pool {
-        json!({RIFLE_TPL: {"mod_magazine": [MAG_TPL]}})
+        json!({RIFLE_TPL: {"mod_magazine": [MAG_TPL], "mod_mount": [MOUNT_TPL]}})
     } else {
         json!({})
     };
@@ -342,7 +385,8 @@ fn template(with_weapon_mod_pool: bool) -> Value {
             "equipment": {"Headwear": 100, "Earpiece": 100, "FaceCover": 100,
                 "ArmorVest": 100, "TacticalVest": 100, "Backpack": 100, "ArmBand": 100,
                 "FirstPrimaryWeapon": 100, "SecondPrimaryWeapon": 0, "Holster": 0},
-            "weaponMods": {"mod_magazine": 100},
+            "weaponMods": {"mod_magazine": 100, "mod_mount": 100,
+                "mod_flashlight": 100, "mod_foregrip": 100},
             "equipmentMods": {"front_plate": 100},
         },
         "generation": {"items": zero_loot_counts()},
@@ -356,18 +400,27 @@ fn template(with_weapon_mod_pool: bool) -> Value {
 /// `equipment`'s two roles each carry a `blacklist` band that covers the player level (20) and bans
 /// nothing, so `select_equipment_blacklist`'s pick is exercised — and exercised *identically* on
 /// both arms, because `equipment` never went resident.
+///
+/// The `randomisation` band opens every `mod_pool_service::derive_pool` gate for all three bots:
+/// `mod_mount` routes the weapon draw through the dynamic pool (and the drawn mount's sub-mods
+/// through the service fetch), and `TacticalVest` routes an armored-vest pick's mod pool through
+/// the gear derive.
 fn shared() -> Value {
-    let filters = json!({"blacklist": [
-        {"levelRange": {"min": 1, "max": 99}, "equipment": {"Earpiece": []}},
-    ]});
+    let filters = json!({
+        "blacklist": [
+            {"levelRange": {"min": 1, "max": 99}, "equipment": {"Earpiece": []}},
+        ],
+        "randomisation": [
+            {"levelRange": {"min": 1, "max": 99},
+             "randomisedWeaponModSlots": ["mod_mount"],
+             "randomisedArmorSlots": ["TacticalVest"]},
+        ],
+    });
 
     json!({
         "generatingPlayerLevel": 20,
         "isNightTime": false,
         "equipment": {"assault": filters, "pmc": filters},
-        // The rifle's non-identity slot order, shared verbatim by both arms - live C# service
-        // state, so it rides every send rather than the views
-        "modPoolSlotOrder": {RIFLE_TPL: [1, 2]},
     })
 }
 
@@ -427,6 +480,34 @@ fn single_request(epoch: u64, views_override: Option<Value>) -> Vec<u8> {
 
     serde_json::to_vec(&request).unwrap()
 }
+
+/// xxh3-128 of the resident batch response with minted ids stripped: an exact-output golden over
+/// all three bots at fixed seeds — both PMC level bands and band B's preset fallback. Any change to
+/// what the native arm generates from this fixture moves it, so it is end-to-end drift detection
+/// over the bot FFI pipeline.
+///
+/// **It pins the mod-pool ordering ABI 32 moved into this crate.** [`shared`]'s `randomisation`
+/// band opens all three gated routes into `mod_pool_service::derive_pool` (each confirmed by
+/// making the respective service function panic — the test fails): the randomised `mod_mount` is
+/// drawn from the dynamic pool (`get_compatible_mods_for_weapon_slot`), the drawn mount's own
+/// sub-mods come from the service fetch (`get_mods_for_weapon_slot`), and an armored-vest pick
+/// rebuilds its mod pool through the gear derive (`get_mods_for_gear_slot`). The mount's two
+/// derived sub-slots make the derived entry's *key order* observable — the recursion appends their
+/// items in iteration order — and `mod_foregrip`'s two candidates make the *inner set order*
+/// observable through the seeded pick, so either order regressing moves the hash.
+///
+/// It is a *Rust-side* golden because a C#-side one is impossible: `MongoId.GetHashCode()`
+/// (`MongoId.cs:325`) is `HashCode.Combine(...)`, which .NET seeds per process, so every
+/// `Dictionary<MongoId, …>` the C# projection serialises enumerates in a process-random order that
+/// the seeded draw then walks. Nothing here has that problem — this fixture drives the exports in
+/// its own process, and `src/bot/` has no `HashMap` at all, its four `HashSet`s being
+/// membership-tested rather than iterated; everything the draw walks is an `IndexMap`/`IndexSet`.
+/// That is the load-bearing result: a Rust-side golden *does* hold across processes where a
+/// C#-side one cannot.
+///
+/// To regenerate after a deliberate generation change: put any wrong value here, run
+/// `cargo test --test flip6_bots_resident`, and paste the `left:` value from the failure.
+const RESIDENT_BATCH_GOLDEN: &str = "87A743ED988C6A8F7ADEE225F0E28062";
 
 #[test]
 fn a_resident_send_matches_the_override_send_and_a_wrong_epoch_is_stale() {
@@ -513,6 +594,13 @@ fn a_resident_send_matches_the_override_send_and_a_wrong_epoch_is_stale() {
     assert!(high.contains("root_p1"), "no preset fallback: {high}");
     let resident = String::from_utf8(resident).unwrap();
     assert!(resident.contains(RIFLE_TPL) && resident.contains(MAG_TPL));
+    // The randomised-slot chain: the mount only reaches the weapon through the dynamic pool, and
+    // its light and grip children only exist in the derived (`derive_pool`) entry the service
+    // fetch inserts — their presence keeps the ordering pin non-vacuous.
+    assert!(
+        resident.contains(MOUNT_TPL) && resident.contains(LIGHT_TPL) && resident.contains("grip_"),
+        "the randomised mount chain was not drawn"
+    );
 
     // (3) The same batch with the equivalent viewsOverride at epoch 0.
     let (status, override_send) = call(
@@ -527,9 +615,19 @@ fn a_resident_send_matches_the_override_send_and_a_wrong_epoch_is_stale() {
     );
 
     // The flip's promise: identical generation off either arm, minted ids aside.
+    let resident_stripped = strip_mongo_ids(&resident);
     assert_eq!(
-        strip_mongo_ids(&resident),
+        resident_stripped,
         strip_mongo_ids(&String::from_utf8(override_send).unwrap())
+    );
+
+    // …and the exact-output pin over those same bytes — see [`RESIDENT_BATCH_GOLDEN`].
+    assert_eq!(
+        format!(
+            "{:032X}",
+            xxhash_rust::xxh3::xxh3_128(resident_stripped.as_bytes())
+        ),
+        RESIDENT_BATCH_GOLDEN
     );
 
     // (4) The single-bot export, same resident-vs-override comparison.

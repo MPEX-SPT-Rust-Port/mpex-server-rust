@@ -39,7 +39,6 @@ public class BotPayloadSizeTests
     private WeatherHelper _weatherHelper = default!;
     private ProfileActivityService _profileActivityService = default!;
     private BotEquipmentFilterService _botEquipmentFilterService = default!;
-    private BotEquipmentModPoolService _botEquipmentModPoolService = default!;
     private BotConfig _botConfig = default!;
     private PmcConfig _pmcConfig = default!;
     private BotTable _botTable = default!;
@@ -60,7 +59,6 @@ public class BotPayloadSizeTests
         _weatherHelper = di.GetService<WeatherHelper>();
         _profileActivityService = di.GetService<ProfileActivityService>();
         _botEquipmentFilterService = di.GetService<BotEquipmentFilterService>();
-        _botEquipmentModPoolService = di.GetService<BotEquipmentModPoolService>();
         _botConfig = di.GetService<BotConfig>();
         _pmcConfig = di.GetService<PmcConfig>();
         _botTable = di.GetService<BotTable>();
@@ -261,8 +259,6 @@ public class BotPayloadSizeTests
                 _profileHelper,
                 _profileActivityService,
                 _weatherHelper,
-                _botEquipmentModPoolService,
-                _itemHelper,
                 _botConfig,
                 // A PMC wave draws its levels natively, so it carries the draw's inputs once
                 new LevelGenerationView { LevelMin = 1, LevelMax = expTable.Length },
@@ -320,9 +316,7 @@ public class BotPayloadSizeTests
             _profileHelper,
             _profileActivityService,
             _weatherHelper,
-            _botEquipmentModPoolService,
             _botLootGenerator.BotLootCacheService,
-            _itemHelper,
             _botConfig,
             _pmcConfig
         );

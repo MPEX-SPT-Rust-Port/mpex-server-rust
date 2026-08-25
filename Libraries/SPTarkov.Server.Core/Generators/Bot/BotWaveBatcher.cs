@@ -48,7 +48,6 @@ public class BotWaveBatcher(
     BotLevelGenerator botLevelGenerator,
     BotInventoryGenerator botInventoryGenerator,
     BotEquipmentFilterService botEquipmentFilterService,
-    BotEquipmentModPoolService botEquipmentModPoolService,
     BotGeneratorHelper botGeneratorHelper,
     ProfileHelper profileHelper,
     ProfileActivityService profileActivityService,
@@ -463,8 +462,6 @@ public class BotWaveBatcher(
                 profileHelper,
                 profileActivityService,
                 weatherHelper,
-                botEquipmentModPoolService,
-                itemHelper,
                 botConfig,
                 levelGeneration,
                 [

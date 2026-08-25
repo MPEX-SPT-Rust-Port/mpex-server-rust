@@ -19,9 +19,12 @@ using ProfileInfo = SPTarkov.Server.Core.Models.Eft.Profile.Info;
 namespace UnitTests.Tests.Generators;
 
 /// <summary>
-/// Golden parity gate on the bot generation port: the same seed must make the legacy 4.1.2 C# path
-/// and the spt-native path build an equivalent bot inventory (deep-equal after LootIdNormalizer),
-/// and must leave the shared randomisation config in the same state afterwards. Mutates the shared
+/// Parity gate on the bot generation port. At level 1 the same seed must make the legacy 4.1.2 C#
+/// path and the spt-native path build an equivalent bot inventory (deep-equal after
+/// LootIdNormalizer); at randomised levels the two arms deliberately draw mod slots in different
+/// orders (Rust owns the mod-pool order since ABI 32), so those cases assert completion and
+/// routing, not output. Both arms must always leave the shared randomisation config in the same
+/// state afterwards. Mutates the shared
 /// config singleton, the RandomUtil seam and the ProbabilityRandomSource static, so it restores all
 /// of them and never runs in parallel with other fixtures.
 /// </summary>
@@ -94,51 +97,38 @@ public class BotParityTests
     }
 
     private static readonly string[] _randomisedRoles = ["usec-level20", "bear-level20"];
-    private static readonly ulong[] _randomisedPassingSeeds =
-    [
-        1,
-        2,
-        3,
-        4,
-        5,
-        6,
-        7,
-        8,
-        9,
-        10,
-        11,
-        12,
-        13,
-        14,
-        15,
-        16,
-        17,
-        18,
-        19,
-        20,
-        42,
-        1337,
-    ];
+    private static readonly ulong[] _randomisedSeeds = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 42, 1337];
 
     /// <summary>
-    /// The level-1 cases above sit below the pmc randomisation buckets, so they never route a mod
-    /// pool through BotEquipmentModPoolService. These do - level 20 selects buckets that set
-    /// RandomisedArmorSlots and RandomisedWeaponModSlots - which is exactly the enumeration-order
-    /// seam the modPoolSlotOrder projection exists for, plus the two blacklist/spawn-chance seams
-    /// the wide seed set exists for.
+    /// The randomised-level matrix the cross-arm assertion used to cover. This asserts only that
+    /// native generation completes and yields a well-formed inventory: it is deliberately not a pin.
+    ///
+    /// An exact-output golden was specified here and is not implementable. Native bot output is not
+    /// reproducible across processes, and ABI 32 does not change that: MongoId.GetHashCode is
+    /// HashCode.Combine (MongoId.cs:325), which .NET seeds from a per-process random value, so every
+    /// Dictionary&lt;MongoId, …&gt; the projection serialises enumerates in a process-random order that
+    /// the seeded native draw then walks. Two back-to-back runs of this fixture produced disjoint
+    /// inventories, differing in item count and not merely in order. This is pre-existing and
+    /// unrelated to the mod pool - the cross-arm test this replaces was immune only because it
+    /// compared native to legacy inside one process.
+    ///
+    /// So the exact-output coverage this matrix used to carry is gone on both arms, recorded in
+    /// RUST-ROADMAP.md's Broken ledger. What survives here is the randomised-level path itself:
+    /// levels 20+ route through the pmc randomisation buckets the level-1 cases never reach.
     /// </summary>
     [Test]
-    public void TheSameSeedGeneratesEquivalentInventoryAtRandomisedLevels(
+    public void TheNativePathGeneratesAtRandomisedLevels(
         [ValueSource(nameof(_randomisedRoles))] string role,
-        [ValueSource(nameof(_randomisedPassingSeeds))] ulong seed
+        [ValueSource(nameof(_randomisedSeeds))] ulong seed
     )
     {
         PreWarmLootCache(role);
 
-        var native = Generate(role, seed, forceLegacy: false, LootGenerationPath.Native);
-        var legacy = Generate(role, seed, forceLegacy: true, LootGenerationPath.Legacy);
-
-        LootJsonAssert.AssertEqual(legacy.Inventory, native.Inventory, $"role={role}", seed);
+        // No assertion here on purpose: Generate already asserts LastPathTaken against the expected
+        // path and Items.Count > 6, so this case earns its keep by exercising the native
+        // randomised-level path over the full seed matrix - it fails on a throw or a silent
+        // fallback to legacy, and nothing weaker belongs on top of that.
+        Generate(role, seed, forceLegacy: false, LootGenerationPath.Native);
     }
 
     /// <summary>
@@ -148,10 +138,13 @@ public class BotParityTests
     /// the clamp is actually written - by GenerateAndAddEquipmentToBot on the legacy path and by
     /// ReplayRandomisationClamps on the native one - and asserts both wrote the same thing.
     ///
-    /// With the mod-pool enumeration order projected (modPoolSlotOrder), the inventories compare
-    /// too - this case is the only one that covers the nighttime clamp path at a randomised level.
-    /// The seed is 1337 only because that is where this case was first pinned; the weapon-mod spawn
-    /// desync that once excluded seed 42 is fixed (RUST-ROADMAP.md roadmap item 7).
+    /// The inventories are no longer compared here: since ABI 32 the native path draws mod slots in
+    /// database order and legacy in BotEquipmentModPoolService's ConcurrentDictionary order, so the
+    /// two diverge at randomised levels by construction. Nothing pins native output at randomised
+    /// levels either - it is not reproducible across processes, for a reason that predates ABI 32
+    /// (see TheNativePathGeneratesAtRandomisedLevels) - so the clamp's effect on the inventory is now
+    /// covered on neither arm. Only the clamp-equality assertion below survives, which is what this
+    /// case was built for.
     /// </summary>
     [Test]
     public void TheNighttimeRandomisationClampIsReplayedOnBothPaths()
@@ -183,7 +176,6 @@ public class BotParityTests
             // hole the other eight cases have
             Assert.That(native.Randomisation, Is.Not.EqualTo(beforeRun), "the clamp never fired, so this case proves nothing");
             Assert.That(native.Randomisation, Is.EqualTo(legacy.Randomisation), "clamp replay diverged from the legacy write");
-            LootJsonAssert.AssertEqual(legacy.Inventory, native.Inventory, "role=usec-at-night", seed);
         }
         finally
         {

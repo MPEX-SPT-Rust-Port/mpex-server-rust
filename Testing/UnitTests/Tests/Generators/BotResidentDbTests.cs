@@ -53,7 +53,6 @@ public class BotResidentDbTests
     private ProfileActivityService _profileActivityService = default!;
     private BotEquipmentFilterService _botEquipmentFilterService = default!;
     private BotHelper _botHelper = default!;
-    private BotEquipmentModPoolService _botEquipmentModPoolService = default!;
     private BotConfig _botConfig = default!;
     private PmcConfig _pmcConfig = default!;
     private BotTable _botTable = default!;
@@ -79,7 +78,6 @@ public class BotResidentDbTests
         _profileActivityService = di.GetService<ProfileActivityService>();
         _botEquipmentFilterService = di.GetService<BotEquipmentFilterService>();
         _botHelper = di.GetService<BotHelper>();
-        _botEquipmentModPoolService = di.GetService<BotEquipmentModPoolService>();
         _botConfig = di.GetService<BotConfig>();
         _pmcConfig = di.GetService<PmcConfig>();
         _botTable = di.GetService<BotTable>();
@@ -406,8 +404,6 @@ public class BotResidentDbTests
                 _profileHelper,
                 _profileActivityService,
                 _weatherHelper,
-                _botEquipmentModPoolService,
-                _itemHelper,
                 _botConfig,
                 isPmc ? new LevelGenerationView { LevelMin = 1, LevelMax = levelMax } : null,
                 [

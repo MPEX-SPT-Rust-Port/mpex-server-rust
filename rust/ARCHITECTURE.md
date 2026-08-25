@@ -76,7 +76,7 @@ different assembly: `Libraries/SPTarkov.Common/Native/NativeMethods.cs`, with
 
 | Path | Role |
 |---|---|
-| `src/lib.rs` | Module roots and `ABI_VERSION` (currently 31; must equal `SptNative.ExpectedAbiVersion`) |
+| `src/lib.rs` | Module roots and `ABI_VERSION` (currently 32; must equal `SptNative.ExpectedAbiVersion`) |
 | `src/ffi.rs` | The C-ABI surface. The **only** module containing `unsafe` |
 | `src/runtime.rs` | Process-wide multi-thread tokio runtime, `OnceLock`-built. Used only by `verify` and the fused load |
 | `src/verify.rs` | Hashes `SPT_Data` with XXH3-128 and diffs it against `checks.dat`. `verify_collecting` is the same walk with a `want` predicate that whole-reads and returns matching files' bytes, so the fused load reads each file once |
@@ -165,8 +165,7 @@ releases with `spt_buf_free`; so do `spt_console_read_line` and `spt_log_format`
   does not hold returns `STATUS_STALE_EPOCH`, and the C# caller force-publishes and retries once; an
   ineligible caller (mods loaded without trust, or the kill switch) instead sends the views inline with
   `epoch: 0`, a wire contract that is documented, not runtime-enforced. Which views each family borrows, and
-  why loose loot, `staticAmmoDist` and the bot family's `modPoolSlotOrder` deliberately stayed per-call, is
-  in RUST-ROADMAP.md's flip ledgers.
+  why loose loot and `staticAmmoDist` deliberately stayed per-call, is in RUST-ROADMAP.md's flip ledgers.
 - **The `configs` root is keyed by kind string, and no view derives from it.** All 28 loaded configs arrive
   under their own `Kind` (`"spt-item"`, `"spt-bot"`, …) rather than a type or file name, and families read
   them per call the way scav case reads its recipes. Only the stems some family actually reads are lifted
@@ -288,7 +287,7 @@ through, and `resolve_bot_views`, shared by both exports — see *FFI boundary*.
 | `bot_weapon_generator_helper.rs` | `Helpers/Bot/BotWeaponGeneratorHelper.cs` | Magazine and bullet counts, magazine+ammo item pairs |
 | `inventory_mag_gen.rs` | `Generators/Weapons/*` | The four `IInventoryMagGen` strategies, collapsed into one enum with a fixed dispatch order |
 | `durability_limits_helper.rs` | `Helpers/Bot/DurabilityLimitsHelper.cs` | Weapon/armor durability rolls |
-| `mod_pool_service.rs` | `Services/Bot/BotEquipmentModPoolService.cs` | Slot mod pools, derived per call instead of cached, drawn in the projected C# enumeration order (`modPoolSlotOrder`, on the varying block — see `views.rs`) |
+| `mod_pool_service.rs` | `Services/Bot/BotEquipmentModPoolService.cs` | Slot mod pools, derived per call instead of cached, drawn in the template's own database slot order — owned natively since ABI 32 |
 | `repair_service.rs` | `Services/Commerce/RepairService.cs` | Only `AddBuff`, the one slice bot generation reaches |
 | `exhaustable_array.rs` | `Utils/Collections/ExhaustableArray.cs` | Draw-without-replacement |
 | `views.rs` | — | Publish-time derivation of `BotDbViews` from the resident roots in `src/db.rs`, embedding `RagfairDbViews` by `Arc` (see *FFI boundary*) |

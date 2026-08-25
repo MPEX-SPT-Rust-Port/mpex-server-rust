@@ -37,7 +37,8 @@ namespace SPTarkov.Server.Core.Generators.Bot;
 /// and the nighttime randomisation clamps. The full 4.1.2 C# implementation is retained below as the
 /// legacy path - it is the frozen mod contract (constructor, public/protected members and DTOs are
 /// apicompat-gated against the 4.1.2 baseline) and runs instead of the native path when a Harmony
-/// patch is detected on any hookable member of this class or of the three generators below it, when
+/// patch is detected on any hookable member of the five types in the decline set - this class, the
+/// three generators below it and <see cref="BotEquipmentModPoolService"/> - when
 /// one of those generators or the mag-gen component set has been replaced, or when
 /// BotConfig.ForceLegacyBotGeneration is set, so mod hooks fire with genuine baseline semantics.
 /// </summary>
@@ -177,15 +178,36 @@ public class BotInventoryGenerator(
     }
 
     /// <summary>
-    ///     The 4.1.2 members a mod can Harmony-patch, across the four classes the native path
-    ///     replaces: this one plus the three generators it drives. Public, protected and
-    ///     protected-internal methods declared on each - exactly the surface the apicompat gate
-    ///     freezes, statics included. <see cref="GenerateInventory"/> itself is excluded: a patch on
-    ///     the dispatcher wraps whichever path runs and does not need the legacy body.
+    ///     The 4.1.2 members a mod can Harmony-patch, across five types: the four classes the native
+    ///     path replaces - this one plus the three generators it drives - and
+    ///     <see cref="BotEquipmentModPoolService"/>, a service the native path does not replace but
+    ///     no longer consults either, Rust having owned the mod pools outright since ABI 32 (the
+    ///     legacy body below still consults it). Public, protected and protected-internal methods
+    ///     declared on each, statics included, plus the pool service's two property getters; across
+    ///     the four generators that is exactly the surface the apicompat gate freezes.
+    ///     <see cref="GenerateInventory"/> itself is excluded: a patch on the dispatcher wraps
+    ///     whichever path runs and does not need the legacy body.
     /// </summary>
     private static readonly List<MethodBase> _hookableMembers =
     [
-        .. new[] { typeof(BotInventoryGenerator), typeof(BotEquipmentModGenerator), typeof(BotWeaponGenerator), typeof(BotLootGenerator) }
+        .. new[]
+        {
+            typeof(BotInventoryGenerator),
+            typeof(BotEquipmentModGenerator),
+            typeof(BotWeaponGenerator),
+            typeof(BotLootGenerator),
+            // Rust owns the pools outright since ABI 32, so a patch here can only take effect on
+            // the legacy path. Whole-type rather than member-scoped: six of the eight methods
+            // build a pool or read one; ResetWeaponPool clears the weapon pool in
+            // place - WeaponModPool.Clear() leaves _weaponModPool non-null, so the getter's ??=
+            // never regenerates it and the pool stays empty rather than being invalidated - and
+            // GetRequiredModsForWeaponSlot reads the template rather than a pool but is still a
+            // read the legacy draw consumes. The !IsSpecialName filter below hides the type's two
+            // protected pool-property getters from the method sweep, so they are re-admitted
+            // explicitly at the end of this initializer - a patch there is a pool-state injection,
+            // exactly what decline exists to catch.
+            typeof(BotEquipmentModPoolService),
+        }
             .SelectMany(type =>
                 type.GetMethods(
                     BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly
@@ -194,6 +216,10 @@ public class BotInventoryGenerator(
             // Property accessors and operators are IsSpecialName; constructors are not returned at all
             .Where(method => !method.IsSpecialName && (method.IsPublic || method.IsFamily || method.IsFamilyOrAssembly))
             .Where(method => method != typeof(BotInventoryGenerator).GetMethod(nameof(GenerateInventory))),
+        // Frozen 4.1.2 members, so a rename cannot happen without tripping apicompat; if one did,
+        // the null-forgiveness throws at type initialisation and every bot test fails loudly.
+        typeof(BotEquipmentModPoolService).GetProperty("GearModPool", BindingFlags.Instance | BindingFlags.NonPublic)!.GetMethod!,
+        typeof(BotEquipmentModPoolService).GetProperty("WeaponModPool", BindingFlags.Instance | BindingFlags.NonPublic)!.GetMethod!,
     ];
 
     /// <summary>
@@ -246,11 +272,14 @@ public class BotInventoryGenerator(
         }
 
         // A mod registered its own subclass with a higher TypePriority, so the container handed us
-        // an implementation the native side does not have
+        // an implementation the native side does not have. The pool service is checked for the
+        // same reason as its whole-type patch detection: a subclass can reach the protected pool
+        // properties and reshape the state the legacy draw reads, with no patch to detect.
         if (
             botEquipmentModGenerator.GetType() != typeof(BotEquipmentModGenerator)
             || botWeaponGenerator.GetType() != typeof(BotWeaponGenerator)
             || botLootGenerator.GetType() != typeof(BotLootGenerator)
+            || botEquipmentModPoolService.GetType() != typeof(BotEquipmentModPoolService)
         )
         {
             return true;
@@ -298,9 +327,7 @@ public class BotInventoryGenerator(
             profileHelper,
             profileActivityService,
             weatherHelper,
-            botEquipmentModPoolService,
             botLootGenerator.BotLootCacheService,
-            itemHelper,
             botConfig,
             pmcConfig
         );
