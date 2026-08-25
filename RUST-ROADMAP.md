@@ -111,9 +111,12 @@ entry and the inherited `ValueType.ToString()`. Scope is `Color` only — mods t
   `Environment.ProcessorCount` (measured moving at 13 real slot names between 8 and 16 cores). So
   the two arms produce different — not wrong — bots for one seed, and only the native side's
   *order* is machine-independent. Nothing cross-arm covers the mod pool **at randomised levels** now,
-  and nothing covers native there on its own either: a different draw order means different RNG
-  consumption, so no order-insensitive comparison would pass, and the C#-side golden that was to
-  replace the cross-arm assertion is unimplementable for the reason in the next entry. (The level-1
+  and no cross-arm case ever could again: a different draw order means different RNG consumption,
+  so no order-insensitive comparison would pass. The native draw *is* covered on its own — the
+  Rust-side golden in the next entry reaches `derive_pool` through all three gated routes and pins
+  the ordering — while C#-side coverage of the native arm at randomised levels stays smoke-only,
+  the C#-side golden that was to replace the cross-arm assertion being unimplementable for the
+  reason in the next entry. (The level-1
   matrix is untouched — `TheSameSeedGeneratesEquivalentInventoryOnBothPaths` still deep-compares
   whole inventories cross-arm over 4 roles × 2 seeds. Those cases do still reach the module at level
   1, but only through `get_required_mods_for_weapon_slot`, which reads the template's slots directly
@@ -143,14 +146,15 @@ entry and the inherited `ValueType.ToString()`. Scope is `Color` only — mods t
   in its own process off a synthetic DB, and `src/bot/` has no equivalent hazard — no `HashMap`
   anywhere in it, its four `HashSet`s membership-tested rather than iterated, everything the draw
   walks an `IndexMap`/`IndexSet`. Its `RESIDENT_BATCH_GOLDEN` pins the exact bytes of a three-bot
-  batch at fixed seeds — both PMC level bands and the preset fallback — and held across four
-  separate processes and both build profiles. **It does not, however, reach `derive_pool`**, the
-  ordering this change moved: both routes there are gated on a populated
-  `EquipmentFilters.randomisation`, that fixture supplies a `blacklist` band only, and its one drawn
-  weapon slot has a single candidate (confirmed by making `derive_pool` panic unconditionally — the
-  test still passed). So the golden is end-to-end drift detection over the bot pipeline, not an
-  ordering pin. **The named upgrade:** give the fixture a `randomisation` band with a
-  multi-candidate randomised slot and the same golden covers the ordering too — viable precisely
+  batch at fixed seeds — both PMC level bands and the preset fallback — and held across five
+  separate processes and both build profiles. **It also reaches `derive_pool`**, the ordering this
+  change moved: the fixture's `randomisation` band opens all three gated routes — the dynamic
+  weapon pool (`get_compatible_mods_for_weapon_slot`), the sub-mod service fetch
+  (`get_mods_for_weapon_slot`) and the gear derive (`get_mods_for_gear_slot`), each confirmed by a
+  panic probe on the respective function failing the test — a randomised mount's two derived
+  sub-slots make the derived entry's key order observable in the response, and a two-candidate
+  `mod_foregrip` makes the inner set order observable through the seeded pick. So the golden is
+  end-to-end drift detection over the bot pipeline *and* an ordering pin — viable precisely
   because the spike proved Rust-side goldens reproduce across processes where a C#-side one cannot.
   The C#-side fix — sorting the projection's `MongoId`-keyed dictionaries before serialising — would
   work and is deliberately not taken here, because it changes the draw order on **every** native
