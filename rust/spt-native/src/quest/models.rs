@@ -176,14 +176,50 @@ pub struct ChangeCost {
     pub extra: Extra,
 }
 
+/// The all-zero ObjectId. C# parses it into a `MongoId` whose twelve bytes are all zero, which
+/// is what `MongoId.IsEmpty` tests (`MongoId.cs:46-49`).
+const MONGO_ID_EMPTY: &str = "000000000000000000000000";
+
+/// C# `MongoId`'s empty-collapse, replicated on parse.
+///
+/// An empty `MongoId` renders as zero characters — `ToString` returns `string.Empty`
+/// (`MongoId.cs:181-183`) and `TryFormat` writes 0 chars (`:219-222`) — so the projection arm,
+/// which round-trips these through `StringToMongoIdConverter`, emits `""` where the file on disk
+/// holds `"000000000000000000000000"`. Collapsing on the way in makes the resident lift carry
+/// what the projection arm's parse carries.
+///
+/// Bug-for-bug, not cosmetics: `repeatableQuests.json` ships the all-zero id in
+/// `templates.{Elimination,Completion,Exploration,Pickup}.questStatus.{id,qid}`, so without this
+/// the two arms install different bytes for a typed member and the load/projection equivalence
+/// gate is red. Deserialize-side on purpose — serialization stays verbatim, so nothing that
+/// echoes a real id back to the client changes.
+fn deserialize_mongo_id_collapsing_empty<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = String::deserialize(deserializer)?;
+
+    Ok(if raw == MONGO_ID_EMPTY {
+        String::new()
+    } else {
+        raw
+    })
+}
+
 /// `Models/Eft/Common/Tables/RepeatableQuests.cs:36-55`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RepeatableQuestStatus {
-    #[serde(rename = "id")]
+    #[serde(
+        rename = "id",
+        deserialize_with = "deserialize_mongo_id_collapsing_empty"
+    )]
     pub id: String,
     #[serde(rename = "uid", skip_serializing_if = "Option::is_none")]
     pub uid: Option<String>,
-    #[serde(rename = "qid")]
+    #[serde(
+        rename = "qid",
+        deserialize_with = "deserialize_mongo_id_collapsing_empty"
+    )]
     pub qid: String,
     #[serde(rename = "startTime", skip_serializing_if = "Option::is_none")]
     pub start_time: Option<i64>,
@@ -1051,13 +1087,48 @@ pub mod tests {
             .expect("SPT_Data file is JSON")
     }
 
-    /// The two divergences a C# round trip has too, applied to both sides before comparing:
+    /// The empty-`MongoId` collapse the projection arm gets for free from
+    /// `StringToMongoIdConverter`; the resident lift has to do it by hand or the two arms install
+    /// different bytes and the load/projection equivalence gate goes red.
+    #[test]
+    fn repeatable_quest_status_collapses_the_empty_mongo_id() {
+        let parse = |json: &str| {
+            serde_json::from_str::<RepeatableQuestStatus>(json).expect("questStatus parses")
+        };
+
+        let zeros = parse(r#"{"id":"000000000000000000000000","qid":"000000000000000000000000"}"#);
+        assert_eq!(
+            zeros.id, "",
+            "an all-zero id collapses the way MongoId does"
+        );
+        assert_eq!(zeros.qid, "", "and so does qid");
+
+        assert_eq!(
+            parse(r#"{"id":"","qid":""}"#).id,
+            "",
+            "already-empty passes through"
+        );
+
+        // A real id is untouched — the collapse must not eat live data.
+        let real = parse(r#"{"id":"68690637c1394a820efc27ca","qid":"67d02f62bcc8d767d075887a"}"#);
+        assert_eq!(real.id, "68690637c1394a820efc27ca");
+        assert_eq!(real.qid, "67d02f62bcc8d767d075887a");
+    }
+
+    /// The three divergences a C# round trip has too, applied to both sides before comparing:
     ///
     /// * null members are dropped — `JsonUtil`'s options set
     ///   `DefaultIgnoreCondition = WhenWritingNull`, so C# never writes them back either
     ///   (`repeatableQuests.json` ships `"location": null` on two templates);
     /// * numbers are compared as `f64` — a C# `double?` member holding `1` writes `1`, serde
-    ///   writes `1.0`, and `serde_json::Value`'s `Eq` distinguishes the two representations.
+    ///   writes `1.0`, and `serde_json::Value`'s `Eq` distinguishes the two representations;
+    /// * the all-zero ObjectId collapses to `""` — a C# `MongoId` parsed from it is `IsEmpty`
+    ///   and renders as zero characters (`MongoId.cs:46-49,181-183`), so C# does not write it
+    ///   back either. [`deserialize_mongo_id_collapsing_empty`] does this on the Rust parse, so
+    ///   the written side arrives already collapsed and only the file side needs it here.
+    ///   Applied to every string rather than to named paths: in this fixture the literal occurs
+    ///   exactly eight times, and all eight are the `MongoId`-typed
+    ///   `templates.*.questStatus.{id,qid}`.
     fn normalise(value: &serde_json::Value) -> serde_json::Value {
         match value {
             serde_json::Value::Object(map) => serde_json::Value::Object(
@@ -1070,6 +1141,9 @@ pub mod tests {
                 serde_json::Value::Array(items.iter().map(normalise).collect())
             }
             serde_json::Value::Number(number) => serde_json::json!(number.as_f64()),
+            serde_json::Value::String(text) if text == MONGO_ID_EMPTY => {
+                serde_json::Value::String(String::new())
+            }
             other => other.clone(),
         }
     }
