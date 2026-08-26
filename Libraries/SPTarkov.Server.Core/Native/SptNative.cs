@@ -411,6 +411,8 @@ public static class SptNative
     /// Per-root canonical digests of the native resident DB's typed lift surface — test support
     /// for the load/projection equivalence gate. Digests are toolchain-stable but no wire
     /// contract; compare only within one run.
+    /// The <c>configs</c> digest is NOT a pure function of the parsed input (ConfigsRoot's HashSet
+    /// lifts serialize in per-instance order) — compare only the five table roots across parses.
     /// </summary>
     /// <exception cref="InvalidOperationException">The native side misbehaved.</exception>
     internal static unsafe DbDigestResult DbResidentDigest()

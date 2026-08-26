@@ -231,6 +231,9 @@ fn hash_value(value: &serde_json::Value, hasher: &mut impl Hasher) {
     match value {
         serde_json::Value::Object(map) => {
             1u8.hash(hasher);
+            // Length first, as the array arm does: without it `{"a":{},"b":X}` and `{"a":{"b":X}}`
+            // feed the hasher the same key/value stream and collide.
+            map.len().hash(hasher);
             let mut keys: Vec<&String> = map.keys().collect();
             keys.sort_unstable();
             for key in keys {
@@ -263,6 +266,10 @@ fn hash_value(value: &serde_json::Value, hasher: &mut impl Hasher) {
 
 /// `{"epoch":N,"roots":{"templates":"<16-hex>",…}}` — absent roots omitted, `{"epoch":0,"roots":{}}`
 /// before the first publish. Test support for the load/projection equivalence gate.
+///
+/// The `configs` digest is **not** a pure function of the parsed input — `ConfigsRoot`'s `HashSet`
+/// lifts serialize in per-instance order, so two parses of the same bytes can digest differently.
+/// Compare only the five table roots (templates/traders/globals/locations/hideout) across parses.
 pub fn resident_digests_json() -> Vec<u8> {
     let Some(db) = current() else {
         return br#"{"epoch":0,"roots":{}}"#.to_vec();
@@ -679,6 +686,32 @@ mod digest_tests {
         let a: serde_json::Value = serde_json::from_str(r#"[1,2]"#).unwrap();
         let b: serde_json::Value = serde_json::from_str(r#"[2,1]"#).unwrap();
         assert_ne!(canonical_digest(&a), canonical_digest(&b));
+
+        // Object nesting is distinguished too — without the object arm's length hash these two
+        // feed the hasher the same key/value stream.
+        let flat: serde_json::Value = serde_json::from_str(r#"{"a":{},"b":1}"#).unwrap();
+        let nested: serde_json::Value = serde_json::from_str(r#"{"a":{"b":1}}"#).unwrap();
+        assert_ne!(canonical_digest(&flat), canonical_digest(&nested));
+    }
+
+    #[test]
+    fn canonical_digest_is_a_function_of_its_input() {
+        // Two independent parses of the same bytes must digest equal — a set-typed lift with
+        // per-instance iteration order (the Task 4 HashSet bug) fails this where same-value
+        // re-serialization cannot.
+        let bytes = r#"{"repeatableQuests":{"data":{"Completion":{
+            "itemsWhitelist":[
+                {"minPlayerLevel":1,"itemIds":["54009119af1c881c07000029","5448e54d4bdc2dcc718b4568",
+                 "5448e5284bdc2dcb718b4567","543be5cb4bdc2deb348b4568","5448f3a64bdc2d60728b456a",
+                 "5447e1d04bdc2dff2f8b4567"]},
+                {"minPlayerLevel":15,"itemIds":["5448bc234bdc2d3c308b4569","543be6564bdc2df4348b4568",
+                 "5447b5cf4bdc2d65278b4567"]}],
+            "itemsBlacklist":[
+                {"minPlayerLevel":1,"itemIds":["5448bf274bdc2dfc2f8b456a","5671435f4bdc2d96058b4569",
+                 "5448e53e4bdc2d60728b4567"]}]}}}}"#;
+        let a: models::TemplatesRoot = serde_json::from_str(bytes).unwrap();
+        let b: models::TemplatesRoot = serde_json::from_str(bytes).unwrap();
+        assert_eq!(canonical_digest(&a), canonical_digest(&b));
     }
 
     #[test]
