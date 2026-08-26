@@ -1,6 +1,9 @@
 using System.Text.Json;
 using NUnit.Framework;
+using SPTarkov.Common.Models.Logging;
+using SPTarkov.Server.Core.Helpers.Profile;
 using SPTarkov.Server.Core.Models.Spt.Config;
+using SPTarkov.Server.Core.Models.Spt.Mod;
 using SPTarkov.Server.Core.Models.Spt.Tables;
 using SPTarkov.Server.Core.Native;
 using SPTarkov.Server.Core.Native.Db;
@@ -18,6 +21,69 @@ public class DbPublisherTests
         // These tests publish behind the DI publisher's bookkeeping; move the stamp so the next
         // EnsureCurrent() republishes real state over whatever they left resident.
         DI.GetInstance().GetService<DatabaseMutationStamp>().Bump();
+    }
+
+    [TearDown]
+    public void TearDown()
+    {
+        DbLoadSeed.TryTake();
+    }
+
+    private static DbPublisher BuildPublisher(IReadOnlyList<SptMod> loadedMods)
+    {
+        var di = DI.GetInstance();
+
+        return new DbPublisher(
+            di.GetService<DatabaseMutationStamp>(),
+            di.GetService<HandbookHelper>(),
+            di.GetService<TemplateTable>(),
+            di.GetService<TradersTable>(),
+            di.GetService<GlobalTable>(),
+            di.GetService<LocationTable>(),
+            di.GetService<HideoutTable>(),
+            di.GetService<IReadOnlyDictionary<Type, BaseConfig>>(),
+            loadedMods,
+            di.GetService<ISptLogger<DbPublisher>>()
+        );
+    }
+
+    [Test]
+    public void ASeededModlessPublisherSkipsThePublishUntilTheStampMoves()
+    {
+        var di = DI.GetInstance();
+        var stamp = di.GetService<DatabaseMutationStamp>();
+
+        // Make the resident DB real and current, exactly as the importer's load + configs publish
+        // would, then hand its coordinates to a fresh publisher.
+        var residentEpoch = di.GetService<DbPublisher>().ForcePublish();
+        DbLoadSeed.Set(residentEpoch, stamp.Current);
+
+        var seeded = BuildPublisher([]);
+        Assert.That(seeded.EnsureCurrent(), Is.EqualTo(residentEpoch), "the seed is the current state");
+        Assert.That(
+            seeded.EnsureCurrent(),
+            Is.EqualTo(residentEpoch),
+            "a settled seeded publisher stays settled (the churn invariant, seeded)"
+        );
+        Assert.That(SptNative.DbResidentDigest().Epoch, Is.EqualTo(residentEpoch), "no publish happened");
+
+        stamp.Bump();
+        Assert.That(seeded.EnsureCurrent(), Is.GreaterThan(residentEpoch), "a moved stamp republishes as always");
+    }
+
+    [Test]
+    public void AModdedPublisherIgnoresTheSeed()
+    {
+        var di = DI.GetInstance();
+        var stamp = di.GetService<DatabaseMutationStamp>();
+
+        var residentEpoch = di.GetService<DbPublisher>().ForcePublish();
+        DbLoadSeed.Set(residentEpoch, stamp.Current);
+
+        // One loaded mod - never dereferenced, only counted (a mod can schedule
+        // pre-GameCallbacks writes, and transformer registrations bump no stamp; spec § Part 3).
+        var modded = BuildPublisher([null!]);
+        Assert.That(modded.EnsureCurrent(), Is.GreaterThan(residentEpoch), "with mods the first call publishes");
     }
 
     [Test]
