@@ -6,6 +6,7 @@ using SPTarkov.Server.Core.Models.Eft.Common;
 using SPTarkov.Server.Core.Models.Enums;
 using SPTarkov.Server.Core.Models.Spt.Config;
 using SPTarkov.Server.Core.Models.Spt.Tables;
+using SPTarkov.Server.Core.Native.Db;
 using SPTarkov.Server.Core.Services.InRaid;
 using SPTarkov.Server.Core.Services.Items;
 using SPTarkov.Server.Core.Services.Locales;
@@ -44,7 +45,15 @@ public class PostDbLoadService(
 {
     public void PerformPostDbLoadActions()
     {
-        coreConfig.ServerStartTime = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        // ponytail: startup-only write, suppressed so the one config write that always precedes
+        // the first EnsureCurrent (five lines down) cannot void the load-time seed. The resident
+        // spt-core entry stays stale by exactly this field until the next real republish - nothing
+        // native reads spt-core (no ConfigsRoot lift) - while the C#-visible value and timing are
+        // unchanged. Lift the suppression if a native consumer of spt-core ever appears.
+        using (WriteBarrier.Suppress())
+        {
+            coreConfig.ServerStartTime = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        }
 
         // Regenerate base cache now mods are loaded and game is starting
         // Mods that add items and use the baseClass service generate the cache including their items, the next mod that
