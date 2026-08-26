@@ -957,9 +957,13 @@ pub struct LevelledItemFilter {
     /// `int?` in the C#, and a null one never passes the `MinPlayerLevel <= pmcLevel` filter
     /// (`CompletionQuestGenerator.cs:202/238`) — a lifted comparison against null is false.
     pub min_player_level: Option<i32>,
-    /// `HashSet<MongoId>?`, flattened by the C# `?? []`.
+    /// `HashSet<MongoId>?`, flattened by the C# `?? []`. An `IndexSet` per the gated-surface
+    /// convention (`db/models.rs:713-715`): this rides the resident `templates` root, whose
+    /// digest hashes arrays in order, and a `HashSet`'s per-instance seed would make that
+    /// digest differ between two parses of the same bytes. Membership-only downstream
+    /// (`completion.rs` `levelled_item_ids`), so the order is unread.
     #[serde(default)]
-    pub item_ids: HashSet<String>,
+    pub item_ids: IndexSet<String>,
 }
 
 /// The members of `Models/Eft/Common/LocationBase.cs:806-883` `Exit` that

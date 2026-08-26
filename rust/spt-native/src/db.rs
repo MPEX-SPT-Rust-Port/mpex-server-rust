@@ -220,9 +220,13 @@ pub fn canonical_digest<T: serde::Serialize>(value: &T) -> u64 {
 }
 
 // Array hashing is order-sensitive — correct for the Vec lifts (both arms carry file order) and
-// for the handbook items whose append position the gate pins. Caveat for any future extension:
-// set-typed lifts (HashSet/IndexSet) serialize in container order, which differs between the
-// arms — today they all sit under the configs root, which the gate never compares.
+// for the handbook items whose append position the gate pins. Constraint for any future
+// extension: a set-typed lift serializes as an array in container order, so anything reachable
+// from a gated root (templates/traders/globals/locations/hideout) must be an `IndexSet` — file
+// order, which both arms carry, and which two parses of the same bytes reproduce. A `HashSet`
+// there is a bug: `RandomState::new` reseeds per instance, so its order differs between two
+// parses within one process and the digest stops being a function of its input. `HashSet` is
+// fine only under the configs root, which the gate never compares.
 fn hash_value(value: &serde_json::Value, hasher: &mut impl Hasher) {
     match value {
         serde_json::Value::Object(map) => {
