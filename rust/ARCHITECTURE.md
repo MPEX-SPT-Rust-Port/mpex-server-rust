@@ -128,7 +128,8 @@ on all but `spt_profile_list` and the profile text on `spt_profile_save` — see
 `spt_profile_load` returns a framed byte response, `[u32-LE header length][{"found":bool}][file
 bytes]`),
 `spt_verify_database` taking a directory path, `spt_db_publish` taking the
-resident-DB publish envelope, `spt_db_load` taking the fused-load request (`{schema, dir, verify}`) and
+resident-DB publish envelope, `spt_db_load` taking the fused-load request
+(`{schema, dir, verify, handbookPriceOverride?}` — see the bullet below) and
 returning a framed byte response — a length-prefixed JSON header naming the verify report, the installed
 epoch and each returned file's path and length, followed by the file bodies back to back —
 `spt_db_resident_digest` taking no request at all (out-buffer only) and answering
@@ -146,6 +147,15 @@ for the log pipeline and the terminal it owns (`spt_logger_init`, `spt_logger_re
 twenty-one generation/verify/publish/load/digest/profile exports hand back a heap buffer on success, which the
 caller releases with `spt_buf_free`; so do `spt_console_read_line` and `spt_log_format`.
 
+- `spt_db_load`'s optional `handbookPriceOverride` member carries `ItemConfig.HandbookPriceOverride` —
+  `{"<itemId>":{"parentId":"…","price":N},…}`, in document order. Rust merges it into
+  `database/templates/handbook.json` the way `HandbookHelper.HydrateHandbookCache` does (upsert by `Id`,
+  missing entries appended at the end) so the epoch-1 handbook equals a published one. **The merge is visible
+  to the publish envelope only**: the framed response still hands back the raw disk bytes, so the C# replica
+  and the equivalence gate hydrate from an unmerged file. The member is absent when no CLR is alive to supply
+  live config values (post-6b pre-load), and `LoadRequest` carries no `deny_unknown_fields` — an old library
+  paired with a new caller would silently ignore it, so the ABI lockstep assert, not the parser, is what
+  prevents that pairing.
 - `run_generator_with` is the shared body of every generation export, `spt_db_publish`, `spt_db_load` and
   the four `spt_profile_*` —
   parse, `catch_unwind`,

@@ -26,6 +26,7 @@ async fn the_shipped_tree_installs_five_roots_and_hands_back_the_eager_files() {
         schema: 1,
         dir: SPT_DATA.to_string(),
         verify: false,
+        handbook_price_override: None,
     })
     .await
     .unwrap_or_else(|error| {
