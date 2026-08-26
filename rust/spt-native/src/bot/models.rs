@@ -32,7 +32,7 @@ pub struct BotTemplateWire {
     pub chances: ChancesWire,
     #[serde(rename = "generation")]
     pub generation: GenerationWire,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: Extra,
 }
 
@@ -57,7 +57,7 @@ pub struct BotTypeInventoryWire {
     /// [`GenerateWeaponRequestWire::mod_pool`], which C# passes by reference.
     #[serde(rename = "mods", default)]
     pub mods: IndexMap<String, IndexMap<String, IndexSet<String>>>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: Extra,
 }
 
@@ -75,12 +75,12 @@ pub struct ItemPoolsWire {
     pub special_loot: IndexMap<String, f64>,
     #[serde(rename = "TacticalVest", default)]
     pub tactical_vest: IndexMap<String, f64>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: Extra,
 }
 
 /// `Models/Spt/Config/BotConfig.cs:465-472` — `BotConfig.LootItemResourceRandomization[botRole]`.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct RandomisedResourceDetails {
     #[serde(rename = "food")]
     pub food: Option<RandomisedResourceValues>,
@@ -91,7 +91,7 @@ pub struct RandomisedResourceDetails {
 /// `Models/Spt/Config/BotConfig.cs:474-487`. Both members are non-nullable `float`s in C#, so a key
 /// missing from the config lands on 0 rather than disabling randomisation — `#[serde(default)]`
 /// reproduces that.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct RandomisedResourceValues {
     #[serde(rename = "resourcePercent", default)]
     pub resource_percent: f64,
@@ -477,7 +477,7 @@ pub struct ItemSpawnLimitSettingsWire {
 }
 
 /// `Models/Spt/Config/BotConfig.cs:185-207` (`WalletLootSettings`).
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct WalletLootSettingsWire {
     pub chance_percent: f64,
@@ -501,7 +501,7 @@ pub struct WalletLootSettingsWire {
 /// defaults instead of failing the publish. A strict twin struct for the stem would have to
 /// mirror this one field for field and would drift; `phase4_configs_root.rs` pins the eight wire
 /// names against the projected dump instead.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct PmcConfigWire {
     pub force_healing_items_into_secure: bool,
@@ -518,7 +518,7 @@ pub struct PmcConfigWire {
 }
 
 /// `Models/Spt/Config/PmcConfig.cs:152-162` (`ForceArmbandSettings`).
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct ForceArmbandSettingsWire {
     pub enabled: bool,
@@ -527,7 +527,7 @@ pub struct ForceArmbandSettingsWire {
 }
 
 /// `Models/Spt/Config/PmcConfig.cs:164-175` (`PmcLootSettings`).
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct PmcLootSettingsWire {
     pub pocket: LootContainerSettingsWire,
@@ -537,7 +537,7 @@ pub struct PmcLootSettingsWire {
 
 /// `Models/Spt/Config/PmcConfig.cs:177-185` (`LootContainerSettings`), read through
 /// `Extensions/LootContainerSettingsExtensions.cs:10-50`.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct LootContainerSettingsWire {
     pub total_rub_by_level: Vec<MinMaxLootValueWire>,
@@ -545,7 +545,7 @@ pub struct LootContainerSettingsWire {
 }
 
 /// `Models/Spt/Config/PmcConfig.cs:233-237` (`MinMaxLootValue : MinMax<int>`).
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct MinMaxLootValueWire {
     pub min: i32,
@@ -554,7 +554,7 @@ pub struct MinMaxLootValueWire {
 }
 
 /// `Models/Spt/Config/PmcConfig.cs:239-249` (`MinMaxLootItemValue : MinMax<double>`).
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct MinMaxLootItemValueWire {
     pub min: f64,

@@ -139,7 +139,7 @@ pub struct Quest {
     /// Nothing in this port reads or writes it, so it is echoed as-is.
     #[serde(rename = "sptStatus", skip_serializing_if = "Option::is_none")]
     pub spt_status: Option<serde_json::Value>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: Extra,
 }
 
@@ -172,7 +172,7 @@ pub struct ChangeCost {
     /// Amount of item needed to reset.
     #[serde(rename = "count", skip_serializing_if = "Option::is_none")]
     pub count: Option<i32>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: Extra,
 }
 
@@ -192,7 +192,7 @@ pub struct RepeatableQuestStatus {
     /// C# types this `object?`; nothing reads it, so it is echoed as-is.
     #[serde(rename = "statusTimers", skip_serializing_if = "Option::is_none")]
     pub status_timers: Option<serde_json::Value>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: Extra,
 }
 
@@ -209,7 +209,7 @@ pub struct QuestConditionTypes {
     pub success: Option<Vec<QuestCondition>>,
     #[serde(rename = "Fail", skip_serializing_if = "Option::is_none")]
     pub fail: Option<Vec<QuestCondition>>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: Extra,
 }
 
@@ -336,7 +336,7 @@ pub struct QuestCondition {
     pub weight: Option<ValueCompare>,
     #[serde(rename = "width", skip_serializing_if = "Option::is_none")]
     pub width: Option<ValueCompare>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: Extra,
 }
 
@@ -347,7 +347,7 @@ pub struct QuestConditionCounter {
     pub id: Option<String>,
     #[serde(rename = "conditions", skip_serializing_if = "Option::is_none")]
     pub conditions: Option<Vec<QuestConditionCounterCondition>>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: Extra,
 }
 
@@ -431,7 +431,7 @@ pub struct QuestConditionCounterCondition {
     pub equipment_exclusive: Option<Vec<Vec<String>>>,
     #[serde(rename = "zoneIds", skip_serializing_if = "Option::is_none")]
     pub zones: Option<Vec<String>>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: Extra,
 }
 
@@ -442,7 +442,7 @@ pub struct EnemyHealthEffect {
     pub body_parts: Option<Vec<String>>,
     #[serde(rename = "effects", skip_serializing_if = "Option::is_none")]
     pub effects: Option<Vec<String>>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: Extra,
 }
 
@@ -453,7 +453,7 @@ pub struct ValueCompare {
     pub compare_method: Option<String>,
     #[serde(rename = "value", skip_serializing_if = "Option::is_none")]
     pub value: Option<f64>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: Extra,
 }
 
@@ -465,7 +465,7 @@ pub struct CounterConditionDistance {
     pub value: Option<f64>,
     #[serde(rename = "compareMethod", skip_serializing_if = "Option::is_none")]
     pub compare_method: Option<String>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: Extra,
 }
 
@@ -476,7 +476,7 @@ pub struct DaytimeCounter {
     pub from: Option<i32>,
     #[serde(rename = "to", skip_serializing_if = "Option::is_none")]
     pub to: Option<i32>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: Extra,
 }
 
@@ -495,7 +495,7 @@ pub struct VisibilityCondition {
     pub one_session_only: Option<bool>,
     #[serde(rename = "conditionType")]
     pub condition_type: String,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: Extra,
 }
 
@@ -553,7 +553,7 @@ pub struct Reward {
     /// Only found with `NotificationPopup` rewards.
     #[serde(rename = "message", skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: Extra,
 }
 
@@ -574,7 +574,7 @@ pub struct IllustrationConfig {
     pub big_image: String,
     #[serde(rename = "isBigImage")]
     pub is_big_image: bool,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: Extra,
 }
 
@@ -600,7 +600,7 @@ pub struct QuestTypePool {
     pub types: Vec<String>,
     #[serde(rename = "pool")]
     pub pool: QuestPool,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: Extra,
 }
 
@@ -613,7 +613,7 @@ pub struct QuestPool {
     pub elimination: EliminationPool,
     #[serde(rename = "Pickup")]
     pub pickup: ExplorationPool,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: Extra,
 }
 
@@ -623,7 +623,7 @@ pub struct QuestPool {
 pub struct ExplorationPool {
     #[serde(rename = "locations", skip_serializing_if = "Option::is_none")]
     pub locations: Option<IndexMap<String, Vec<String>>>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: Extra,
 }
 
@@ -632,7 +632,7 @@ pub struct ExplorationPool {
 pub struct EliminationPool {
     #[serde(rename = "targets", skip_serializing_if = "Option::is_none")]
     pub targets: Option<IndexMap<String, TargetLocation>>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: Extra,
 }
 
@@ -641,7 +641,7 @@ pub struct EliminationPool {
 pub struct TargetLocation {
     #[serde(rename = "locations", skip_serializing_if = "Option::is_none")]
     pub locations: Option<Vec<String>>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: Extra,
 }
 
@@ -937,7 +937,7 @@ impl QuestViewsWire {
 
 /// `Models/Eft/Common/Tables/RepeatableQuests.cs:57-70`. The C# member names are the wire names;
 /// a missing or null template is the `null` arm of `GetClonedQuestTemplateForType`.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct RepeatableTemplates {
     #[serde(rename = "Elimination")]
     pub elimination: Option<RepeatableQuest>,
@@ -951,7 +951,7 @@ pub struct RepeatableTemplates {
 
 /// `Models/Eft/Common/Tables/RepeatableQuests.cs:153-169` — C# declares two identical records,
 /// `ItemsWhitelist` and `ItemsBlacklist`; one type serves both.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LevelledItemFilter {
     /// `int?` in the C#, and a null one never passes the `MinPlayerLevel <= pmcLevel` filter
@@ -979,7 +979,7 @@ pub struct ExitView {
 
 /// `Models/Spt/Config/QuestConfig.cs:75-90` `RepeatableQuestTemplates` — template ids keyed by
 /// quest type name, one map per player group.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RepeatableQuestTemplates {
     pub pmc: IndexMap<String, String>,

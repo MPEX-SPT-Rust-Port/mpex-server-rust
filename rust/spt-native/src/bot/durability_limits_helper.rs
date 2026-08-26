@@ -32,13 +32,13 @@
 //! The C# `logger.Debug("… doesn't exist in bot config durability values, using default fallback")`
 //! is dropped: these functions have no diagnostic sink and the fallback itself is ported verbatim.
 use indexmap::IndexMap;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::loot::item_helper::LootError;
 use crate::loot::random_util::{get_double, get_int, round_half_even};
 
 /// `Models/Spt/Config/BotDurability.cs` — `BotConfig.Durability`.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct BotDurability {
     #[serde(rename = "default")]
     pub default: DefaultDurability,
@@ -49,7 +49,7 @@ pub struct BotDurability {
 }
 
 /// `Models/Spt/Config/BotDurability.cs` — also the per-role shape in `BotDurabilities`.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct DefaultDurability {
     #[serde(rename = "armor")]
     pub armor: ArmorDurability,
@@ -58,7 +58,7 @@ pub struct DefaultDurability {
 }
 
 /// `Models/Spt/Config/BotDurability.cs`.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PmcDurability {
     #[serde(rename = "armor")]
     pub armor: PmcDurabilityArmor,
@@ -68,7 +68,7 @@ pub struct PmcDurability {
 
 /// `Models/Spt/Config/BotDurability.cs`. Its own type, not [`ArmorDurability`], because the
 /// percent bounds are non-nullable here and nullable there.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PmcDurabilityArmor {
     #[serde(rename = "lowestMaxPercent")]
     pub lowest_max_percent: i32,
@@ -84,7 +84,7 @@ pub struct PmcDurabilityArmor {
 
 /// `Models/Spt/Config/BotDurability.cs`. `LowestMaxPercent`/`HighestMaxPercent` are declared here
 /// too but nothing reads them off this type — only the PMC slice's are used.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ArmorDurability {
     #[serde(rename = "maxDelta")]
     pub max_delta: i32,
@@ -100,7 +100,7 @@ pub struct ArmorDurability {
 
 /// `Models/Spt/Config/BotDurability.cs`. `MinLimitPercent` is a `double` here and an `int` on
 /// [`ArmorDurability`]; both are mirrored as declared.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct WeaponDurability {
     #[serde(rename = "lowestMax")]
     pub lowest_max: i32,

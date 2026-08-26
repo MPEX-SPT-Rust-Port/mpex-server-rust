@@ -19,7 +19,7 @@
 //! consumes nothing. Each `GetWeightedValue` is itself one draw, or none when its map holds a
 //! single entry — that shortcut lives in `random_util` and applies here unchanged.
 use indexmap::IndexMap;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::loot::item_helper::LootError;
 use crate::loot::models::{Item, RepairBuffType, UpdBuff};
@@ -27,7 +27,7 @@ use crate::loot::random_util::{get_double, get_percent_of_value, get_weighted_va
 
 /// `Models/Spt/Config/RepairConfig.cs` — `RepairConfig.RepairKit.Weapon` is the only instance bot
 /// generation passes. The weight maps are [`IndexMap`]s because insertion order is the draw order.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct BonusSettings {
     #[serde(rename = "rarityWeight")]
     pub rarity_weight: IndexMap<String, f64>,
@@ -40,7 +40,7 @@ pub struct BonusSettings {
 }
 
 /// `Models/Spt/Config/RepairConfig.cs`.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct BonusValues {
     #[serde(rename = "valuesMinMax")]
     pub values_min_max: MinMax<f64>,
@@ -53,7 +53,7 @@ pub struct BonusValues {
 /// lands on the C# default rather than failing the parse. Distinct from
 /// [`crate::loot::models::MinMaxI32`], whose members are nullable because the loot request
 /// declares them that way. `MinMax.Type` is never read and is not mirrored.
-#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize)]
 pub struct MinMax<T> {
     #[serde(default)]
     pub min: T,

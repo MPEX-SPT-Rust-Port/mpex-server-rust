@@ -96,7 +96,7 @@ pub struct EndProductsView {
 /// the generator reads it. Also the resident `spt-scavcase` stem
 /// ([`crate::db::models::ConfigsRoot::scavcase`]): no `deny_unknown_fields`, so the unread members
 /// (`kind`, the dispatch flags, a Release build's `[JsonExtensionData]` additions) ride past.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScavCaseConfigView {
     /// Keyed by `RewardRarity` (`:504-509`): `common`/`rare`/`superrare`. Lookup only.
@@ -113,7 +113,7 @@ pub struct ScavCaseConfigView {
 }
 
 /// `Models/Spt/Config/ScavCaseConfig.cs:36-52`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MoneyRewardsView {
     pub money_reward_chance_percent: i32,
@@ -125,7 +125,7 @@ pub struct MoneyRewardsView {
 
 /// `Models/Spt/Config/ScavCaseConfig.cs:54-64` — the rarity levels C# reaches by JSON property name
 /// (`GetByJsonProperty<MinMax<int>>(rarity)`, `:472-495`).
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MoneyLevelsView {
     pub common: MinMax<i32>,
@@ -134,7 +134,7 @@ pub struct MoneyLevelsView {
 }
 
 /// `Models/Spt/Config/ScavCaseConfig.cs:66-79`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AmmoRewardsView {
     pub ammo_reward_chance_percent: i32,

@@ -8,6 +8,7 @@
 pub mod load;
 pub mod models;
 
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::{Arc, RwLock};
 
 use crate::bot::views::BotDbViews;
@@ -172,6 +173,120 @@ pub fn publish(request: PublishRequest) -> Result<u64, PublishError> {
     }));
 
     Ok(epoch)
+}
+
+thread_local! {
+    /// True only while `canonical_digest` serializes. The wire models' flattened `extra` maps
+    /// carry `skip_serializing_if = "crate::db::skip_extra_for_digest"`, so digest serialization
+    /// sees the typed lift surface only, while production serialization (the loot responses that
+    /// round-trip `extra`) is untouched.
+    static DIGEST_MODE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// `skip_serializing_if` hook for every wire model's flattened `extra` map — see [`DIGEST_MODE`].
+pub fn skip_extra_for_digest<T>(_: &T) -> bool {
+    DIGEST_MODE.with(std::cell::Cell::get)
+}
+
+/// Sets digest mode for the guard's lifetime, unwinding included.
+struct DigestModeGuard;
+
+impl DigestModeGuard {
+    fn set() -> Self {
+        DIGEST_MODE.with(|mode| mode.set(true));
+
+        DigestModeGuard
+    }
+}
+
+impl Drop for DigestModeGuard {
+    fn drop(&mut self) {
+        DIGEST_MODE.with(|mode| mode.set(false));
+    }
+}
+
+/// Order-insensitive for object keys (the C#-written and Rust-spliced envelopes legitimately
+/// differ in member order — serde_json is preserve_order here), order-sensitive for arrays.
+/// Serializes in digest mode: `extra` maps are skipped, so this digests the typed lift surface —
+/// the read surface — not post-parse byte fidelity (spec § Part 0). std `DefaultHasher` is
+/// SipHash-1-3 with fixed keys — stable within a toolchain, but no wire contract; the equivalence
+/// gate compares within one process, which needs neither.
+pub fn canonical_digest<T: serde::Serialize>(value: &T) -> u64 {
+    let _digest_mode = DigestModeGuard::set();
+    let value = serde_json::to_value(value).expect("resident roots serialize");
+    let mut hasher = DefaultHasher::new();
+    hash_value(&value, &mut hasher);
+    hasher.finish()
+}
+
+// Array hashing is order-sensitive — correct for the Vec lifts (both arms carry file order) and
+// for the handbook items whose append position the gate pins. Caveat for any future extension:
+// set-typed lifts (HashSet/IndexSet) serialize in container order, which differs between the
+// arms — today they all sit under the configs root, which the gate never compares.
+fn hash_value(value: &serde_json::Value, hasher: &mut impl Hasher) {
+    match value {
+        serde_json::Value::Object(map) => {
+            1u8.hash(hasher);
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort_unstable();
+            for key in keys {
+                key.hash(hasher);
+                hash_value(&map[key.as_str()], hasher);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            2u8.hash(hasher);
+            items.len().hash(hasher);
+            for item in items {
+                hash_value(item, hasher);
+            }
+        }
+        serde_json::Value::String(s) => {
+            3u8.hash(hasher);
+            s.hash(hasher);
+        }
+        serde_json::Value::Number(n) => {
+            4u8.hash(hasher);
+            n.to_string().hash(hasher);
+        }
+        serde_json::Value::Bool(b) => {
+            5u8.hash(hasher);
+            b.hash(hasher);
+        }
+        serde_json::Value::Null => 6u8.hash(hasher),
+    }
+}
+
+/// `{"epoch":N,"roots":{"templates":"<16-hex>",…}}` — absent roots omitted, `{"epoch":0,"roots":{}}`
+/// before the first publish. Test support for the load/projection equivalence gate.
+pub fn resident_digests_json() -> Vec<u8> {
+    let Some(db) = current() else {
+        return br#"{"epoch":0,"roots":{}}"#.to_vec();
+    };
+
+    fn push<T: serde::Serialize>(
+        roots: &mut serde_json::Map<String, serde_json::Value>,
+        name: &str,
+        root: &Option<Arc<T>>,
+    ) {
+        if let Some(root) = root {
+            roots.insert(
+                name.to_string(),
+                serde_json::Value::String(format!("{:016x}", canonical_digest(root.as_ref()))),
+            );
+        }
+    }
+
+    let mut roots = serde_json::Map::new();
+    push(&mut roots, "templates", &db.templates);
+    push(&mut roots, "traders", &db.traders);
+    push(&mut roots, "globals", &db.globals);
+    push(&mut roots, "locations", &db.locations);
+    push(&mut roots, "hideout", &db.hideout);
+    push(&mut roots, "configs", &db.configs);
+
+    serde_json::to_vec(&serde_json::json!({"epoch": db.epoch, "roots": roots}))
+        .expect("digest report serializes")
 }
 
 #[cfg(test)]
@@ -541,5 +656,90 @@ mod store_tests {
         let result: Result<models::PublishRequest, _> =
             serde_json::from_str(r#"{"schema":1,"roots":{"tempaltes":{}}}"#);
         assert!(result.is_err());
+    }
+}
+
+#[cfg(test)]
+mod digest_tests {
+    use super::*;
+
+    #[test]
+    fn canonical_digest_ignores_object_key_order() {
+        let a: serde_json::Value = serde_json::from_str(r#"{"a":1,"b":[{"x":1,"y":2}]}"#).unwrap();
+        let b: serde_json::Value = serde_json::from_str(r#"{"b":[{"y":2,"x":1}],"a":1}"#).unwrap();
+        assert_eq!(canonical_digest(&a), canonical_digest(&b));
+    }
+
+    #[test]
+    fn canonical_digest_distinguishes_array_order_and_values() {
+        let a: serde_json::Value = serde_json::from_str(r#"[1,2]"#).unwrap();
+        let b: serde_json::Value = serde_json::from_str(r#"[2,1]"#).unwrap();
+        assert_ne!(canonical_digest(&a), canonical_digest(&b));
+    }
+
+    #[test]
+    fn canonical_digest_sees_lifts_not_extra() {
+        // Same lift (production.scavRecipes), different unlifted stems: equal digests — the
+        // digest surface is the read surface, not post-parse byte fidelity (spec § Part 0).
+        let a: models::HideoutRoot =
+            serde_json::from_str(r#"{"production":{"scavRecipes":[]},"areas":[1,2]}"#).unwrap();
+        let b: models::HideoutRoot =
+            serde_json::from_str(r#"{"production":{"scavRecipes":[]},"qte":{"x":1}}"#).unwrap();
+        assert_eq!(canonical_digest(&a), canonical_digest(&b));
+
+        // A differing lift is seen (recipe body copied from the known-good store test).
+        let c: models::HideoutRoot = serde_json::from_str(
+            r#"{"production":{"scavRecipes":[
+                {"_id":"6662e9aca7e0b43baa3d5f9c",
+                 "endProducts":{"Common":{"min":1,"max":2},"Rare":{"min":0,"max":1},"Superrare":{"min":0,"max":0}},
+                 "productionTime":3.0}
+            ]}}"#,
+        )
+        .unwrap();
+        assert_ne!(canonical_digest(&a), canonical_digest(&c));
+    }
+
+    #[test]
+    fn extra_members_still_serialize_outside_digest_mode() {
+        // The loot models serialize these types into production responses: the skip must be
+        // digest-mode-only.
+        let root: models::HideoutRoot =
+            serde_json::from_str(r#"{"production":{"scavRecipes":[]},"areas":[1]}"#).unwrap();
+        let value = serde_json::to_value(&root).unwrap();
+        assert!(
+            value.get("areas").is_some(),
+            "production serialization keeps extra content"
+        );
+    }
+
+    #[test]
+    fn resident_digests_json_is_empty_before_any_publish_and_filled_after() {
+        let _guard = tests::DB_TEST_LOCK.lock().unwrap();
+        clear();
+        assert_eq!(
+            resident_digests_json(),
+            br#"{"epoch":0,"roots":{}}"#.to_vec()
+        );
+
+        let request: models::PublishRequest = serde_json::from_str(
+            r#"{"schema":1,"roots":{"configs":{"spt-item":{"kind":"spt-item"}}}}"#,
+        )
+        .unwrap();
+        publish(request).unwrap();
+
+        let json = resident_digests_json();
+        let value: serde_json::Value = serde_json::from_slice(&json).unwrap();
+        assert_eq!(value["epoch"], 1);
+        assert!(
+            value["roots"]["configs"].is_string(),
+            "a resident root digests"
+        );
+        assert!(
+            value["roots"].get("templates").is_none(),
+            "an absent root is omitted"
+        );
+        // Deterministic within the process:
+        assert_eq!(json, resident_digests_json());
+        clear();
     }
 }
