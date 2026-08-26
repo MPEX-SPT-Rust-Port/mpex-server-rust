@@ -96,4 +96,28 @@ async fn the_shipped_tree_installs_five_roots_and_hands_back_the_eager_files() {
         .strip_prefix(&[0xEF, 0xBB, 0xBF][..])
         .unwrap_or(&prices);
     assert_eq!(files["database/templates/prices.json"], prices);
+
+    // Cross-parse determinism, total over the shipped tree: a second load of the same bytes must
+    // digest identically on all five gated roots. This is the automatic sweep for the rule at
+    // db::hash_value — anything reachable from a gated root must be IndexSet/IndexMap, never
+    // HashSet/HashMap — so a per-instance-order container under a gated root fails loudly here
+    // instead of surfacing as an intermittently red equivalence gate pointing at the wrong layer.
+    // In this test (same process, same store) because loads install globally and the epoch-1
+    // assertion above owns first place.
+    let first: serde_json::Value = serde_json::from_slice(&db::resident_digests_json()).unwrap();
+    load(LoadRequest {
+        schema: 1,
+        dir: SPT_DATA.to_string(),
+        verify: false,
+        handbook_price_override: None,
+    })
+    .await
+    .expect("the second load of the same tree");
+    let second: serde_json::Value = serde_json::from_slice(&db::resident_digests_json()).unwrap();
+    for root in ["templates", "traders", "globals", "locations", "hideout"] {
+        assert_eq!(
+            first["roots"][root], second["roots"][root],
+            "{root}: two parses of the same bytes must digest equal"
+        );
+    }
 }
