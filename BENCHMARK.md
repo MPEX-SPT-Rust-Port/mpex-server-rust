@@ -444,6 +444,96 @@ and the managed array during `ToArray` — so the concurrent peak is ~53 MB, not
 three are native, so `GC.GetTotalAllocatedBytes` would not see them; none of this is on the
 save-side follow-up's path.
 
+## Load-epoch seeding — the first publish, skipped
+
+`c7af978` — 2026-08-26. On a modless boot `DatabaseImporter` follows the native load with a
+configs-only publish and hands `DbPublisher` the resulting epoch, so the first `EnsureCurrent`
+returns without publishing. **Full-boot publishes go 2 → 1**, not 1 → 0: `AdjustLocationBotValues`
+bumps the stamp later in `PostDbLoadService`, so the publish `RagfairCallbacks` forces stays.
+
+Nothing committed measures this. `DatabaseImportBenchmarkTests` times the load walk and never the
+publisher, and `ScavCaseBenchmarkTests`' 730–745 ms `ForcePublish` arm is a *warm, in-process*
+publish — a scale reference, not a boot measurement. So this section is a boot harness rather than a
+fixture: `dotnet publish -c Release` into three kept trees, `./mpex-server` booted from each in turn,
+`/health` polled at 100 ms and the console watched for `Server has started, happy playing`. Console
+logging was raised to `Debug` with a `[%time%]` prefix in all three trees, identically, for the phase
+timeline. Six rounds, arms **interleaved within each round** so page-cache and thermal drift hit all
+three equally — an un-interleaved first pass had the pre-change tree written to disk last and read
+about a second faster for it, which inverted the headline.
+
+| arm | tree |
+|---|---|
+| **seeded** | this branch, `c7af978`, native import |
+| **pre-change** | `a250382`, the merge base with `dev`, native import |
+| **legacy** | `c7af978` with `"forceLegacyDatabaseImport": true` added to the published `SPT_Data/configs/core.json` — and `checks.dat` regenerated over that tree (`cargo run --bin gen_checks <dir>/SPT_Data`), because Release verification hashes `configs/` too and rejects the edited file otherwise |
+
+### Boot wall time, six runs per arm
+
+| arm | to `/health` | range | to `Server has started` | range |
+|---|---|---|---|---|
+| seeded | 7173 ms | 6532 – 7390 | **10,676 ms** | 9931 – 10,892 |
+| pre-change | 6754 ms | 6220 – 7181 | 11,537 ms | 10,955 – 12,020 |
+| legacy | 6426 ms | 4949 – 6440 | 11,480 ms | 10,099 – 11,698 |
+
+Medians; every run is in the raw list below.
+
+    seeded      health  6532 6637 7068 7278 7285 7390   started   9931 10140 10572 10779 10887 10892
+    pre-change  health  6220 6330 6753 6755 7175 7181   started  10955 10961 11483 11591 12009 12020
+    legacy      health  4949 5793 6426 6427 6429 6440   started  10099 11047 11477 11484 11485 11698
+
+**Read the `Server has started` column, not the `/health` one.** `/health` is a minimal API that
+answers as soon as Kestrel is bound, and on the pre-change arm Kestrel binds *inside* the first
+`EnsureCurrent`: in every pre-change run `/health` answered ~2 s before `PostDbLoadService` finished.
+That column therefore measures everything up to the publish and none of the publish, so the seed's
+**+419 ms** there is its own load-time cost carrying none of its saving. Against `Server has started`
+the seed is **−861 ms against pre-change (−7.5 %) and −805 ms against legacy**.
+
+### Where it moves, from the console timeline
+
+Medians over the same six runs per arm:
+
+| phase | seeded | pre-change | legacy |
+|---|---|---|---|
+| `Database import took …` | 3398 ms | 2915 ms | 1460 ms |
+| `startup callbacks` → `Generating flea offers` | **2776 ms** | 5062 ms | 6404 ms |
+| `Generating flea offers` → `Server has started` | 3072 ms | 2192 ms | 2238 ms |
+
+Three movements, and two of them are costs:
+
+- **+483 ms on the import line** — the load-time configs publish, which the importer runs before it
+  stops its own stopwatch. **`Database import took Nms` is no longer comparable to any pre-phase
+  figure in this file**: on a modless boot it now contains a publish. Compare it to the pre-change
+  arm here; never to § Phase 3.
+- **−2286 ms in the `PostDbLoadService` block** — the skipped first `EnsureCurrent`. Three times the
+  730–745 ms the warm fixture reads, because a boot publish is the process's *first*: cold JIT
+  through `DbPayloadProjection`, cold allocator, cold native parse.
+- **+880 ms in the flea-offer block** — the saving is not free. Skipping the first publish promotes
+  the `RagfairCallbacks` publish to the process's first full six-root publish, so it inherits the
+  cold-start cost the skipped one used to absorb. Net of all three: **−923 ms**, which is the −861 ms
+  wall-clock delta to within run-to-run noise.
+
+**Legacy and pre-change land in the same place** — 11,480 against 11,537 ms — which is § Phase 3's
+regression restated at boot scale: the native import costs 1455 ms more than the C# one and hands
+1342 ms of it back in the `PostDbLoadService` block, because whichever arm touches the resident DB
+first pays the parse and the derive. The seed is the first change that takes that work off the boot
+instead of moving it.
+
+### The deterministic half
+
+Wall clock is noisy; the log lines are not. A Debug-published `scripts/smoke-mpex-server.sh` run and
+every Release boot above print, in order:
+
+    Resident database seeded at epoch 2; a modless boot skips the first publish.
+    Load-time seed consumed at epoch 2; first publish skipped.
+
+and never `Load-time seed voided:` — in all 20 seeded-arm boots taken for this section the stamp did
+not move between the importer's read and the first `EnsureCurrent`. Epoch 2 is the load's epoch-1
+five-root install plus the configs-only publish. A voided line means some pre-`GameCallbacks` write
+moved the stamp and the first publish came back; it is the line to grep after any change to
+`PostDbLoadService` or to a startup `IOnLoad`.
+
+Machine as § Machine; both arms built with the pinned `rustc 1.98` and .NET SDK 10.0.110.
+
 ## Methodology
 
 - Both paths run in one process against one live shipped database; the fixture asserts `LastPathTaken`

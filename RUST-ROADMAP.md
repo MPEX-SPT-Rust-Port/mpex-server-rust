@@ -14,10 +14,10 @@ automatically when a mod hooks it or manually via a config flag. The log pipelin
 has no legacy path: `SPTLoggerDispatcher` hands every line to the crate, and the crate owns the
 terminal outright — raw `Console.Write*`, prompts, title and clear all cross the boundary.
 
-Thirty-four C-ABI exports (`src/ffi.rs`) carry all of it, JSON in and JSON out — except the ragfair
+Thirty-five C-ABI exports (`src/ffi.rs`) carry all of it, JSON in and JSON out — except the ragfair
 response (a framed MessagePack envelope), `spt_db_load` and `spt_profile_load` (a JSON header frame
 followed by the loaded file bytes), and the log and console exports (the fields of one line, or raw
-bytes, directly). Current ABI 32.
+bytes, directly). Current ABI 33.
 
 Since Phase 6b those exports are reached two ways, one per process. A shipped Linux build resolves
 them out of the `mpex-server` executable, which links the crate as an rlib; dev builds, the test run
@@ -651,14 +651,22 @@ disk walk it replaces (451.1 vs 383.8 ms), and the fused load costs ~380–391 m
 whenever `_currentEpoch` is 0, and nothing feeds `DbLoad`'s installed epoch into it, so both arms pay
 a 730–745 ms forced publish. Feeding that epoch through buys less than it looks: `EnsureCurrent`
 republishes when `_currentEpoch == 0` **or** `_lastPublishedStamp != stamp` (`DbPublisher.cs:40`),
-and on Release the barriers move the stamp during `PostDbLoadService` — `AdjustLocationBotValues`
-writes `map.Base.BotMax`/`BotStart` for 12 of the 13 shipped `maxBotCap` entries
-(`PostDbLoadService.cs:624-627` skips what does not resolve) and `LocationBase`'s setters bump under
-Ceciler. **Phase 4 moved the goalposts further:** `spt_db_load` stays `database/`-scoped, so epoch 1
+and on Release the barriers move the stamp during `PostDbLoadService` before that first
+`EnsureCurrent` ever runs. *(Corrected by the load-epoch seed follow-up: the mover is exactly one
+write, `coreConfig.ServerStartTime` at `PostDbLoadService.cs:53-56`, which precedes the first
+`EnsureCurrent` — `HydrateItemBaseClassCache`, five lines down. `AdjustLocationBotValues`
+(`PostDbLoadService.cs:627`) bumps the stamp too, through `LocationBase`'s Ceciler-injected setters,
+but it runs at `:95`, after that first publish, so it was never in the pre-publish window.)*
+**Phase 4 moved the goalposts further:** `spt_db_load` stays `database/`-scoped, so epoch 1
 installs five of the six published roots and carries no `configs` root — skipping the first
-`EnsureCurrent` on the strength of epoch 1 would hand every config-reading family a resolve failure.
+`EnsureCurrent` on the strength of epoch 1 would leave every config-reading family without one.
+*(Also corrected: an absent root is not a resolve failure. A family whose view resolver finds no
+configs root answers `STATUS_STALE_EPOCH` — status 4 — which the C# side already self-heals with
+`ForcePublish` + one retry, so the cost of getting this wrong would have been a silent extra
+republish, not a fault.)*
 The follow-up now has to publish configs at load time from the live C# objects, not from
-`configs/*.json` (the values-not-keys trap), or keep the first republish.
+`configs/*.json` (the values-not-keys trap), or keep the first republish. *(Delivered 2026-08-26 —
+see the load-epoch seeding ledger below.)*
 
 - Freshness: **none at generation time.** Epoch 1 is boot-validation only, always superseded by the
   first `EnsureCurrent` republish, so no generation path ever reads it.
@@ -914,7 +922,7 @@ same wiring but has never been executed on Windows.
 
 **Phase 6b — rlib linkage flip (landed 2026-08-21, no ABI bump).** The resident DB's statics now live
 in the executable: `mpex-server` links `spt-native` as an rlib and is linked with
-`-Wl,--export-dynamic`, so all 34 exports sit in its own `.dynsym`, and the two
+`-Wl,--export-dynamic`, so all 35 exports sit in its own `.dynsym`, and the two
 `SetDllImportResolver` callbacks try `NativeLibrary.GetMainProgramHandle()` before the cdylib. The
 published Linux tree therefore ships no cdylib and `SPT.Server.Linux` is no longer a working
 direct-run fallback there.
@@ -954,6 +962,34 @@ gone on both — booked in the *Broken* ledger, together with the process-nondet
 made a C#-side golden unimplementable. `BotEquipmentModPoolService` gained a whole-type decline
 entry (guideline 2), Rust no longer consulting it.
 
+**Load-epoch seeding (ABI 33, landed 2026-08-26).** The Phase 3 follow-up, delivered: on a modless boot
+the first `EnsureCurrent` no longer publishes. `DatabaseImporter.LoadDatabaseAsync(seedResidentDb:)` is
+opt-in and `Program.cs` passes true only when `loadedMods.Count == 0`; it follows the native load's
+five-root epoch-1 install with a **configs-only publish built from the live C# config objects** — never
+`configs/*.json`, the values-not-keys trap — reaching epoch 2, and records `(epoch, stamp)` in the static
+`DbLoadSeed`. `DbPublisher.EnsureCurrent` consumes that seed once: it forces the same `HandbookHelper`
+hydration a first publish would have forced, under the same `WriteBarrier.Suppress()`, then either logs
+`Load-time seed consumed at epoch N; first publish skipped.` and starts from that epoch, or logs
+`Load-time seed voided: …` and republishes because the stamp moved in the window. Two changes close that
+window. `ItemConfig.HandbookPriceOverride` now rides the `spt_db_load` request, so the resident handbook
+carries the merged prices C#'s lazy hydration produces — an **envelope-only merge**: the raw handbook
+bytes are restored before `files` is handed back, so the C# reflection walk still parses the shipped
+file. And `PostDbLoadService`'s `coreConfig.ServerStartTime` write, the one stamp mover that precedes the
+first `EnsureCurrent`, is suppressed; the carve-out leaves the resident `spt-core` entry stale by exactly
+that field until the next real republish, which is safe only because nothing native lifts `spt-core`
+(lift the suppression the day a consumer appears). The gate is `ResidentRootEquivalenceTests`: the
+load-installed roots against a `DbPayloadProjection` publish of the same tree, compared through
+`spt_db_resident_digest` (ABI 33's new export) as canonical post-parse digests of the **typed lift
+surface** — `extra` maps excluded, because envelope text legitimately differs there in member order,
+number formatting, explicit nulls and Debug-build model coverage. What it buys is **publishes 2 → 1**,
+not 1 → 0: `AdjustLocationBotValues` still bumps the stamp before `RagfairCallbacks` generates offers, so
+that second publish stays, by design. Measured at the boot, that is **−861 ms to `Server has started`
+against the merge base, −7.5%** — the skipped publish is worth −2286 ms in the `PostDbLoadService`
+block and gives 483 ms back on the import line and 880 ms back to the now-cold `RagfairCallbacks`
+publish (BENCHMARK.md § Load-epoch seeding, which also explains why boot-to-`/health` reads this as a
+*regression*: `/health` answers before the publish it skips). The `Database import took Nms` line now
+contains a publish on a modless boot and is no longer comparable to any pre-phase figure.
+
 **The ported 4.1.2 quirks are documented at their call sites** as numbered `Quirk N` comments in
 `rust/spt-native/src/quest/*.rs`, `src/scav_case/generator.rs`, `src/base_class.rs`,
 `src/linked_items.rs` and `src/loot/container_extensions.rs`; grep case-insensitively for `quirk`,
@@ -966,23 +1002,18 @@ the 4.1.2 body the port was written against, not the current file.
 
 State-ownership Phases 1 through 6b are complete (ledgers above). Open work:
 
-1. **Wire `DbLoad`'s installed epoch into `DbPublisher`.** Both arms still pay the first
-   `EnsureCurrent` republish (730–745 ms), which cancels the fused load out of its own comparison.
-   Blocked on publishing configs at load time from the live C# objects — see the Phase 3 ledger for
-   the values-not-keys trap and the ungated `classify`/`LOCATION_MEMBERS` mapping the follow-up
-   inherits.
-2. **Port queue** — candidates and their costing live in [todo/TODO.md](todo/TODO.md); the unstarted
+1. **Port queue** — candidates and their costing live in [todo/TODO.md](todo/TODO.md); the unstarted
    front is tier 2. The two axes are independent: a flip re-homes data for something already ported,
    a TODO item ports something new.
-3. **Convert `is_valid_reward_item`'s trader whitelist** (`quest/reward_generator.rs:869`, a
+2. **Convert `is_valid_reward_item`'s trader whitelist** (`quest/reward_generator.rs:869`, a
    `Vec<&str>` of up to 14 candidates) to `ItemBaseClassCache::is_of_baseclasses_set` and measure
    whether 14 is long enough for the set form to pay. Narrow and unmeasured.
-4. **Split `BotConfig.Equipment`** (named by Phase 4, not delivered with it). Lift `equipment` onto
+3. **Split `BotConfig.Equipment`** (named by Phase 4, not delivered with it). Lift `equipment` onto
    the resident configs root and keep one varying member carrying just the live role+band
    `EquipmentMods` that `ReplayRandomisationClamps` writes, gated by a second-bot nighttime regression
    test. At 39,811 bytes it is now the largest — and only — member of genuinely varying process state
    on a bot send.
-5. **Frame the profile save request** (named by Phase 5, not delivered with it). The removable costs,
+4. **Frame the profile save request** (named by Phase 5, not delivered with it). The removable costs,
    in the order worth chasing: the owned `Box<RawValue>` copy in `profile.rs` (a genuine extra
    full-size copy at peak), and `Utf8JsonWriter.WriteRawValue(string)`'s `chars × 3` transcode
    scratch — a full UTF-8 encode pass on every save, though *not* a guaranteed allocation. Handing the
