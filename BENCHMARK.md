@@ -532,7 +532,9 @@ five-root install plus the configs-only publish. A voided line means some pre-`G
 moved the stamp and the first publish came back; it is the line to grep after any change to
 `PostDbLoadService` or to a startup `IOnLoad`.
 
-Machine as § Machine; both arms built with the pinned `rustc 1.98` and .NET SDK 10.0.110.
+Machine as § Machine. Two trees were built — seeded and pre-change — both with the pinned
+`rustc 1.98` and .NET SDK 10.0.110; the legacy arm is a copy of the seeded publish with the config flag
+flipped, so it runs the seeded arm's binaries and differs only in `core.json` and `checks.dat`.
 
 ## Methodology
 

@@ -650,7 +650,7 @@ disk walk it replaces (451.1 vs 383.8 ms), and the fused load costs ~380–391 m
 **The startup win is not wired up.** `DbPublisher.EnsureCurrent` still republishes every root
 whenever `_currentEpoch` is 0, and nothing feeds `DbLoad`'s installed epoch into it, so both arms pay
 a 730–745 ms forced publish. Feeding that epoch through buys less than it looks: `EnsureCurrent`
-republishes when `_currentEpoch == 0` **or** `_lastPublishedStamp != stamp` (`DbPublisher.cs:40`),
+republishes when `_currentEpoch == 0` **or** `_lastPublishedStamp != stamp` (`DbPublisher.cs:46`),
 and on Release the barriers move the stamp during `PostDbLoadService` before that first
 `EnsureCurrent` ever runs. *(Corrected by the load-epoch seed follow-up: the mover is exactly one
 write, `coreConfig.ServerStartTime` at `PostDbLoadService.cs:53-56`, which precedes the first
@@ -767,7 +767,7 @@ mod-chance clamps back into `Equipment[role].Randomisation[band].EquipmentMods` 
 after *every* native single-bot send, and that write is a deliberate cross-bot feedback loop the next
 bot's C# prelude reads (`BotEquipmentFilterService.cs:63`). A published copy would freeze at the
 on-disk values and diverge from bot 2 of a nighttime raid on. Eleven of twelve planned bot lifts
-landed; the upgrade path is roadmap item 4. **`ItemConfigLift.blacklist` is a `HashSet<String>`, not
+landed; the upgrade path is roadmap item 3. **`ItemConfigLift.blacklist` is a `HashSet<String>`, not
 the plan's `IndexSet`** — the override wire mirrors C#'s `HashSet`, so both arms read one shape and
 there is no iteration site to observe an order. Zero `[Test]` bodies, assertions, seeds or normalizers
 were edited anywhere in the phase.
@@ -904,7 +904,7 @@ the UTF-8 encode pass, not an allocation.
 
 **The ruling is that the regression ships**: the remedy would make `spt_profile_save` the first export
 off the shared `run_generator_with` ladder, at the tail of a phase whose entire value is mechanical
-parity. It is re-opened as roadmap item 5. **The load side was not timed, but its allocations are pure
+parity. It is re-opened as roadmap item 4. **The load side was not timed, but its allocations are pure
 addition** where the save path's replaced an old buffer: `DeserializeFromFileAsync` streamed with
 `bufferSize: 4096` so no full-size buffer existed, where the native path materialises three transient
 ones — `fs::read` (`profile.rs:133`), `encode_load_frame` (`profile.rs:154-165`) copying into a second
