@@ -140,8 +140,9 @@ public sealed class DatabaseImporter(
         {
             // The load installed five roots as epoch 1; add the configs root from the live
             // objects - never configs/*.json (the values-not-keys trap) - and record the seed
-            // DbPublisher's first EnsureCurrent starts from. Modless boots only: the caller
-            // gates on the loaded-mod count (spec § Part 3). The stamp is read after the walk:
+            // DbPublisher's first EnsureCurrent starts from. Modless, barriered boots only: the
+            // caller gates on the loaded-mod count and WriteBarrier.Installed (spec § Part 3),
+            // so the voided-seed tripwire exists wherever a seed does. The stamp is read after the walk:
             // the walk's own barriered setters describe content both sides already share. A
             // failure here forfeits the seed, never the boot - the first EnsureCurrent then
             // republishes as it always has.
