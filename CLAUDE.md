@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 scripts/decompress-assets.sh                        # REQUIRED before first build (or .ps1 on Windows) - unpacks looseLoot.7z
-# rustup (Rust 1.97.1) is REQUIRED: dotnet build invokes cargo for rust/spt-native
+# rustup (Rust 1.98) is REQUIRED: dotnet build invokes cargo for rust/spt-native
 dotnet build                                        # solution is server-csharp.slnx
 dotnet test                                         # all tests (Testing/UnitTests, NUnit)
 dotnet test --filter "FullyQualifiedName~MongoIdTests"   # single fixture

@@ -111,7 +111,7 @@ C# SptNative → spt_generate_* (JSON in)
 
 ### Toolchain and dependencies
 
-Toolchain is pinned in `rust-toolchain.toml` (1.97.1, edition 2024) and `Cargo.lock` is committed.
+Toolchain is pinned in `rust-toolchain.toml` (1.98, edition 2024) and `Cargo.lock` is committed.
 Dependencies: `serde`/`serde_json` (with `preserve_order`, so untyped maps keep C# `Dictionary` insertion
 order), `rmp-serde` (the ragfair MessagePack envelope), `indexmap`, `rand`/`rand_xoshiro`, `rayon`, `tokio`,
 `walkdir`, `xxhash-rust`, `base64`, `regex-lite` (the `sptLogger.json` filter patterns — deliberately -lite, so

@@ -99,7 +99,7 @@ fn splitmix64(state: &mut u64) -> u64 {
 fn xoshiro_from_u64(seed: u64) -> Xoshiro256StarStar {
     let mut state = seed;
     let mut seed_bytes = [0u8; 32];
-    for chunk in seed_bytes.chunks_exact_mut(8) {
+    for chunk in seed_bytes.as_chunks_mut::<8>().0 {
         chunk.copy_from_slice(&splitmix64(&mut state).to_le_bytes());
     }
 
