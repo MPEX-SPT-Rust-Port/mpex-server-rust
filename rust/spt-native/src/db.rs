@@ -206,16 +206,35 @@ impl Drop for DigestModeGuard {
 }
 
 /// Order-insensitive for object keys (the C#-written and Rust-spliced envelopes legitimately
-/// differ in member order — serde_json is preserve_order here), order-sensitive for arrays.
-/// Serializes in digest mode: `extra` maps are skipped, so this digests the typed lift surface —
-/// the read surface — not post-parse byte fidelity (spec § Part 0). std `DefaultHasher` is
-/// SipHash-1-3 with fixed keys — stable within a toolchain, but no wire contract; the equivalence
-/// gate compares within one process, which needs neither.
+/// differ in member order — serde_json is preserve_order here), order-sensitive for arrays —
+/// except the three order-contract maps below, whose container-order key sequence joins the
+/// digest. Serializes in digest mode: `extra` maps are skipped, so this digests the typed lift
+/// surface — the read surface — not post-parse byte fidelity (spec § Part 0). std `DefaultHasher`
+/// is SipHash-1-3 with fixed keys — stable within a toolchain, but no wire contract; the
+/// equivalence gate compares within one process, which needs neither.
 pub fn canonical_digest<T: serde::Serialize>(value: &T) -> u64 {
     let _digest_mode = DigestModeGuard::set();
     let value = serde_json::to_value(value).expect("resident roots serialize");
     let mut hasher = DefaultHasher::new();
     hash_value(&value, &mut hasher);
+    // hash_value's key sort also sorts away genuine order divergence in the maps whose iteration
+    // order is documented read contract: `templates.items` (the ragfair view caches iterate its
+    // key order), `templates.prices` (`GetFleaPricesAsArray` draws an RNG index into source
+    // order) and `globals.ItemPresets` (last-in-map-order wins the default-preset cache). Mix
+    // those maps' container-order key sequence back in. Only these three: each comes from a
+    // single JSON file, so both arms carry the same order deterministically — a flatten root's
+    // key order (directory-walk) or a raw-Value lift's member order (C# emission) does not, and
+    // making those order-sensitive would trade a gate blind spot for gate flakiness. The names
+    // are matched at the root level only, where no digested root type has a colliding member.
+    for name in ["items", "prices", "ItemPresets"] {
+        if let Some(serde_json::Value::Object(map)) = value.get(name) {
+            7u8.hash(&mut hasher);
+            map.len().hash(&mut hasher);
+            for key in map.keys() {
+                key.hash(&mut hasher);
+            }
+        }
+    }
     hasher.finish()
 }
 
@@ -679,6 +698,43 @@ mod digest_tests {
         let a: serde_json::Value = serde_json::from_str(r#"{"a":1,"b":[{"x":1,"y":2}]}"#).unwrap();
         let b: serde_json::Value = serde_json::from_str(r#"{"b":[{"y":2,"x":1}],"a":1}"#).unwrap();
         assert_eq!(canonical_digest(&a), canonical_digest(&b));
+    }
+
+    #[test]
+    fn canonical_digest_sees_order_in_the_order_contract_maps() {
+        // Same entries, permuted map order, equal digests would let a projection change that
+        // reorders these maps pass the equivalence gate while epoch 1 — live since the load-epoch
+        // seed — feeds different RNG draws / iteration / last-wins resolution than a republish.
+        // Both review reports reproduced that escape; this pins the fix per map.
+        let a: models::TemplatesRoot =
+            serde_json::from_str(r#"{"prices":{"aaa":1.0,"bbb":2.0}}"#).unwrap();
+        let b: models::TemplatesRoot =
+            serde_json::from_str(r#"{"prices":{"bbb":2.0,"aaa":1.0}}"#).unwrap();
+        assert_ne!(
+            canonical_digest(&a),
+            canonical_digest(&b),
+            "prices order is what GetFleaPricesAsArray draws an index into"
+        );
+
+        let a: models::TemplatesRoot =
+            serde_json::from_str(r#"{"items":{"aaa":{},"bbb":{}}}"#).unwrap();
+        let b: models::TemplatesRoot =
+            serde_json::from_str(r#"{"items":{"bbb":{},"aaa":{}}}"#).unwrap();
+        assert_ne!(
+            canonical_digest(&a),
+            canonical_digest(&b),
+            "items order is what the ragfair view caches iterate"
+        );
+
+        let a: models::GlobalsRoot =
+            serde_json::from_str(r#"{"ItemPresets":{"aaa":{},"bbb":{}}}"#).unwrap();
+        let b: models::GlobalsRoot =
+            serde_json::from_str(r#"{"ItemPresets":{"bbb":{},"aaa":{}}}"#).unwrap();
+        assert_ne!(
+            canonical_digest(&a),
+            canonical_digest(&b),
+            "ItemPresets order is last-preset-wins in the default cache"
+        );
     }
 
     #[test]
