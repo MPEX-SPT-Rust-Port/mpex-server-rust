@@ -2969,6 +2969,11 @@ mod tests {
             unsafe { spt_db_resident_digest(std::ptr::null_mut(), &mut out_len) },
             STATUS_BAD_ARGS
         );
+        assert_eq!(
+            out_len,
+            body.len(),
+            "nothing may be written when out_ptr is null"
+        );
     }
 
     #[test]
