@@ -34,7 +34,7 @@ pub struct Vector3 {
     pub y: f32,
     #[serde(rename = "z", default)]
     pub z: f32,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: Extra,
 }
 
@@ -59,7 +59,7 @@ pub struct Item {
     pub desc: Option<String>,
     #[serde(rename = "upd", skip_serializing_if = "Option::is_none")]
     pub upd: Option<Upd>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: Extra,
 }
 
@@ -122,7 +122,7 @@ pub struct Upd {
     pub resource: Option<UpdResource>,
     #[serde(rename = "RepairKit", skip_serializing_if = "Option::is_none")]
     pub repair_kit: Option<UpdRepairKit>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: Extra,
 }
 
@@ -205,7 +205,7 @@ pub struct UpdRepairable {
     pub durability: Option<f64>,
     #[serde(rename = "MaxDurability", skip_serializing_if = "Option::is_none")]
     pub max_durability: Option<f64>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: Extra,
 }
 
@@ -223,7 +223,7 @@ pub struct UpdBuff {
         skip_serializing_if = "Option::is_none"
     )]
     pub threshold_durability: Option<f64>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: Extra,
 }
 
@@ -314,7 +314,7 @@ pub struct SpawnpointTemplate {
     pub root: Option<String>,
     #[serde(rename = "Items", skip_serializing_if = "Option::is_none")]
     pub items: Option<Vec<SptLootItem>>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: Extra,
 }
 
@@ -339,7 +339,7 @@ pub struct Spawnpoint {
     pub template: Option<SpawnpointTemplate>,
     #[serde(rename = "itemDistribution", skip_serializing_if = "Option::is_none")]
     pub item_distribution: Option<Vec<LooseLootItemDistribution>>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: Extra,
 }
 
@@ -353,7 +353,7 @@ pub struct LooseLootItemDistribution {
         skip_serializing_if = "Option::is_none"
     )]
     pub relative_probability: Option<f64>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: Extra,
 }
 
@@ -362,7 +362,7 @@ pub struct LooseLootItemDistribution {
 pub struct ComposedKey {
     #[serde(rename = "key", skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: Extra,
 }
 
@@ -375,7 +375,7 @@ pub struct LooseLoot {
     pub spawnpoints_forced: Option<Vec<Spawnpoint>>,
     #[serde(rename = "spawnpoints", skip_serializing_if = "Option::is_none")]
     pub spawnpoints: Option<Vec<Spawnpoint>>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: Extra,
 }
 
@@ -386,7 +386,7 @@ pub struct SpawnpointCount {
     pub mean: f64,
     #[serde(rename = "std")]
     pub std: f64,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: Extra,
 }
 
@@ -397,7 +397,7 @@ pub struct StaticContainerData {
     pub probability: Option<f64>,
     #[serde(rename = "template", skip_serializing_if = "Option::is_none")]
     pub template: Option<SpawnpointTemplate>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: Extra,
 }
 
@@ -410,7 +410,7 @@ pub struct StaticForced {
     pub container_id: String,
     #[serde(rename = "itemTpl", default)]
     pub item_tpl: String,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: Extra,
 }
 
@@ -428,7 +428,7 @@ pub struct StaticLootDetails {
     pub item_count_distribution: Option<Vec<ItemCountDistribution>>,
     #[serde(rename = "itemDistribution", skip_serializing_if = "Option::is_none")]
     pub item_distribution: Option<Vec<ItemDistribution>>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: Extra,
 }
 
@@ -442,7 +442,7 @@ pub struct ItemCountDistribution {
         skip_serializing_if = "Option::is_none"
     )]
     pub relative_probability: Option<f64>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: Extra,
 }
 
@@ -457,7 +457,7 @@ pub struct ItemDistribution {
         skip_serializing_if = "Option::is_none"
     )]
     pub relative_probability: Option<f64>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: Extra,
 }
 
@@ -471,7 +471,7 @@ pub struct StaticAmmoDetails {
         skip_serializing_if = "Option::is_none"
     )]
     pub relative_probability: Option<f64>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: Extra,
 }
 
@@ -487,7 +487,7 @@ pub struct StaticContainer {
     /// Keyed lookups only, so iteration order never reaches the RNG.
     #[serde(rename = "containers", skip_serializing_if = "Option::is_none")]
     pub containers: Option<HashMap<String, ContainerData>>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: Extra,
 }
 
@@ -502,7 +502,7 @@ pub struct ContainerMinMax {
     pub current: Option<i32>,
     #[serde(rename = "chosenCount", skip_serializing_if = "Option::is_none")]
     pub chosen_count: Option<i32>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: Extra,
 }
 
@@ -511,7 +511,7 @@ pub struct ContainerMinMax {
 pub struct ContainerData {
     #[serde(rename = "groupId", skip_serializing_if = "Option::is_none")]
     pub group_id: Option<String>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: Extra,
 }
 

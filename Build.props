@@ -12,6 +12,12 @@
     <AssemblyVersion>$(SptVersion)</AssemblyVersion>
     <FileVersion>$(SptVersion)</FileVersion>
     <InformationalVersion>$(Version)</InformationalVersion>
+    <!-- The dotnet CLI sets _IsPublishing globally for `dotnet publish`; surface it as the
+         IsPublish flag the Ceciler conditions in SPTarkov.Server.Core.csproj test. Without this
+         the flag was never defined anywhere, so a non-Release publish (scripts/smoke-mpex-server.sh
+         publishes Debug) silently skipped the IL rewrite CLAUDE.md documents as running on any
+         publish - shipping a tree with no write barriers and no [JsonExtensionData]. -->
+    <IsPublish Condition="'$(_IsPublishing)' == 'true'">true</IsPublish>
     <!-- Project settings -->
     <TargetFramework>net10.0</TargetFramework>
     <LangVersion>latest</LangVersion>

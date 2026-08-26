@@ -134,7 +134,7 @@ impl RagfairViewsWire {
 }
 
 /// `Models/Spt/Config/RagfairConfig.cs:102-239` `Dynamic`, whole. Reuse the C# record's wire names.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DynamicConfigWire {
     pub use_trader_price_for_offers_if_higher: bool,
@@ -162,18 +162,18 @@ pub struct DynamicConfigWire {
     pub blacklist: RagfairBlacklistWire,
     pub unreasonable_mod_prices: IndexMap<String, UnreasonableModPricesWire>,
     pub generate_base_flea_prices: GenerateFleaPricesWire,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: Extra,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MinMaxIntWire {
     pub min: i32,
     pub max: i32,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MinMaxDoubleWire {
     pub min: f64,
@@ -181,7 +181,7 @@ pub struct MinMaxDoubleWire {
 }
 
 /// `RagfairConfig.cs:292-341` `BarterDetails`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BarterDetailsWire {
     pub chance_percent: f64,
@@ -192,71 +192,71 @@ pub struct BarterDetailsWire {
     pub make_single_stack_only: bool,
     pub item_tpl_blacklist: IndexSet<String>,
     pub item_type_blacklist: IndexSet<String>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: Extra,
 }
 
 /// `RagfairConfig.cs:343-368` `PackDetails`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PackDetailsWire {
     pub chance_percent: f64,
     pub item_count_min: i32,
     pub item_count_max: i32,
     pub item_type_whitelist: IndexSet<String>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: Extra,
 }
 
 /// `RagfairConfig.cs:370-395` `OfferAdjustment`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OfferAdjustmentWire {
     pub adjust_price_when_below_handbook_price: bool,
     pub max_price_difference_below_handbook_percent: f64,
     pub handbook_price_multiplier: f64,
     pub price_threshold_rub: f64,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: Extra,
 }
 
 /// `RagfairConfig.cs:280-290` `PriceRanges`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PriceRangesWire {
     pub default: MinMaxDoubleWire,
     pub preset: MinMaxDoubleWire,
     pub pack: MinMaxDoubleWire,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: Extra,
 }
 
 /// `RagfairConfig.cs:397-413` `Condition`. `_name` is a note to the config author, never read, so
 /// it rides in `extra`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConditionWire {
     pub condition_chance: f64,
     pub current: MinMaxDoubleWire,
     pub max: MinMaxDoubleWire,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: Extra,
 }
 
 /// `RagfairConfig.cs:505-518` `ArmorSettings`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ArmorSettingsWire {
     pub remove_removable_plate_chance: i32,
     /// An `IndexSet` because it is drawn from by index and a `HashSet` deserialized from a JSON
     /// array keeps that array's order in C# too.
     pub plate_slot_id_to_remove_pool: IndexSet<String>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: Extra,
 }
 
 /// `RagfairConfig.cs:415-464` `RagfairBlacklist`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RagfairBlacklistWire {
     pub damaged_ammo_packs: bool,
@@ -267,34 +267,34 @@ pub struct RagfairBlacklistWire {
     pub armor_plate: ArmorPlateBlacklistSettingsWire,
     pub enable_custom_item_category_list: bool,
     pub custom_item_category_list: IndexSet<String>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: Extra,
 }
 
 /// `RagfairConfig.cs:466-479` `ArmorPlateBlacklistSettings`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ArmorPlateBlacklistSettingsWire {
     pub max_protection_level: i32,
     pub ignore_slots: IndexSet<String>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: Extra,
 }
 
 /// `RagfairConfig.cs:481-503` `UnreasonableModPrices`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UnreasonableModPricesWire {
     pub enabled: bool,
     pub handbook_price_over_multiplier: i32,
     pub new_price_handbook_multiplier: i32,
     pub item_type: Option<String>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: Extra,
 }
 
 /// `RagfairConfig.cs:241-278` `GenerateFleaPrices`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GenerateFleaPricesWire {
     pub use_handbook_price: bool,
@@ -305,7 +305,7 @@ pub struct GenerateFleaPricesWire {
     pub use_hideout_craft_multiplier: bool,
     pub hideout_craft_multiplier: f64,
     pub generate_preset_price_by_children: bool,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: Extra,
 }
 

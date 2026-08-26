@@ -190,7 +190,7 @@ Server.Core. It owns database hash verification, the ported generation paths (lo
 loot, whole-bot inventory, dynamic ragfair offers, repeatable quests, scav case rewards), the item
 base-class cache build, the ragfair linked-item table, the resident DB every ported family but bots
 reads from, `user/profiles/`' live disk I/O, the whole log pipeline, and the terminal itself.
-Thirty-four exports, JSON in / JSON out —
+Thirty-five exports, JSON in / JSON out —
 except the ragfair response, a framed MessagePack envelope; the fused database load, whose response
 is a 4-byte little-endian header length, a JSON header, then the returned file bodies concatenated
 in header order; the profile load, framed the same way but with a `{"found":bool}` header and a
@@ -209,7 +209,7 @@ per-symbol and by name, so the `DllNotFoundException` / `EntryPointNotFoundExcep
 logging and console paths degrade on is unchanged.
 
 One non-obvious consequence, because it is invisible from the C# side: the launcher must reference
-`spt_native` in its own source or the linker discards the unreferenced rlib and *all* 34 exports with
+`spt_native` in its own source or the linker discards the unreferenced rlib and *all* 35 exports with
 it. `rust/mpex-server/src/main.rs` carries a deliberate anchor call, and
 `scripts/smoke-mpex-server.sh` checks the published launcher still exports them.
 
@@ -228,7 +228,11 @@ family carries no call-invariant half at all: `DbPublisher` re-publishes the
 templates/traders/globals/locations/hideout roots — and, since Phase 4, a configs root carrying
 every loaded config — into the native resident DB when
 `DatabaseMutationStamp` has moved, and each call carries just an epoch (a stale epoch self-heals by
-force-publish and one retry). Since Phase 2 the stamp's bump sites are mostly Ceciler-injected
+force-publish and one retry). On a modless boot of a barriered build the first publish is skipped
+entirely: the importer seeds `DbPublisher` from the load-time install (five roots plus a
+configs-only publish), and the first `EnsureCurrent` consumes the seed unless the stamp moved —
+`Load-time seed voided:` in the log is the tripwire to grep after changing anything
+pre-`GameCallbacks`. Since Phase 2 the stamp's bump sites are mostly Ceciler-injected
 setter barriers, so a modded server rides the resident path too — `TrustNativeRequestCacheWithMods`
 defaults on, honoured only where the barriers were actually injected (Release and publish), with a
 per-family kill switch beside it; an ineligible caller ships the full views with every call instead.
@@ -250,7 +254,7 @@ Linux-only `PropertyGroup`, so from a Windows host nothing maps and the guard in
 | External System | Integration Type | Notes |
 |-------------------|-------------------|-------|
 | Escape from Tarkov game client | Sync HTTP + async WebSocket | Every `/client/*` route; zlib both ways, responses wrapped in the `data`/`err`/`errmsg` envelope. `Models/Eft/` mirrors its wire contracts |
-| `rust/spt-native` (rlib in the shipped exe; cdylib in dev/test/Windows) | Sync FFI, C ABI | Thirty-four exports; JSON in/out except the MessagePack ragfair response, the fused database load's framed byte response (length-prefixed JSON header, then the file bodies), the profile load's (same framing, a `{"found":bool}` header and one file body), and the log and console exports. `spt_native_abi_version` handshakes `SptNative.ExpectedAbiVersion`. The resolver picks the source: main program handle first, cdylib second — one per process |
+| `rust/spt-native` (rlib in the shipped exe; cdylib in dev/test/Windows) | Sync FFI, C ABI | Thirty-five exports; JSON in/out except the MessagePack ragfair response, the fused database load's framed byte response (length-prefixed JSON header, then the file bodies), the profile load's (same framing, a `{"found":bool}` header and one file body), and the log and console exports. `spt_native_abi_version` handshakes `SptNative.ExpectedAbiVersion`. The resolver picks the source: main program handle first, cdylib second — one per process |
 | `SPT_Data/` on disk | Batch read at startup | `configs/` via `ConfigLoader`, `database/` via `DatabaseImporter`, hash-verified against `checks.dat` outside DEBUG |
 | `user/profiles/` | Blocking read/write on a threadpool thread | `SaveServer` owns the JSON profiles; interval saves plus `BackupService` timers. Since Phase 5 the disk itself is `spt_profile_*` — the serialization, the MD5 dirty-check and `BackupService` stay C# |
 | `user/mods/`, `user/patchers/` | Reflective assembly load | Third-party DLLs: `[Injectable]` registrations, `IOnDIConstruct` hooks, HarmonyX patches, enum prepatchers |

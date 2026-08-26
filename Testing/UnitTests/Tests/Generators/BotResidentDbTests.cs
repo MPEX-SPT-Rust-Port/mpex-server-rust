@@ -318,7 +318,7 @@ public class BotResidentDbTests
     /// the next bot is filtered. Equipment therefore rides the varying block, C#-resolved per bot; a
     /// regression that resolves it off the resident <c>spt-bot</c> stem would hand every bot after
     /// the first stale chances, and nothing else in the suite would notice. RUST-ROADMAP roadmap
-    /// item 4 records the upgrade path this test gates.
+    /// item 3 records the upgrade path this test gates.
     /// </summary>
     [Test]
     public void AnInPlaceEquipmentModClampReachesAResidentSend()

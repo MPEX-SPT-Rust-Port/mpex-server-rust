@@ -37,7 +37,7 @@ frozen 4.1.2 mod surface has `Spectre.Console.Color` baked into `ISptLogger<T>`,
 that name. Built on every build, but incrementally. Its own header covers the fidelity gaps.
 
 **The split-brain rule, post-6b:** exactly one linkage path may be live *per process*. `mpex-server` links
-`spt-native` as an rlib and, via `-Wl,--export-dynamic` in `.cargo/config.toml`, carries all 34
+`spt-native` as an rlib and, via `-Wl,--export-dynamic` in `.cargo/config.toml`, carries all 35
 `#[unsafe(no_mangle)]` exports in its own `.dynsym`; the resident DB's statics therefore live in the executable.
 The published Linux tree ships **no cdylib** (`ExcludeSptNativeFromPublish` in `SPTarkov.Server.csproj`), so
 there is nothing for a second copy to come from. The cdylib is still built and still lives in `bin/`, which is
@@ -54,7 +54,7 @@ tree only.
 Two things that follow, and that a reader will otherwise trip over:
 
 - **The launcher must reference `spt_native` in its own source.** An rlib nothing references is discarded whole
-  by the linker, taking all 34 exports with it, silently, at link time. `src/main.rs` carries a deliberate
+  by the linker, taking all 35 exports with it, silently, at link time. `src/main.rs` carries a deliberate
   anchor call and `scripts/smoke-mpex-server.sh` checks the launcher still exports them — retention is
   all-or-nothing, so a nonzero count is the whole check and no export count needs maintaining. Any path
   reference suffices; the anchor is a call behind `black_box` only so that deleting it looks like a behaviour
@@ -76,7 +76,7 @@ different assembly: `Libraries/SPTarkov.Common/Native/NativeMethods.cs`, with
 
 | Path | Role |
 |---|---|
-| `src/lib.rs` | Module roots and `ABI_VERSION` (currently 32; must equal `SptNative.ExpectedAbiVersion`) |
+| `src/lib.rs` | Module roots and `ABI_VERSION` (currently 33; must equal `SptNative.ExpectedAbiVersion`) |
 | `src/ffi.rs` | The C-ABI surface. The **only** module containing `unsafe` |
 | `src/runtime.rs` | Process-wide multi-thread tokio runtime, `OnceLock`-built. Used only by `verify` and the fused load |
 | `src/verify.rs` | Hashes `SPT_Data` with XXH3-128 and diffs it against `checks.dat`. `verify_collecting` is the same walk with a `want` predicate that whole-reads and returns matching files' bytes, so the fused load reads each file once |
@@ -122,29 +122,50 @@ trades that for build time — `opt-level = 1`, sixteen codegen units, line-tabl
 
 ### FFI boundary (`ffi.rs`)
 
-Thirty-four `extern "C"` exports: two trivial (`spt_native_abi_version`, `spt_buf_free`), thirteen taking a
+Thirty-five `extern "C"` exports: two trivial (`spt_native_abi_version`, `spt_buf_free`), thirteen taking a
 UTF-8 JSON generation request, four taking a profile-persistence request (`{schema, dir}`, plus `id`
 on all but `spt_profile_list` and the profile text on `spt_profile_save` — see *`src/profile.rs`*;
 `spt_profile_load` returns a framed byte response, `[u32-LE header length][{"found":bool}][file
 bytes]`),
 `spt_verify_database` taking a directory path, `spt_db_publish` taking the
-resident-DB publish envelope, `spt_db_load` taking the fused-load request (`{schema, dir, verify}`) and
+resident-DB publish envelope, `spt_db_load` taking the fused-load request
+(`{schema, dir, verify, handbookPriceOverride?}` — see the bullet below) and
 returning a framed byte response — a length-prefixed JSON header naming the verify report, the installed
 epoch and each returned file's path and length, followed by the file bodies back to back —
+`spt_db_resident_digest` taking no request at all (out-buffer only) and answering
+`{"epoch":N,"roots":{"templates":"<16-hex>",…}}`, one canonical digest per resident root over the *typed
+lift surface* — the roots serialize in digest mode, which skips the named `extra` overflow maps, so whatever
+rides one is invisible to it, and the two arms' extras are *known* to differ (explicit nulls, number
+forms, Debug-build model coverage, the projection's narrower hideout root), so a divergence living
+entirely in extras passes the gate by design; the dictionary roots' bare flatten maps (`TradersRoot`, `LocationsRoot`) are
+*not* overflow, they are the payload, and they are digested —
+with absent roots omitted and `{"epoch":0,"roots":{}}` before the first publish; the digests are
+test support for the load/projection equivalence gate and no wire contract, so compare two calls within
+one process, never across builds or machines —
 `spt_locales_set` taking the resolved server-locale table as JSON, and eleven
 for the log pipeline and the terminal it owns (`spt_logger_init`, `spt_logger_reinit`, `spt_log_emit`,
 `spt_logger_close`, `spt_log_set_tap`, `spt_log_enabled`, `spt_log_format`, `spt_console_write`,
 `spt_console_read_line`, `spt_console_set_title`, `spt_console_clear` — see *The log pipeline*). The
-twenty generation/verify/publish/load/profile exports hand back a heap buffer on success, which the caller
-releases with `spt_buf_free`; so do `spt_console_read_line` and `spt_log_format`.
+twenty-one generation/verify/publish/load/digest/profile exports hand back a heap buffer on success, which the
+caller releases with `spt_buf_free`; so do `spt_console_read_line` and `spt_log_format`.
 
+- `spt_db_load`'s optional `handbookPriceOverride` member carries `ItemConfig.HandbookPriceOverride` —
+  `{"<itemId>":{"parentId":"…","price":N},…}`, in document order. Rust merges it into
+  `database/templates/handbook.json` the way `HandbookHelper.HydrateHandbookCache` does (upsert by `Id`,
+  missing entries appended at the end) so the epoch-1 handbook equals a published one. **The merge is visible
+  to the publish envelope only**: the framed response still hands back the raw disk bytes, so the C# replica
+  and the equivalence gate hydrate from an unmerged file. The member is absent when no CLR is alive to supply
+  live config values (post-6b pre-load), and `LoadRequest` carries no `deny_unknown_fields` — an old library
+  paired with a new caller would silently ignore it, so the ABI lockstep assert, not the parser, is what
+  prevents that pairing.
 - `run_generator_with` is the shared body of every generation export, `spt_db_publish`, `spt_db_load` and
   the four `spt_profile_*` —
   parse, `catch_unwind`,
   encode — so a new export is a thin wrapper over it, generic in its error type and response encoding.
   `spt_db_load` is its own encoder (the framed byte response) and blocks on the tokio runtime inside its
-  generator fn. `spt_verify_database` is the one that stands apart from the shared body entirely, because it
-  blocks on the runtime around a hand-written wrapper.
+  generator fn. Two stand apart from the shared body entirely: `spt_verify_database`, because it blocks on
+  the runtime around a hand-written wrapper, and `spt_db_resident_digest`, because it takes no request to
+  parse — just a null check, a `catch_unwind` and a `write_buffer`.
 - Status codes: `STATUS_OK` 0, `STATUS_BAD_ARGS` 1, `STATUS_PANIC` 2, `STATUS_ERROR` 3, `STATUS_STALE_EPOCH` 4
   (every generation export since flip #6). **Quest and scav case never return 2**: they catch the generator's
   panic themselves and report it as 3 carrying the message, because those families port a C#-sanctioned throw
@@ -448,7 +469,7 @@ over the server-assembly probe, `spectre-facade`'s two.
 
 | External System | Integration Type | Notes |
 |-------------------|-------------------|-------|
-| `SPTarkov.Server.Core` | Sync FFI, C ABI | `Native/NativeMethods.cs` + `SptNative.cs` and the per-family projections. Thirty-four exports; `ABI_VERSION` must equal `SptNative.ExpectedAbiVersion` |
+| `SPTarkov.Server.Core` | Sync FFI, C ABI | `Native/NativeMethods.cs` + `SptNative.cs` and the per-family projections. Thirty-five exports; `ABI_VERSION` must equal `SptNative.ExpectedAbiVersion` |
 | `SPTarkov.Common` | Sync FFI, C ABI | The eleven log and console exports plus `spt_buf_free`, from a second `Native/NativeMethods.cs` — Common cannot reference Core |
 | `SPT_Data/` on disk | Batch, async over tokio | `spt_verify_database` hashes `configs/` + `database/` with XXH3-128; `spt_db_load` (since ABI 29) does that walk *and* reads `database/` in one pass, installing the five database roots — never the configs root, which only `spt_db_publish` builds — and handing the eager bytes back to `DatabaseImporter`; `gen_checks` writes `checks.dat` on Release builds |
 | `user/profiles/` on disk | Blocking read/write per call | `spt_profile_*` (since Phase 5) own every live listing, read, write and delete; the directory arrives in each request. `BackupService` (C#) still copies and restores beside them |

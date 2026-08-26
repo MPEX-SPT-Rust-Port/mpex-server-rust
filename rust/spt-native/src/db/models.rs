@@ -12,7 +12,7 @@
 use std::collections::{HashMap, HashSet};
 
 use indexmap::{IndexMap, IndexSet};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::bot::durability_limits_helper::BotDurability;
@@ -26,7 +26,7 @@ use crate::ragfair::models::DynamicConfigWire;
 use crate::scav_case::models::ScavCaseConfigView;
 
 /// `{"schema":1,"roots":{...}}` — the envelope `DbPayloadProjection` (C#) writes.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct PublishRequest {
     pub schema: u32,
     pub roots: PublishRoots,
@@ -35,7 +35,7 @@ pub struct PublishRequest {
 /// Every root optional: an absent root keeps the currently-resident one. Unknown root names are
 /// a parse error (`deny_unknown_fields`), surfacing as `STATUS_BAD_ARGS` — C# and Rust ship in
 /// lockstep, so a typo should fail loudly, not silently install nothing.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PublishRoots {
     pub templates: Option<TemplatesRoot>,
@@ -52,7 +52,7 @@ pub struct PublishRoots {
 /// `extra` full-fidelity. An absent stem is `None` — the consuming family fails its resolve
 /// loudly, per call; a present-but-malformed stem fails the whole publish parse
 /// (STATUS_BAD_ARGS), previous resident DB intact.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 pub struct ConfigsRoot {
     /// `Models/Spt/Config/ItemConfig.cs`, whose `Kind` is `spt-item` (`ItemConfig.cs:9-10`) — see
     /// [`ItemConfigLift`].
@@ -99,7 +99,7 @@ pub struct ConfigsRoot {
     /// (`RepairConfig.cs:8-9`) — see [`RepairConfigLift`].
     #[serde(default, rename = "spt-repair")]
     pub repair: Option<RepairConfigLift>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: IndexMap<String, Value>,
 }
 
@@ -121,7 +121,7 @@ pub struct ConfigsRoot {
 /// auto-property C# fills with the type's default. Everything else — the four dispatch flags, the
 /// brain types, the caps, whatever Ceciler's `[JsonExtensionData]` adds on a Release build — rides
 /// [`Self::extra`].
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct BotConfigLift {
     /// `BotConfig.Bosses` — scanned case-insensitively by `BotHelper.IsBotBoss`, so source order
     /// is irrelevant but the `List<string>` shape is mirrored anyway.
@@ -149,7 +149,7 @@ pub struct BotConfigLift {
     /// equipment-role mapping.
     #[serde(rename = "lootItemResourceRandomization")]
     pub loot_item_resource_randomization: IndexMap<String, RandomisedResourceDetails>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: IndexMap<String, Value>,
 }
 
@@ -158,19 +158,19 @@ pub struct BotConfigLift {
 /// (`BotWeaponGenerator.cs:173`). `RepairKit` and `RepairKit.Weapon` are both `required`
 /// (`RepairConfig.cs:29-30,84-85`), so both are strict here; the armor/vest/headwear kits and every
 /// other member ride the two `extra` maps.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct RepairConfigLift {
     #[serde(rename = "repairKit")]
     pub repair_kit: RepairKitLift,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: IndexMap<String, Value>,
 }
 
 /// `RepairConfig.cs:78-92` `RepairKit`, narrowed to `weapon`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct RepairKitLift {
     pub weapon: BonusSettings,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: IndexMap<String, Value>,
 }
 
@@ -199,7 +199,7 @@ pub struct RepairKitLift {
 /// which parses as the override wire's soft [`PmcConfigWire`](crate::bot::models::PmcConfigWire)
 /// (its doc has the trade). `phase4_configs_root.rs` pins every soft member's wire name against the
 /// projected dump, since a drifted name on a soft member parses fine and silently reads empty.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 pub struct ItemConfigLift {
     /// `ItemConfig.Blacklist` (`ItemConfig.cs:14-15`) — what `ItemFilterService.GetBlacklistedItems`
     /// returns verbatim (`ItemFilterService.cs:51-54`). A `HashSet` rather than an `IndexSet`
@@ -213,7 +213,7 @@ pub struct ItemConfigLift {
     pub reward_item_type_blacklist: IndexSet<String>,
     #[serde(default, rename = "bossItems")]
     pub boss_items: IndexSet<String>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: IndexMap<String, Value>,
 }
 
@@ -223,10 +223,10 @@ pub struct ItemConfigLift {
 /// without it — or with a malformed one — fails the whole publish rather than handing the offer
 /// path a config it would have to invent values for. Every other `RagfairConfig` member (and
 /// whatever Ceciler's `[JsonExtensionData]` adds on a Release build) rides [`Self::extra`].
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct RagfairConfigLift {
     pub dynamic: DynamicConfigWire,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: IndexMap<String, Value>,
 }
 
@@ -235,46 +235,46 @@ pub struct RagfairConfigLift {
 /// the four `Money` constants (`PaymentHelper.cs:19-33`). `#[serde(default)]`, unlike
 /// [`RagfairConfigLift::dynamic`]: no stock configuration carries a custom currency, and an empty
 /// set is exactly what the ragfair path did before the lift, so an absent member is not a failure.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 pub struct InventoryConfigLift {
     /// An `IndexSet` because the C# member is a `List<MongoId>` and this is membership-only; a
     /// duplicate entry would have been a duplicate `HashSet.Add` on the C# side too.
     #[serde(default, rename = "customMoneyTpls")]
     pub custom_money_tpls: IndexSet<String>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: IndexMap<String, Value>,
 }
 
 /// Hideout root: `production.scavRecipes` only (flip #5) — locations-root
 /// partial-projection precedent. Wire names pin to the C# `JsonPropertyName`s
 /// (HideoutTable.cs / HideoutProduction.cs): note capitalized Common/Rare/Superrare.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 pub struct HideoutRoot {
     #[serde(default)]
     pub production: HideoutProductionRoot,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: IndexMap<String, Value>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 pub struct HideoutProductionRoot {
     #[serde(default, rename = "scavRecipes")]
     pub scav_recipes: Vec<DbScavRecipe>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: IndexMap<String, Value>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 pub struct DbScavRecipe {
     #[serde(default, rename = "_id")]
     pub id: String,
     #[serde(default, rename = "endProducts")]
     pub end_products: Option<DbEndProducts>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: IndexMap<String, Value>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 pub struct DbEndProducts {
     #[serde(default, rename = "Common")]
     pub common: Option<MinMax<i32>>,
@@ -282,13 +282,13 @@ pub struct DbEndProducts {
     pub rare: Option<MinMax<i32>>,
     #[serde(default, rename = "Superrare")]
     pub superrare: Option<MinMax<i32>>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: IndexMap<String, Value>,
 }
 
 /// `Models/Spt/Tables/TemplateTable.cs` — only the members the ragfair view derivation and the
 /// repeatable-quest flip read are typed; everything else rides in `extra`.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 pub struct TemplatesRoot {
     /// `TemplateTable.Items` (`TemplateTable.cs:16-17`).
     #[serde(default)]
@@ -304,40 +304,40 @@ pub struct TemplatesRoot {
     /// flip reads.
     #[serde(rename = "repeatableQuests")]
     pub repeatable_quests: Option<RepeatableQuestsWire>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: IndexMap<String, Value>,
 }
 
 /// `Models/Eft/Common/Tables/RepeatableQuests.cs:21-34` `RepeatableQuestDatabase` — only the
 /// members the repeatable-quest generators read (`Templates`, `Data`) are typed; `rewards` and
 /// `samples` ride in `extra`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct RepeatableQuestsWire {
     pub templates: Option<RepeatableTemplates>,
     pub data: Option<RepeatableQuestsData>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: IndexMap<String, Value>,
 }
 
 /// `RepeatableQuests.cs:138-141` `Options`, the `Data` member's type.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct RepeatableQuestsData {
     #[serde(rename = "Completion")]
     pub completion: Option<CompletionFilter>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: IndexMap<String, Value>,
 }
 
 /// `RepeatableQuests.cs:144-150` `CompletionFilter`. C# declares both lists nullable; absent and
 /// null collapse to empty here, the same branch the C# takes for both (`quest::models` documents
 /// the same collapse on its slice members).
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct CompletionFilter {
     #[serde(rename = "itemsWhitelist", default)]
     pub items_whitelist: Vec<LevelledItemFilter>,
     #[serde(rename = "itemsBlacklist", default)]
     pub items_blacklist: Vec<LevelledItemFilter>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: IndexMap<String, Value>,
 }
 
@@ -345,7 +345,7 @@ pub struct CompletionFilter {
 /// flatten map replaces a named `extra` wholesale: every key is a trader id. [`TraderEntry`]
 /// keeps the parse total over values no C# `Trader` could have loaded (the store tests publish
 /// `{"b":2}`); those ride through as raw JSON, exactly as full-fidelity as before the lift.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 pub struct TradersRoot {
     #[serde(flatten)]
     pub traders: IndexMap<String, TraderEntry>,
@@ -353,7 +353,7 @@ pub struct TradersRoot {
 
 /// One value of the traders dictionary root. Untagged: any JSON object parses as [`Trader`]
 /// (whose members are all optional), anything else falls through to raw JSON.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum TraderEntry {
     Trader(Box<Trader>),
@@ -363,38 +363,38 @@ pub enum TraderEntry {
 }
 
 /// `Models/Eft/Common/Tables/Trader.cs:9-28` — only `base` is typed.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct Trader {
     /// `required` in C#; `Option` here so the parse stays total. A base-less trader prices like
     /// one with no loyalty levels — unobservable, C# throws at database load before it could
     /// ever publish one.
     #[serde(rename = "base")]
     pub base: Option<TraderBase>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: IndexMap<String, Value>,
 }
 
 /// `Trader.cs:30-180` `TraderBase` — only `loyaltyLevels` is typed.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct TraderBase {
     #[serde(rename = "loyaltyLevels")]
     pub loyalty_levels: Option<Vec<TraderLoyaltyLevel>>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: IndexMap<String, Value>,
 }
 
 /// `Trader.cs:182-…` `TraderLoyaltyLevel` — only `buy_price_coef` is read.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct TraderLoyaltyLevel {
     #[serde(rename = "buy_price_coef")]
     pub buy_price_coef: Option<f64>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: IndexMap<String, Value>,
 }
 
 /// `Models/Spt/Tables/GlobalTable.cs:10-26` — only `ItemPresets` and the `config` lift are typed;
 /// everything else rides [`Self::extra`].
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 pub struct GlobalsRoot {
     /// `GlobalTable.ItemPresets` (`GlobalTable.cs:24-25`), keyed by preset id — that key domain
     /// (the map's keys, not each preset's `_id`) is what `PresetHelper.IsPreset`/`GetPreset`
@@ -404,47 +404,47 @@ pub struct GlobalsRoot {
     /// `GlobalTable.Configuration` (`GlobalTable.cs:12-13`) — see [`GlobalsConfigLift`].
     #[serde(default, rename = "config")]
     pub config: GlobalsConfigLift,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: IndexMap<String, Value>,
 }
 
 /// Globals `config` lift: `exp.level.exp_table` only (flip #6) — everything else
 /// rides `extra`. Wire names pin to GlobalTable.cs (`config`/`exp`/`level`/`exp_table`,
 /// entries `{"exp": n}` — GlobalTable.cs:12, :299, :1166, :1290, :1311).
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 pub struct GlobalsConfigLift {
     #[serde(default)]
     pub exp: GlobalsExpLift,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: IndexMap<String, Value>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 pub struct GlobalsExpLift {
     #[serde(default)]
     pub level: GlobalsExpLevelLift,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: IndexMap<String, Value>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 pub struct GlobalsExpLevelLift {
     #[serde(default, rename = "exp_table")]
     pub exp_table: Vec<ExpTableEntry>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: IndexMap<String, Value>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 pub struct ExpTableEntry {
     #[serde(default)]
     pub exp: i32,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: IndexMap<String, Value>,
 }
 
 /// `Models/Spt/Tables/GlobalTable.cs:4397-4422` `Preset`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct Preset {
     #[serde(rename = "_id", default)]
     pub id: String,
@@ -458,7 +458,7 @@ pub struct Preset {
     /// Only default presets carry `_encyclopedia`.
     #[serde(rename = "_encyclopedia")]
     pub encyclopedia: Option<String>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: IndexMap<String, Value>,
 }
 
@@ -468,7 +468,7 @@ pub struct Preset {
 /// `QuestConfig`: strict like [`RagfairConfigLift::dynamic`], rather than defaulting to an empty
 /// map the helper would then fail every lookup against. `repeatableQuests`, the dispatch flags and
 /// whatever Ceciler's `[JsonExtensionData]` adds on a Release build ride [`Self::extra`].
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct QuestConfigLift {
     /// `QuestConfig.RepeatableQuestTemplates`, whose wire name is `repeatableQuestTemplateIds` —
     /// the template **ids** by player group (`RepeatableQuestHelper.cs:187-197`), not the quest
@@ -478,7 +478,7 @@ pub struct QuestConfigLift {
     /// `QuestConfig.LocationIdMap` — `GetQuestLocationByMapId` (`RepeatableQuestHelper.cs:204`).
     #[serde(rename = "locationIdMap")]
     pub location_id_map: IndexMap<String, String>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: IndexMap<String, Value>,
 }
 
@@ -499,7 +499,7 @@ pub struct QuestConfigLift {
 /// loose scalars are plain auto-properties, which C# fills with the type's default, and default
 /// here too. Every other member (the dispatch flags, the waves, whatever Ceciler's
 /// `[JsonExtensionData]` adds on a Release build) rides [`Self::extra`].
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct LocationConfigLift {
     #[serde(rename = "containerRandomisationSettings")]
     pub container_randomisation_settings: ContainerRandomisationSettingsLift,
@@ -528,12 +528,12 @@ pub struct LocationConfigLift {
     /// no entry blacklists nothing (`LocationLootGenerator.cs:480`).
     #[serde(rename = "looseLootBlacklist")]
     pub loose_loot_blacklist: HashMap<String, HashSet<String>>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: IndexMap<String, Value>,
 }
 
 /// `LocationConfig.cs:228-250` `ContainerRandomisationSettings`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct ContainerRandomisationSettingsLift {
     #[serde(default)]
     pub enabled: bool,
@@ -546,17 +546,17 @@ pub struct ContainerRandomisationSettingsLift {
     pub container_group_min_size_multiplier: f64,
     #[serde(default, rename = "containerGroupMaxSizeMultiplier")]
     pub container_group_max_size_multiplier: f64,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: IndexMap<String, Value>,
 }
 
 /// `LocationConfig.cs:192-199` `EquipmentLootSettings`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct EquipmentLootSettingsLift {
     /// Keyed by slot name; keyed lookups only, so the order is unread.
     #[serde(rename = "modSpawnChancePercent")]
     pub mod_spawn_chance_percent: HashMap<String, f64>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: IndexMap<String, Value>,
 }
 
@@ -564,13 +564,13 @@ pub struct EquipmentLootSettingsLift {
 /// (`SeasonalEventConfig.cs:56-57`), the one member of that config the loot family reads off the
 /// config rather than through `SeasonalEventService`. `required` in C#, so strict here; the whole
 /// rest of the config rides [`Self::extra`].
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct SeasonalEventConfigLift {
     /// Spawn point ids, not tpls. Membership only — the christmas-container filter in
     /// `loot::location_loot_generator::generate_static_containers` is the sole reader.
     #[serde(rename = "christmasContainerIds")]
     pub christmas_container_ids: HashSet<String>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: IndexMap<String, Value>,
 }
 
@@ -579,7 +579,7 @@ pub struct SeasonalEventConfigLift {
 /// flatten map replaces a named `extra` wholesale, the same shape as [`TradersRoot`].
 /// `GetDictionary()` re-keys by C# property name at read time; the wire keys here are the
 /// `JsonPropertyName`s `GetLocation` falls back to.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 pub struct LocationsRoot {
     #[serde(flatten)]
     pub locations: IndexMap<String, LocationEntry>,
@@ -591,7 +591,7 @@ pub struct LocationsRoot {
 /// deliberately NOT lifted (549 MiB resident; the per-call splice is retained until Phase 3) and
 /// `staticAmmo` stays a public-API parameter — both would ride in `extra` if published, but the
 /// `DbPayloadProjection` (C#) publish deliberately omits them; only test fixtures land them there.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct LocationEntry {
     /// `Location.Base` (`Location.cs:12-13`). `Option` keeps the parse total — the table's
     /// UI-linkage `base` key parses as an entry with no `base` member of its own.
@@ -609,13 +609,13 @@ pub struct LocationEntry {
     /// `Location.Statics` (`Location.cs:39-40`).
     #[serde(rename = "statics")]
     pub statics: Option<StaticContainer>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: IndexMap<String, Value>,
 }
 
 /// `StaticContainerDetails` (`Location.cs:106-116`). All three `Option`: the C# members are
 /// nullable `IEnumerable`s and the generator logs a map-specific error per missing list.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct StaticContainerDetailsWire {
     #[serde(rename = "staticWeapons")]
     pub static_weapons: Option<Vec<SpawnpointTemplate>>,
@@ -623,13 +623,13 @@ pub struct StaticContainerDetailsWire {
     pub static_containers: Option<Vec<StaticContainerData>>,
     #[serde(rename = "staticForced")]
     pub static_forced: Option<Vec<StaticForced>>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: IndexMap<String, Value>,
 }
 
 /// `Models/Eft/Common/LocationBase.cs:8` `LocationBase` — only the two members
 /// `BuildBossSpawnsByLocation` reads (`RepeatableQuestNativeRequestBuilder.cs:195-206`).
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct LocationBaseView {
     /// `required string` in C# (`LocationBase.cs:181-182`); `Option` so the parse stays total —
     /// the builder's `Base?.Id is not { }` skip is the branch a missing id takes.
@@ -637,24 +637,24 @@ pub struct LocationBaseView {
     pub id: Option<String>,
     #[serde(rename = "BossLocationSpawn", default)]
     pub boss_location_spawn: Vec<BossSpawnView>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: IndexMap<String, Value>,
 }
 
 /// `LocationBase.cs:501` `BossLocationSpawn` — `BossName` is the only member the elimination
 /// projection reads off a spawn.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct BossSpawnView {
     #[serde(rename = "BossName")]
     pub boss_name: Option<String>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: IndexMap<String, Value>,
 }
 
 /// `LocationBase.cs:806-883` `Exit`, restricted to the four members `ToExitView` reads
 /// (`RepeatableQuestNativeRequestBuilder.cs:238-247`). `AllExtracts` entries are the derived
 /// `AllExtractsExit : Exit`; its `SptName` addition rides in `extra`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct ExitSourceView {
     #[serde(rename = "Name")]
     pub name: Option<String>,
@@ -666,34 +666,34 @@ pub struct ExitSourceView {
     /// on a published root; `Option` keeps the parse total.
     #[serde(rename = "PassageRequirement")]
     pub passage_requirement: Option<String>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: IndexMap<String, Value>,
 }
 
 /// `Models/Eft/Common/Tables/HandbookBase.cs:6-13` — `Categories` is unread by the ragfair
 /// derivation and rides in `extra`.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 pub struct HandbookBase {
     #[serde(rename = "Items", default)]
     pub items: Vec<HandbookItem>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: IndexMap<String, Value>,
 }
 
 /// `HandbookBase.cs:35-46` `HandbookItem`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct HandbookItem {
     #[serde(rename = "Id", default)]
     pub id: String,
     #[serde(rename = "Price")]
     pub price: Option<f64>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: IndexMap<String, Value>,
 }
 
 /// `Models/Eft/Common/Tables/TemplateItem.cs:12-38` — the members
 /// `PayloadProjection.BuildItemsView` reads, plus the flatten superset.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct TemplateItem {
     #[serde(rename = "_name")]
     pub name: Option<String>,
@@ -705,7 +705,7 @@ pub struct TemplateItem {
     pub item_type: Option<String>,
     #[serde(rename = "_props")]
     pub properties: Option<TemplateItemProperties>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: IndexMap<String, Value>,
 }
 
@@ -713,7 +713,7 @@ pub struct TemplateItem {
 /// C# `HashSet<MongoId>`/`HashSet<string>` members are `IndexSet` here: a .NET `HashSet` built
 /// by deserializing a JSON array keeps that array's order and drops later duplicates, which is
 /// exactly `IndexSet`'s first-wins insertion order.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct TemplateItemProperties {
     #[serde(rename = "Width")]
     pub width: Option<i32>,
@@ -835,23 +835,23 @@ pub struct TemplateItemProperties {
     pub max_repair_resource: Option<f64>,
     #[serde(rename = "CanSellOnRagfair")]
     pub can_sell_on_ragfair: Option<bool>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: IndexMap<String, Value>,
 }
 
 /// `TemplateItem.cs:1640-1658` `Grid`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct Grid {
     #[serde(rename = "_name")]
     pub name: Option<String>,
     #[serde(rename = "_props")]
     pub properties: Option<GridProperties>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: IndexMap<String, Value>,
 }
 
 /// `TemplateItem.cs:1660-1683` `GridProperties`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct GridProperties {
     #[serde(rename = "filters")]
     pub filters: Option<Vec<GridFilter>>,
@@ -859,23 +859,23 @@ pub struct GridProperties {
     pub cells_h: Option<i32>,
     #[serde(rename = "cellsV")]
     pub cells_v: Option<i32>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: IndexMap<String, Value>,
 }
 
 /// `TemplateItem.cs:1685-1696` `GridFilter`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct GridFilter {
     #[serde(rename = "Filter")]
     pub filter: Option<IndexSet<String>>,
     #[serde(rename = "ExcludedFilter")]
     pub excluded_filter: Option<IndexSet<String>>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: IndexMap<String, Value>,
 }
 
 /// `TemplateItem.cs:1698-1740` `Slot` — `Cartridges` and `Chambers` are `Slot` lists too.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct Slot {
     #[serde(rename = "_name")]
     pub name: Option<String>,
@@ -885,47 +885,47 @@ pub struct Slot {
     pub max_count: Option<f64>,
     #[serde(rename = "_required")]
     pub required: Option<bool>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: IndexMap<String, Value>,
 }
 
 /// `TemplateItem.cs:1742-1749` `SlotProperties`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct SlotProperties {
     #[serde(rename = "filters")]
     pub filters: Option<Vec<SlotFilter>>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: IndexMap<String, Value>,
 }
 
 /// `TemplateItem.cs:1751-1767` `SlotFilter` — shared by `Slot` and `StackSlot` properties.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct SlotFilter {
     #[serde(rename = "Plate")]
     pub plate: Option<String>,
     #[serde(rename = "Filter")]
     pub filter: Option<IndexSet<String>>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: IndexMap<String, Value>,
 }
 
 /// `TemplateItem.cs:1769-1791` `StackSlot`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct StackSlot {
     #[serde(rename = "_max_count")]
     pub max_count: Option<f64>,
     #[serde(rename = "_props")]
     pub properties: Option<StackSlotProperties>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: IndexMap<String, Value>,
 }
 
 /// `TemplateItem.cs:1793-1797` `StackSlotProperties`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct StackSlotProperties {
     #[serde(rename = "filters")]
     pub filters: Option<Vec<SlotFilter>>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: IndexMap<String, Value>,
 }
 

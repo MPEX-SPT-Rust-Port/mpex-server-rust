@@ -24,6 +24,7 @@ const LOCATION_MEMBERS: [&str; 5] = [
 ];
 
 const GLOBALS_KEY: &str = "database/globals.json";
+const HANDBOOK_KEY: &str = "database/templates/handbook.json";
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -33,6 +34,21 @@ pub struct LoadRequest {
     /// e.g. `"./SPT_Data/"` — the same relative-path contract as `spt_verify_database`.
     pub dir: String,
     pub verify: bool,
+    /// `ItemConfig.HandbookPriceOverride`, applied to `templates/handbook.json` exactly as
+    /// `HydrateHandbookCache` does (HandbookHelper.cs:26-49) so the epoch-1 handbook equals a
+    /// published one — visible to the publish envelope only, never to the returned `files`.
+    /// Absent when no CLR is alive to supply live config values (post-6b pre-load).
+    #[serde(default)]
+    pub handbook_price_override: Option<indexmap::IndexMap<String, HandbookPriceOverrideWire>>,
+}
+
+/// One `ItemConfig.HandbookPriceOverride` entry as the C# wrapper sends it.
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HandbookPriceOverrideWire {
+    pub parent_id: String,
+    /// `serde_json::Number` so the value crosses with C#'s own formatting, no float round-trip.
+    pub price: serde_json::Number,
 }
 
 #[derive(Debug)]
@@ -141,16 +157,27 @@ pub async fn load(request: LoadRequest) -> Result<LoadResponse, LoadError> {
         (None, read_database(&spt_data).await?)
     };
 
-    let raw: BTreeMap<String, Vec<u8>> = collected
+    let mut raw: BTreeMap<String, Vec<u8>> = collected
         .into_iter()
         .map(|(key, bytes)| (key, strip_bom(bytes)))
         .collect();
     require_root_sources(&raw)?;
 
+    // Merged for the envelope only: the returned `files` must stay the raw disk bytes
+    // (spec non-goal — and the equivalence gate's C# arm must hydrate from raw bytes).
+    let original_handbook = match &request.handbook_price_override {
+        Some(overrides) => apply_handbook_overrides(&mut raw, overrides)?,
+        None => None,
+    };
+
     let envelope = assemble_publish_envelope(&raw);
     let publish_request: PublishRequest = serde_json::from_slice(&envelope)
         .map_err(|e| LoadError::Publish(crate::db::PublishError::Schema(e.to_string())))?;
     let epoch = crate::db::publish(publish_request).map_err(LoadError::Publish)?;
+
+    if let Some(original) = original_handbook {
+        raw.insert(HANDBOOK_KEY.to_string(), original);
+    }
 
     Ok(LoadResponse {
         verify: report,
@@ -216,6 +243,59 @@ fn require_root_sources(raw: &BTreeMap<String, Vec<u8>>) -> Result<(), LoadError
     require("database/hideout/*.json", under("database/hideout/", 3))?;
 
     Ok(())
+}
+
+/// Mirror of HandbookHelper.HydrateHandbookCache's upsert (HandbookHelper.cs:26-49): find each
+/// override's handbook item by Id, append `{Id, ParentId, Price}` at the end of Items when
+/// missing, then overwrite Price and ParentId — in override document order. Replaces the raw
+/// handbook entry in `raw` and returns the original bytes; the caller restores them after
+/// envelope assembly so the merge is visible to the publish only and `files` stays raw.
+/// Gated by ResidentRootEquivalenceTests.
+fn apply_handbook_overrides(
+    raw: &mut BTreeMap<String, Vec<u8>>,
+    overrides: &indexmap::IndexMap<String, HandbookPriceOverrideWire>,
+) -> Result<Option<Vec<u8>>, LoadError> {
+    if overrides.is_empty() {
+        return Ok(None);
+    }
+    let Some(bytes) = raw.get(HANDBOOK_KEY) else {
+        // No handbook source at all — the C# arm would be hydrating into an absent table too.
+        // Unreachable on a real tree (require_root_sources demands templates/ content).
+        return Ok(None);
+    };
+    let mut handbook: serde_json::Value = serde_json::from_slice(bytes)
+        .map_err(|error| LoadError::Io(format!("{HANDBOOK_KEY}: {error}")))?;
+    let items = handbook
+        .as_object_mut()
+        .and_then(|object| object.get_mut("Items"))
+        .and_then(serde_json::Value::as_array_mut)
+        .ok_or_else(|| LoadError::Io(format!("{HANDBOOK_KEY} has no Items array")))?;
+    for (id, price_override) in overrides {
+        let position = items
+            .iter()
+            .position(|item| item.get("Id").and_then(serde_json::Value::as_str) == Some(id));
+        let index = match position {
+            Some(index) => index,
+            None => {
+                items.push(serde_json::json!({ "Id": id }));
+                items.len() - 1
+            }
+        };
+        let item = items[index]
+            .as_object_mut()
+            .ok_or_else(|| LoadError::Io(format!("{HANDBOOK_KEY}: non-object Items entry")))?;
+        item.insert(
+            "Price".to_string(),
+            serde_json::Value::Number(price_override.price.clone()),
+        );
+        item.insert(
+            "ParentId".to_string(),
+            serde_json::Value::String(price_override.parent_id.clone()),
+        );
+    }
+    let merged = serde_json::to_vec(&handbook).map_err(|error| LoadError::Io(error.to_string()))?;
+
+    Ok(raw.insert(HANDBOOK_KEY.to_string(), merged))
 }
 
 /// Splices the raw file bytes into exactly the publish shape `DbPayloadProjection` emits — the
@@ -462,6 +542,7 @@ pub mod tests {
             schema: 1,
             dir: dir.path().to_string_lossy().into_owned(),
             verify,
+            handbook_price_override: None,
         }
     }
 
@@ -769,5 +850,80 @@ pub mod tests {
             trader.get("bearsuits").is_none(),
             "the importer skip list keeps bearsuits out of the root"
         );
+    }
+
+    #[test]
+    fn handbook_overrides_upsert_by_id_and_append_missing_at_the_end() {
+        let mut raw = std::collections::BTreeMap::new();
+        let original = br#"{"Categories":[],"Items":[{"Id":"a","ParentId":"p","Price":1},{"Id":"c","ParentId":"p","Price":3}]}"#.to_vec();
+        raw.insert(HANDBOOK_KEY.to_string(), original.clone());
+        let overrides: indexmap::IndexMap<String, HandbookPriceOverrideWire> =
+            serde_json::from_str(
+                r#"{"a":{"parentId":"pp","price":5},"b":{"parentId":"bp","price":7.5}}"#,
+            )
+            .unwrap();
+
+        let replaced = apply_handbook_overrides(&mut raw, &overrides).unwrap();
+        assert_eq!(
+            replaced,
+            Some(original),
+            "the raw bytes come back for the caller to restore"
+        );
+
+        let merged: serde_json::Value = serde_json::from_slice(&raw[HANDBOOK_KEY]).unwrap();
+        let items = merged["Items"].as_array().unwrap();
+        // Existing entry updated in place (HandbookHelper.cs:26-49: find by Id, set Price+ParentId).
+        assert_eq!(items[0]["Id"], "a");
+        assert_eq!(items[0]["Price"], 5);
+        assert_eq!(items[0]["ParentId"], "pp");
+        // Untouched entry intact.
+        assert_eq!(items[1]["Id"], "c");
+        assert_eq!(items[1]["Price"], 3);
+        // Missing entry appended at the END, in override document order.
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[2]["Id"], "b");
+        assert_eq!(items[2]["Price"], 7.5);
+        assert_eq!(items[2]["ParentId"], "bp");
+    }
+
+    #[test]
+    fn handbook_overrides_with_no_handbook_file_are_a_no_op() {
+        let mut raw = std::collections::BTreeMap::new();
+        let overrides: indexmap::IndexMap<String, HandbookPriceOverrideWire> =
+            serde_json::from_str(r#"{"a":{"parentId":"p","price":1}}"#).unwrap();
+        assert_eq!(
+            apply_handbook_overrides(&mut raw, &overrides).unwrap(),
+            None
+        );
+        assert!(raw.is_empty());
+    }
+
+    #[test]
+    fn overrides_merge_into_the_resident_root_but_files_stay_raw() {
+        let _guard = crate::db::tests::DB_TEST_LOCK.lock().unwrap();
+        crate::db::clear();
+
+        let dir = mini_tree();
+        let mut with_overrides = request(&dir, false);
+        with_overrides.handbook_price_override =
+            Some(serde_json::from_str(r#"{"appended":{"parentId":"p","price":42}}"#).unwrap());
+        let response = block_on(load(with_overrides)).expect("load succeeds");
+        assert_eq!(response.epoch, Some(1));
+
+        // The resident lift carries the merge — mini_tree's handbook is {"Items":[]}, so this is the
+        // append path, the one the shipped tree's absent override exercises on every real boot.
+        let db = crate::db::current().expect("a resident DB");
+        let items = &db.templates.as_ref().unwrap().handbook.items;
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id, "appended");
+
+        // The returned files are the raw disk bytes — the merge never leaks to C#
+        // (spec non-goal: no change to what spt_db_load returns to the importer).
+        let handbook = response
+            .files
+            .iter()
+            .find(|(key, _)| key == HANDBOOK_KEY)
+            .expect("handbook ships to C#");
+        assert_eq!(handbook.1, fs::read(dir.path().join(HANDBOOK_KEY)).unwrap());
     }
 }

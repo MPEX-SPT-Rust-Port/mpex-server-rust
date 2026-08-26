@@ -1,7 +1,9 @@
+using SPTarkov.Common.Models.Logging;
 using SPTarkov.DI.Annotations;
 using SPTarkov.Server.Core.Helpers.Profile;
 using SPTarkov.Server.Core.Models.Enums;
 using SPTarkov.Server.Core.Models.Spt.Config;
+using SPTarkov.Server.Core.Models.Spt.Mod;
 using SPTarkov.Server.Core.Models.Spt.Tables;
 using SPTarkov.Server.Core.Services.Server;
 
@@ -25,7 +27,9 @@ public class DbPublisher(
     GlobalTable globalTable,
     LocationTable locationTable,
     HideoutTable hideoutTable,
-    IReadOnlyDictionary<Type, BaseConfig> configs
+    IReadOnlyDictionary<Type, BaseConfig> configs,
+    IReadOnlyList<SptMod> loadedMods,
+    ISptLogger<DbPublisher> logger
 )
 {
     private readonly Lock _gate = new();
@@ -36,6 +40,8 @@ public class DbPublisher(
     {
         lock (_gate)
         {
+            ConsumeSeedOnce();
+
             var stamp = databaseMutationStamp.Current;
             if (_currentEpoch == 0 || _lastPublishedStamp != stamp)
             {
@@ -46,6 +52,12 @@ public class DbPublisher(
         }
     }
 
+    /// <summary>
+    /// Republishes unconditionally — the self-heal after a <c>NativeStaleEpochException</c>. Never
+    /// consumes the load-time seed: afterwards the epoch is non-zero, so a pending seed is dead for
+    /// this publisher (production always reaches <see cref="EnsureCurrent"/> first; tests drain the
+    /// slot in teardown).
+    /// </summary>
     public ulong ForcePublish()
     {
         lock (_gate)
@@ -53,6 +65,44 @@ public class DbPublisher(
             PublishLocked(databaseMutationStamp.Current);
 
             return _currentEpoch;
+        }
+    }
+
+    /// <summary>
+    /// Starts this publisher from the load-time install (spec § load-time seeding): modless only —
+    /// a mod can schedule pre-GameCallbacks IOnLoad writes, and LazyLoad transformer registrations
+    /// bump no stamp, so with mods loaded the first publish stays real. Forces the handbook
+    /// hydration a first publish would have forced, under the same suppression, so the C#-visible
+    /// hydration timing is unchanged and the first HandbookHelper use cannot bump the stamp.
+    /// Logs whether the seed was honoured or voided — the Release boot proof greps both.
+    /// </summary>
+    private void ConsumeSeedOnce()
+    {
+        if (_currentEpoch != 0 || loadedMods.Count != 0)
+        {
+            return;
+        }
+
+        if (DbLoadSeed.TryTake() is { } seed)
+        {
+            using (WriteBarrier.Suppress())
+            {
+                handbookHelper.IsCategory(Money.ROUBLES);
+            }
+
+            if (seed.Stamp == databaseMutationStamp.Current)
+            {
+                logger.Info($"Load-time seed consumed at epoch {seed.Epoch}; first publish skipped.");
+            }
+            else
+            {
+                logger.Warning(
+                    $"Load-time seed voided: stamp moved {seed.Stamp} -> {databaseMutationStamp.Current} before the first EnsureCurrent; republishing."
+                );
+            }
+
+            _currentEpoch = seed.Epoch;
+            _lastPublishedStamp = seed.Stamp;
         }
     }
 

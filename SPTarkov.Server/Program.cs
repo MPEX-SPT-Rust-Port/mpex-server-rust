@@ -12,6 +12,7 @@ using SPTarkov.Server.Core.Helpers.Server;
 using SPTarkov.Server.Core.Loaders;
 using SPTarkov.Server.Core.Models.Spt.Config;
 using SPTarkov.Server.Core.Models.Spt.Mod;
+using SPTarkov.Server.Core.Native.Db;
 using SPTarkov.Server.Core.Servers;
 using SPTarkov.Server.Core.Utils;
 using SPTarkov.Server.Exceptions;
@@ -198,9 +199,19 @@ public static class Program
 
         var shouldVerify = !ProgramStatics.DEBUG();
 
+        // Modless gate for the load-time seed: the early provider predates the mod loader, so
+        // the importer cannot see the mod list itself. Prepatchers (./user/patchers/) are
+        // invisible to this count - accepted; a barriered write from foreign IL voids the
+        // seed and DbPublisher logs it (spec § Part 3). Barrier-less builds never seed: the
+        // voided-seed tripwire is DbPublisher's stamp compare, and a build Ceciler never
+        // rewrote has no barriers, so a pre-EnsureCurrent table write there would be honoured
+        // silently and the resident DB would stay stale for the life of the process.
         var tables =
-            await dbImporter.LoadDatabaseAsync(shouldVerify, cancellationToken)
-            ?? throw new NullReferenceException("Failed to import database tables.");
+            await dbImporter.LoadDatabaseAsync(
+                shouldVerify,
+                seedResidentDb: loadedMods.Count == 0 && WriteBarrier.Installed,
+                cancellationToken
+            ) ?? throw new NullReferenceException("Failed to import database tables.");
 
         // Create web builder and logger
         var builder = ProgramHelpers.CreateNewHostBuilder(loggerFactory, configuration, tables);

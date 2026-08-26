@@ -5,6 +5,7 @@ using System.Text.Json.Serialization;
 using SPTarkov.Server.Core.Models.Common;
 using SPTarkov.Server.Core.Models.Eft.Ragfair;
 using SPTarkov.Server.Core.Models.Enums;
+using SPTarkov.Server.Core.Models.Spt.Config;
 using SPTarkov.Server.Core.Native.BaseClass;
 using SPTarkov.Server.Core.Native.Bot;
 using SPTarkov.Server.Core.Native.Db;
@@ -77,6 +78,17 @@ internal sealed class DbLoadResult
 }
 
 /// <summary>
+/// The resident DB's per-root canonical digests and the epoch they were taken at: the roots map is
+/// empty before the first publish, and omits any root that is not resident.
+/// </summary>
+internal sealed class DbDigestResult
+{
+    public required ulong Epoch { get; init; }
+
+    public required Dictionary<string, string> Roots { get; init; }
+}
+
+/// <summary>
 /// One profile off disk: its bytes exactly as they were stored, <c>default</c> when the file was
 /// not there. Bytes and not a string on purpose - the profile goes straight into
 /// <c>jsonUtil.Deserialize(span, type)</c>, so tens of MB are never widened to UTF-16.
@@ -104,7 +116,7 @@ internal enum LootExport
 
 public static class SptNative
 {
-    private const uint ExpectedAbiVersion = 32;
+    private const uint ExpectedAbiVersion = 33;
 
     // ffi.rs
     private const int StatusOk = 0;
@@ -396,22 +408,70 @@ public static class SptNative
     }
 
     /// <summary>
+    /// Per-root canonical digests of the native resident DB's typed lift surface — test support
+    /// for the load/projection equivalence gate. Digests are toolchain-stable but no wire
+    /// contract; compare only within one run.
+    /// The <c>configs</c> digest is NOT a pure function of the parsed input (ConfigsRoot's HashSet
+    /// lifts serialize in per-instance order) — compare only the five table roots across parses.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">The native side misbehaved.</exception>
+    internal static unsafe DbDigestResult DbResidentDigest()
+    {
+        EnsureLoadable();
+
+        byte* outPtr = null;
+        nuint outLen = 0;
+        var status = NativeMethods.DbResidentDigest(&outPtr, &outLen);
+
+        return DecodeResult(
+            "DbResidentDigest",
+            status,
+            outPtr,
+            outLen,
+            (buffer, length) =>
+            {
+                using var document = JsonDocument.Parse(new ReadOnlySpan<byte>((byte*)buffer, length).ToArray());
+                var roots = new Dictionary<string, string>();
+                foreach (var member in document.RootElement.GetProperty("roots").EnumerateObject())
+                {
+                    roots[member.Name] = member.Value.GetString()!;
+                }
+
+                return new DbDigestResult { Epoch = document.RootElement.GetProperty("epoch").GetUInt64(), Roots = roots };
+            }
+        );
+    }
+
+    /// <summary>
     /// Loads SPT_Data in one native pass: hash-verify (when asked), read the tree, install the
-    /// resident DB roots, and hand back the eager file bytes for the managed replica.
+    /// resident DB roots, and hand back the eager file bytes for the managed replica. Any
+    /// <paramref name="handbookPriceOverride"/> entries are merged into the installed roots only -
+    /// the returned file bytes stay exactly what is on disk, so the managed replica still hydrates
+    /// them itself through <c>HandbookHelper</c>.
     /// </summary>
     /// <exception cref="InvalidOperationException">The load failed, or the native side misbehaved.</exception>
-    internal static unsafe DbLoadResult DbLoad(string sptDataDir, bool verify)
+    internal static unsafe DbLoadResult DbLoad(
+        string sptDataDir,
+        bool verify,
+        IReadOnlyDictionary<MongoId, HandbookPriceOverride>? handbookPriceOverride = null
+    )
     {
         EnsureLoadable();
 
         // Default options on purpose: the request has three scalar members and no model types, so
-        // the loot converters would only risk renaming them away from what db/load.rs reads.
+        // the loot converters would only risk renaming them away from what db/load.rs reads. The
+        // override map is projected to plain strings and numbers for the same reason - and because
+        // a MongoId-keyed dictionary under default options throws NotSupportedException.
         var requestUtf8 = JsonSerializer.SerializeToUtf8Bytes(
             new
             {
                 schema = 1,
                 dir = sptDataDir,
                 verify,
+                handbookPriceOverride = handbookPriceOverride?.ToDictionary(
+                    kv => kv.Key.ToString(),
+                    kv => new { parentId = kv.Value.ParentId.ToString(), price = kv.Value.Price }
+                ),
             }
         );
         byte* outPtr = null;

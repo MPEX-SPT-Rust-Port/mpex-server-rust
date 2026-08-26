@@ -1,7 +1,11 @@
 using System.Text.Json;
 using NUnit.Framework;
+using SPTarkov.Common.Models.Logging;
+using SPTarkov.Server.Core.Helpers.Profile;
 using SPTarkov.Server.Core.Models.Spt.Config;
+using SPTarkov.Server.Core.Models.Spt.Mod;
 using SPTarkov.Server.Core.Models.Spt.Tables;
+using SPTarkov.Server.Core.Native;
 using SPTarkov.Server.Core.Native.Db;
 using SPTarkov.Server.Core.Services.Server;
 
@@ -11,6 +15,93 @@ namespace UnitTests.Tests.Native;
 [NonParallelizable]
 public class DbPublisherTests
 {
+    [OneTimeTearDown]
+    public void OneTimeTearDown()
+    {
+        // These tests publish behind the DI publisher's bookkeeping; move the stamp so the next
+        // EnsureCurrent() republishes real state over whatever they left resident.
+        DI.GetInstance().GetService<DatabaseMutationStamp>().Bump();
+    }
+
+    [TearDown]
+    public void TearDown()
+    {
+        DbLoadSeed.TryTake();
+    }
+
+    private static DbPublisher BuildPublisher(IReadOnlyList<SptMod> loadedMods)
+    {
+        var di = DI.GetInstance();
+
+        return new DbPublisher(
+            di.GetService<DatabaseMutationStamp>(),
+            di.GetService<HandbookHelper>(),
+            di.GetService<TemplateTable>(),
+            di.GetService<TradersTable>(),
+            di.GetService<GlobalTable>(),
+            di.GetService<LocationTable>(),
+            di.GetService<HideoutTable>(),
+            di.GetService<IReadOnlyDictionary<Type, BaseConfig>>(),
+            loadedMods,
+            di.GetService<ISptLogger<DbPublisher>>()
+        );
+    }
+
+    [Test]
+    public void ASeededModlessPublisherSkipsThePublishUntilTheStampMoves()
+    {
+        var di = DI.GetInstance();
+        var stamp = di.GetService<DatabaseMutationStamp>();
+
+        // Make the resident DB real and current, exactly as the importer's load + configs publish
+        // would, then hand its coordinates to a fresh publisher.
+        var residentEpoch = di.GetService<DbPublisher>().ForcePublish();
+        DbLoadSeed.Set(residentEpoch, stamp.Current);
+
+        var seeded = BuildPublisher([]);
+        Assert.That(seeded.EnsureCurrent(), Is.EqualTo(residentEpoch), "the seed is the current state");
+        Assert.That(
+            seeded.EnsureCurrent(),
+            Is.EqualTo(residentEpoch),
+            "a settled seeded publisher stays settled (the churn invariant, seeded)"
+        );
+        Assert.That(SptNative.DbResidentDigest().Epoch, Is.EqualTo(residentEpoch), "no publish happened");
+
+        stamp.Bump();
+        Assert.That(seeded.EnsureCurrent(), Is.GreaterThan(residentEpoch), "a moved stamp republishes as always");
+    }
+
+    [Test]
+    public void AVoidedSeedRepublishesOnTheFirstEnsureCurrent()
+    {
+        var di = DI.GetInstance();
+        var stamp = di.GetService<DatabaseMutationStamp>();
+
+        var residentEpoch = di.GetService<DbPublisher>().ForcePublish();
+        DbLoadSeed.Set(residentEpoch, stamp.Current);
+
+        // The stamp moves between the seed and the first EnsureCurrent - the seed no longer
+        // describes the tables, so it must be voided and the publish must be real (spec § Part 3's
+        // tripwire).
+        stamp.Bump();
+        Assert.That(BuildPublisher([]).EnsureCurrent(), Is.GreaterThan(residentEpoch), "a voided seed republishes");
+    }
+
+    [Test]
+    public void AModdedPublisherIgnoresTheSeed()
+    {
+        var di = DI.GetInstance();
+        var stamp = di.GetService<DatabaseMutationStamp>();
+
+        var residentEpoch = di.GetService<DbPublisher>().ForcePublish();
+        DbLoadSeed.Set(residentEpoch, stamp.Current);
+
+        // One loaded mod - never dereferenced, only counted (a mod can schedule
+        // pre-GameCallbacks writes, and transformer registrations bump no stamp; spec § Part 3).
+        var modded = BuildPublisher([null!]);
+        Assert.That(modded.EnsureCurrent(), Is.GreaterThan(residentEpoch), "with mods the first call publishes");
+    }
+
     [Test]
     public void EnsureCurrentPublishesOncePerStampAndRepublishesOnBump()
     {
@@ -143,5 +234,49 @@ public class DbPublisherTests
         Assert.That(recipes.GetArrayLength(), Is.GreaterThan(0));
         Assert.That(recipes[0].TryGetProperty("_id", out _), Is.True);
         Assert.That(recipes[0].GetProperty("endProducts").TryGetProperty("Common", out _), Is.True);
+    }
+
+    [Test]
+    public void BuildConfigsOnlyEnvelopeCarriesConfigsAndNoOtherRoot()
+    {
+        var di = DI.GetInstance();
+
+        var envelope = DbPayloadProjection.BuildConfigsOnlyEnvelope(
+            new Dictionary<Type, BaseConfig> { [typeof(RagfairConfig)] = di.GetService<RagfairConfig>() }
+        );
+
+        using var document = JsonDocument.Parse(envelope);
+        Assert.That(document.RootElement.GetProperty("schema").GetInt32(), Is.EqualTo(1));
+        var roots = document.RootElement.GetProperty("roots");
+        Assert.That(
+            roots.EnumerateObject().Select(member => member.Name),
+            Is.EquivalentTo(new[] { "configs" }),
+            "a configs-only envelope must name no other root - an absent root keeps the resident one"
+        );
+        // Runtime-type overload preserved through the extraction: a concrete-record member exists.
+        Assert.That(roots.GetProperty("configs").GetProperty("spt-ragfair").TryGetProperty("dynamic", out _), Is.True);
+    }
+
+    [Test]
+    public void ConfigsOnlyPublishKeepsTheOtherRootsResidentByDigest()
+    {
+        var di = DI.GetInstance();
+
+        // Make every root resident, then re-publish configs alone: the five table roots must not move.
+        di.GetService<DbPublisher>().ForcePublish();
+        var before = SptNative.DbResidentDigest();
+
+        SptNative.DbPublish(
+            DbPayloadProjection.BuildConfigsOnlyEnvelope(
+                new Dictionary<Type, BaseConfig> { [typeof(RagfairConfig)] = di.GetService<RagfairConfig>() }
+            )
+        );
+        var after = SptNative.DbResidentDigest();
+
+        Assert.That(after.Epoch, Is.EqualTo(before.Epoch + 1), "every publish increments the epoch");
+        foreach (var root in new[] { "templates", "traders", "globals", "locations", "hideout" })
+        {
+            Assert.That(after.Roots[root], Is.EqualTo(before.Roots[root]), $"{root} must survive a configs-only publish");
+        }
     }
 }

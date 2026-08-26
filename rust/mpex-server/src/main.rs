@@ -52,7 +52,7 @@ fn run() -> Result<i32, String> {
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| format!("argument is not a valid host string: {e}"))?;
 
-    // Anchor: the linker drops an rlib the binary never references, taking all 34 #[no_mangle]
+    // Anchor: the linker drops an rlib the binary never references, taking all 35 #[no_mangle]
     // spt_* exports with it. Any path reference keeps them; this one is a call behind black_box so
     // that deleting it reads as a behaviour change rather than dead-code cleanup.
     // scripts/smoke-mpex-server.sh checks the launcher still exports them.

@@ -45,6 +45,10 @@ public class DI
         {
             services.AddSingleton(configEntry.Key, configEntry.Value);
         }
+
+        // The whole map too, mirroring ProgramHelpers.CreateNewHostBuilder: DatabaseImporter
+        // projects every config rather than reading one.
+        services.AddSingleton(configuration);
         services.AddSingleton(logger);
         services.AddSingleton(typeof(ILogger<>), typeof(MockLogger<>));
         services.AddSingleton(typeof(ISptLogger<>), typeof(MockLogger<>));

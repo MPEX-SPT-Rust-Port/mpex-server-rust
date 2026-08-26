@@ -139,7 +139,7 @@ pub struct Quest {
     /// Nothing in this port reads or writes it, so it is echoed as-is.
     #[serde(rename = "sptStatus", skip_serializing_if = "Option::is_none")]
     pub spt_status: Option<serde_json::Value>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: Extra,
 }
 
@@ -172,18 +172,60 @@ pub struct ChangeCost {
     /// Amount of item needed to reset.
     #[serde(rename = "count", skip_serializing_if = "Option::is_none")]
     pub count: Option<i32>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: Extra,
+}
+
+/// The all-zero ObjectId. C# parses it into a `MongoId` whose twelve bytes are all zero, which
+/// is what `MongoId.IsEmpty` tests (`MongoId.cs:46-49`).
+const MONGO_ID_EMPTY: &str = "000000000000000000000000";
+
+/// C# `MongoId`'s empty-collapse, replicated on parse.
+///
+/// An empty `MongoId` renders as zero characters — `ToString` returns `string.Empty`
+/// (`MongoId.cs:181-183`) and `TryFormat` writes 0 chars (`:219-222`) — so the projection arm,
+/// which round-trips these through `StringToMongoIdConverter`, emits `""` where the file on disk
+/// holds `"000000000000000000000000"`. Collapsing on the way in makes the resident lift carry
+/// what the projection arm's parse carries.
+///
+/// Bug-for-bug, not cosmetics: `repeatableQuests.json` ships the all-zero id in
+/// `templates.{Elimination,Completion,Exploration,Pickup}.questStatus.{id,qid}`, so without this
+/// the two arms install different bytes for a typed member and the load/projection equivalence
+/// gate is red. Deserialize-side on purpose — serialization stays verbatim, so nothing that
+/// echoes a real id back to the client changes.
+///
+/// Scope: the empty-collapse only. C#'s `MongoId` also accepts `A–F` on parse and emits lowercase
+/// on serialize (`MongoId.cs:157-170`); neither this hook nor any other MongoId-typed lift
+/// normalizes case. Safe while no uppercase 24-hex literal ships in the tree (verified at review);
+/// if a data drop ever ships one, the fix is a shared lowercase+collapse deserializer on every
+/// MongoId-typed lift, not a wider version of this hook.
+fn deserialize_mongo_id_collapsing_empty<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = String::deserialize(deserializer)?;
+
+    Ok(if raw == MONGO_ID_EMPTY {
+        String::new()
+    } else {
+        raw
+    })
 }
 
 /// `Models/Eft/Common/Tables/RepeatableQuests.cs:36-55`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RepeatableQuestStatus {
-    #[serde(rename = "id")]
+    #[serde(
+        rename = "id",
+        deserialize_with = "deserialize_mongo_id_collapsing_empty"
+    )]
     pub id: String,
     #[serde(rename = "uid", skip_serializing_if = "Option::is_none")]
     pub uid: Option<String>,
-    #[serde(rename = "qid")]
+    #[serde(
+        rename = "qid",
+        deserialize_with = "deserialize_mongo_id_collapsing_empty"
+    )]
     pub qid: String,
     #[serde(rename = "startTime", skip_serializing_if = "Option::is_none")]
     pub start_time: Option<i64>,
@@ -192,7 +234,7 @@ pub struct RepeatableQuestStatus {
     /// C# types this `object?`; nothing reads it, so it is echoed as-is.
     #[serde(rename = "statusTimers", skip_serializing_if = "Option::is_none")]
     pub status_timers: Option<serde_json::Value>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: Extra,
 }
 
@@ -209,7 +251,7 @@ pub struct QuestConditionTypes {
     pub success: Option<Vec<QuestCondition>>,
     #[serde(rename = "Fail", skip_serializing_if = "Option::is_none")]
     pub fail: Option<Vec<QuestCondition>>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: Extra,
 }
 
@@ -336,7 +378,7 @@ pub struct QuestCondition {
     pub weight: Option<ValueCompare>,
     #[serde(rename = "width", skip_serializing_if = "Option::is_none")]
     pub width: Option<ValueCompare>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: Extra,
 }
 
@@ -347,7 +389,7 @@ pub struct QuestConditionCounter {
     pub id: Option<String>,
     #[serde(rename = "conditions", skip_serializing_if = "Option::is_none")]
     pub conditions: Option<Vec<QuestConditionCounterCondition>>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: Extra,
 }
 
@@ -431,7 +473,7 @@ pub struct QuestConditionCounterCondition {
     pub equipment_exclusive: Option<Vec<Vec<String>>>,
     #[serde(rename = "zoneIds", skip_serializing_if = "Option::is_none")]
     pub zones: Option<Vec<String>>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: Extra,
 }
 
@@ -442,7 +484,7 @@ pub struct EnemyHealthEffect {
     pub body_parts: Option<Vec<String>>,
     #[serde(rename = "effects", skip_serializing_if = "Option::is_none")]
     pub effects: Option<Vec<String>>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: Extra,
 }
 
@@ -453,7 +495,7 @@ pub struct ValueCompare {
     pub compare_method: Option<String>,
     #[serde(rename = "value", skip_serializing_if = "Option::is_none")]
     pub value: Option<f64>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: Extra,
 }
 
@@ -465,7 +507,7 @@ pub struct CounterConditionDistance {
     pub value: Option<f64>,
     #[serde(rename = "compareMethod", skip_serializing_if = "Option::is_none")]
     pub compare_method: Option<String>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: Extra,
 }
 
@@ -476,7 +518,7 @@ pub struct DaytimeCounter {
     pub from: Option<i32>,
     #[serde(rename = "to", skip_serializing_if = "Option::is_none")]
     pub to: Option<i32>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: Extra,
 }
 
@@ -495,7 +537,7 @@ pub struct VisibilityCondition {
     pub one_session_only: Option<bool>,
     #[serde(rename = "conditionType")]
     pub condition_type: String,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: Extra,
 }
 
@@ -553,7 +595,7 @@ pub struct Reward {
     /// Only found with `NotificationPopup` rewards.
     #[serde(rename = "message", skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: Extra,
 }
 
@@ -574,7 +616,7 @@ pub struct IllustrationConfig {
     pub big_image: String,
     #[serde(rename = "isBigImage")]
     pub is_big_image: bool,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: Extra,
 }
 
@@ -600,7 +642,7 @@ pub struct QuestTypePool {
     pub types: Vec<String>,
     #[serde(rename = "pool")]
     pub pool: QuestPool,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: Extra,
 }
 
@@ -613,7 +655,7 @@ pub struct QuestPool {
     pub elimination: EliminationPool,
     #[serde(rename = "Pickup")]
     pub pickup: ExplorationPool,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: Extra,
 }
 
@@ -623,7 +665,7 @@ pub struct QuestPool {
 pub struct ExplorationPool {
     #[serde(rename = "locations", skip_serializing_if = "Option::is_none")]
     pub locations: Option<IndexMap<String, Vec<String>>>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: Extra,
 }
 
@@ -632,7 +674,7 @@ pub struct ExplorationPool {
 pub struct EliminationPool {
     #[serde(rename = "targets", skip_serializing_if = "Option::is_none")]
     pub targets: Option<IndexMap<String, TargetLocation>>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: Extra,
 }
 
@@ -641,7 +683,7 @@ pub struct EliminationPool {
 pub struct TargetLocation {
     #[serde(rename = "locations", skip_serializing_if = "Option::is_none")]
     pub locations: Option<Vec<String>>,
-    #[serde(flatten)]
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: Extra,
 }
 
@@ -937,7 +979,7 @@ impl QuestViewsWire {
 
 /// `Models/Eft/Common/Tables/RepeatableQuests.cs:57-70`. The C# member names are the wire names;
 /// a missing or null template is the `null` arm of `GetClonedQuestTemplateForType`.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct RepeatableTemplates {
     #[serde(rename = "Elimination")]
     pub elimination: Option<RepeatableQuest>,
@@ -951,15 +993,19 @@ pub struct RepeatableTemplates {
 
 /// `Models/Eft/Common/Tables/RepeatableQuests.cs:153-169` — C# declares two identical records,
 /// `ItemsWhitelist` and `ItemsBlacklist`; one type serves both.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LevelledItemFilter {
     /// `int?` in the C#, and a null one never passes the `MinPlayerLevel <= pmcLevel` filter
     /// (`CompletionQuestGenerator.cs:202/238`) — a lifted comparison against null is false.
     pub min_player_level: Option<i32>,
-    /// `HashSet<MongoId>?`, flattened by the C# `?? []`.
+    /// `HashSet<MongoId>?`, flattened by the C# `?? []`. An `IndexSet` per the gated-surface
+    /// convention (`db/models.rs:713-715`): this rides the resident `templates` root, whose
+    /// digest hashes arrays in order, and a `HashSet`'s per-instance seed would make that
+    /// digest differ between two parses of the same bytes. Membership-only downstream
+    /// (`completion.rs` `levelled_item_ids`), so the order is unread.
     #[serde(default)]
-    pub item_ids: HashSet<String>,
+    pub item_ids: IndexSet<String>,
 }
 
 /// The members of `Models/Eft/Common/LocationBase.cs:806-883` `Exit` that
@@ -979,7 +1025,7 @@ pub struct ExitView {
 
 /// `Models/Spt/Config/QuestConfig.cs:75-90` `RepeatableQuestTemplates` — template ids keyed by
 /// quest type name, one map per player group.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RepeatableQuestTemplates {
     pub pmc: IndexMap<String, String>,
@@ -1047,13 +1093,48 @@ pub mod tests {
             .expect("SPT_Data file is JSON")
     }
 
-    /// The two divergences a C# round trip has too, applied to both sides before comparing:
+    /// The empty-`MongoId` collapse the projection arm gets for free from
+    /// `StringToMongoIdConverter`; the resident lift has to do it by hand or the two arms install
+    /// different bytes and the load/projection equivalence gate goes red.
+    #[test]
+    fn repeatable_quest_status_collapses_the_empty_mongo_id() {
+        let parse = |json: &str| {
+            serde_json::from_str::<RepeatableQuestStatus>(json).expect("questStatus parses")
+        };
+
+        let zeros = parse(r#"{"id":"000000000000000000000000","qid":"000000000000000000000000"}"#);
+        assert_eq!(
+            zeros.id, "",
+            "an all-zero id collapses the way MongoId does"
+        );
+        assert_eq!(zeros.qid, "", "and so does qid");
+
+        assert_eq!(
+            parse(r#"{"id":"","qid":""}"#).id,
+            "",
+            "already-empty passes through"
+        );
+
+        // A real id is untouched — the collapse must not eat live data.
+        let real = parse(r#"{"id":"68690637c1394a820efc27ca","qid":"67d02f62bcc8d767d075887a"}"#);
+        assert_eq!(real.id, "68690637c1394a820efc27ca");
+        assert_eq!(real.qid, "67d02f62bcc8d767d075887a");
+    }
+
+    /// The three divergences a C# round trip has too, applied to both sides before comparing:
     ///
     /// * null members are dropped — `JsonUtil`'s options set
     ///   `DefaultIgnoreCondition = WhenWritingNull`, so C# never writes them back either
     ///   (`repeatableQuests.json` ships `"location": null` on two templates);
     /// * numbers are compared as `f64` — a C# `double?` member holding `1` writes `1`, serde
-    ///   writes `1.0`, and `serde_json::Value`'s `Eq` distinguishes the two representations.
+    ///   writes `1.0`, and `serde_json::Value`'s `Eq` distinguishes the two representations;
+    /// * the all-zero ObjectId collapses to `""` — a C# `MongoId` parsed from it is `IsEmpty`
+    ///   and renders as zero characters (`MongoId.cs:46-49,181-183`), so C# does not write it
+    ///   back either. [`deserialize_mongo_id_collapsing_empty`] does this on the Rust parse, so
+    ///   the written side arrives already collapsed and only the file side needs it here.
+    ///   Applied to every string rather than to named paths: in this fixture the literal occurs
+    ///   exactly eight times, and all eight are the `MongoId`-typed
+    ///   `templates.*.questStatus.{id,qid}`.
     fn normalise(value: &serde_json::Value) -> serde_json::Value {
         match value {
             serde_json::Value::Object(map) => serde_json::Value::Object(
@@ -1066,6 +1147,9 @@ pub mod tests {
                 serde_json::Value::Array(items.iter().map(normalise).collect())
             }
             serde_json::Value::Number(number) => serde_json::json!(number.as_f64()),
+            serde_json::Value::String(text) if text == MONGO_ID_EMPTY => {
+                serde_json::Value::String(String::new())
+            }
             other => other.clone(),
         }
     }
