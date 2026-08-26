@@ -486,7 +486,7 @@ answers as soon as Kestrel is bound, and on the pre-change arm Kestrel binds *in
 `EnsureCurrent`: in every pre-change run `/health` answered ~2 s before `PostDbLoadService` finished.
 That column therefore measures everything up to the publish and none of the publish, so the seed's
 **+419 ms** there is its own load-time cost carrying none of its saving. Against `Server has started`
-the seed is **−861 ms against pre-change (−7.5 %) and −805 ms against legacy**.
+the seed is **−861 ms against pre-change (−7.5 %) and −804 ms against legacy**.
 
 ### Where it moves, from the console timeline
 
@@ -520,14 +520,18 @@ instead of moving it.
 
 ### The deterministic half
 
-Wall clock is noisy; the log lines are not. A Debug-published `scripts/smoke-mpex-server.sh` run and
-every Release boot above print, in order:
+Wall clock is noisy; the log lines are not. Every seeded Release boot above prints, in order:
 
     Resident database seeded at epoch 2; a modless boot skips the first publish.
     Load-time seed consumed at epoch 2; first publish skipped.
 
-and never `Load-time seed voided:` — in all 20 seeded-arm boots taken for this section the stamp did
-not move between the importer's read and the first `EnsureCurrent`. Epoch 2 is the load's epoch-1
+and never `Load-time seed voided:` — in every seeded Release boot taken for this section (the six
+tabulated runs and the discarded un-interleaved pass) the stamp did not move between the importer's
+read and the first `EnsureCurrent`. Only Release boots carry that evidence: when these runs were
+taken a Debug publish had no Ceciler write barriers, so a Debug smoke boot could not have printed
+the voided line no matter what wrote to the database — vacuous as proof. Since corrected on this
+branch: `IsPublish` is defined for every publish, and a build without barriers never seeds at all,
+so wherever the seeded/consumed pair appears the tripwire behind it is live. Epoch 2 is the load's epoch-1
 five-root install plus the configs-only publish. A voided line means some pre-`GameCallbacks` write
 moved the stamp and the first publish came back; it is the line to grep after any change to
 `PostDbLoadService` or to a startup `IOnLoad`.

@@ -669,7 +669,10 @@ The follow-up now has to publish configs at load time from the live C# objects, 
 see the load-epoch seeding ledger below.)*
 
 - Freshness: **none at generation time.** Epoch 1 is boot-validation only, always superseded by the
-  first `EnsureCurrent` republish, so no generation path ever reads it.
+  first `EnsureCurrent` republish, so no generation path ever reads it. *(Corrected by the
+  load-epoch seed follow-up: on a modless boot the first `EnsureCurrent` now consumes the seed
+  instead of republishing, so epoch 1 plus the configs-only publish — epoch 2 — is exactly what
+  every eligible family reads until the `RagfairCallbacks` settle publish.)*
 - **1, loose-loot residency declined.** 549 MiB on top of the measured 405.2 MiB publish RSS delta is
   954.2 MiB, leaving no headroom under the ~1 GB line Phase 0's RSS gate drew. The spec's
   byte-serving export was **not built**. `locations/*/looseLoot.json` and `locales/global/*` are
@@ -689,7 +692,9 @@ see the load-epoch seeding ledger below.)*
   `DbPayloadProjection`, and **nothing gates it** — `DatabaseLoadEquivalenceTests` compares
   `DatabaseTables`, never the resident roots. What makes it safe today is only that epoch 1 is
   superseded by the very republish the follow-up exists to remove. Gate it against a
-  `DbPayloadProjection` publish before, not after.
+  `DbPayloadProjection` publish before, not after. *(Delivered with the load-epoch seed:
+  `ResidentRootEquivalenceTests` is that gate — always-on, five roots, digest compare over the
+  typed lift surface via `spt_db_resident_digest`.)*
 - **4, the equivalence golden is permanent.** `DatabaseLoadEquivalenceTests` compares the
   legacy-built and native-built `DatabaseTables` root by root and pins that the fused load returns a
   file under every root it compares (`ImporterUtilPreloadedTests` covers consumption). Plain `[Test]`,

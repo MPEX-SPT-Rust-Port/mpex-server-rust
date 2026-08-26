@@ -135,7 +135,9 @@ epoch and each returned file's path and length, followed by the file bodies back
 `spt_db_resident_digest` taking no request at all (out-buffer only) and answering
 `{"epoch":N,"roots":{"templates":"<16-hex>",…}}`, one canonical digest per resident root over the *typed
 lift surface* — the roots serialize in digest mode, which skips the named `extra` overflow maps, so whatever
-rides one is invisible to it; the dictionary roots' bare flatten maps (`TradersRoot`, `LocationsRoot`) are
+rides one is invisible to it, and the two arms' extras are *known* to differ (explicit nulls, number
+forms, Debug-build model coverage, the projection's narrower hideout root), so a divergence living
+entirely in extras passes the gate by design; the dictionary roots' bare flatten maps (`TradersRoot`, `LocationsRoot`) are
 *not* overflow, they are the payload, and they are digested —
 with absent roots omitted and `{"epoch":0,"roots":{}}` before the first publish; the digests are
 test support for the load/projection equivalence gate and no wire contract, so compare two calls within

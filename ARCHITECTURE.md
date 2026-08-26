@@ -228,7 +228,11 @@ family carries no call-invariant half at all: `DbPublisher` re-publishes the
 templates/traders/globals/locations/hideout roots — and, since Phase 4, a configs root carrying
 every loaded config — into the native resident DB when
 `DatabaseMutationStamp` has moved, and each call carries just an epoch (a stale epoch self-heals by
-force-publish and one retry). Since Phase 2 the stamp's bump sites are mostly Ceciler-injected
+force-publish and one retry). On a modless boot of a barriered build the first publish is skipped
+entirely: the importer seeds `DbPublisher` from the load-time install (five roots plus a
+configs-only publish), and the first `EnsureCurrent` consumes the seed unless the stamp moved —
+`Load-time seed voided:` in the log is the tripwire to grep after changing anything
+pre-`GameCallbacks`. Since Phase 2 the stamp's bump sites are mostly Ceciler-injected
 setter barriers, so a modded server rides the resident path too — `TrustNativeRequestCacheWithMods`
 defaults on, honoured only where the barriers were actually injected (Release and publish), with a
 per-family kill switch beside it; an ineligible caller ships the full views with every call instead.
