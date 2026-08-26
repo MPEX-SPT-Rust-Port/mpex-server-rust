@@ -72,6 +72,22 @@ public class DbPublisherTests
     }
 
     [Test]
+    public void AVoidedSeedRepublishesOnTheFirstEnsureCurrent()
+    {
+        var di = DI.GetInstance();
+        var stamp = di.GetService<DatabaseMutationStamp>();
+
+        var residentEpoch = di.GetService<DbPublisher>().ForcePublish();
+        DbLoadSeed.Set(residentEpoch, stamp.Current);
+
+        // The stamp moves between the seed and the first EnsureCurrent - the seed no longer
+        // describes the tables, so it must be voided and the publish must be real (spec § Part 3's
+        // tripwire).
+        stamp.Bump();
+        Assert.That(BuildPublisher([]).EnsureCurrent(), Is.GreaterThan(residentEpoch), "a voided seed republishes");
+    }
+
+    [Test]
     public void AModdedPublisherIgnoresTheSeed()
     {
         var di = DI.GetInstance();
