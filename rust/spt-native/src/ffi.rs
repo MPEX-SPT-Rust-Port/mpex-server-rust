@@ -702,6 +702,33 @@ pub unsafe extern "C" fn spt_db_publish(
     }
 }
 
+/// Per-root canonical digests of the resident DB's typed lift surface,
+/// `{"epoch":N,"roots":{…}}` — `{"epoch":0,"roots":{}}` before the first publish. Digests are
+/// stable within a toolchain but no wire contract: compare two calls within one process, never
+/// across builds or machines. Test support for the load/projection equivalence gate.
+///
+/// # Safety
+/// `out_ptr` and `out_len` must be valid for writes; the buffer must be released with
+/// `spt_buf_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn spt_db_resident_digest(out_ptr: *mut *mut u8, out_len: *mut usize) -> i32 {
+    if out_ptr.is_null() || out_len.is_null() {
+        return STATUS_BAD_ARGS;
+    }
+    match catch_unwind(AssertUnwindSafe(crate::db::resident_digests_json)) {
+        Ok(json) => {
+            unsafe { write_buffer(json, out_ptr, out_len) };
+
+            STATUS_OK
+        }
+        Err(payload) => {
+            unsafe { write_buffer(panic_message(payload).into_bytes(), out_ptr, out_len) };
+
+            STATUS_PANIC
+        }
+    }
+}
+
 /// The framed load response: `[u32-LE header length][header JSON][blob 0][blob 1]…`, the blobs in
 /// `files[]` order. Framed rather than one JSON document so the file bytes cross as bytes — the
 /// eager tree is tens of megabytes of JSON that C# re-parses itself.
@@ -1537,7 +1564,7 @@ mod tests {
         assert_eq!(spt_native_abi_version(), crate::ABI_VERSION);
         assert_eq!(
             crate::ABI_VERSION,
-            32,
+            33,
             "bump SptNative.ExpectedAbiVersion too"
         );
     }
@@ -2923,6 +2950,25 @@ mod tests {
 
         assert_eq!(status, STATUS_BAD_ARGS);
         assert_eq!(out_len, 0, "nothing may be written when out_ptr is null");
+    }
+
+    #[test]
+    fn db_resident_digest_answers_the_empty_report_when_nothing_is_resident() {
+        let _guard = db_lock();
+        crate::db::clear();
+
+        let mut out_ptr: *mut u8 = std::ptr::null_mut();
+        let mut out_len: usize = 0;
+        let status = unsafe { spt_db_resident_digest(&mut out_ptr, &mut out_len) };
+        assert_eq!(status, STATUS_OK);
+        let body = unsafe { std::slice::from_raw_parts(out_ptr, out_len) }.to_vec();
+        unsafe { spt_buf_free(out_ptr, out_len) };
+        assert_eq!(body, br#"{"epoch":0,"roots":{}}"#.to_vec());
+
+        assert_eq!(
+            unsafe { spt_db_resident_digest(std::ptr::null_mut(), &mut out_len) },
+            STATUS_BAD_ARGS
+        );
     }
 
     #[test]

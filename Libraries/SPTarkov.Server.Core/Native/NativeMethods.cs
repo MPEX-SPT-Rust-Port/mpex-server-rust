@@ -94,6 +94,9 @@ internal static unsafe partial class NativeMethods
     [LibraryImport(LibraryName, EntryPoint = "spt_db_load")]
     internal static partial int DbLoad(byte* requestUtf8, nuint requestLen, byte** outPtr, nuint* outLen);
 
+    [LibraryImport(LibraryName, EntryPoint = "spt_db_resident_digest")]
+    internal static partial int DbResidentDigest(byte** outPtr, nuint* outLen);
+
     [LibraryImport(LibraryName, EntryPoint = "spt_profile_list")]
     internal static partial int ProfileList(byte* requestUtf8, nuint requestLen, byte** outPtr, nuint* outLen);
 

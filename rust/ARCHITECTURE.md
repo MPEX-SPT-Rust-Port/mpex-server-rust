@@ -122,7 +122,7 @@ trades that for build time — `opt-level = 1`, sixteen codegen units, line-tabl
 
 ### FFI boundary (`ffi.rs`)
 
-Thirty-four `extern "C"` exports: two trivial (`spt_native_abi_version`, `spt_buf_free`), thirteen taking a
+Thirty-five `extern "C"` exports: two trivial (`spt_native_abi_version`, `spt_buf_free`), thirteen taking a
 UTF-8 JSON generation request, four taking a profile-persistence request (`{schema, dir}`, plus `id`
 on all but `spt_profile_list` and the profile text on `spt_profile_save` — see *`src/profile.rs`*;
 `spt_profile_load` returns a framed byte response, `[u32-LE header length][{"found":bool}][file
@@ -131,20 +131,27 @@ bytes]`),
 resident-DB publish envelope, `spt_db_load` taking the fused-load request (`{schema, dir, verify}`) and
 returning a framed byte response — a length-prefixed JSON header naming the verify report, the installed
 epoch and each returned file's path and length, followed by the file bodies back to back —
+`spt_db_resident_digest` taking no request at all (out-buffer only) and answering
+`{"epoch":N,"roots":{"templates":"<16-hex>",…}}`, one canonical digest per resident root over the *typed
+lift surface* — what `db/models.rs` actually parses, so anything riding a flatten map is invisible to it —
+with absent roots omitted and `{"epoch":0,"roots":{}}` before the first publish; the digests are
+test support for the load/projection equivalence gate and no wire contract, so compare two calls within
+one process, never across builds or machines —
 `spt_locales_set` taking the resolved server-locale table as JSON, and eleven
 for the log pipeline and the terminal it owns (`spt_logger_init`, `spt_logger_reinit`, `spt_log_emit`,
 `spt_logger_close`, `spt_log_set_tap`, `spt_log_enabled`, `spt_log_format`, `spt_console_write`,
 `spt_console_read_line`, `spt_console_set_title`, `spt_console_clear` — see *The log pipeline*). The
-twenty generation/verify/publish/load/profile exports hand back a heap buffer on success, which the caller
-releases with `spt_buf_free`; so do `spt_console_read_line` and `spt_log_format`.
+twenty-one generation/verify/publish/load/digest/profile exports hand back a heap buffer on success, which the
+caller releases with `spt_buf_free`; so do `spt_console_read_line` and `spt_log_format`.
 
 - `run_generator_with` is the shared body of every generation export, `spt_db_publish`, `spt_db_load` and
   the four `spt_profile_*` —
   parse, `catch_unwind`,
   encode — so a new export is a thin wrapper over it, generic in its error type and response encoding.
   `spt_db_load` is its own encoder (the framed byte response) and blocks on the tokio runtime inside its
-  generator fn. `spt_verify_database` is the one that stands apart from the shared body entirely, because it
-  blocks on the runtime around a hand-written wrapper.
+  generator fn. Two stand apart from the shared body entirely: `spt_verify_database`, because it blocks on
+  the runtime around a hand-written wrapper, and `spt_db_resident_digest`, because it takes no request to
+  parse — just a null check, a `catch_unwind` and a `write_buffer`.
 - Status codes: `STATUS_OK` 0, `STATUS_BAD_ARGS` 1, `STATUS_PANIC` 2, `STATUS_ERROR` 3, `STATUS_STALE_EPOCH` 4
   (every generation export since flip #6). **Quest and scav case never return 2**: they catch the generator's
   panic themselves and report it as 3 carrying the message, because those families port a C#-sanctioned throw
