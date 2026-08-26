@@ -184,7 +184,7 @@ pub struct SaveRequest {
 /// with `MOVEFILE_REPLACE_EXISTING` and fails with a sharing violation while the source
 /// handle is open without `FILE_SHARE_DELETE`. Do not hoist the handle out of the chain; it
 /// would still pass every test on Linux, which is the only platform this repo runs today
-/// (`RUST-ROADMAP.md` § Roadmap, the 6a item — `mpex-server.exe` ships but has never been
+/// (`RUST-ROADMAP.md` § Ledgers, Phase 6a — `mpex-server.exe` ships but has never been
 /// executed).
 ///
 /// **Callers must serialize saves per id.** The temp name is fixed, so two concurrent saves of one
