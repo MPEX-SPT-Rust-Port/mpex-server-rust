@@ -3,7 +3,9 @@ using SPTarkov.Common.Models.Logging;
 using SPTarkov.Server.Core.Exceptions.Database;
 using SPTarkov.Server.Core.Models.Spt.Config;
 using SPTarkov.Server.Core.Native;
+using SPTarkov.Server.Core.Native.Db;
 using SPTarkov.Server.Core.Services.Locales;
+using SPTarkov.Server.Core.Services.Server;
 using SPTarkov.Server.Core.Utils;
 
 namespace SPTarkov.Server.Helpers;
@@ -13,7 +15,8 @@ public sealed class DatabaseImporter(
     ServerLocalisationService serverLocalisationService,
     ImporterUtil importerUtil,
     CoreConfig coreConfig,
-    IReadOnlyDictionary<Type, BaseConfig> configs
+    IReadOnlyDictionary<Type, BaseConfig> configs,
+    DatabaseMutationStamp databaseMutationStamp
 )
 {
     private const string SptDataPath = "./SPT_Data/";
@@ -22,11 +25,20 @@ public sealed class DatabaseImporter(
     /// Read all json files in database folder and map into a json object
     /// </summary>
     /// <param name="shouldVerifyDatabase">if the database should be verified before deserialization</param>
+    /// <param name="seedResidentDb">
+    /// Publish the configs root over what the native load installed and record the resulting epoch as
+    /// <see cref="DbLoadSeed"/>, so the first <c>EnsureCurrent</c> can skip its republish. Opt-in: only a
+    /// modless boot may pass true, and the test bootstrap never does.
+    /// </param>
     /// <param name="cancellationToken">
     /// The <see cref="CancellationToken"/> that can be used to cancel the database hydration operation.
     /// </param>
     /// <returns></returns>
-    public async Task<DatabaseTables?> LoadDatabaseAsync(bool shouldVerifyDatabase, CancellationToken cancellationToken = default)
+    public async Task<DatabaseTables?> LoadDatabaseAsync(
+        bool shouldVerifyDatabase,
+        bool seedResidentDb = false,
+        CancellationToken cancellationToken = default
+    )
     {
         try
         {
@@ -44,7 +56,7 @@ public sealed class DatabaseImporter(
             Stopwatch timer = new();
             timer.Start();
 
-            var (dataToImport, preloadedFiles) = await ImportTablesAsync(shouldVerifyDatabase, cancellationToken);
+            var (dataToImport, preloadedFiles) = await ImportTablesAsync(shouldVerifyDatabase, seedResidentDb, cancellationToken);
 
             timer.Stop();
 
@@ -72,6 +84,7 @@ public sealed class DatabaseImporter(
     /// </summary>
     private async Task<(DatabaseTables Tables, int? PreloadedFiles)> ImportTablesAsync(
         bool shouldVerifyDatabase,
+        bool seedResidentDb,
         CancellationToken cancellationToken
     )
     {
@@ -92,8 +105,6 @@ public sealed class DatabaseImporter(
 
         // Fused native load: one walk hashes (when verifying) and reads; the reflection walk below
         // materializes from the returned buffers and only touches disk for LazyLoad content.
-        // ponytail: epoch 1 is installed here but DbPublisher still republishes on its first
-        // EnsureCurrent; skipping that republish when the stamp never moved is deliberately not built.
         DbLoadResult load;
 
         var handbookOverrides = ((ItemConfig)configs[typeof(ItemConfig)]).HandbookPriceOverride;
@@ -124,6 +135,32 @@ public sealed class DatabaseImporter(
         }
 
         var tables = await importerUtil.LoadRecursiveAsync<DatabaseTables>($"{SptDataPath}database/", load.Files, cancellationToken);
+
+        if (seedResidentDb)
+        {
+            // The load installed five roots as epoch 1; add the configs root from the live
+            // objects - never configs/*.json (the values-not-keys trap) - and record the seed
+            // DbPublisher's first EnsureCurrent starts from. Modless boots only: the caller
+            // gates on the loaded-mod count (spec § Part 3). The stamp is read after the walk:
+            // the walk's own barriered setters describe content both sides already share. A
+            // failure here forfeits the seed, never the boot - the first EnsureCurrent then
+            // republishes as it always has.
+            try
+            {
+                var epoch = SptNative.DbPublish(DbPayloadProjection.BuildConfigsOnlyEnvelope(configs));
+                if (handbookOverrides is not null)
+                {
+                    // Phase 6 inversion guard: a boot that did not drive the load with live
+                    // overrides must not seed - the resident handbook would be raw (spec § Part 1).
+                    DbLoadSeed.Set(epoch, databaseMutationStamp.Current);
+                    logger.Info($"Resident database seeded at epoch {epoch}; a modless boot skips the first publish.");
+                }
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger.Warning($"Load-time configs publish failed; the first EnsureCurrent will republish. {ex.Message}");
+            }
+        }
 
         return (tables, load.Files.Count);
     }

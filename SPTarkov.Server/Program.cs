@@ -198,8 +198,12 @@ public static class Program
 
         var shouldVerify = !ProgramStatics.DEBUG();
 
+        // Modless gate for the load-time seed: the early provider predates the mod loader, so
+        // the importer cannot see the mod list itself. Prepatchers (./user/patchers/) are
+        // invisible to this count - accepted; a barriered write from foreign IL voids the
+        // seed and DbPublisher logs it (spec § Part 3).
         var tables =
-            await dbImporter.LoadDatabaseAsync(shouldVerify, cancellationToken)
+            await dbImporter.LoadDatabaseAsync(shouldVerify, seedResidentDb: loadedMods.Count == 0, cancellationToken)
             ?? throw new NullReferenceException("Failed to import database tables.");
 
         // Create web builder and logger

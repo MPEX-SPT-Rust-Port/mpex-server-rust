@@ -2,6 +2,7 @@ using System.Text.Json;
 using NUnit.Framework;
 using SPTarkov.Server.Core.Models.Spt.Config;
 using SPTarkov.Server.Core.Models.Spt.Tables;
+using SPTarkov.Server.Core.Native;
 using SPTarkov.Server.Core.Native.Db;
 using SPTarkov.Server.Core.Services.Server;
 
@@ -11,6 +12,14 @@ namespace UnitTests.Tests.Native;
 [NonParallelizable]
 public class DbPublisherTests
 {
+    [OneTimeTearDown]
+    public void OneTimeTearDown()
+    {
+        // These tests publish behind the DI publisher's bookkeeping; move the stamp so the next
+        // EnsureCurrent() republishes real state over whatever they left resident.
+        DI.GetInstance().GetService<DatabaseMutationStamp>().Bump();
+    }
+
     [Test]
     public void EnsureCurrentPublishesOncePerStampAndRepublishesOnBump()
     {
@@ -143,5 +152,49 @@ public class DbPublisherTests
         Assert.That(recipes.GetArrayLength(), Is.GreaterThan(0));
         Assert.That(recipes[0].TryGetProperty("_id", out _), Is.True);
         Assert.That(recipes[0].GetProperty("endProducts").TryGetProperty("Common", out _), Is.True);
+    }
+
+    [Test]
+    public void BuildConfigsOnlyEnvelopeCarriesConfigsAndNoOtherRoot()
+    {
+        var di = DI.GetInstance();
+
+        var envelope = DbPayloadProjection.BuildConfigsOnlyEnvelope(
+            new Dictionary<Type, BaseConfig> { [typeof(RagfairConfig)] = di.GetService<RagfairConfig>() }
+        );
+
+        using var document = JsonDocument.Parse(envelope);
+        Assert.That(document.RootElement.GetProperty("schema").GetInt32(), Is.EqualTo(1));
+        var roots = document.RootElement.GetProperty("roots");
+        Assert.That(
+            roots.EnumerateObject().Select(member => member.Name),
+            Is.EquivalentTo(new[] { "configs" }),
+            "a configs-only envelope must name no other root - an absent root keeps the resident one"
+        );
+        // Runtime-type overload preserved through the extraction: a concrete-record member exists.
+        Assert.That(roots.GetProperty("configs").GetProperty("spt-ragfair").TryGetProperty("dynamic", out _), Is.True);
+    }
+
+    [Test]
+    public void ConfigsOnlyPublishKeepsTheOtherRootsResidentByDigest()
+    {
+        var di = DI.GetInstance();
+
+        // Make every root resident, then re-publish configs alone: the five table roots must not move.
+        di.GetService<DbPublisher>().ForcePublish();
+        var before = SptNative.DbResidentDigest();
+
+        SptNative.DbPublish(
+            DbPayloadProjection.BuildConfigsOnlyEnvelope(
+                new Dictionary<Type, BaseConfig> { [typeof(RagfairConfig)] = di.GetService<RagfairConfig>() }
+            )
+        );
+        var after = SptNative.DbResidentDigest();
+
+        Assert.That(after.Epoch, Is.EqualTo(before.Epoch + 1), "every publish increments the epoch");
+        foreach (var root in new[] { "templates", "traders", "globals", "locations", "hideout" })
+        {
+            Assert.That(after.Roots[root], Is.EqualTo(before.Roots[root]), $"{root} must survive a configs-only publish");
+        }
     }
 }

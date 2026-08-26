@@ -97,21 +97,55 @@ internal static class DbPayloadProjection
             );
             writer.WriteEndObject();
             writer.WriteEndObject();
-            // Phase 4: every loaded config, keyed by its self-declared kind. Serialized with the
-            // shared options so the records' JsonPropertyNames stay the wire authority;
-            // runtime-type overload so each BaseConfig serializes as its concrete record.
-            writer.WritePropertyName("configs");
-            writer.WriteStartObject();
-            foreach (var (configType, config) in configs)
-            {
-                writer.WritePropertyName(config.Kind);
-                writer.WriteRawValue(JsonSerializer.SerializeToUtf8Bytes(config, configType, options), skipInputValidation: true);
-            }
-            writer.WriteEndObject();
+            WriteConfigsRoot(writer, configs, options);
             writer.WriteEndObject();
             writer.WriteEndObject();
         }
 
         return stream.ToArray();
+    }
+
+    /// <summary>
+    /// A configs-only publish envelope: <c>{"schema":1,"roots":{"configs":{…}}}</c>. Every other
+    /// root stays absent, which the store reads as "keep the currently-resident one" — the
+    /// load-time seed path publishes this over the five roots <c>spt_db_load</c> installed.
+    /// </summary>
+    internal static byte[] BuildConfigsOnlyEnvelope(IReadOnlyDictionary<Type, BaseConfig> configs)
+    {
+        var options = JsonUtil.JsonSerializerOptionsNoIndent ?? throw new InvalidOperationException("JsonUtil has not been built yet.");
+
+        using var stream = new MemoryStream();
+        using (var writer = new Utf8JsonWriter(stream))
+        {
+            writer.WriteStartObject();
+            writer.WriteNumber("schema", 1);
+            writer.WritePropertyName("roots");
+            writer.WriteStartObject();
+            WriteConfigsRoot(writer, configs, options);
+            writer.WriteEndObject();
+            writer.WriteEndObject();
+        }
+
+        return stream.ToArray();
+    }
+
+    // Phase 4: every loaded config, keyed by its self-declared kind. Serialized with the shared
+    // options so the records' JsonPropertyNames stay the wire authority; runtime-type overload so
+    // each BaseConfig serializes as its concrete record.
+    private static void WriteConfigsRoot(
+        Utf8JsonWriter writer,
+        IReadOnlyDictionary<Type, BaseConfig> configs,
+        JsonSerializerOptions options
+    )
+    {
+        writer.WritePropertyName("configs");
+        writer.WriteStartObject();
+        foreach (var (configType, config) in configs)
+        {
+            writer.WritePropertyName(config.Kind);
+            writer.WriteRawValue(JsonSerializer.SerializeToUtf8Bytes(config, configType, options), skipInputValidation: true);
+        }
+
+        writer.WriteEndObject();
     }
 }
