@@ -459,7 +459,8 @@ save-side follow-up's path.
 
 ## Machine
 
-All figures below are from one machine, one commit, one sitting.
+Every figure in this file is from one machine. Each section names its own commit and sitting; only
+within a section are figures directly comparable.
 
 | | |
 |---|---|
@@ -467,10 +468,54 @@ All figures below are from one machine, one commit, one sitting.
 | RAM | 23 GB |
 | OS | Linux 7.1.8-200.fc44.x86_64 (Fedora 44) |
 | .NET SDK | 10.0.110 |
-| rustc | 1.97.1 |
+| rustc | 1.97.1 for every section below; 1.98 is the pin from `b563367` on, and separates from none of them (§ Toolchain) |
 
 Earlier location-loot figures in this file were taken on a Ryzen 7 5800X3D and have been replaced;
 its 2.61x is not comparable to the 2.21x below.
+
+## Toolchain — 1.97.1 against 1.98
+
+`b563367` — 2026-08-26. `rust-toolchain.toml` moved 1.97.1 → 1.98. Taken as a paired A/B rather than
+by re-reading the sections below, because those were measured at `06825b3` through `875b2c9`: a
+straight re-run would fold a week of commits into the toolchain column. Same commit, same working
+tree, same `Cargo.lock`, same machine, one sitting; two passes per fixture per toolchain, medians
+below. The control was produced by flipping the channel back, deleting `libspt_native.so` and
+rebuilding — verified as `rustc 1.97.1 (8bab26f4f)` against `rustc 1.98.0 (88d9e12ae)`.
+
+| fixture / arm | 1.97.1 (pass 1 / 2) | 1.98 (pass 1 / 2) |
+|---|---|---|
+| location loot, native | 325.22 / 328.11 ms | 366.28 / 331.25 ms |
+| location loot, legacy | 995.15 / 1005.01 ms | 1016.27 / 1022.10 ms |
+| airdrop loot, native | 1.36 / 1.42 ms | 1.41 / 1.39 ms |
+| bot assault, native | 3.44 / 4.29 ms | 4.54 / 3.44 ms |
+| bot usec, native | 5.27 / 5.27 ms | 5.33 / 5.39 ms |
+| ragfair full pass, native | 489.05 / 504.56 ms | 488.34 / 475.86 ms |
+| ragfair publish (forced) | 751.80 / 755.80 ms | 756.81 / 744.96 ms |
+| repeatable quest, elimination warm | 2.50 / 2.45 ms | 2.42 / 2.41 ms |
+| scav case warm (`6271093e…`) | 1.47 / 1.84 ms | 1.51 / 1.62 ms |
+| item base class, native | 12.34 / 12.71 ms | 12.69 / 12.38 ms |
+| ragfair linked item, native | 39.62 / 42.26 ms | 41.50 / 41.50 ms |
+| db import, native total (warm) | 883.7 ms | 887.3 ms |
+| loot peak RSS, native | 2512 / 2455 MB | 2473 / 2549 MB |
+| `libspt_native.so` | 4.28 MB | 4.22 MB |
+
+**No arm separates.** Every 1.98 median lands inside the 1.97.1 pair's own pass-to-pass spread, in
+both directions — the bump is not a speed-up and not a regression at this fixture set's resolution.
+The one row that looks like a move is location loot's 366.28 ms, and it is the outlier of its own
+pair (331.25 ms on the repeat, against 325.22 / 328.11 control); the legacy arm, which cannot be
+touched by a rustc bump, drifted +11 to +17 ms over the same two sittings, which is the noise bar to
+read the native column against. The only measured difference is 60 KB off the stripped `.so`.
+
+**Two artifacts this pairing exposed, neither caused by the bump.** Bot `BuildRequest` alternates
+bimodally between ~0.23 ms and ~0.84 ms (assault) — and it flips *between passes within each
+toolchain* (1.97.1 read 0.24 then 0.84; 1.98 read 0.83 then 0.23), so § Mod-pool ownership's 0.23 ms
+is the low mode of a two-mode reading, not a settled median. Cause not chased. Second, the ragfair
+regeneration pass reports a projection share above 100% (123.4%), which is the fixture's own
+arithmetic over two arms it times separately, not a measurement.
+
+**Not re-run under either toolchain:** Phase 2's startup rows (they need a base-commit worktree
+build) and Phase 5's profile-save rows (that harness was throwaway and never committed). Both stay
+pinned to their own commits.
 
 ## Location loot
 
@@ -502,6 +547,11 @@ Separate invocations per path, two of each.
 
 The `.so` is unstripped — `rust/Cargo.toml` sets `debug = "line-tables-only"` on the release profile
 and nothing strips it. Stripped it is a fraction of that; the size does not affect any timing here.
+
+That last sentence has since been settled and this paragraph's premise no longer holds at HEAD:
+`[profile.release]` now sets `debug = false` and `strip = true` (`line-tables-only` moved to
+`[profile.dev]`), and the same library builds at 4.22 MB (§ Toolchain). The 20.29 MB above and the
+21.85 MB below are correct for their own commits and are left as measured.
 
 `f6c40fa` — 2026-08-19, post resident-DB flip (phase 1 flip #4, ABI 25). Same fixture shape and
 workload. The native arm now rides the resident DB: `DbPublisher.EnsureCurrent` publishes the
