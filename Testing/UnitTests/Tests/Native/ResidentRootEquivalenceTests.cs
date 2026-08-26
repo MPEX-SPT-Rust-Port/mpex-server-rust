@@ -39,7 +39,12 @@ public class ResidentRootEquivalenceTests
     public void OneTimeTearDown()
     {
         // Both arms of this test publish behind DbPublisher's bookkeeping; move the stamp so the
-        // next EnsureCurrent() republishes for whichever fixture runs after this one.
+        // next EnsureCurrent() republishes for whichever fixture runs after this one. That
+        // republish also restores the configs root this fixture leaves resident-but-empty (the
+        // projection arm publishes an empty configs dictionary, and a present root replaces rather
+        // than carries forward) - a fixture reading via SptNative with a previously captured epoch
+        // would see empty configs as a wrong answer, not an exception, so route through
+        // DbPublisher.EnsureCurrent() as every current fixture does.
         DI.GetInstance().GetService<DatabaseMutationStamp>().Bump();
     }
 

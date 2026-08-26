@@ -193,6 +193,12 @@ const MONGO_ID_EMPTY: &str = "000000000000000000000000";
 /// the two arms install different bytes for a typed member and the load/projection equivalence
 /// gate is red. Deserialize-side on purpose — serialization stays verbatim, so nothing that
 /// echoes a real id back to the client changes.
+///
+/// Scope: the empty-collapse only. C#'s `MongoId` also accepts `A–F` on parse and emits lowercase
+/// on serialize (`MongoId.cs:157-170`); neither this hook nor any other MongoId-typed lift
+/// normalizes case. Safe while no uppercase 24-hex literal ships in the tree (verified at review);
+/// if a data drop ever ships one, the fix is a shared lowercase+collapse deserializer on every
+/// MongoId-typed lift, not a wider version of this hook.
 fn deserialize_mongo_id_collapsing_empty<'de, D>(deserializer: D) -> Result<String, D::Error>
 where
     D: serde::Deserializer<'de>,

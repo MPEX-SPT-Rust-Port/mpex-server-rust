@@ -149,17 +149,20 @@ public sealed class DatabaseImporter(
             try
             {
                 var epoch = SptNative.DbPublish(DbPayloadProjection.BuildConfigsOnlyEnvelope(configs));
-                if (handbookOverrides is not null)
-                {
-                    // Phase 6 inversion guard: a boot that did not drive the load with live
-                    // overrides must not seed - the resident handbook would be raw (spec § Part 1).
-                    DbLoadSeed.Set(epoch, databaseMutationStamp.Current);
-                    logger.Info($"Resident database seeded at epoch {epoch}; a modless boot skips the first publish.");
-                }
+                // No live-overrides guard here: handbookOverrides is projected from a `required`
+                // non-nullable member, so a null check on it is statically dead. The invariant a
+                // guard would name - a boot that did not drive the load with live overrides must
+                // not seed, or the resident handbook would be raw (spec § Part 1) - holds because
+                // the same local fed SptNative.DbLoad above. When the Phase 6 inversion moves that
+                // call, thread its actual override argument to a gate ABOVE the configs publish,
+                // or a non-seeding boot pays the publish and still takes the full first
+                // EnsureCurrent.
+                DbLoadSeed.Set(epoch, databaseMutationStamp.Current);
+                logger.Info($"Resident database seeded at epoch {epoch}; a modless boot skips the first publish.");
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                logger.Warning($"Load-time configs publish failed; the first EnsureCurrent will republish. {ex.Message}");
+                logger.Warning("Load-time configs publish failed; the first EnsureCurrent will republish.", ex);
             }
         }
 
