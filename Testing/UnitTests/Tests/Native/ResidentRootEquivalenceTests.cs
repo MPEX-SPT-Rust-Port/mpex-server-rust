@@ -1,9 +1,13 @@
 using NUnit.Framework;
+using SPTarkov.Common.Models.Logging;
+using SPTarkov.Server.Core.Helpers.Profile;
+using SPTarkov.Server.Core.Models.Enums;
 using SPTarkov.Server.Core.Models.Spt.Config;
 using SPTarkov.Server.Core.Native;
 using SPTarkov.Server.Core.Native.Db;
 using SPTarkov.Server.Core.Services.Server;
 using SPTarkov.Server.Core.Utils;
+using SPTarkov.Server.Core.Utils.Cloners;
 using SPTarkov.Server.Helpers;
 
 namespace UnitTests.Tests.Native;
@@ -16,6 +20,12 @@ namespace UnitTests.Tests.Native;
 /// model coverage, and all of that rides extra). Red here means the two file→wire mappings
 /// diverged on something a Rust consumer reads; fix the mapping, do not weaken the gate
 /// (spec § Part 0).
+///
+/// The load arm sends ItemConfig.HandbookPriceOverride and the publish arm hydrates the same
+/// overrides through HandbookHelper, so the merge compares too — but only the half the digest
+/// sees: the overridden Price values, the appended Ids, and where an appended entry lands.
+/// HandbookItem.ParentId rides the Rust extra map, which digest mode skips, so this gate does
+/// not cover the ParentId half of the merge.
 /// </summary>
 [TestFixture]
 [NonParallelizable]
@@ -39,14 +49,34 @@ public class ResidentRootEquivalenceTests
         var di = DI.GetInstance();
         var importerUtil = di.GetService<ImporterUtil>();
 
-        var load = SptNative.DbLoad(SptDataPath, verify: false);
+        var itemConfig = di.GetService<ItemConfig>();
+        Assert.That(itemConfig.HandbookPriceOverride, Is.Not.Empty, "the shipped tree must exercise the override merge");
+
+        var load = SptNative.DbLoad(SptDataPath, verify: false, itemConfig.HandbookPriceOverride);
         var loadDigests = SptNative.DbResidentDigest();
         Assert.That(loadDigests.Epoch, Is.GreaterThan(0UL), "the load must leave a resident DB");
         Assert.That(loadDigests.Roots.Keys, Is.SupersetOf(LoadInstalledRoots), "the load must install all five roots");
 
-        // No handbook hydration on this side either: the raw-file mappings are what compare here
-        // (Task 6 extends this test with the override merge).
         var tables = await importerUtil.LoadRecursiveAsync<DatabaseTables>($"{SptDataPath}database/", load.Files);
+
+        // The returned files are raw, so this arm must reproduce PublishLocked's forced
+        // hydration itself: HydrateHandbookCache upserts the overrides into
+        // tables.Templates.Handbook exactly as the Rust merge did at load time.
+        var rawHandbookIds = tables.Templates.Handbook.Items.Select(item => item.Id).ToHashSet();
+        Assert.That(
+            itemConfig.HandbookPriceOverride.Keys.Any(id => !rawHandbookIds.Contains(id)),
+            Is.True,
+            "at least one override must be absent from the raw handbook - the append path is the ordering property this gate pins"
+        );
+
+        var handbookHelper = new HandbookHelper(
+            di.GetService<ISptLogger<HandbookHelper>>(),
+            tables.Templates,
+            itemConfig,
+            di.GetService<ICloner>()
+        );
+        handbookHelper.IsCategory(Money.ROUBLES);
+
         var envelope = DbPayloadProjection.BuildPublishEnvelope(
             tables.Templates,
             tables.Traders,

@@ -12,7 +12,8 @@ public sealed class DatabaseImporter(
     ISptLogger<DatabaseImporter> logger,
     ServerLocalisationService serverLocalisationService,
     ImporterUtil importerUtil,
-    CoreConfig coreConfig
+    CoreConfig coreConfig,
+    IReadOnlyDictionary<Type, BaseConfig> configs
 )
 {
     private const string SptDataPath = "./SPT_Data/";
@@ -95,9 +96,11 @@ public sealed class DatabaseImporter(
         // EnsureCurrent; skipping that republish when the stamp never moved is deliberately not built.
         DbLoadResult load;
 
+        var handbookOverrides = ((ItemConfig)configs[typeof(ItemConfig)]).HandbookPriceOverride;
+
         try
         {
-            load = await Task.Run(() => SptNative.DbLoad(SptDataPath, shouldVerifyDatabase), cancellationToken);
+            load = await Task.Run(() => SptNative.DbLoad(SptDataPath, shouldVerifyDatabase, handbookOverrides), cancellationToken);
         }
         catch (InvalidOperationException ex)
         {

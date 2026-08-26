@@ -5,6 +5,7 @@ using System.Text.Json.Serialization;
 using SPTarkov.Server.Core.Models.Common;
 using SPTarkov.Server.Core.Models.Eft.Ragfair;
 using SPTarkov.Server.Core.Models.Enums;
+using SPTarkov.Server.Core.Models.Spt.Config;
 using SPTarkov.Server.Core.Native.BaseClass;
 using SPTarkov.Server.Core.Native.Bot;
 using SPTarkov.Server.Core.Native.Db;
@@ -441,21 +442,34 @@ public static class SptNative
 
     /// <summary>
     /// Loads SPT_Data in one native pass: hash-verify (when asked), read the tree, install the
-    /// resident DB roots, and hand back the eager file bytes for the managed replica.
+    /// resident DB roots, and hand back the eager file bytes for the managed replica. Any
+    /// <paramref name="handbookPriceOverride"/> entries are merged into the installed roots only -
+    /// the returned file bytes stay exactly what is on disk, so the managed replica still hydrates
+    /// them itself through <c>HandbookHelper</c>.
     /// </summary>
     /// <exception cref="InvalidOperationException">The load failed, or the native side misbehaved.</exception>
-    internal static unsafe DbLoadResult DbLoad(string sptDataDir, bool verify)
+    internal static unsafe DbLoadResult DbLoad(
+        string sptDataDir,
+        bool verify,
+        IReadOnlyDictionary<MongoId, HandbookPriceOverride>? handbookPriceOverride = null
+    )
     {
         EnsureLoadable();
 
         // Default options on purpose: the request has three scalar members and no model types, so
-        // the loot converters would only risk renaming them away from what db/load.rs reads.
+        // the loot converters would only risk renaming them away from what db/load.rs reads. The
+        // override map is projected to plain strings and numbers for the same reason - and because
+        // a MongoId-keyed dictionary under default options throws NotSupportedException.
         var requestUtf8 = JsonSerializer.SerializeToUtf8Bytes(
             new
             {
                 schema = 1,
                 dir = sptDataDir,
                 verify,
+                handbookPriceOverride = handbookPriceOverride?.ToDictionary(
+                    kv => kv.Key.ToString(),
+                    kv => new { parentId = kv.Value.ParentId.ToString(), price = kv.Value.Price }
+                ),
             }
         );
         byte* outPtr = null;
