@@ -133,13 +133,14 @@ Eight `ForceLegacy*` flags are the Rust-port escape hatches, one per dual-path f
 `RagfairConfig.ForceLegacyRagfairGeneration`, `RagfairConfig.ForceLegacyRagfairLinkedItemBuild`,
 `QuestConfig.ForceLegacyRepeatableQuestGeneration`, `ScavCaseConfig.ForceLegacyScavCaseGeneration`,
 `ItemConfig.ForceLegacyItemBaseClassHydration` and `LocationConfig.ForceLegacyRaidAdjustments`
-(the raid family is one flag across two services). Narrower knobs:
-`BotConfig.ForcePerBotGeneration` (unbatch waves without leaving native) and, on the six configs
-backing the resident-DB families (`LocationConfig`, `ItemConfig`, `ScavCaseConfig`, `QuestConfig`,
-`RagfairConfig`, `BotConfig`), `TrustNativeRequestCacheWithMods` / `DisableNativeRequestCache` —
-the names are legacy, they now gate resident-DB eligibility rather than a request cache. Since
-Phase 2 `TrustNativeRequestCacheWithMods` defaults **on**, and is honoured only in a build carrying
-the Ceciler write barriers (Release or publish, never Debug).
+(the raid family is one flag across two services). `CoreConfig.ForceLegacyDatabaseImport` is a ninth
+`ForceLegacy*` flag but is **not** in that count — the database import is not a dual-path generation
+family. Narrower knobs: `BotConfig.ForcePerBotGeneration` (unbatch waves without leaving native)
+and, on the six configs backing the resident-DB families (`LocationConfig`, `ItemConfig`,
+`ScavCaseConfig`, `QuestConfig`, `RagfairConfig`, `BotConfig`), `TrustNativeRequestCacheWithMods` /
+`DisableNativeRequestCache` — the names are legacy, they now gate resident-DB eligibility rather
+than a request cache. Since Phase 2 `TrustNativeRequestCacheWithMods` defaults **on**, and is
+honoured only in a build carrying the Ceciler write barriers (Release or publish, never Debug).
 
 ### JSON layer (`Utils/Json/`, 23 files)
 
@@ -182,8 +183,7 @@ fallback — nine generators (`LocationLootGenerator`, `LootGenerator`, `BotInve
 generators) and four services (`ItemBaseClassService`, `RagfairLinkedItemService`,
 `RaidTimeAdjustmentService` and `LocationLifecycleService` — the last two share one frozen set, so a
 patch on any of its six members declines both). Each holds a frozen list of 4.1.2 members and uses
-HarmonyX to detect a live patch before dispatching, as does
-`BotWaveBatcher`.
+HarmonyX to detect a live patch before dispatching, as does `BotWaveBatcher`.
 
 Two families fold collaborators into the native call, so those collaborators run legacy-only while
 still participating in the dispatch decision:

@@ -10,10 +10,10 @@ What is ported to `rust/spt-native`, what is known-broken, and what comes next. 
 Ported and native by default: the loot family, the bot family, dynamic ragfair offer generation, the
 repeatable-quest family, scav case rewards, the item base-class cache build, the ragfair
 linked-item table and map/raid setup. Each keeps its full 4.1.2 C# implementation as a **legacy
-path**, selected
-automatically when a mod hooks it or manually via a config flag. The log pipeline is ported too and
-has no legacy path: `SPTLoggerDispatcher` hands every line to the crate, and the crate owns the
-terminal outright — raw `Console.Write*`, prompts, title and clear all cross the boundary.
+path**, selected automatically when a mod hooks it or manually via a config flag. The log pipeline is
+ported too and has no legacy path: `SPTLoggerDispatcher` hands every line to the crate, and the
+crate owns the terminal outright — raw `Console.Write*`, prompts, title and clear all cross the
+boundary.
 
 Thirty-nine C-ABI exports (`src/ffi.rs`) carry all of it, JSON in and JSON out — except the ragfair
 response (a framed MessagePack envelope), `spt_db_load` and `spt_profile_load` (a JSON header frame
@@ -373,8 +373,7 @@ against C#'s `OrdinalIgnoreCase`. The parity gates would catch any of them.
    `docs/superpowers/specs/2026-08-17-rust-state-ownership-design.md`. Thirteen of the seventeen
    generation exports ride it (flips #1-#6) — the raid four carry no epoch at all — both slice
    caches are gone, and the eligibility rule plus the stale-epoch self-heal live once in
-   `Native/Db/ResidentDbDispatch`; a family's own
-   `ResidentDbEligible()` is a one-line wrapper.
+   `Native/Db/ResidentDbDispatch`; a family's own `ResidentDbEligible()` is a one-line wrapper.
 4. **RNG parity.** Both sides draw through the shared xoshiro256\*\* source behind test-only seams
    (`Utils/RandomSource.cs` / `random_util.rs`), pinned by twin known-answer tests. Production C#
    randomness stays bit-for-bit unchanged.
@@ -414,14 +413,14 @@ no per-generator flag. Elsewhere: `BotConfig.ForceLegacyBotGeneration` and `Forc
 `QuestConfig.ForceLegacyRepeatableQuestGeneration`, `ScavCaseConfig.ForceLegacyScavCaseGeneration`,
 `ItemConfig.ForceLegacyItemBaseClassHydration`, `LocationConfig.ForceLegacyRaidAdjustments` (covering
 all four raid exports across both services, on the `ForceLegacyLootGeneration` precedent), and
-`CoreConfig.ForceLegacyDatabaseImport` — the one
-flag that is not a generation path. Plus `TrustNativeRequestCacheWithMods` /
-`DisableNativeRequestCache`, the resident-DB eligibility gate, on `RagfairConfig`, `QuestConfig`,
-`ItemConfig`, `LocationConfig` (covering both loot generators), `ScavCaseConfig` and `BotConfig`
-(covering both bot exports); the linked-item table reads `RagfairConfig`'s pair. Only
-`forceLegacyLootGeneration` is serialised into a shipped `.json` (`location.json`); the rest are C#
-defaults a user adds to the file to change — and since Phase 2 `TrustNativeRequestCacheWithMods`
-defaults **on** in all six, so it is the flag a user adds to turn *off*.
+`CoreConfig.ForceLegacyDatabaseImport` — the one flag that is not a generation path. Plus
+`TrustNativeRequestCacheWithMods` / `DisableNativeRequestCache`, the resident-DB eligibility gate, on
+`RagfairConfig`, `QuestConfig`, `ItemConfig`, `LocationConfig` (covering both loot generators),
+`ScavCaseConfig` and `BotConfig` (covering both bot exports); the linked-item table reads
+`RagfairConfig`'s pair. Only `forceLegacyLootGeneration` is serialised into a shipped `.json`
+(`location.json`); the rest are C# defaults a user adds to the file to change — and since Phase 2
+`TrustNativeRequestCacheWithMods` defaults **on** in all six, so it is the flag a user adds to turn
+*off*.
 
 **What flips to legacy.** Loot flips only on a *protected* member patch. Every other family flips on
 a patch of any public/protected/protected-internal member of its frozen set, **except** the
@@ -1052,6 +1051,14 @@ in `NativeMethods.cs` and `SptNative.cs`. The two services keep their full 4.1.2
   added a fourth in prose at `rust/ARCHITECTURE.md:79` ("currently 34"). Any renumber — the
   parallel-branch collision rule, whichever of two same-number bumps lands second — is four sites plus
   a docs grep for the stale number, not three.
+  **The export counts are a second silent-merge surface, and a worse one**, because nothing asserts
+  them: "Thirty-nine" appears three times in `ARCHITECTURE.md`, twice in this file and three times in
+  `rust/ARCHITECTURE.md`, and a parallel branch adding exports writes *its* number into the same files
+  on adjacent-but-distinct lines — so git merges both cleanly and leaves the tree internally
+  inconsistent with no conflict to notice. The integrator's procedure is therefore to **re-derive the
+  count, never to sum the branch deltas**: `grep -c '#\[unsafe(no_mangle)\]' rust/spt-native/src/ffi.rs`
+  is the ground truth. "Seventeen" (the generation subset) and "twenty-five" (the buffer-returning
+  subset) move with it, as do the bare-numeric `39`s in the rlib-anchor prose.
 - **No standing benchmark fixture**, by ruling rather than omission: menu and raid-start frequency has
   no throughput to win, so Phase 5's decision 11 applies — the free number off the parity run is
   recorded (BENCHMARK.md § Map/raid setup) and no `[Explicit]` harness is added.
@@ -1062,7 +1069,12 @@ in `NativeMethods.cs` and `SptNative.cs`. The two services keep their full 4.1.2
   `AlwaysEnemies` with additional enemy types (NRE → error) and a non-numeric `ReductionPercentWeights`
   key (`FormatException` → error). `MakeAdjustmentsToMap`'s error paths apply no deltas where legacy
   left a partially-mutated, then-abandoned clone — unobservable, the multiplier side effect being
-  identical on both arms.
+  identical on both arms. And the two appliers read a **snapshot** where legacy re-reads after its own
+  write — `adjustments.rs:463` takes the pmc offset's operand from the request where RTAS:362 re-reads
+  the live `spawn.Time`, and the wave applier writes absolute `WaveTimes` where legacy compounds two
+  subtractions in place — which diverges only if one `BossLocationSpawn`/`Wave` instance appears at
+  two kept indices. Unreachable: the clone yields distinct objects and the PMC splice appends distinct
+  config instances. Inherent to the delta protocol, so booked rather than mitigated.
 - **`AdjustBotHostilitySettings` Quirk-10 error path applies no deltas where legacy left earlier roles
   applied.** Unobservable: the clone half is abandoned identically, and the one surviving mutation — the
   duplicate-`Role` merge write onto the live `PmcConfig` `ChancedEnemy` (LLS:316-324) — is idempotent

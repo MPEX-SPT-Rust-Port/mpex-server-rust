@@ -442,8 +442,10 @@ public class LocationLifecycleService(
 
         if (deltas.AppendExtractIndices.Count > 0)
         {
-            // Deferred on purpose, exactly like the legacy Where this stands in for: the union's
-            // operand is a lazy sequence of the location table's own live instances
+            // Quirk 9, ported verbatim: deferred on purpose, exactly like the legacy Where this
+            // stands in for. The union's operand is a lazy sequence of the location table's own
+            // live instances, and AllExtractsExit's derived EqualityContract never matches a base
+            // Exit, so nothing dedupes
             var scavExtracts = deltas.AppendExtractIndices.Select(index => mapExtracts![index]);
 
             locationData.Exits = locationData.Exits.Union(scavExtracts);
@@ -573,8 +575,9 @@ public class LocationLifecycleService(
             // No matching bot in config, skip
             if (entry.MatchedIndex is null)
             {
-                // The whole KeyValuePair is what legacy interpolates, so the pair is re-indexed out
-                // of the live dictionary the role was projected from moments ago
+                // Quirk 12, ported verbatim: the whole KeyValuePair is what legacy interpolates,
+                // not the role, so the pair is re-indexed out of the live dictionary the role was
+                // projected from moments ago
                 var botId = pmcConfig.HostilitySettings.First(hostilitySetting => hostilitySetting.Key == entry.Role);
 
                 logger.Warning($"No bot: {botId} hostility values found on: {location.Id}, can only edit existing. Skipping");
@@ -590,9 +593,10 @@ public class LocationLifecycleService(
                 locationBotHostilityDetails.AlwaysEnemies.Add(enemyTypeToAdd);
             }
 
-            // Add/edit chance settings. The legacy loop verbatim: it clears first and then probes
-            // the list it is itself refilling, so a duplicate role merges onto the live instance the
-            // earlier pass appended
+            // Add/edit chance settings. Quirk 8, ported verbatim - the legacy loop, run here rather
+            // than in Rust: a non-null ChancedEnemies (empty included) clears first, then the loop
+            // probes the list it is itself refilling, so a duplicate role merges onto the live
+            // instance the earlier pass appended
             if (entry.RunChancedEnemiesLoop)
             {
                 locationBotHostilityDetails.ChancedEnemies = [];

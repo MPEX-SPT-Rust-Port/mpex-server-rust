@@ -124,12 +124,7 @@ trades that for build time — `opt-level = 1`, sixteen codegen units, line-tabl
 ### FFI boundary (`ffi.rs`)
 
 Thirty-nine `extern "C"` exports: two trivial (`spt_native_abi_version`, `spt_buf_free`), seventeen taking a
-UTF-8 JSON generation request — the newest four of them are the raid-setup family's, and the first of those,
-`spt_get_raid_adjustments`, takes
-one scav raid's time adjustment, JSON in and JSON out (`{applied, chosenReductionPercent,
-mapSettingsMissingValue, raidChanges}`, whose `raidChanges` is the real `RaidChanges` record and whose
-`exitChanges` entries carry `ExtractChange`'s PascalCase names), and **naming no resident-DB epoch**
-because every config and location member it reads is projected into the request —
+UTF-8 JSON generation request (the newest four are the raid-setup family's, described after this list),
 four taking a profile-persistence request (`{schema, dir}`, plus `id`
 on all but `spt_profile_list` and the profile text on `spt_profile_save` — see *`src/profile.rs`*;
 `spt_profile_load` returns a framed byte response, `[u32-LE header length][{"found":bool}][file
@@ -153,8 +148,12 @@ one process, never across builds or machines —
 for the log pipeline and the terminal it owns (`spt_logger_init`, `spt_logger_reinit`, `spt_log_emit`,
 `spt_logger_close`, `spt_log_set_tap`, `spt_log_enabled`, `spt_log_format`, `spt_console_write`,
 `spt_console_read_line`, `spt_console_set_title`, `spt_console_clear` — see *The log pipeline*).
-The raid-setup family's second export, `spt_make_adjustments_to_map`, is another of those JSON
-generation requests: it takes `spt_get_raid_adjustments`' own `raidChanges` back (`exitChanges`
+The four raid-setup exports, then. The first, `spt_get_raid_adjustments`, takes one scav raid's time
+adjustment, JSON in and JSON out (`{applied, chosenReductionPercent, mapSettingsMissingValue, raidChanges}`,
+whose `raidChanges` is the real `RaidChanges` record and whose `exitChanges` entries carry
+`ExtractChange`'s PascalCase names), and **names no resident-DB epoch** because every config and location
+member it reads is projected into the request. The second, `spt_make_adjustments_to_map`, takes
+`spt_get_raid_adjustments`' own `raidChanges` back (`exitChanges`
 PascalCase again, inbound this time) alongside the map's exit names, wave times and boss spawns, and
 answers with **deltas, not a mutated map** — `{escapeTimeLimit, exitUpdates, aborted, abortedExitName,
 mapSettingsMissingValue, waveAdjustments?}`. Every `index` in that response addresses the request's own
@@ -190,13 +189,13 @@ caller releases with `spt_buf_free`; so do `spt_console_read_line` and `spt_log_
   the runtime around a hand-written wrapper, and `spt_db_resident_digest`, because it takes no request to
   parse — just a null check, a `catch_unwind` and a `write_buffer`.
 - Status codes: `STATUS_OK` 0, `STATUS_BAD_ARGS` 1, `STATUS_PANIC` 2, `STATUS_ERROR` 3, `STATUS_STALE_EPOCH` 4
-  (every generation export since flip #6 **except the four raid ones** — they are generation exports that
-  name no epoch, so 4 is not in their vocabulary at all). **Quest, scav case and raid never return 2**: they catch the
-  generator's panic themselves and report it as 3 carrying the message. Quest and scav case do it because they
-  port a C#-sanctioned throw as a panic — a generation failure, not a library bug; raid returns both of its
-  sanctioned throws as a `RaidError` and keeps the `catch_unwind` as a backstop. The cost is that a real port
-  bug in those three also arrives as 3, indistinguishable from a sanctioned failure. Deliberate. Raid never
-  returns 4 either: it rides no resident DB, so its `FfiFailure` impl has a single arm.
+  (every generation export since flip #6 **except the four raid ones**). **Quest, scav case and raid never
+  return 2**: they catch the generator's panic themselves and report it as 3 carrying the message. Quest and
+  scav case do it because they port a C#-sanctioned throw as a panic — a generation failure, not a library
+  bug; raid returns both of its sanctioned throws as a `RaidError` and keeps the `catch_unwind` as a
+  backstop. The cost is that a real port bug in those three also arrives as 3, indistinguishable from a
+  sanctioned failure. Deliberate. Raid never returns 4 either: it rides no resident DB, so its `FfiFailure`
+  impl has a single arm.
 - **Every family but raid rides the resident DB (Phase 1 complete at flip #6, ABI 27): ragfair, the repeatable
   quest, the two startup one-shots (base-class cache, linked-item table), the loot pair — location loot and
   reward loot — the scav case, and the bot family's two exports.** `spt_db_publish` (called by C#'s
