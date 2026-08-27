@@ -149,7 +149,11 @@ public class SptNativeBotWireTests
         // native side applies the equipment path's `?? 1` and the weapon-mod path's `?? 0` itself
         Assert.That(_request.Shared.GeneratingPlayerLevel, Is.Null);
         Assert.That(_request.Bot.TestSeed, Is.EqualTo(TestSeed));
-        Assert.That(_request.Shared.Equipment, Does.ContainKey("assault"));
+        Assert.That(_request.ViewsOverride!.Equipment, Does.ContainKey("assault"));
+        // The live EquipmentMods bands ride the shared block on both arms, never the views. Only
+        // the two roles with a `randomisation` list project a band; `assault` has none
+        Assert.That(_request.Shared.LiveEquipmentMods["pmc"], Is.Not.Empty);
+        Assert.That(_request.Shared.LiveEquipmentMods["pmc"][0].EquipmentMods, Is.Not.Empty);
         Assert.That(_request.ViewsOverride!.Bosses, Is.Not.Empty);
         Assert.That(_request.ViewsOverride.ItemPresets, Is.Not.Empty);
         Assert.That(_request.ViewsOverride.DefaultPresetsByTpl, Is.Not.Empty);

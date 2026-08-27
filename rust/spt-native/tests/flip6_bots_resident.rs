@@ -266,13 +266,38 @@ fn durability() -> Value {
     })
 }
 
+/// `BotConfig.Equipment`, shared verbatim by the override bundle and the published `spt-bot` stem —
+/// resident since ABI 34, so a value that differed between the arms would fail the byte comparison.
+///
+/// Each role carries a `blacklist` band that covers the player level (20) and bans nothing, so
+/// `select_equipment_blacklist`'s pick is exercised on both arms.
+///
+/// The `randomisation` band opens every `mod_pool_service::derive_pool` gate for all three bots:
+/// `mod_mount` routes the weapon draw through the dynamic pool (and the drawn mount's sub-mods
+/// through the service fetch), and `TacticalVest` routes an armored-vest pick's mod pool through
+/// the gear derive.
+fn equipment() -> Value {
+    let filters = json!({
+        "blacklist": [
+            {"levelRange": {"min": 1, "max": 99}, "equipment": {"Earpiece": []}},
+        ],
+        "randomisation": [
+            {"levelRange": {"min": 1, "max": 99},
+             "randomisedWeaponModSlots": ["mod_mount"],
+             "randomisedArmorSlots": ["TacticalVest"]},
+        ],
+    });
+
+    json!({"assault": filters, "pmc": filters})
+}
+
 /// The override's views, value-identical to what the publish below derives or lifts: the items
 /// view, the presets map (globals key domain, map order), the default re-keyed to the preset's own
 /// id, a handbook price per items-table key (0.0 for a handbook miss), the three exp bands, and the
-/// twelve config members that went resident in Task 10 — the `spt-bot`, `spt-pmc`, `spt-repair` and
+/// thirteen config members that went resident — the `spt-bot`, `spt-pmc`, `spt-repair` and
 /// `spt-item` stems the publish below carries. The rifle's non-identity slot order, the raid's
-/// daylight, the player's level and `BotConfig.Equipment` are *not* views — they ride the shared
-/// varying block on both arms ([`shared`]).
+/// daylight, the player's level and the live `EquipmentMods` bands are *not* views — they ride the
+/// shared varying block on both arms ([`shared`]).
 fn views_override() -> Value {
     json!({
         "items": view_items(),
@@ -301,6 +326,7 @@ fn views_override() -> Value {
         "disableLootOnBotTypes": [],
         "lowProfileGasBlockTpls": [],
         "lootItemResourceRandomization": {},
+        "equipment": equipment(),
         "pmcConfig": {},
         "repairKitWeapon": {"rarityWeight": {}, "bonusTypeWeight": {}, "Common": {}, "Rare": {}},
         "configBlacklist": [],
@@ -324,6 +350,7 @@ fn configs_root() -> Value {
             "disableLootOnBotTypes": [],
             "lowProfileGasBlockTpls": [],
             "lootItemResourceRandomization": {},
+            "equipment": equipment(),
         },
         "spt-pmc": {"kind": "spt-pmc"},
         "spt-repair": {"kind": "spt-repair", "repairKit": {
@@ -393,34 +420,18 @@ fn template(with_weapon_mod_pool: bool) -> Value {
     })
 }
 
-/// The wave-constant block both requests share — live C# process state only, since Task 10 moved
-/// every config slice but `equipment` onto the views. The batch send appends `levelGeneration` and
+/// The wave-constant block both requests share — live C# process state only, now that
+/// `BotConfig.Equipment` is resident too. The batch send appends `levelGeneration` and
 /// `templateVariants`; the single send carries its template and loot pools at the top level.
 ///
-/// `equipment`'s two roles each carry a `blacklist` band that covers the player level (20) and bans
-/// nothing, so `select_equipment_blacklist`'s pick is exercised — and exercised *identically* on
-/// both arms, because `equipment` never went resident.
-///
-/// The `randomisation` band opens every `mod_pool_service::derive_pool` gate for all three bots:
-/// `mod_mount` routes the weapon draw through the dynamic pool (and the drawn mount's sub-mods
-/// through the service fetch), and `TacticalVest` routes an armored-vest pick's mod pool through
-/// the gear derive.
+/// `liveEquipmentMods` is the projection-correct overlay for [`equipment`]: its bands carry no
+/// `equipmentMods` at all, so the C# projection filters every one of them out and each role's band
+/// list is **empty** — not a band with an empty `equipmentMods` map.
 fn shared() -> Value {
-    let filters = json!({
-        "blacklist": [
-            {"levelRange": {"min": 1, "max": 99}, "equipment": {"Earpiece": []}},
-        ],
-        "randomisation": [
-            {"levelRange": {"min": 1, "max": 99},
-             "randomisedWeaponModSlots": ["mod_mount"],
-             "randomisedArmorSlots": ["TacticalVest"]},
-        ],
-    });
-
     json!({
         "generatingPlayerLevel": 20,
         "isNightTime": false,
-        "equipment": {"assault": filters, "pmc": filters},
+        "liveEquipmentMods": {"assault": [], "pmc": []},
     })
 }
 
@@ -486,7 +497,7 @@ fn single_request(epoch: u64, views_override: Option<Value>) -> Vec<u8> {
 /// what the native arm generates from this fixture moves it, so it is end-to-end drift detection
 /// over the bot FFI pipeline.
 ///
-/// **It pins the mod-pool ordering ABI 32 moved into this crate.** [`shared`]'s `randomisation`
+/// **It pins the mod-pool ordering ABI 32 moved into this crate.** [`equipment`]'s `randomisation`
 /// band opens all three gated routes into `mod_pool_service::derive_pool` (each confirmed by
 /// making the respective service function panic — the test fails): the randomised `mod_mount` is
 /// drawn from the dynamic pool (`get_compatible_mods_for_weapon_slot`), the drawn mount's own

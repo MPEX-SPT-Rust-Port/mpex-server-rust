@@ -17,8 +17,8 @@ use indexmap::IndexMap;
 
 use crate::bot::durability_limits_helper::BotDurability;
 use crate::bot::models::{
-    BotViewsWire, EquipmentFilterDetails, EquipmentFilters, PmcConfigWire,
-    RandomisedResourceDetails, WalletLootSettingsWire,
+    BotViewsWire, EquipmentFilterDetails, EquipmentFilters, LiveEquipmentModsBandWire,
+    PmcConfigWire, RandomisedResourceDetails, WalletLootSettingsWire,
 };
 use crate::bot::repair_service::BonusSettings;
 use crate::bot::views::BotDbViews;
@@ -33,9 +33,10 @@ use std::sync::Arc;
 /// The database half of a bot request. The resident arm is the published [`BotDbViews`] — the
 /// items and preset views it shares with ragfair plus the bot-only derivations — together with the
 /// resident configs root the family's four stems come out of; the override arm is all of it on the
-/// wire. The mod-pool slot order, the raid's daylight, the player's level and `BotConfig.Equipment`
-/// are not views — they are live C# process state — so they ride the shared varying block on every
-/// send.
+/// wire. The raid's daylight, the player's level and the live `EquipmentMods` bands are not views —
+/// they are live C# process state — so they ride the shared varying block on every send. The rest
+/// of `BotConfig.Equipment` *is* a view;
+/// [`resolve_equipment`] puts the two halves back together per call.
 pub enum BotViews {
     Override(Box<BotViewsWire>),
     Resident {
@@ -259,6 +260,53 @@ pub fn resolve_bot_views(
     Ok(BotViews::Resident { views, configs })
 }
 
+/// Resident (or override) equipment with the live `EquipmentMods` overlay applied.
+///
+/// Each overlay band replaces the `equipment_mods` of the first NOT-YET-WRITTEN band with an equal
+/// `levelRange` — each resident band is written at most once, so duplicate ranges pair positionally
+/// (the overlay enumerates the same live list). Unmatched overlay entries drop: their existence
+/// implies a post-publish band-structure container edit, which is the Broken ledger's booked stale
+/// window either way.
+///
+/// The resident arm skips the `None` roles, which is the filter the C# per-call projection used to
+/// apply before the lift (`BotPayloadProjection.cs:123`).
+pub fn resolve_equipment(
+    views: &BotViews,
+    live: &IndexMap<String, Vec<LiveEquipmentModsBandWire>>,
+) -> IndexMap<String, EquipmentFilters> {
+    let mut merged: IndexMap<String, EquipmentFilters> = match views {
+        BotViews::Override(wire) => wire.equipment.clone(),
+        BotViews::Resident { configs, .. } => bot_config(configs)
+            .equipment
+            .iter()
+            .filter_map(|(role, filters)| Some((role.clone(), filters.clone()?)))
+            .collect(),
+    };
+
+    for (role, bands) in live {
+        if let Some(filters) = merged.get_mut(role)
+            && let Some(randomisation) = filters.randomisation.as_mut()
+        {
+            let mut written = vec![false; randomisation.len()];
+            for band in bands {
+                if let Some((index, target)) =
+                    randomisation
+                        .iter_mut()
+                        .enumerate()
+                        .find(|(index, resident)| {
+                            !written[*index] && resident.level_range == band.level_range
+                        })
+                {
+                    target.equipment_mods = Some(band.equipment_mods.clone());
+                    written[index] = true;
+                }
+            }
+        }
+    }
+
+    merged
+}
+
 /// `BotEquipmentFilterService.GetBotEquipmentBlacklist` (`BotEquipmentFilterService.cs:137-144`),
 /// bug for bug:
 ///
@@ -335,9 +383,10 @@ pub struct BotContext<'a> {
     pub bosses: &'a [String],
     /// `BotConfig.Durability`.
     pub durability: &'a BotDurability,
-    /// `BotConfig.Equipment`, keyed by *equipment* role — `pmcBEAR`/`pmcUSEC` collapse to `pmc`
-    /// through `bot_generator_helper::get_bot_equipment_role` before the lookup. The whole map, not
-    /// one resolved entry: `GenerateExtraPropertiesForItem` takes a per-item `botRole` and
+    /// `BotConfig.Equipment` as [`resolve_equipment`] merged it, keyed by *equipment* role —
+    /// `pmcBEAR`/`pmcUSEC` collapse to `pmc` through
+    /// `bot_generator_helper::get_bot_equipment_role` before the lookup. The whole map, not one
+    /// resolved entry: `GenerateExtraPropertiesForItem` takes a per-item `botRole` and
     /// `PlayerScavGenerator.cs:177` passes a literal `"assault"` that need not be the bot's own.
     pub equipment: &'a IndexMap<String, EquipmentFilters>,
     /// `BotConfig.LootItemResourceRandomization`, keyed by the raw bot role (no equipment-role
@@ -404,6 +453,12 @@ mod tests {
     use crate::db::tests::DB_TEST_LOCK;
 
     fn empty_override() -> Box<BotViewsWire> {
+        override_with_equipment(json!({}))
+    }
+
+    /// [`empty_override`] with `BotConfig.Equipment` filled in — the strict member the override arm
+    /// always carries.
+    fn override_with_equipment(equipment: serde_json::Value) -> Box<BotViewsWire> {
         Box::new(
             serde_json::from_value(json!({
                 "items": {}, "itemPresets": {}, "defaultPresetsByTpl": {},
@@ -411,9 +466,10 @@ mod tests {
                 "itemSpawnLimits": {}, "walletLoot": {}, "currencyStackSize": {},
                 "secureContainerAmmoStackCount": 0, "disableLootOnBotTypes": [],
                 "lowProfileGasBlockTpls": [], "lootItemResourceRandomization": {},
+                "equipment": equipment,
                 "pmcConfig": {}, "repairKitWeapon": bonus_settings(), "configBlacklist": []
             }))
-            .expect("empty views override parses"),
+            .expect("views override parses"),
         )
     }
 
@@ -465,6 +521,7 @@ mod tests {
                 "disableLootOnBotTypes": ["bosstest"],
                 "lowProfileGasBlockTpls": ["gas_block_low"],
                 "lootItemResourceRandomization": {"assault": {"food": {"resourcePercent": 44}}},
+                "equipment": {"assault": {}},
             },
             "spt-pmc": {"kind": "spt-pmc", "weaponHasEnhancementChancePercent": 33},
             "spt-repair": {"kind": "spt-repair", "repairKit": {
@@ -622,5 +679,167 @@ mod tests {
         let no_blacklist: IndexMap<String, EquipmentFilters> =
             serde_json::from_value(json!({"assault": {}})).expect("fixture parses");
         assert!(select_equipment_blacklist(&no_blacklist, "assault", 1).is_none());
+    }
+
+    // -- `resolve_equipment`: the resident (or override) equipment plus the live overlay.
+    //
+    // Every fixture below is parsed from a JSON literal, so the tests pin the *wire* names the C#
+    // sender writes rather than this crate's struct internals.
+
+    /// One role's filters as a single `randomisation` band covering `[min..max]`.
+    fn filters_with_band(min: i32, max: i32, mods: serde_json::Value) -> EquipmentFilters {
+        serde_json::from_value(json!({
+            "randomisation": [{"levelRange": {"min": min, "max": max}, "equipmentMods": mods}],
+        }))
+        .expect("band fixture parses")
+    }
+
+    fn live_bands(bands: serde_json::Value) -> IndexMap<String, Vec<LiveEquipmentModsBandWire>> {
+        serde_json::from_value(bands).expect("live equipment mods parse")
+    }
+
+    /// A resident-arm [`BotViews`] whose `spt-bot` lift carries `equipment`. The caller holds
+    /// [`DB_TEST_LOCK`].
+    fn resident_views_with_equipment(equipment: serde_json::Value) -> BotViews {
+        crate::db::clear();
+        let mut configs = bot_stems();
+        configs["spt-bot"]["equipment"] = equipment;
+
+        resolve_bot_views(publish_with_configs(configs), None).expect("the publish resolves")
+    }
+
+    #[test]
+    fn the_overlay_replaces_the_matching_band_wholesale() {
+        let _guard = DB_TEST_LOCK.lock().unwrap();
+        let views = resident_views_with_equipment(json!({
+            "pmc": filters_with_band(1, 14, json!({"mod_nvg": 95.0, "front_plate": 40.0})),
+        }));
+        let live = live_bands(json!({
+            "pmc": [{"levelRange": {"min": 1, "max": 14}, "equipmentMods": {"mod_nvg": 100.0}}],
+        }));
+
+        let merged = resolve_equipment(&views, &live);
+
+        let mods = merged["pmc"].randomisation.as_ref().unwrap()[0]
+            .equipment_mods
+            .as_ref()
+            .unwrap();
+        // Replacement, not patch: `front_plate` is gone, `mod_nvg` took the overlay value.
+        assert_eq!(mods.len(), 1);
+        assert_eq!(mods["mod_nvg"], 100.0);
+    }
+
+    /// An overlay entry that matches no resident band — and one naming a role the resident lift
+    /// does not hold — drops. Their existence implies a post-publish band-structure edit, which is
+    /// a stale window either way; inserting would be a guess at the missing filters.
+    #[test]
+    fn an_unmatched_overlay_band_or_role_is_dropped() {
+        let _guard = DB_TEST_LOCK.lock().unwrap();
+        let views = resident_views_with_equipment(json!({
+            "pmc": filters_with_band(1, 14, json!({"mod_nvg": 95.0})),
+        }));
+        let live = live_bands(json!({
+            "pmc": [{"levelRange": {"min": 15, "max": 22}, "equipmentMods": {"mod_nvg": 100.0}}],
+            "unpublished": [{"levelRange": {"min": 1, "max": 14},
+                             "equipmentMods": {"mod_nvg": 100.0}}],
+        }));
+
+        let merged = resolve_equipment(&views, &live);
+
+        assert_eq!(merged.keys().collect::<Vec<_>>(), ["pmc"]);
+        let mods = merged["pmc"].randomisation.as_ref().unwrap()[0]
+            .equipment_mods
+            .as_ref()
+            .unwrap();
+        assert_eq!(mods["mod_nvg"], 95.0);
+    }
+
+    /// The null roles the C# per-call projection used to filter (`BotPayloadProjection.cs:123`)
+    /// reach the resident root as `None`, and the merge applies that same filter — an overlay
+    /// naming one cannot resurrect it.
+    #[test]
+    fn a_null_resident_role_stays_absent() {
+        let _guard = DB_TEST_LOCK.lock().unwrap();
+        let views = resident_views_with_equipment(json!({"pmc": null}));
+        let live = live_bands(json!({
+            "pmc": [{"levelRange": {"min": 1, "max": 14}, "equipmentMods": {"mod_nvg": 100.0}}],
+        }));
+
+        let merged = resolve_equipment(&views, &live);
+
+        assert!(merged.is_empty(), "{merged:?}");
+    }
+
+    /// Two bands with the same `levelRange` are indistinguishable by range alone, so the pairing is
+    /// positional: each resident band is written at most once, in order.
+    #[test]
+    fn duplicate_level_ranges_pair_positionally_and_write_each_band_once() {
+        let _guard = DB_TEST_LOCK.lock().unwrap();
+        let views = resident_views_with_equipment(json!({
+            "pmc": {"randomisation": [
+                {"levelRange": {"min": 1, "max": 14}, "equipmentMods": {"mod_nvg": 10.0}},
+                {"levelRange": {"min": 1, "max": 14}, "equipmentMods": {"mod_nvg": 20.0}},
+            ]},
+        }));
+
+        let live = live_bands(json!({"pmc": [
+            {"levelRange": {"min": 1, "max": 14}, "equipmentMods": {"mod_nvg": 30.0}},
+            {"levelRange": {"min": 1, "max": 14}, "equipmentMods": {"mod_nvg": 40.0}},
+        ]}));
+        let merged = resolve_equipment(&views, &live);
+        let bands = merged["pmc"].randomisation.as_ref().unwrap();
+        // Never both entries into band 0 — that is the clobber bug this test exists for.
+        assert_eq!(bands[0].equipment_mods.as_ref().unwrap()["mod_nvg"], 30.0);
+        assert_eq!(bands[1].equipment_mods.as_ref().unwrap()["mod_nvg"], 40.0);
+
+        // One overlay entry writes band 0 only; band 1 keeps its published mods.
+        let live = live_bands(json!({"pmc": [
+            {"levelRange": {"min": 1, "max": 14}, "equipmentMods": {"mod_nvg": 30.0}},
+        ]}));
+        let merged = resolve_equipment(&views, &live);
+        let bands = merged["pmc"].randomisation.as_ref().unwrap();
+        assert_eq!(bands[0].equipment_mods.as_ref().unwrap()["mod_nvg"], 30.0);
+        assert_eq!(bands[1].equipment_mods.as_ref().unwrap()["mod_nvg"], 20.0);
+    }
+
+    /// The override arm's equipment and its overlay are built call-time-fresh from the same live
+    /// C# object, so the overlay always carries what the bands already hold: the merge has to be a
+    /// no-op there, or the two arms would stop generating the same bytes. The second half proves
+    /// that no-op is the overlay *agreeing* rather than the loop skipping this arm — a differing
+    /// overlay value has to win.
+    #[test]
+    fn the_override_arm_merge_is_idempotent() {
+        let equipment = json!({
+            "pmc": filters_with_band(1, 14, json!({"mod_nvg": 95.0, "front_plate": 40.0})),
+        });
+        let views = resolve_bot_views(0, Some(override_with_equipment(equipment)))
+            .expect("override resolves");
+        let live = live_bands(json!({"pmc": [
+            {"levelRange": {"min": 1, "max": 14},
+             "equipmentMods": {"mod_nvg": 95.0, "front_plate": 40.0}},
+        ]}));
+
+        let merged = resolve_equipment(&views, &live);
+
+        let BotViews::Override(wire) = &views else {
+            panic!("the override arm resolved resident");
+        };
+        assert_eq!(
+            serde_json::to_value(&merged).expect("merged serializes"),
+            serde_json::to_value(&wire.equipment).expect("the override's equipment serializes"),
+        );
+
+        // The overlay loop runs on this arm too: a differing value wins over the override's own
+        // band, so the equality above is agreement rather than a skipped merge.
+        let live = live_bands(json!({"pmc": [
+            {"levelRange": {"min": 1, "max": 14}, "equipmentMods": {"mod_nvg": 3.0}},
+        ]}));
+        let merged = resolve_equipment(&views, &live);
+        let mods = merged["pmc"].randomisation.as_ref().unwrap()[0]
+            .equipment_mods
+            .as_ref()
+            .unwrap();
+        assert_eq!(mods["mod_nvg"], 3.0);
+        assert_eq!(mods.len(), 1, "replacement, not patch: {mods:?}");
     }
 }

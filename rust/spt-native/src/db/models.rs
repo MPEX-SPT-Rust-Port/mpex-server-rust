@@ -16,7 +16,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::bot::durability_limits_helper::BotDurability;
-use crate::bot::models::{PmcConfigWire, RandomisedResourceDetails, WalletLootSettingsWire};
+use crate::bot::models::{
+    EquipmentFilters, PmcConfigWire, RandomisedResourceDetails, WalletLootSettingsWire,
+};
 use crate::bot::repair_service::{BonusSettings, MinMax};
 use crate::loot::models::{
     Item, SpawnpointTemplate, StaticContainer, StaticContainerData, StaticForced, StaticLootDetails,
@@ -104,20 +106,19 @@ pub struct ConfigsRoot {
 }
 
 /// `Models/Spt/Config/BotConfig.cs` — the nine members bot generation reads that no runtime writer
-/// touches.
+/// touches, plus [`Self::equipment`], whose one written cell is overlaid per call.
 ///
-/// `equipment` is deliberately **not** lifted, though `BuildSharedVarying` reads it:
-/// `BotInventoryGenerator.ReplayRandomisationClamps` (`:405-432`) writes the nighttime mod-chance
-/// clamps back into `Equipment[role].Randomisation[band].EquipmentMods` through the dictionary
-/// indexer after *every* native single-bot send, which trips no write barrier and so never moves
-/// the mutation stamp. That write is a cross-bot feedback loop (the next bot's C# prelude reads it
-/// at `BotEquipmentFilterService.cs:63`), so a resident copy would freeze at the published values
-/// and diverge from bot 2 on. It rides the request instead
-/// ([`crate::bot::models::SharedBotVaryingWire::equipment`]) and lands in this lift's
-/// [`Self::extra`], unread.
+/// `equipment` is resident since ABI 34. Only the live `EquipmentMods` bands ride the varying
+/// block: `BotInventoryGenerator.ReplayRandomisationClamps` (`:405-432`) writes the nighttime
+/// mod-chance clamps back into `Equipment[role].Randomisation[band].EquipmentMods` through the
+/// dictionary indexer after *every* native single-bot send, which trips no write barrier and so
+/// never moves the mutation stamp. That one cell — and nothing else in the equipment graph — is
+/// therefore stale in the resident copy, so it arrives on the request as
+/// [`crate::bot::models::SharedBotVaryingWire::live_equipment_mods`] and
+/// [`crate::bot::resolve_equipment`] overlays it onto the bands below.
 ///
 /// Strictness per member follows the C# `required`: every member below is `required`
-/// (`BotConfig.cs:57,63,69,76,83,130,135,140,146`) except `secureContainerAmmoStackCount`, a plain
+/// (`BotConfig.cs:57,63,69,77,83,131,137,143,149`) except `secureContainerAmmoStackCount`, a plain
 /// auto-property C# fills with the type's default. Everything else — the four dispatch flags, the
 /// brain types, the caps, whatever Ceciler's `[JsonExtensionData]` adds on a Release build — rides
 /// [`Self::extra`].
@@ -149,6 +150,12 @@ pub struct BotConfigLift {
     /// equipment-role mapping.
     #[serde(rename = "lootItemResourceRandomization")]
     pub loot_item_resource_randomization: IndexMap<String, RandomisedResourceDetails>,
+    /// `BotConfig.Equipment`, keyed by *equipment* role. The C# per-call projection used to drop
+    /// the null values (`BotPayloadProjection.cs:123`); the resident root carries the whole
+    /// dictionary as published, so the nulls survive as `None` and
+    /// [`crate::bot::resolve_equipment`] applies that filter instead.
+    #[serde(rename = "equipment")]
+    pub equipment: IndexMap<String, Option<EquipmentFilters>>,
     #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: IndexMap<String, Value>,
 }

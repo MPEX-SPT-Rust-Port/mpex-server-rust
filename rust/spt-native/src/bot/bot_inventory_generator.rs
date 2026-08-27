@@ -86,11 +86,13 @@ use crate::bot::mod_pool_service::get_mods_for_gear_slot;
 use crate::bot::models::{
     BotBaseInventoryWire, BotGenerationDetailsWire, BotInventoryBatchResult, BotInventoryResult,
     BotLootCacheWire, BotResultEnvelope, BotSliceWire, BotTemplateWire, BotTypeInventoryWire,
-    ChancesWire, EquipmentFilterDetails, GenerateBotInventoryBatchRequest,
+    ChancesWire, EquipmentFilterDetails, EquipmentFilters, GenerateBotInventoryBatchRequest,
     GenerateBotInventoryRequest, GenerateEquipmentPropertiesWire, GenerationWire, PmcConfigWire,
     RandomisationDetails, SharedBotVaryingWire,
 };
-use crate::bot::{BotContext, BotViews, resolve_bot_views, select_equipment_blacklists};
+use crate::bot::{
+    BotContext, BotViews, resolve_bot_views, resolve_equipment, select_equipment_blacklists,
+};
 use crate::diag::DiagSink;
 use crate::loot::item_helper::{LootEpochError, LootError, get_item};
 use crate::loot::models::{DEBUG, Diagnostic, ERROR, Item, ItemView, WARNING};
@@ -190,11 +192,15 @@ pub fn generate_inventory(
     } = bot;
     let _seed_guard = test_seed.map(TestSeedGuard::install);
 
+    // Once per call, not once per bot: the merge clones the whole role map.
+    let equipment = resolve_equipment(&views, &shared.live_equipment_mods);
+
     // The single-bot path keeps C# level generation and C# filtering: no draw, no variant pick,
     // and the template arrives pre-filtered exactly as it does today.
     Ok(generate_prepared(
         &shared,
         &views,
+        &equipment,
         PreparedBot {
             details,
             template,
@@ -239,6 +245,9 @@ pub fn generate_inventory_batch(
     // Resolved once for the wave, before any bot's seed guard (scav-case precedent): a stale
     // epoch answers cleanly, without touching any RNG stream.
     let views = resolve_bot_views(epoch, views_override)?;
+    // Once per wave, not once per bot: the merge clones the whole role map, which on the
+    // amortising path is 59 roles deep.
+    let equipment = resolve_equipment(&views, &shared.live_equipment_mods);
 
     let bots = bots
         .into_par_iter()
@@ -298,7 +307,7 @@ pub fn generate_inventory_batch(
                 loot_pools: variant.loot_pools.clone(),
             };
 
-            match generate_prepared(&shared, &views, prepared) {
+            match generate_prepared(&shared, &views, &equipment, prepared) {
                 Ok(mut result) => {
                     result.level = Some(level);
                     result.exp = Some(exp);
@@ -343,9 +352,13 @@ struct PreparedBot {
 /// `BotInventoryGenerator.GenerateInventory` (`:80-120`) proper - one bot against views the caller
 /// already resolved. The seed guard belongs to the caller: on the batch path it has to cover the
 /// level draw, which happens before this.
+///
+/// `equipment` is merged by the caller too, for the same reason: this runs once per *bot* and the
+/// merge is once per call.
 fn generate_prepared(
     shared: &SharedBotVaryingWire,
     views: &BotViews,
+    equipment: &IndexMap<String, EquipmentFilters>,
     prepared: PreparedBot,
 ) -> Result<BotInventoryResult, LootError> {
     let PreparedBot {
@@ -357,7 +370,6 @@ fn generate_prepared(
     let SharedBotVaryingWire {
         generating_player_level,
         is_night_time,
-        equipment,
         ..
     } = shared;
 
@@ -369,7 +381,7 @@ fn generate_prepared(
     } = template;
 
     // `BuildSharedVarying` used to resolve both of these C# side and ship them; they are a band
-    // lookup over the (still varying) equipment map, so they are resolved here instead.
+    // lookup over the merged equipment map, so they are resolved here instead.
     let (equipment_blacklist, weapon_mod_equipment_blacklist) = select_equipment_blacklists(
         equipment,
         get_bot_equipment_role(&details.role_lowercase),
@@ -1321,6 +1333,7 @@ mod tests {
                 "disableLootOnBotTypes": [],
                 "lowProfileGasBlockTpls": [],
                 "lootItemResourceRandomization": {},
+                "equipment": {"assault": {}},
                 "pmcConfig": {},
                 "repairKitWeapon": {"rarityWeight": {}, "bonusTypeWeight": {}, "Common": {},
                     "Rare": {}},
@@ -1369,7 +1382,7 @@ mod tests {
             "shared": {
                 "generatingPlayerLevel": 20,
                 "isNightTime": false,
-                "equipment": {"assault": {}},
+                "liveEquipmentMods": {},
             },
         })
     }
@@ -1501,15 +1514,21 @@ mod tests {
     fn nighttime_clamps_are_recorded_but_change_nothing_this_call() {
         let mut request = base_request();
         request["shared"]["isNightTime"] = json!(true);
-        request["shared"]["equipment"]["assault"] = json!({
+        // The band is split across the two homes it now has: the structure is resident (here, the
+        // override arm's views), the live `equipmentMods` ride the varying block, and the clamp
+        // path only sees them because `resolve_equipment` merged them back.
+        request["viewsOverride"]["equipment"]["assault"] = json!({
             "randomisation": [{
                 "levelRange": {"min": 1, "max": 99},
-                "equipmentMods": {"front_plate": 40, "mod_nvg": 95, "mod_absent_modifier": 10},
                 "nighttimeChanges": {"equipmentModsModifiers": {
                     "front_plate": 30, "mod_nvg": 90, "mod_not_in_equipment_mods": 50,
                 }},
             }],
         });
+        request["shared"]["liveEquipmentMods"]["assault"] = json!([{
+            "levelRange": {"min": 1, "max": 99},
+            "equipmentMods": {"front_plate": 40, "mod_nvg": 95, "mod_absent_modifier": 10},
+        }]);
 
         let result = generate(request).unwrap();
 
@@ -1565,7 +1584,7 @@ mod tests {
         // Poison a role the good bot does not use: night + nighttimeChanges configured but no
         // equipmentMods is the error return at the top of equipment generation.
         envelope["shared"]["isNightTime"] = json!(true);
-        envelope["shared"]["equipment"]["poisoned"] = json!({
+        envelope["viewsOverride"]["equipment"]["poisoned"] = json!({
             "randomisation": [{
                 "levelRange": {"min": 1, "max": 99},
                 "nighttimeChanges": {"equipmentModsModifiers": {"front_plate": 30}},
@@ -1855,7 +1874,7 @@ mod tests {
         let mut request = base_request();
         request["bot"]["details"]["isPmc"] = json!(true);
         request["bot"]["details"]["roleLowercase"] = json!("pmcbear");
-        request["shared"]["equipment"] = json!({"pmc": {}});
+        request["viewsOverride"]["equipment"] = json!({"pmc": {}});
         request["viewsOverride"]["pmcConfig"] = json!({
             "forceArmband": {"enabled": true, "usec": "armband_usec", "bear": FORCED_ARMBAND_TPL},
         });
@@ -1871,7 +1890,7 @@ mod tests {
         let mut request = base_request();
         request["bot"]["details"]["isPmc"] = json!(true);
         request["bot"]["details"]["roleLowercase"] = json!("pmcbear");
-        request["shared"]["equipment"] = json!({"pmc": {}});
+        request["viewsOverride"]["equipment"] = json!({"pmc": {}});
         request["viewsOverride"]["pmcConfig"] = json!({
             "forceArmband": {"enabled": true, "usec": "armband_usec", "bear": FORCED_ARMBAND_TPL},
         });
@@ -1883,7 +1902,7 @@ mod tests {
     #[test]
     fn an_unknown_equipment_role_stops_the_equipment_phase_without_failing() {
         let mut request = base_request();
-        request["shared"]["equipment"] = json!({"pmc": {}});
+        request["viewsOverride"]["equipment"] = json!({"pmc": {}});
         // The weapon path indexes `BotConfig.Equipment[botRole]` too, and would throw right after;
         // rolling no primary keeps this test on the equipment phase.
         request["template"]["chances"]["equipment"]["FirstPrimaryWeapon"] = json!(0);
@@ -1912,7 +1931,7 @@ mod tests {
     #[test]
     fn forcing_a_rig_when_there_is_no_armour_overrides_the_slot_chance() {
         let mut request = base_request();
-        request["shared"]["equipment"]["assault"] = json!({"forceRigWhenNoVest": true});
+        request["viewsOverride"]["equipment"]["assault"] = json!({"forceRigWhenNoVest": true});
         request["template"]["chances"]["equipment"]["ArmorVest"] = json!(0);
         request["template"]["chances"]["equipment"]["TacticalVest"] = json!(0);
 
