@@ -321,10 +321,14 @@ public class BotResidentDbTests
     /// <see cref="LootResidentDbTests.AnInPlaceLootMultiplierAdjustmentReachesAResidentSend"/>: an
     /// unbarriered dictionary-indexer write into
     /// <c>BotConfig.Equipment[role].Randomisation[band].EquipmentMods</c> — no setter, no write
-    /// barrier, no stamp move — still reaches the native side of a *resident* send, because those
-    /// values ride the <c>liveEquipmentMods</c> overlay on the varying block rather than the
-    /// resident copy. That is all this case pins: it perturbs the config itself, generates two waves
-    /// whose only difference is that perturbation, and asserts their outputs differ.
+    /// barrier, no stamp move — still reaches the native side of a *resident* send. It gets there
+    /// through the *template*: <c>FilterBotEquipment</c> bakes the clamped band into
+    /// <c>BotChances.EquipmentModsChances</c> before projection
+    /// (<c>BotEquipmentFilterService.cs:63,82</c>), and templates stay varying. The same cells now
+    /// *also* ride the <c>liveEquipmentMods</c> overlay on the varying block, so this case is
+    /// over-determined and does not discriminate between the two paths. That is all this case pins:
+    /// it perturbs the config itself, generates two waves whose only difference is that
+    /// perturbation, and asserts their outputs differ.
     ///
     /// It does not gate the second-bot feedback loop <c>ReplayRandomisationClamps</c> drives: its
     /// perturbation is the test's own, not a clamp; its wave is daytime; and its level-1 band has no

@@ -210,7 +210,7 @@ break.
   `BotConfig.Equipment["pmc"].Randomisation[band].Generation["pocketLoot"].Weights`
   (`BotGenerator.cs:487-489`) — so the next bot's prelude copies the polluted reference on, on
   every path. Pre-existing and invisible to the stamp (`GenerationData` is denied,
-  `WriteBarriersPatch.cs:75-84`, and the write is an indexer-set regardless); never read natively —
+  `WriteBarriersPatch.cs:75-86`, and the write is an indexer-set regardless); never read natively —
   Rust declares no `generation` field, and the split deliberately keeps it that way. Shipped data
   confines the leak to PMC bands 0–1 (levels 1–22) on both the write and the read end: only those
   bands carry `pocketLoot`. The `PlayerScavGenerator.AdjustItemWeights` twin aliases
@@ -1047,7 +1047,7 @@ varying process state on a bot request — now rides `BotConfigLift` as a strict
 per-call projection used to drop and `resolve_equipment` applies that filter instead. The views
 override gained the same member for the ineligible arm. One slim varying member survives:
 `liveEquipmentMods`, role → band → `EquipmentMods` — the only cells a barrier-invisible runtime writer
-touches *and* Rust reads. Inside the subtree only the two nested `level_range`s are
+touches *and* Rust reads. Inside the subtree the two newly-softened nested `level_range`s are
 `#[serde(default)]` (the `EquipmentFilterDetails` precedent); everything else stays strict, and
 `generation` stays undeclared, so W3's polluted cell never enters resident state at all.
 
