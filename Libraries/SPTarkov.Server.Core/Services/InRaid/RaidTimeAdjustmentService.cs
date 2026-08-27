@@ -59,7 +59,9 @@ public class RaidTimeAdjustmentService(
 
     /// <summary>
     ///     Which implementation the most recent adjustment call ran - the spt-native path or the
-    ///     retained C# path. Test seam; also handy in a debugger.
+    ///     retained C# path. Test seam; also handy in a debugger. Unsynchronized on a singleton -
+    ///     concurrent raid starts race it - which only the non-parallel fixtures that assert on it
+    ///     may ignore.
     /// </summary>
     internal LootGenerationPath LastPathTaken { get; private set; }
 

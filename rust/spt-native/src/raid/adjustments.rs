@@ -92,8 +92,10 @@ pub fn get_adjustments(
     // three draw paths (single entry: none; weights summing to the entry count: one int; else one
     // double) and the negative-weight skip, whose mid-draw warning is dropped and booked.
     //
-    // Its only failure is the `InvalidOperationException("No item was picked.")` an empty weight map
-    // falls through to (`WeightedRandomHelper.cs:106`) — carried across as its message.
+    // Its only failure is the empty weight map, which takes the `sum == count` (0 == 0) uniform
+    // branch and throws `ArgumentOutOfRangeException` from `items[0]` with no draw spent — the
+    // `InvalidOperationException("No item was picked.")` at `WeightedRandomHelper.cs:106` is
+    // unreachable from it. The twin errors with that message anyway: both arms throw, zero draws.
     let chosen_key = get_weighted_value(&map_settings.reduction_percent_weights)
         .map_err(|error| RaidError::new(error.message))?;
 
@@ -386,7 +388,9 @@ fn adjust_waves(request: &MakeAdjustmentsRequest, adjustments: &mut WaveAdjustme
 /// dropped every wave in that case, so the loop body never runs. Ported as written all the same.
 fn subtract_start_seconds(simulated: Option<f64>, wave_times: &mut [WaveTimesWire]) {
     let start_seconds = simulated.unwrap_or(1.0);
-    // `(int)Math.Max(startSeconds, 0)` — the C# cast truncates toward zero, which `as i32` is.
+    // `(int)Math.Max(startSeconds, 0)` — the C# cast truncates toward zero, which `as i32` is in
+    // range. Out of range (an `EscapeTimeLimit` above ~35.8M minutes) C#'s unchecked cast yields
+    // `int.MinValue` where `as` saturates — unreachable from sane data, noted for honesty.
     let offset = start_seconds.max(0.0) as i32;
 
     for times in wave_times {

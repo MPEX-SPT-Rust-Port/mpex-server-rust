@@ -1054,8 +1054,9 @@ in `NativeMethods.cs` and `SptNative.cs`. The two services keep their full 4.1.2
   parallel-branch collision rule, whichever of two same-number bumps lands second — is four sites plus
   a docs grep for the stale number, not three.
   **The export counts are a second silent-merge surface, and a worse one**, because nothing asserts
-  them: "Thirty-nine" appears three times in `ARCHITECTURE.md`, twice in this file and three times in
-  `rust/ARCHITECTURE.md`, and a parallel branch adding exports writes *its* number into the same files
+  them: the count sits in prose — as "Thirty-nine" and as bare `39` — across `ARCHITECTURE.md`, this
+  file and `rust/ARCHITECTURE.md` (no per-file tally here; a prior one was wrong twice over, so grep
+  is the procedure), and a parallel branch adding exports writes *its* number into the same files
   on adjacent-but-distinct lines — so git merges both cleanly and leaves the tree internally
   inconsistent with no conflict to notice. The integrator's procedure is therefore to **re-derive the
   count, never to sum the branch deltas**: `grep -c '#\[unsafe(no_mangle)\]' rust/spt-native/src/ffi.rs`
@@ -1075,8 +1076,14 @@ in `NativeMethods.cs` and `SptNative.cs`. The two services keep their full 4.1.2
   write — `adjustments.rs:463` takes the pmc offset's operand from the request where RTAS:362 re-reads
   the live `spawn.Time`, and the wave applier writes absolute `WaveTimes` where legacy compounds two
   subtractions in place — which diverges only if one `BossLocationSpawn`/`Wave` instance appears at
-  two kept indices. Unreachable: the clone yields distinct objects and the PMC splice appends distinct
-  config instances. Inherent to the delta protocol, so booked rather than mitigated.
+  two kept indices. **Mod-reachable**, the fourth mod-shaped divergence: the clone yields distinct
+  objects, but the PMC splice appends the config's own instances by reference
+  (`PmcWaveGenerator.ApplyWaveChangesToMap`), and `AddPmcWaveToLocation` accepts the same
+  `BossLocationSpawn` twice — legacy then compounds the offset on the aliased instance, landing on
+  the live `PmcConfig` object and accumulating across raids, where the delta write is
+  last-write-wins. The parity fixture cannot construct the shape: its `WithWaves`/`WithBossSpawns`
+  builders clone prototypes per call precisely to prevent instance sharing. Inherent to the delta
+  protocol, so booked rather than mitigated.
 - **`AdjustBotHostilitySettings` Quirk-10 error path applies no deltas where legacy left earlier roles
   applied.** Unobservable: the clone half is abandoned identically, and the one surviving mutation — the
   duplicate-`Role` merge write onto the live `PmcConfig` `ChancedEnemy` (LLS:316-324) — is idempotent

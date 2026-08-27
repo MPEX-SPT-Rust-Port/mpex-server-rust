@@ -176,7 +176,9 @@ public class LocationLifecycleService(
 
     /// <summary>
     ///     Which implementation the most recent raid-start adjustment call ran - the spt-native path
-    ///     or the retained C# path. Test seam; also handy in a debugger.
+    ///     or the retained C# path. Test seam; also handy in a debugger. Unsynchronized on a
+    ///     singleton - concurrent raid starts race it - which only the non-parallel fixtures that
+    ///     assert on it may ignore.
     /// </summary>
     internal LootGenerationPath LastPathTaken { get; private set; }
 
@@ -454,7 +456,10 @@ public class LocationLifecycleService(
             // Quirk 9, ported verbatim: deferred on purpose, exactly like the legacy Where this
             // stands in for. The union's operand is a lazy sequence of the location table's own
             // live instances, and AllExtractsExit's derived EqualityContract never matches a base
-            // Exit, so nothing dedupes
+            // Exit, so nothing dedupes. One booked residual: membership was fixed against the
+            // builder's snapshot list, where legacy's Where re-ran its predicate over the live
+            // AllExtracts on every enumeration - a mutation of AllExtracts between this pass and
+            // the response's serialization is visible to legacy and not here
             var scavExtracts = deltas.AppendExtractIndices.Select(index => mapExtracts![index]);
 
             locationData.Exits = locationData.Exits.Union(scavExtracts);

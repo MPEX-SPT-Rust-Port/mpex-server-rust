@@ -35,7 +35,11 @@ fn is_side(side: Option<&str>, side_check: &str) -> bool {
 /// [`RaidError::Failed`] on Quirk 10: a matched location entry whose `AlwaysEnemies` is null, with
 /// enemy types to add to it. Legacy NREs there; the native arm reports it and applies **nothing**,
 /// where legacy would have kept the earlier roles' mutations — the same half-applied asymmetry the
-/// family's other error points carry, unobservable because the throw abandons the cloned map.
+/// family's other error points carry. The clone half of those mutations is abandoned identically;
+/// the one that outlives the clone — the Quirk-8 duplicate-role merge's `EnemyChance` write onto
+/// the live `PmcConfig` `ChancedEnemy` — is idempotent and value-independent (the applier clears
+/// and recomputes first := last from the config itself every run), so the asymmetry still cannot
+/// be observed across raids.
 pub fn adjust_bot_hostility_settings(
     request: &AdjustHostilityRequest,
 ) -> Result<AdjustHostilityResponse, RaidError> {

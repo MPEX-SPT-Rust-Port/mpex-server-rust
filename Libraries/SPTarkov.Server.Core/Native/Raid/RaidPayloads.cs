@@ -348,7 +348,10 @@ public record BossTimeUpdateWire
     /// <summary>
     ///     Into the request's <c>bossSpawns</c> - the <em>original</em> spawn list, not the kept
     ///     one, so the write lands on the very object legacy wrote (which on a map that took the
-    ///     custom-PMC splice belongs to the live <c>PmcConfig</c>).
+    ///     custom-PMC splice belongs to the live <c>PmcConfig</c>). The absolute time leans on each
+    ///     instance appearing at one index: legacy's read-modify-write compounds on an instance a
+    ///     mod spliced in twice, where this write is last-write-wins - the booked aliasing
+    ///     divergence in the roadmap ledger.
     /// </summary>
     [JsonPropertyName("index")]
     public required int Index { get; set; }
