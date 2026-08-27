@@ -196,7 +196,16 @@ break.
   an indexer surface with a distinct failure shape: a role registered at runtime works today and is
   simply missing resident-side, where the equipment phase early-returns with a diagnostic
   (`bot_inventory_generator.rs:546-556`) and the weapon path errors the bot
-  (`bot_weapon_generator.rs:372-376`). The sole carve-out is `Randomisation[band].EquipmentMods`,
+  (`bot_weapon_generator.rs:372-376`). The four `MinMax<int>` `LevelRange`s in the graph
+  (`RandomisationDetails`, `EquipmentFilterDetails`, `ArmorPlateWeights`,
+  `WeightingAdjustmentDetails`) are in the window through the *other* hole — open generics are never
+  barriered (the `MinMax<T>` bullet above) — with a failure shape of their own: a runtime
+  `LevelRange.Min`/`.Max` set moves no stamp, so Rust keeps selecting bands on the published range
+  while the C# prelude uses the live one, and, new since the split, the overlay pairs by `levelRange`
+  equality, so the edited band's overlay entry matches no resident band and **drops silently** — the
+  nighttime clamp feedback loop dies for that band while everything else keeps working. No
+  production code writes a `LevelRange` (two independent sweeps); this is a mod-facing hazard.
+  The sole carve-out is `Randomisation[band].EquipmentMods`,
   which rides the `liveEquipmentMods` overlay on the varying block and stays exactly as fresh as it
   was on both arms. `DisableNativeRequestCache` restores per-call freshness on every arm;
   `TrustNativeRequestCacheWithMods` is consulted only on the modded arm
@@ -210,8 +219,16 @@ break.
   `BotConfig.Equipment["pmc"].Randomisation[band].Generation["pocketLoot"].Weights`
   (`BotGenerator.cs:487-489`) — so the next bot's prelude copies the polluted reference on, on
   every path. Pre-existing and invisible to the stamp (`GenerationData` is denied,
-  `WriteBarriersPatch.cs:75-86`, and the write is an indexer-set regardless); never read natively —
-  Rust declares no `generation` field, and the split deliberately keeps it that way. Shipped data
+  `WriteBarriersPatch.cs:75-86`, and the write is an indexer-set regardless); never read *via
+  resident state* — Rust's `RandomisationDetails` declares no `generation` field, and the split
+  deliberately keeps it that way — though the polluted cells do reach Rust on every send, always
+  fresh, through the bot template's `generation` block on the varying wire
+  (`BotTemplateWire.generation`: the pocket-loot resize, the loot-count draws, the magazine
+  chances). Anyone lifting the bot *template* to resident state inherits the barrier analysis that
+  freshness currently makes unnecessary. The pollution is also path-dependent since the batch flip:
+  the single-bot path still runs the C# write (`BotGenerator.cs:333`, gated on
+  `!nativeLevelAndFilter`), while a batched UNHEARD PMC gets the extra weights natively on Rust's
+  own template copy and leaves the live config clean. Shipped data
   confines the leak to PMC bands 0–1 (levels 1–22) on both the write and the read end: only those
   bands carry `pocketLoot`. The `PlayerScavGenerator.AdjustItemWeights` twin aliases
   `PlayerScavConfig` unconditionally (`:340,:345`); what keeps the UNHEARD pocket write off player
@@ -225,7 +242,9 @@ break.
   matching tpl from the combined loot pool into
   `BotConfig.Equipment[role].Randomisation[band].Generation[subtype].Whitelist`, and the cache then
   shares those objects (`:432-439`). Pre-existing, barrier-invisible (`GenerationData` denied,
-  `TryAdd` regardless), and never read natively — `generation` stays un-resident.
+  `TryAdd` regardless), and never read via resident state — `generation` stays un-resident, and the
+  W3 entry's template-wire caveat applies here too: the polluted whitelists cross fresh on the
+  template's `generation` block every send.
 - **Write barriers exist on Release and publish builds only.** Ceciler does not run in Debug, so
   `WriteBarrier.Installed` is false there and `ResidentDbDispatch.Eligible` refuses to honour
   `TrustNativeRequestCacheWithMods` — a Debug server with mods loaded always sends the views
@@ -1047,9 +1066,17 @@ varying process state on a bot request — now rides `BotConfigLift` as a strict
 per-call projection used to drop and `resolve_equipment` applies that filter instead. The views
 override gained the same member for the ineligible arm. One slim varying member survives:
 `liveEquipmentMods`, role → band → `EquipmentMods` — the only cells a barrier-invisible runtime writer
-touches *and* Rust reads. Inside the subtree the two newly-softened nested `level_range`s are
-`#[serde(default)]` (the `EquipmentFilterDetails` precedent); everything else stays strict, and
-`generation` stays undeclared, so W3's polluted cell never enters resident state at all.
+touches *and* Rust reads. Inside the subtree the softened `level_range`s are `#[serde(default)]` (the
+`EquipmentFilterDetails` precedent): the two nested resident ones and — post-review — the overlay
+wire's own (`LiveEquipmentModsBandWire`), without which a mod-nulled `levelRange` (the serializer's
+`WhenWritingNull` turns an explicit null into an omitted key on publish and request alike) would
+survive the publish only to fail every subsequent bot request; a defaulted `(0, 0)` band matches
+nothing and drops. Everything else stays strict, and `generation` stays undeclared, so W3's polluted
+cell never enters resident state at all. The two strict leaves remaining inside the subtree —
+`NighttimeChanges.equipmentModsModifiers` and `ArmorPlateWeights.values` — are the lift's
+publish-abort surface: mod data that nulls either serialises as an omitted key and fails the whole
+`spt_db_publish` (previous resident DB retained, every family falls back to override sends) where it
+used to fail one bot request's varying parse.
 
 The overlay carries every role whose `Randomisation` is non-null and every band whose `EquipmentMods`
 is non-null, on both arms of both envelopes, keyed by `levelRange`. **As built the pairing is
@@ -1074,10 +1101,16 @@ nighttime raid still reads bot 1's clamps on both arms. W3 (the UNHEARD pocket-l
 booked in the *Broken* ledger above and neither is fixed here — breaking the alias at
 `BotEquipmentFilterService.cs:100-105` would change generated bots server-wide, the MongoId-sort
 precedent. W4 (the admin panel's whole-property `SetValue`) goes through a barriered setter and
-republishes; its own pre-existing quirk is that the apply orphans `BotEquipmentFilterService`'s
+republishes **on a barriered (Release/publish) build**: a Debug zero-mod server has no barriers yet
+stays resident-eligible (`ResidentDbDispatch.Eligible` consults `WriteBarrier.Installed` only on the
+modded arm), so an admin-panel apply there reaches the next send only through the
+`liveEquipmentMods` overlay until something republishes — the pre-existing Debug pattern for every
+resident member, W4 is just the first writer whose disposition *depends* on the barrier. Its other
+pre-existing quirk is that the apply orphans `BotEquipmentFilterService`'s
 constructor-cached reference, severing the C# half of the feedback loop — untouched. What the lift
 costs is the container stale window, now stretched over the whole equipment graph, plus two C# reads
-that stay live while Rust reads resident (the batcher's nighttime decline and its band cutting), which
+that stay live while Rust reads resident (the batcher's nighttime decline and its band cutting — so
+a runtime-added band cuts batch variants on boundaries the resident side does not know), which
 degrade into that same window.
 
 **The gate is `BotResidentDbTests.ASecondNighttimeBotSeesTheFirstBotsClampsOnTheResidentPath`,** two
@@ -1088,8 +1121,11 @@ believed to and does not (its perturbation reaches native through the *template*
 its band carries no `nighttimeChanges`), and its docblock now says so. `RESIDENT_BATCH_GOLDEN` is
 unchanged, as a residency flip requires — but it pins the plumbing, not the merge: its bands carry no
 `equipmentMods` and its wave is daytime, so the merge-loop body never executes there. Six Rust unit
-cases cover the merge itself (`bot/mod.rs:691-880`). Wire and `BuildRequest` numbers are in
-BENCHMARK.md § Equipment split.
+cases cover the merge itself (`bot/mod.rs:696-886`), and the batch entry point's hoist has a direct
+gate of its own (`the_batch_arm_computes_clamps_off_the_live_overlay_mods`, added post-review after
+a sabotage run showed the whole tree stayed green with the batch-path merge blinded — its safety
+had rested entirely on `BotWaveBatcher`'s nighttime decline policy). Wire and `BuildRequest` numbers
+are in BENCHMARK.md § Equipment split.
 
 **The ported 4.1.2 quirks are documented at their call sites** as numbered `Quirk N` comments in
 `rust/spt-native/src/quest/*.rs`, `src/scav_case/generator.rs`, `src/base_class.rs`,

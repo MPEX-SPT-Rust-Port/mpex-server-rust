@@ -271,7 +271,12 @@ pub fn resolve_bot_views(
 /// carry `None` here if its live counterpart is null too — `EquipmentMods` flips null↔`Some` only
 /// through a barriered property setter, which republishes — so no skipped band is ever owed mods.
 /// Unmatched overlay entries drop: their existence implies a post-publish band-structure container
-/// edit, which is the Broken ledger's booked stale window either way.
+/// edit — or a runtime write to a band's `LevelRange`, whose setters Ceciler never barriers
+/// (`MinMax<T>` is an open generic) — which is the Broken ledger's booked stale window either way.
+/// And if the sender/merge invariant above ever broke, a duplicate-range group would not merely
+/// drop: the positional pairing could hand one band's live mods to its range-twin neighbour, so a
+/// fresh band would inherit another band's clamps. That invariant is enforced only by the write
+/// barriers' denylist, a different repo tree.
 ///
 /// The resident arm skips the `None` roles, which is the filter the C# projection applies on the
 /// override arm (`BotPayloadProjection.cs:149`).

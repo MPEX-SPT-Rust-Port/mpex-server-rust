@@ -893,14 +893,21 @@ usec BuildRequest only       n=20  mean=0.14 ms  median=0.13 ms  min=0.11 ms  ma
 
 usec is flat. Assault reads 3.4x worse and reproduced (0.81 ms median on a second invocation), so it
 is not noise — but it is not this change either. A decomposition probe in the same Release build
-times the parts of assault's `BuildRequest`: `BuildSharedVarying`, the only method the split touched,
-is **0.01 ms** (both roles), while `BuildLootPools` is **0.63 ms of a 0.66 ms total**. `BuildLootPools`,
-`BotLootCacheService` and the rest of that path are byte-identical across the two commits —
-`git diff a8535ba..HEAD` touches `BotPayloadProjection` in two hunks, `BuildSharedVarying` and
-`BuildViewsOverride`, and nothing else on the C# request path. Read the assault pair as loot-cache and
-host state, not as a projection regression. Note also what `BuildRequest` never contained: the 39,811 B
-member's *serialisation* cost is paid in the wrapper's serialise step, which this fixture does not
-time, so the wire saving does not show up here at all.
+timed the parts of assault's `BuildRequest`: `BuildSharedVarying`, the only method the split touched,
+at **0.01 ms** (both roles), against `BuildLootPools` at **0.63 ms of a 0.66 ms total**. That probe
+was a throwaway edit and is **not committed**, so those part-times are not reproducible from the
+tree; the durable evidence is diff scope — `git diff a8535ba..HEAD` touches `BotPayloadProjection`
+in three hunks (two methods: `BuildSharedVarying`, whose docblock splits into a hunk of its own, and
+`BuildViewsOverride`) and nothing else on the C# request path, while `BuildLootPools`,
+`BotLootCacheService` and the rest of that path are byte-identical across the two commits. Read the
+assault pair as loot-cache and host state, not as a projection regression. Note also what
+`BuildRequest` never contained: the 39,811 B member's *serialisation* cost is paid in the wrapper's
+serialise step, which this fixture does not time, so the wire saving does not show up here at all.
+The `native (rust)` series the same invocation prints was **not read** for this change, so the
+split's one new native-side cost — `resolve_equipment` cloning the full 59-role equipment graph once
+per single-bot call, including the override arm where the merge is provably a no-op — is unmeasured;
+a `Cow` for the empty-overlay case is the booked follow-up (PR #20's carryover comment) if it ever
+shows up.
 
 **Publish delta: expected ~zero, and only its shape was confirmed.** The configs root already carried
 the equipment JSON at every publish — it landed in `BotConfigLift.extra`, parsed but unread — so the
