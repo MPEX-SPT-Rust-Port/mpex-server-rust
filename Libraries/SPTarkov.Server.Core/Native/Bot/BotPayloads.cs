@@ -235,9 +235,10 @@ internal record SharedBotVarying
 /// <summary>
 /// One band of <see cref="SharedBotVarying.LiveEquipmentMods"/>: the <c>levelRange</c> that
 /// identifies which <c>Randomisation</c> band it overlays, and that band's live
-/// <c>EquipmentMods</c> map. Sent in the live <c>Randomisation</c> list's own order, which is the
-/// order the resident copy was published from - what lets the native merge pair duplicate ranges
-/// positionally.
+/// <c>EquipmentMods</c> map. The projection sends the bands of the live <c>Randomisation</c> list
+/// that <i>carry</i> an <c>EquipmentMods</c> map, in that list's own order, so the overlay is a
+/// subsequence rather than the whole list - which is why the native merge pairs positionally
+/// among the resident bands that carry one too, and never onto a band whose map is null.
 /// </summary>
 internal record LiveEquipmentModsBand
 {

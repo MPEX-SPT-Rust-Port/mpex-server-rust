@@ -667,7 +667,7 @@ pub struct BotViewsWire {
     pub low_profile_gas_block_tpls: std::collections::HashSet<String>,
     pub loot_item_resource_randomization: IndexMap<String, RandomisedResourceDetails>,
     /// `BotConfig.Equipment`, minus the null values the C# projection drops
-    /// (`BotPayloadProjection.cs:123`) — the resident arm's [`crate::db::models::BotConfigLift`]
+    /// (`BotPayloadProjection.cs:149`) — the resident arm's [`crate::db::models::BotConfigLift`]
     /// keeps them as `None` and filters at resolve time instead.
     pub equipment: IndexMap<String, EquipmentFilters>,
 
@@ -770,9 +770,11 @@ pub struct SharedBotVaryingWire {
 
 /// One band of [`SharedBotVaryingWire::live_equipment_mods`]: the `levelRange` that identifies
 /// which resident [`RandomisationDetails`] it overlays, and that band's live `EquipmentMods` map.
-/// The C# sender enumerates the same live `Randomisation` list the resident copy was published
-/// from, so the bands arrive in resident order — which is what lets
-/// [`crate::bot::resolve_equipment`] pair duplicate ranges positionally.
+/// The C# sender enumerates the live `Randomisation` list the resident copy was published from and
+/// sends the bands that *carry* an `EquipmentMods` map (`BotPayloadProjection.cs:101`), so what
+/// arrives is that list's mod-carrying subsequence, in order — which is why
+/// [`crate::bot::resolve_equipment`] pairs duplicate ranges positionally against the resident bands
+/// whose [`RandomisationDetails::equipment_mods`] is `Some`, the matching subsequence.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LiveEquipmentModsBandWire {

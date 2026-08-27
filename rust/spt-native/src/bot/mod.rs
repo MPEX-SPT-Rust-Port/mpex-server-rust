@@ -262,14 +262,19 @@ pub fn resolve_bot_views(
 
 /// Resident (or override) equipment with the live `EquipmentMods` overlay applied.
 ///
-/// Each overlay band replaces the `equipment_mods` of the first NOT-YET-WRITTEN band with an equal
-/// `levelRange` — each resident band is written at most once, so duplicate ranges pair positionally
-/// (the overlay enumerates the same live list). Unmatched overlay entries drop: their existence
-/// implies a post-publish band-structure container edit, which is the Broken ledger's booked stale
-/// window either way.
+/// Each overlay band replaces the `equipment_mods` of the first NOT-YET-WRITTEN band that has an
+/// equal `levelRange` **and** `Some` `equipment_mods` — each such band is written at most once, so
+/// duplicate ranges pair positionally. The `is_some` half of the predicate is what makes that
+/// pairing sound: the sender skips the bands whose live `EquipmentMods` is null
+/// (`BotPayloadProjection.cs:101`), so the overlay is a *subsequence* of the role's `randomisation`
+/// list and both ends only line up if the merge skips the same bands. A resident band can only
+/// carry `None` here if its live counterpart is null too — `EquipmentMods` flips null↔`Some` only
+/// through a barriered property setter, which republishes — so no skipped band is ever owed mods.
+/// Unmatched overlay entries drop: their existence implies a post-publish band-structure container
+/// edit, which is the Broken ledger's booked stale window either way.
 ///
-/// The resident arm skips the `None` roles, which is the filter the C# per-call projection used to
-/// apply before the lift (`BotPayloadProjection.cs:123`).
+/// The resident arm skips the `None` roles, which is the filter the C# projection applies on the
+/// override arm (`BotPayloadProjection.cs:149`).
 pub fn resolve_equipment(
     views: &BotViews,
     live: &IndexMap<String, Vec<LiveEquipmentModsBandWire>>,
@@ -294,7 +299,9 @@ pub fn resolve_equipment(
                         .iter_mut()
                         .enumerate()
                         .find(|(index, resident)| {
-                            !written[*index] && resident.level_range == band.level_range
+                            !written[*index]
+                                && resident.level_range == band.level_range
+                                && resident.equipment_mods.is_some()
                         })
                 {
                     target.equipment_mods = Some(band.equipment_mods.clone());
@@ -754,7 +761,7 @@ mod tests {
         assert_eq!(mods["mod_nvg"], 95.0);
     }
 
-    /// The null roles the C# per-call projection used to filter (`BotPayloadProjection.cs:123`)
+    /// The null roles the C# per-call projection used to filter (`BotPayloadProjection.cs:149`)
     /// reach the resident root as `None`, and the merge applies that same filter — an overlay
     /// naming one cannot resurrect it.
     #[test]
@@ -800,6 +807,35 @@ mod tests {
         let bands = merged["pmc"].randomisation.as_ref().unwrap();
         assert_eq!(bands[0].equipment_mods.as_ref().unwrap()["mod_nvg"], 30.0);
         assert_eq!(bands[1].equipment_mods.as_ref().unwrap()["mod_nvg"], 20.0);
+    }
+
+    /// The overlay is a *subsequence* of the role's bands — the sender drops the ones whose live
+    /// `EquipmentMods` is null (`BotPayloadProjection.cs:101`) — so the merge has to skip the very
+    /// same bands or the two ends stop lining up. Same `levelRange` twice, the first band without
+    /// `equipmentMods`: the single overlay entry is band 2's, and writing it onto band 1 would both
+    /// invent mods for a band that has none and leave band 2 stale.
+    #[test]
+    fn an_overlay_band_skips_a_resident_band_that_carries_no_mods() {
+        let _guard = DB_TEST_LOCK.lock().unwrap();
+        let views = resident_views_with_equipment(json!({
+            "pmc": {"randomisation": [
+                {"levelRange": {"min": 1, "max": 14}},
+                {"levelRange": {"min": 1, "max": 14}, "equipmentMods": {"mod_nvg": 20.0}},
+            ]},
+        }));
+        let live = live_bands(json!({"pmc": [
+            {"levelRange": {"min": 1, "max": 14}, "equipmentMods": {"mod_nvg": 30.0}},
+        ]}));
+
+        let merged = resolve_equipment(&views, &live);
+
+        let bands = merged["pmc"].randomisation.as_ref().unwrap();
+        assert!(
+            bands[0].equipment_mods.is_none(),
+            "a band the sender skipped must stay mod-less: {:?}",
+            bands[0].equipment_mods
+        );
+        assert_eq!(bands[1].equipment_mods.as_ref().unwrap()["mod_nvg"], 30.0);
     }
 
     /// The override arm's equipment and its overlay are built call-time-fresh from the same live

@@ -151,7 +151,7 @@ pub struct BotConfigLift {
     #[serde(rename = "lootItemResourceRandomization")]
     pub loot_item_resource_randomization: IndexMap<String, RandomisedResourceDetails>,
     /// `BotConfig.Equipment`, keyed by *equipment* role. The C# per-call projection used to drop
-    /// the null values (`BotPayloadProjection.cs:123`); the resident root carries the whole
+    /// the null values (`BotPayloadProjection.cs:149`); the resident root carries the whole
     /// dictionary as published, so the nulls survive as `None` and
     /// [`crate::bot::resolve_equipment`] applies that filter instead.
     #[serde(rename = "equipment")]

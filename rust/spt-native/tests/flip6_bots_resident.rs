@@ -295,9 +295,9 @@ fn equipment() -> Value {
 /// view, the presets map (globals key domain, map order), the default re-keyed to the preset's own
 /// id, a handbook price per items-table key (0.0 for a handbook miss), the three exp bands, and the
 /// thirteen config members that went resident — the `spt-bot`, `spt-pmc`, `spt-repair` and
-/// `spt-item` stems the publish below carries. The rifle's non-identity slot order, the raid's
-/// daylight, the player's level and the live `EquipmentMods` bands are *not* views — they ride the
-/// shared varying block on both arms ([`shared`]).
+/// `spt-item` stems the publish below carries. The rifle's non-identity slot order rides the items
+/// view above, on both arms; the raid's daylight, the player's level and the live `EquipmentMods`
+/// bands are *not* views at all — they are live C# state on the shared varying block ([`shared`]).
 fn views_override() -> Value {
     json!({
         "items": view_items(),

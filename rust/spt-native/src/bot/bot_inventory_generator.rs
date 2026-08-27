@@ -1515,11 +1515,13 @@ mod tests {
         let mut request = base_request();
         request["shared"]["isNightTime"] = json!(true);
         // The band is split across the two homes it now has: the structure is resident (here, the
-        // override arm's views), the live `equipmentMods` ride the varying block, and the clamp
-        // path only sees them because `resolve_equipment` merged them back.
+        // override arm's views) and carries the *published* mods, the live ones ride the varying
+        // block, and the clamps below are computed from the live values only because
+        // `resolve_equipment` replaced the published map wholesale.
         request["viewsOverride"]["equipment"]["assault"] = json!({
             "randomisation": [{
                 "levelRange": {"min": 1, "max": 99},
+                "equipmentMods": {"front_plate": 5, "stale_slot": 5},
                 "nighttimeChanges": {"equipmentModsModifiers": {
                     "front_plate": 30, "mod_nvg": 90, "mod_not_in_equipment_mods": 50,
                 }},
@@ -1532,7 +1534,8 @@ mod tests {
 
         let result = generate(request).unwrap();
 
-        // Clamped into 0-100, and a modifier with no matching `equipmentMods` entry is skipped.
+        // Clamped into 0-100 off the *live* mods (published `front_plate` was 5, not 40, and
+        // `stale_slot` is gone), and a modifier with no matching `equipmentMods` entry is skipped.
         assert_eq!(
             result
                 .randomisation_clamps
