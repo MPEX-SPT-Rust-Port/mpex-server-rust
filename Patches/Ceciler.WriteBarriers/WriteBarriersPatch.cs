@@ -80,7 +80,10 @@ public class WriteBarriersPatch : IPatcher
         // hottest path in the server. Neither write is read back from the resident configs root
         // today - bot generation gets BotConfig and the bot template alike in its per-request payload
         // (BotPayloadProjection.BuildRequest takes both) - but unread is not un-stale, so the
-        // coverage this gives up is in RUST-ROADMAP.md's Broken ledger.
+        // coverage this gives up is in RUST-ROADMAP.md's Broken ledger. The ABI 34 equipment lift
+        // kept that "neither is read back" clause true by construction: it deliberately does not
+        // parse `generation` into resident state, so GenerationData has no resident home to go
+        // stale in (RUST-ROADMAP.md, the W3/W5 entries).
         "SPTarkov.Server.Core.Models.Eft.Common.Tables.GenerationData",
     ];
 

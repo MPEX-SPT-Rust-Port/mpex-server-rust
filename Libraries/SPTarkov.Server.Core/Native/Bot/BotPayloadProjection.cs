@@ -63,11 +63,11 @@ internal static class BotPayloadProjection
 
     /// <summary>
     /// The request members that do not vary between the bots of one wave, built once for the
-    /// whole wave: the generating player's level, the raid's daylight, <c>BotConfig.Equipment</c>
-    /// (which a runtime writer keeps off the resident DB), and the caller's level inputs and band
-    /// variants - only the caller knows the wave's level range and the bands it splits into. Every
-    /// other config slice, and every database view, lives on <see cref="BuildViewsOverride"/> or
-    /// the resident DB.
+    /// whole wave: the generating player's level, the raid's daylight, the live
+    /// <c>EquipmentMods</c> bands (the one equipment cell a runtime writer keeps off the resident
+    /// DB), and the caller's level inputs and band variants - only the caller knows the wave's
+    /// level range and the bands it splits into. Every config slice, and every database view,
+    /// lives on <see cref="BuildViewsOverride"/> or the resident DB.
     /// </summary>
     internal static SharedBotVarying BuildSharedVarying(
         MongoId sessionId,
@@ -93,9 +93,15 @@ internal static class BotPayloadProjection
         {
             GeneratingPlayerLevel = pmcProfile?.Info?.Level,
             IsNightTime = isNightTime,
-            // A null entry is a role the legacy path would have thrown on; dropping it makes the
-            // native side take its "no equipment filters for role" exit instead
-            Equipment = botConfig.Equipment.Where(role => role.Value is not null).ToDictionary(role => role.Key, role => role.Value!),
+            LiveEquipmentMods = botConfig
+                .Equipment.Where(role => role.Value?.Randomisation is not null)
+                .ToDictionary(
+                    role => role.Key,
+                    role =>
+                        role.Value!.Randomisation!.Where(band => band.EquipmentMods is not null)
+                            .Select(band => new LiveEquipmentModsBand { LevelRange = band.LevelRange, EquipmentMods = band.EquipmentMods! })
+                            .ToList()
+                ),
             LevelGeneration = levelGeneration,
             TemplateVariants = templateVariants,
         };
@@ -138,6 +144,9 @@ internal static class BotPayloadProjection
             DisableLootOnBotTypes = botConfig.DisableLootOnBotTypes,
             LowProfileGasBlockTpls = botConfig.LowProfileGasBlockTpls,
             LootItemResourceRandomization = botConfig.LootItemResourceRandomization,
+            // A null entry is a role the legacy path would have thrown on; dropping it makes the
+            // native side take its "no equipment filters for role" exit instead
+            Equipment = botConfig.Equipment.Where(role => role.Value is not null).ToDictionary(role => role.Key, role => role.Value!),
             PmcConfig = pmcConfig,
             RepairKitWeapon = repairConfig.RepairKit.Weapon,
             ConfigBlacklist = itemFilterService.GetBlacklistedItems(),

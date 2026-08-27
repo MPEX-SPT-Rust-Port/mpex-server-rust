@@ -10,6 +10,8 @@ using SPTarkov.Server.Core.Helpers.InRaid;
 using SPTarkov.Server.Core.Helpers.Items;
 using SPTarkov.Server.Core.Helpers.Profile;
 using SPTarkov.Server.Core.Models.Common;
+using SPTarkov.Server.Core.Models.Eft.Match;
+using SPTarkov.Server.Core.Models.Enums;
 using SPTarkov.Server.Core.Models.Spt.Bots;
 using SPTarkov.Server.Core.Models.Spt.Config;
 using SPTarkov.Server.Core.Models.Spt.Mod;
@@ -123,12 +125,18 @@ public class BotResidentDbTests
 
     /// <summary>
     /// The batch path's twin for the single-bot dispatch site. Same fail-fast contract as
-    /// <see cref="GenerateWave" />: a decline to the legacy path or an empty inventory fails here,
-    /// before the caller asserts anything about the send.
+    /// <see cref="GenerateWave" />: a decline to the expected path or an empty inventory fails here,
+    /// before the caller asserts anything about the send. Defaults to the assault-at-level-1 case on
+    /// the native path; the nighttime case passes its own details, template and expected path.
     /// </summary>
-    private void GenerateSingleBot(BotInventoryGenerator generator)
+    private void GenerateSingleBot(
+        BotInventoryGenerator generator,
+        BotGenerationDetails? details = null,
+        string templateKey = "assault",
+        LootGenerationPath expected = LootGenerationPath.Native
+    )
     {
-        var details = new BotGenerationDetails
+        details ??= new BotGenerationDetails
         {
             Role = "assault",
             RoleLowercase = "assault",
@@ -137,13 +145,13 @@ public class BotResidentDbTests
             GameVersion = "standard",
             BotLevel = 1,
         };
-        var template = _cloner.Clone(_botTable.Types["assault"])!;
+        var template = _cloner.Clone(_botTable.Types[templateKey])!;
         _botEquipmentFilterService.FilterBotEquipment(_sessionId, template, details);
 
         var inventory = generator.GenerateInventory(new MongoId(), _sessionId, template, details);
 
-        Assert.That(generator.LastPathTaken, Is.EqualTo(LootGenerationPath.Native), "generation did not take the native path");
-        Assert.That(inventory.Items, Is.Not.Empty, "the native path generated no inventory");
+        Assert.That(generator.LastPathTaken, Is.EqualTo(expected), $"generation did not take the {expected} path");
+        Assert.That(inventory.Items, Is.Not.Empty, $"the {expected} path generated no inventory");
     }
 
     [Test]
@@ -310,15 +318,23 @@ public class BotResidentDbTests
 
     /// <summary>
     /// The bot family's twin of
-    /// <see cref="LootResidentDbTests.AnInPlaceLootMultiplierAdjustmentReachesAResidentSend"/>,
-    /// pinning the Equipment carve-out: <c>ReplayRandomisationClamps</c> writes nighttime mod-chance
-    /// clamps back into <c>BotConfig.Equipment[role].Randomisation[band].EquipmentMods</c> through
-    /// the dictionary indexer — no setter, no write barrier, no stamp move — and
-    /// <c>BotEquipmentFilterService.AdjustChances</c> reads them off the shared config object when
-    /// the next bot is filtered. Equipment therefore rides the varying block, C#-resolved per bot; a
-    /// regression that resolves it off the resident <c>spt-bot</c> stem would hand every bot after
-    /// the first stale chances, and nothing else in the suite would notice. RUST-ROADMAP roadmap
-    /// item 3 records the upgrade path this test gates.
+    /// <see cref="LootResidentDbTests.AnInPlaceLootMultiplierAdjustmentReachesAResidentSend"/>: an
+    /// unbarriered dictionary-indexer write into
+    /// <c>BotConfig.Equipment[role].Randomisation[band].EquipmentMods</c> — no setter, no write
+    /// barrier, no stamp move — still reaches the native side of a *resident* send. It gets there
+    /// through the *template*: <c>FilterBotEquipment</c> bakes the clamped band into
+    /// <c>BotChances.EquipmentModsChances</c> before projection
+    /// (<c>BotEquipmentFilterService.cs:63,82</c>), and templates stay varying. The same cells now
+    /// *also* ride the <c>liveEquipmentMods</c> overlay on the varying block, so this case is
+    /// over-determined and does not discriminate between the two paths. That is all this case pins:
+    /// it perturbs the config itself, generates two waves whose only difference is that
+    /// perturbation, and asserts their outputs differ.
+    ///
+    /// It does not gate the second-bot feedback loop <c>ReplayRandomisationClamps</c> drives: its
+    /// perturbation is the test's own, not a clamp; its wave is daytime; and its level-1 band has no
+    /// <c>NighttimeChanges</c>, so no clamp is reachable here at all. That loop — bot 1's clamp
+    /// being visible to bot 2 — is gated only by
+    /// <see cref="ASecondNighttimeBotSeesTheFirstBotsClampsOnTheResidentPath"/>.
     /// </summary>
     [Test]
     public void AnInPlaceEquipmentModClampReachesAResidentSend()
@@ -370,6 +386,153 @@ public class BotResidentDbTests
         Assert.That(result.Bots.All(envelope => envelope.Result is not null), Is.True, "a resident pmc bot failed");
 
         return Serialize(result);
+    }
+
+    /// <summary>
+    ///     The spec's second-bot gate (2026-08-26-botconfig-equipment-split-design.md): bot 1's
+    ///     nighttime clamps are written into the live config through the dictionary indexer —
+    ///     no barrier, no stamp move, no republish — and bot 2's *resident* send must still see
+    ///     them, because they ride the liveEquipmentMods overlay. A frozen resident copy fails
+    ///     here from bot 2 on.
+    /// </summary>
+    [Test]
+    public void ASecondNighttimeBotSeesTheFirstBotsClampsOnTheResidentPath()
+    {
+        Assert.That(_botConfig.Equipment.TryGetValue("pmc", out var pmcEquipConfig), Is.True, "no pmc equipment config in bot.json");
+        var band = _botHelper.GetBotRandomizationDetails(NightBotLevel, pmcEquipConfig!);
+        Assert.That(
+            band?.EquipmentMods,
+            Is.Not.Null.And.Not.Empty,
+            $"no pmc randomisation band with equipment mods covers level {NightBotLevel}"
+        );
+        Assert.That(
+            band!.NighttimeChanges?.EquipmentModsModifiers,
+            Does.ContainKey(NightSlot),
+            $"the level-{NightBotLevel} pmc band no longer modifies {NightSlot} at night"
+        );
+
+        // Restored slot by slot, through the same unbarriered indexer the clamp uses - the clamp
+        // never adds a key, so this puts the band back exactly. Both this fixture and BotParityTests
+        // resolve BotConfig from one container, so a leaked clamp would break their non-vacuity
+        // asserts and the neighbouring case above.
+        var original = new Dictionary<string, double>(band.EquipmentMods!);
+        var raidData = _profileActivityService.GetProfileActivityRaidData(_sessionId);
+        var originalRaidConfiguration = raidData.RaidConfiguration;
+        var originalForceLegacy = _botConfig.ForceLegacyBotGeneration;
+
+        Dictionary<string, double> residentAfterFirst,
+            residentAfterSecond,
+            legacyAfterSecond;
+        try
+        {
+            // Hydrating BotLootCacheService is a one-off cost, paid before the raid is installed so
+            // the pre-warm generation cannot fire a clamp of its own
+            _botConfig.ForceLegacyBotGeneration = true;
+            GenerateSingleBot(_botInventoryGenerator, NighttimeUsecDetails(), "usec", LootGenerationPath.Legacy);
+
+            // factory4_night is the one location IsNightTime answers true for without consulting the
+            // wall clock, so this case does not silently stop testing anything at 6am
+            raidData.RaidConfiguration = new GetRaidConfigurationRequestData
+            {
+                Location = "factory4_night",
+                TimeVariant = DateTimeEnum.CURR,
+            };
+
+            (residentAfterFirst, residentAfterSecond) = GenerateTwoNighttimeBots(band, forceLegacy: false);
+
+            RestoreEquipmentMods(band, original);
+            (_, legacyAfterSecond) = GenerateTwoNighttimeBots(band, forceLegacy: true);
+        }
+        finally
+        {
+            raidData.RaidConfiguration = originalRaidConfiguration;
+            _botConfig.ForceLegacyBotGeneration = originalForceLegacy;
+            RestoreEquipmentMods(band, original);
+        }
+
+        // Without this the compounding assert below could pass on a band nothing ever clamped
+        Assert.That(residentAfterFirst, Is.Not.EqualTo(original), "bot 1 fired no clamp, so this case proves nothing");
+        Assert.That(
+            residentAfterFirst[NightSlot],
+            Is.EqualTo(original[NightSlot] + NightModifier),
+            $"bot 1 did not clamp {NightSlot} off the shipped band value"
+        );
+        Assert.That(
+            residentAfterSecond[NightSlot],
+            Is.EqualTo(original[NightSlot] + (2 * NightModifier)),
+            $"bot 2's resident send did not see bot 1's clamp - the liveEquipmentMods overlay is not reaching the merge"
+        );
+        Assert.That(residentAfterSecond, Is.EqualTo(legacyAfterSecond), "the resident path's clamp state diverged from the legacy path's");
+    }
+
+    // The shipped pmc 15-22 band: mod_nvg starts at 0 and nighttimeChanges adds 30 per bot, so two
+    // bots compound to 60. Level 20 selects it - the 1-14 band has equipmentMods but no
+    // nighttimeChanges, so no clamp is reachable below 15.
+    private const int NightBotLevel = 20;
+    private const string NightSlot = "mod_nvg";
+    private const double NightModifier = 30;
+
+    /// <summary>
+    /// Two sequential nighttime pmc bots down one path, returning the live band's
+    /// <c>EquipmentMods</c> after each. Single-bot dispatch only: the batcher declines the batch
+    /// path for any wave that could write clamps (<c>BotWaveBatcher.cs</c>), so a batch-shaped copy
+    /// of this would fire none.
+    /// </summary>
+    private (Dictionary<string, double> AfterFirst, Dictionary<string, double> AfterSecond) GenerateTwoNighttimeBots(
+        RandomisationDetails band,
+        bool forceLegacy
+    )
+    {
+        _botConfig.ForceLegacyBotGeneration = forceLegacy;
+        var expected = forceLegacy ? LootGenerationPath.Legacy : LootGenerationPath.Native;
+
+        GenerateSingleBot(_botInventoryGenerator, NighttimeUsecDetails(), "usec", expected);
+        AssertResidentSend(forceLegacy);
+        var afterFirst = new Dictionary<string, double>(band.EquipmentMods!);
+
+        GenerateSingleBot(_botInventoryGenerator, NighttimeUsecDetails(), "usec", expected);
+        AssertResidentSend(forceLegacy);
+        var afterSecond = new Dictionary<string, double>(band.EquipmentMods!);
+
+        return (afterFirst, afterSecond);
+    }
+
+    /// <summary>
+    /// The native leg has to be a *resident* send or it proves nothing about the overlay - an
+    /// override send carries the whole equipment block and would compound either way.
+    /// </summary>
+    private void AssertResidentSend(bool forceLegacy)
+    {
+        if (!forceLegacy)
+        {
+            Assert.That(_botInventoryGenerator.LastSendIncludedViewsOverride, Is.False, "the nighttime bot did not take a resident send");
+        }
+    }
+
+    /// <summary>
+    /// The pmc usec bot at a level whose randomisation band carries <c>NighttimeChanges</c>. PMCs
+    /// read their template from the side, not the role - usec.json.
+    /// </summary>
+    private static BotGenerationDetails NighttimeUsecDetails()
+    {
+        return new BotGenerationDetails
+        {
+            Role = "pmcUSEC",
+            RoleLowercase = "pmcusec",
+            Side = "Usec",
+            BotDifficulty = "normal",
+            GameVersion = "standard",
+            BotLevel = NightBotLevel,
+            IsPmc = true,
+        };
+    }
+
+    private static void RestoreEquipmentMods(RandomisationDetails band, Dictionary<string, double> original)
+    {
+        foreach (var (slot, chance) in original)
+        {
+            band.EquipmentMods![slot] = chance;
+        }
     }
 
     /// <summary>

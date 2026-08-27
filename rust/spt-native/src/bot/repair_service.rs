@@ -53,7 +53,7 @@ pub struct BonusValues {
 /// lands on the C# default rather than failing the parse. Distinct from
 /// [`crate::loot::models::MinMaxI32`], whose members are nullable because the loot request
 /// declares them that way. `MinMax.Type` is never read and is not mirrored.
-#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize, Serialize)]
 pub struct MinMax<T> {
     #[serde(default)]
     pub min: T,

@@ -119,7 +119,7 @@ public class BotBatchTests
         var request = BuildBatchRequest(BuildCase(), [null, null]);
 
         request.Shared.IsNightTime = true;
-        request.Shared.Equipment["poisoned"] = new EquipmentFilters
+        request.ViewsOverride!.Equipment["poisoned"] = new EquipmentFilters
         {
             Randomisation =
             [
