@@ -60,11 +60,19 @@ public class RaidAdjustmentWireContractTests
 
         // trainExits, and the PascalCase ExtractChange names: (800 + 60 + 5 + 88) / 60 leaves 44.1
         // of the 60 minutes, above the 48-minute raid, so this exit reduces rather than disabling
-        Assert.That(changes.ExitChanges, Has.Count.EqualTo(1), "the train exits did not cross");
+        Assert.That(changes.ExitChanges, Has.Count.EqualTo(2), "the train exits did not cross");
         Assert.That(changes.ExitChanges![0].Name, Is.EqualTo("LateTrain"));
         Assert.That(changes.ExitChanges[0].MinTime, Is.EqualTo(80));
         Assert.That(changes.ExitChanges[0].MaxTime, Is.EqualTo(180));
         Assert.That(changes.ExitChanges[0].Chance, Is.Null);
+
+        // The disable branch, and the only place a non-null Chance ever crosses: a dropped or
+        // misspelled Chance decodes as the null above on every other exit, so without this the
+        // "train has already left" case would arrive at the client fully enabled
+        Assert.That(changes.ExitChanges[1].Name, Is.EqualTo("EarlyTrain"));
+        Assert.That(changes.ExitChanges[1].Chance, Is.EqualTo(0));
+        Assert.That(changes.ExitChanges[1].MinTime, Is.Null);
+        Assert.That(changes.ExitChanges[1].MaxTime, Is.Null);
     }
 
     /// <summary>
@@ -136,6 +144,16 @@ public class RaidAdjustmentWireContractTests
                     MaxTime = 900,
                     Count = 60,
                     ExfiltrationTime = 5,
+                },
+                // (1 + 1 + 1 + 88) / 60 leaves 58.5 of the 60 minutes, above the 48-minute raid, so
+                // this train has already left and the exit is disabled with a Chance of 0
+                new TrainExitWire
+                {
+                    Name = "EarlyTrain",
+                    MinTime = 1,
+                    MaxTime = 2,
+                    Count = 1,
+                    ExfiltrationTime = 1,
                 },
             ],
             TestSeed = 42,
