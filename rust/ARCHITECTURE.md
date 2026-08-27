@@ -151,7 +151,14 @@ one process, never across builds or machines —
 `spt_locales_set` taking the resolved server-locale table as JSON, and eleven
 for the log pipeline and the terminal it owns (`spt_logger_init`, `spt_logger_reinit`, `spt_log_emit`,
 `spt_logger_close`, `spt_log_set_tap`, `spt_log_enabled`, `spt_log_format`, `spt_console_write`,
-`spt_console_read_line`, `spt_console_set_title`, `spt_console_clear` — see *The log pipeline*). The
+`spt_console_read_line`, `spt_console_set_title`, `spt_console_clear` — see *The log pipeline*).
+The raid-setup family's second export, `spt_make_adjustments_to_map`, is another of those JSON
+generation requests: it takes `spt_get_raid_adjustments`' own `raidChanges` back (`exitChanges`
+PascalCase again, inbound this time) alongside the map's exit names, wave times and boss spawns, and
+answers with **deltas, not a mutated map** — `{escapeTimeLimit, exitUpdates, aborted, abortedExitName,
+mapSettingsMissingValue, waveAdjustments?}`. Every `index` in that response addresses the request's own
+projection order, which is what lets the C# side apply the deltas to the live `LocationBase` objects it
+built the request from. It draws nothing, so it carries no `testSeed`, and it names no epoch either. The
 twenty-one generation/verify/publish/load/digest/profile exports hand back a heap buffer on success, which the
 caller releases with `spt_buf_free`; so do `spt_console_read_line` and `spt_log_format`.
 
@@ -394,9 +401,9 @@ header — read it first, because it states the family's citation convention: a 
 
 | Module | Stands in for | What it does |
 |---|---|---|
-| `mod.rs` | `Services/InRaid/RaidTimeAdjustmentService.cs` (entry) | `get_raid_adjustments` — installs the seed guard and `catch_unwind`s the pass, so a panic arrives as an error message rather than `STATUS_PANIC` (see *Conventions*) |
-| `adjustments.rs` | `Services/InRaid/RaidTimeAdjustmentService.cs` (`:201-374`) | `GetRaidAdjustments` and the two halves it calls, `GetMapSettings` and `GetExitAdjustments`: the chance roll, the weighted reduction percent, the loot-percent floors, and the per-train-exit disable-or-reduce walk |
-| `models.rs` | `Models/Spt/Location/RaidChanges.cs` (the response's inner half) | Wire types — a fresh contract, mirrored member-for-member C#-side |
+| `mod.rs` | `Services/InRaid/RaidTimeAdjustmentService.cs` (entry) | `get_raid_adjustments` and `make_adjustments_to_map` — both `catch_unwind` the pass, so a panic arrives as an error message rather than `STATUS_PANIC` (see *Conventions*); only the first installs the seed guard, because only the first draws |
+| `adjustments.rs` | `Services/InRaid/RaidTimeAdjustmentService.cs` (`:35-193`, `:201-374`) | `GetRaidAdjustments` with `GetMapSettings` and `GetExitAdjustments` — the chance roll, the weighted reduction percent, the loot-percent floors, and the per-train-exit disable-or-reduce walk — plus `MakeAdjustmentsToMap` with `AdjustWaves` and `AdjustPMCSpawns`: the exit-update walk and its unmatched-name abort, the twice-applied wave reduction, and the pmc keep-and-offset passes. `AdjustLootMultipliers` is *not* here: it rewrites the live `LocationConfig` in place and stays C# on both arms, the family's one decline-set carve-out |
+| `models.rs` | `Models/Spt/Location/RaidChanges.cs` (both exports' inner half) | Wire types — a fresh contract, mirrored member-for-member C#-side |
 
 ### Conventions
 

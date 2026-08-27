@@ -112,6 +112,7 @@ internal enum LootExport
     RepeatableQuest,
     ScavCaseRewards,
     RaidAdjustments,
+    MakeAdjustmentsToMap,
     ItemBaseClass,
     RagfairLinkedItems,
 }
@@ -255,6 +256,18 @@ public static class SptNative
             LootExport.RaidAdjustments,
             JsonSerializer.SerializeToUtf8Bytes(request, LootJsonOptions)
         );
+    }
+
+    /// <summary>
+    /// Works out one map's raid-setup deltas from the changes <see cref="GetRaidAdjustments"/>
+    /// produced: the escape time limit, the per-exit updates and - when the map's settings enable
+    /// them - the wave and PMC-spawn adjustments. Deltas, not a mutated map: the caller applies
+    /// them to the live <c>LocationBase</c>. Draws nothing, so the call carries no seed.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">The pass failed, or the native side misbehaved.</exception>
+    public static TResponse MakeAdjustmentsToMap<TResponse>(ReadOnlySpan<byte> requestUtf8)
+    {
+        return Generate<TResponse>(LootExport.MakeAdjustmentsToMap, requestUtf8);
     }
 
     /// <summary>
@@ -993,6 +1006,12 @@ public static class SptNative
                     &outLen
                 ),
                 LootExport.RaidAdjustments => NativeMethods.GetRaidAdjustments(requestPtr, (nuint)requestUtf8.Length, &outPtr, &outLen),
+                LootExport.MakeAdjustmentsToMap => NativeMethods.MakeAdjustmentsToMap(
+                    requestPtr,
+                    (nuint)requestUtf8.Length,
+                    &outPtr,
+                    &outLen
+                ),
                 LootExport.ItemBaseClass => NativeMethods.BuildItemBaseClassCache(requestPtr, (nuint)requestUtf8.Length, &outPtr, &outLen),
                 LootExport.RagfairLinkedItems => NativeMethods.BuildRagfairLinkedItemTable(
                     requestPtr,

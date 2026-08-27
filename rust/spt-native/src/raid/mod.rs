@@ -11,7 +11,10 @@ use std::any::Any;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use crate::loot::random_util::TestSeedGuard;
-use crate::raid::models::{GetRaidAdjustmentsRequest, GetRaidAdjustmentsResponse};
+use crate::raid::models::{
+    GetRaidAdjustmentsRequest, GetRaidAdjustmentsResponse, MakeAdjustmentsRequest,
+    MakeAdjustmentsResponse,
+};
 
 /// What a raid-setup pass can fail with: the message of a C#-sanctioned throw carried back to the
 /// caller instead of unwinding (shaped like [`crate::scav_case::ScavCaseError`], minus its
@@ -41,6 +44,22 @@ pub fn get_raid_adjustments(
     let _seed_guard = request.test_seed.map(TestSeedGuard::install);
 
     catch_unwind(AssertUnwindSafe(|| adjustments::get_adjustments(&request)))
+        .unwrap_or_else(|payload| Err(panic_message(payload)))
+}
+
+/// The module boundary: one map's raid-setup deltas, off the changes [`get_raid_adjustments`]
+/// produced. No seed guard, unlike its sibling — this pass draws nothing, so every value it emits
+/// is a function of the request alone. The `catch_unwind` still stands, to keep a port bug off
+/// `STATUS_PANIC`.
+///
+/// # Errors
+///
+/// [`RaidError::Failed`] carrying the message of the one C#-sanctioned throw this pass can reach,
+/// the missing map key — thrown or panicked.
+pub fn make_adjustments_to_map(
+    request: MakeAdjustmentsRequest,
+) -> Result<MakeAdjustmentsResponse, RaidError> {
+    catch_unwind(AssertUnwindSafe(|| adjustments::make_adjustments(&request)))
         .unwrap_or_else(|payload| Err(panic_message(payload)))
 }
 

@@ -85,6 +85,9 @@ internal static unsafe partial class NativeMethods
     [LibraryImport(LibraryName, EntryPoint = "spt_get_raid_adjustments")]
     internal static partial int GetRaidAdjustments(byte* requestUtf8, nuint requestLen, byte** outPtr, nuint* outLen);
 
+    [LibraryImport(LibraryName, EntryPoint = "spt_make_adjustments_to_map")]
+    internal static partial int MakeAdjustmentsToMap(byte* requestUtf8, nuint requestLen, byte** outPtr, nuint* outLen);
+
     [LibraryImport(LibraryName, EntryPoint = "spt_build_item_base_class_cache")]
     internal static partial int BuildItemBaseClassCache(byte* requestUtf8, nuint requestLen, byte** outPtr, nuint* outLen);
 

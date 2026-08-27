@@ -23,7 +23,7 @@ use crate::loot::loot_generator::{
 use crate::quest::{QuestError, generate_repeatable_quest};
 use crate::ragfair::models::{DynamicOffersHeader, DynamicOffersResult};
 use crate::ragfair::offer_generator::{RagfairError, generate_dynamic_offers};
-use crate::raid::{RaidError, get_raid_adjustments};
+use crate::raid::{RaidError, get_raid_adjustments, make_adjustments_to_map};
 use crate::runtime::runtime;
 use crate::scav_case::{ScavCaseError, generate_scav_case_rewards};
 use crate::verify;
@@ -643,6 +643,35 @@ pub unsafe extern "C" fn spt_get_raid_adjustments(
             get_raid_adjustments,
             |response| {
                 serde_json::to_vec(&response).expect("raid response serialization cannot fail")
+            },
+        )
+    }
+}
+
+/// One map's raid-setup deltas, off the changes `spt_get_raid_adjustments` produced: the escape
+/// time limit, the per-exit updates and - when the map's settings enable them - the wave and
+/// PMC-spawn adjustments. Deltas, not a mutated map: the caller applies them to the live
+/// `LocationBase`. Names no epoch, and draws nothing, so it carries no `testSeed` either.
+///
+/// # Safety
+/// See `spt_generate_static_containers`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn spt_make_adjustments_to_map(
+    req_ptr: *const u8,
+    req_len: usize,
+    out_ptr: *mut *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    unsafe {
+        run_generator_with(
+            req_ptr,
+            req_len,
+            out_ptr,
+            out_len,
+            make_adjustments_to_map,
+            |response| {
+                serde_json::to_vec(&response)
+                    .expect("raid adjustment response serialization cannot fail")
             },
         )
     }
@@ -2835,6 +2864,110 @@ mod tests {
         );
     }
 
+    /// One map's deltas, with a branch of each half live: an exit change that matches the second
+    /// exit, a wave that survives the `TimeMax > start` filter and one that does not, and three
+    /// boss spawns covering both the ignore-case keep test and the case-sensitive offset pass.
+    /// Draws nothing, so there is no `testSeed` to carry.
+    fn make_adjustments_request() -> serde_json::Value {
+        serde_json::json!({
+            "mapId": "bigmap",
+            "raidChanges": {
+                "raidTimeMinutes": 36.0,
+                "simulatedRaidStartSeconds": 100.0,
+                // PascalCase inner, mirroring `ExtractChange`'s own `[JsonPropertyName]`s — the
+                // one member of this request that is not camelCase.
+                "exitChanges": [
+                    { "Name": "Exit_E", "MinTime": 10.0, "MaxTime": 20.0, "Chance": 0.0 }
+                ]
+            },
+            "mapSettings": { "found": true, "value": true },
+            "exits": ["Exit_W", "Exit_E"],
+            "waves": [
+                { "timeMin": 50, "timeMax": 60 },
+                { "timeMin": 500, "timeMax": 600 }
+            ],
+            "bossSpawns": [
+                { "bossName": "pmcUSEC", "time": 300.0 },
+                { "bossName": "bossTagilla", "time": 50.0 },
+                { "bossName": "pmcBEAR", "time": 1_000.0 }
+            ]
+        })
+    }
+
+    #[test]
+    fn make_adjustments_to_map_roundtrips_result_json() {
+        let request = serde_json::to_vec(&make_adjustments_request()).unwrap();
+
+        let (status, out) = call_generate(spt_make_adjustments_to_map, &request);
+        assert_eq!(status, STATUS_OK);
+
+        let response: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        // Quirk 13: the escape time limit rides through unconditionally.
+        assert_eq!(response["escapeTimeLimit"], 36.0);
+        assert_eq!(response["aborted"], false);
+        assert!(response["abortedExitName"].is_null());
+        assert_eq!(response["mapSettingsMissingValue"], false);
+
+        // The PascalCase members of the request's `exitChanges` reached the update, which a
+        // mismatched rename would have left null.
+        let updates = response["exitUpdates"].as_array().unwrap();
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0]["index"], 1);
+        assert_eq!(updates[0]["chance"], 0.0);
+        assert_eq!(updates[0]["minTime"], 10.0);
+        assert_eq!(updates[0]["maxTime"], 20.0);
+
+        let waves = &response["waveAdjustments"];
+        assert_eq!(waves["waveKeepIndices"], serde_json::json!([1]));
+        // Quirk 2: the surviving wave loses the 100-second start twice.
+        assert_eq!(
+            waves["waveTimes"],
+            serde_json::json!([{ "timeMin": 300, "timeMax": 400 }])
+        );
+        assert_eq!(waves["removedWaveCount"], 1);
+
+        // The non-pmc spawn is kept despite sitting below the start time.
+        assert_eq!(waves["bossKeepIndices"], serde_json::json!([0, 1, 2]));
+        assert_eq!(waves["removedBossCount"], 0);
+        // Quirk 4: the earliest pmc seeds the offset and lands on the floor of 1, and the indices
+        // are the request list's, not the kept list's.
+        assert_eq!(waves["pmcStartSeconds"], 300.0);
+        assert_eq!(
+            waves["bossTimeUpdates"],
+            serde_json::json!([{ "index": 0, "time": 1.0 }, { "index": 2, "time": 700.0 }])
+        );
+    }
+
+    #[test]
+    fn an_unparseable_make_adjustments_request_returns_bad_args_with_the_parse_error() {
+        let (status, out) = call_generate(spt_make_adjustments_to_map, b"{\"mapId\":");
+
+        assert_eq!(status, STATUS_BAD_ARGS);
+        let message = String::from_utf8(out).unwrap();
+        assert!(
+            message.contains("EOF while parsing"),
+            "expected the serde error, got: {message}"
+        );
+    }
+
+    #[test]
+    fn a_make_adjustments_failure_returns_status_error_and_the_message() {
+        // Quirk 11 again, from the `MakeAdjustmentsToMap` side of the same resolve.
+        let mut request = make_adjustments_request();
+        request["mapSettings"]["found"] = serde_json::json!(false);
+
+        let (status, out) = call_generate(
+            spt_make_adjustments_to_map,
+            &serde_json::to_vec(&request).unwrap(),
+        );
+
+        assert_eq!(status, STATUS_ERROR);
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "Unable to find scav raid time settings for map: bigmap"
+        );
+    }
+
     /// `child` is an Item whose chain climbs through the `node` root to a `root` the view never
     /// holds — the three-template shape `base_class`'s own tests pin, here across the boundary.
     const BASE_CLASS_REQUEST: &[u8] = br#"{"epoch":0,"viewsOverride":{"itemsView":{
@@ -3166,6 +3299,16 @@ mod tests {
 
         let status = unsafe {
             spt_get_raid_adjustments(
+                std::ptr::null(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(status, STATUS_BAD_ARGS);
+
+        let status = unsafe {
+            spt_make_adjustments_to_map(
                 std::ptr::null(),
                 0,
                 std::ptr::null_mut(),
