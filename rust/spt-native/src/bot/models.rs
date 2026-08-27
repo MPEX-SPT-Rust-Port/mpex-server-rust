@@ -102,7 +102,7 @@ pub struct RandomisedResourceValues {
 /// The six `EquipmentFilters` chance percentages `BotGeneratorHelper.GenerateExtraPropertiesForItem`
 /// reads (`Models/Spt/Config/BotConfig.cs:287-318`). All nullable in C#; each call site supplies its
 /// own literal fallback, so the `Option`s are carried through rather than defaulted here.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct EquipmentFilters {
     #[serde(rename = "faceShieldIsActiveChancePercent")]
     pub face_shield_is_active_chance_percent: Option<f64>,
@@ -165,7 +165,7 @@ pub struct EquipmentFilters {
 }
 
 /// `Models/Spt/Config/BotConfig.cs:320-337` (`ModLimits`).
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct ModLimitsWire {
     #[serde(rename = "scopeLimit")]
     pub scope_limit: Option<i32>,
@@ -175,9 +175,14 @@ pub struct ModLimitsWire {
 
 /// `Models/Spt/Config/BotConfig.cs:339-388`, narrowed to the members the bot generators read.
 /// `LevelRange` is `required` in C#; the rest of the record belongs to tasks that read it.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RandomisationDetails {
-    #[serde(rename = "levelRange")]
+    /// `#[serde(default)]` for [`EquipmentFilterDetails::level_range`]'s reason, which applies with
+    /// more force here: these bands are resident now, so a mod-authored band with no `levelRange`
+    /// would fail the *publish* rather than one call. The same tolerance reaches the override arm
+    /// (`BotViewsWire.equipment` shares this type): such a band becomes a `(0, 0)` band that
+    /// matches no level instead of failing the request loudly.
+    #[serde(default, rename = "levelRange")]
     pub level_range: MinMax<i32>,
     /// Slots whose pool is rebuilt from `items.json` instead of the bot's own mod pool.
     #[serde(rename = "randomisedWeaponModSlots")]
@@ -186,9 +191,13 @@ pub struct RandomisationDetails {
     /// (`BotInventoryGenerator.cs:592`).
     #[serde(rename = "randomisedArmorSlots")]
     pub randomised_armor_slots: Option<IndexSet<String>>,
-    /// Equipment *mod* slot name → chance. Written by the nighttime clamp
-    /// (`BotInventoryGenerator.cs:204`) and read by nothing — see
-    /// [`crate::bot::bot_inventory_generator`].
+    /// Equipment *mod* slot name → chance. The one cell of the equipment graph a runtime writer
+    /// touches: the nighttime clamp (`BotInventoryGenerator.cs:204`) assigns into it after every
+    /// send, tripping no write barrier — see [`crate::bot::bot_inventory_generator`]. Nothing in
+    /// *this* call reads it back, but the next bot's C# prelude does
+    /// (`BotEquipmentFilterService.cs:63`), so the live values arrive on the request as
+    /// [`SharedBotVaryingWire::live_equipment_mods`] and
+    /// [`crate::bot::resolve_equipment`] overlays them onto the resident bands.
     #[serde(rename = "equipmentMods")]
     pub equipment_mods: Option<IndexMap<String, f64>>,
     #[serde(rename = "nighttimeChanges")]
@@ -200,7 +209,7 @@ pub struct RandomisationDetails {
 
 /// `Models/Spt/Config/BotConfig.cs:390-397`. `EquipmentModsModifiers` is `required` in C#, so an
 /// absent key is a deserialization failure there and here.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct NighttimeChanges {
     /// Equipment mod slot name → the delta added to the matching `equipmentMods` chance.
     #[serde(rename = "equipmentModsModifiers")]
@@ -209,9 +218,11 @@ pub struct NighttimeChanges {
 
 /// `Models/Spt/Config/BotConfig.cs:456-463`. `MinMax` is reused from
 /// [`crate::bot::repair_service`], which ported it first; both are the same `Models/Common/MinMax.cs`.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ArmorPlateWeights {
-    #[serde(rename = "levelRange")]
+    /// `#[serde(default)]` for [`EquipmentFilterDetails::level_range`]'s reason — see
+    /// [`RandomisationDetails::level_range`].
+    #[serde(default, rename = "levelRange")]
     pub level_range: MinMax<i32>,
     /// Plate slot name (`front_plate`, …) → armor class as a string → weight. Ordered: the inner map
     /// is what `get_weighted_value` scans.
@@ -222,7 +233,7 @@ pub struct ArmorPlateWeights {
 /// `Models/Spt/Config/BotConfig.cs:433-452`, narrowed to the two members the native side reads.
 /// `Cartridge` grows a field in the task that first reads it — the cartridge filter still runs C#
 /// side, before the call.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct EquipmentFilterDetails {
     /// The band this entry covers. Read by [`crate::bot::select_equipment_blacklist`], which is
     /// where `GetBotEquipmentBlacklist`'s `FirstOrDefault` now lives.
@@ -614,11 +625,15 @@ pub struct ContainerMapDetailsWire {
     pub grid_full: bool,
 }
 
-/// The database half of both bot requests — [`crate::bot::views::BotDbViews`] plus the three
+/// The database half of both bot requests — [`crate::bot::views::BotDbViews`] plus the four
 /// resident config stems on the wire, for the override arm of
 /// [`crate::bot::resolve_bot_views`]. An override-less request reads all of it off the resident DB
 /// instead ([`crate::db::models::BotConfigLift`], the `spt-pmc` [`PmcConfigWire`] stem,
 /// [`crate::db::models::RepairConfigLift`] and [`crate::db::models::ItemConfigLift::blacklist`]).
+///
+/// [`Self::equipment`] is the override arm's `BotConfig.Equipment`; the live `EquipmentMods` bands
+/// ride [`SharedBotVaryingWire::live_equipment_mods`] on *both* arms and
+/// [`crate::bot::resolve_equipment`] overlays them onto whichever arm answered.
 ///
 /// Every config member below is `required` on the C# record, so all are strict here: the override
 /// arm is always C#-built and always carries them.
@@ -653,6 +668,10 @@ pub struct BotViewsWire {
     pub disable_loot_on_bot_types: std::collections::HashSet<String>,
     pub low_profile_gas_block_tpls: std::collections::HashSet<String>,
     pub loot_item_resource_randomization: IndexMap<String, RandomisedResourceDetails>,
+    /// `BotConfig.Equipment`, minus the null values the C# projection drops
+    /// (`BotPayloadProjection.cs:149`) — the resident arm's [`crate::db::models::BotConfigLift`]
+    /// keeps them as `None` and filters at resolve time instead.
+    pub equipment: IndexMap<String, EquipmentFilters>,
 
     // -- The `spt-pmc` and `spt-repair` slices, and `ItemConfig.Blacklist`.
     pub pmc_config: PmcConfigWire,
@@ -713,10 +732,11 @@ pub struct TemplateVariantWire {
 }
 
 /// The request members that do not vary between the bots of one wave and are not database views:
-/// live C# process state (the player's level, the raid's daylight, the mod-pool slot order), the
-/// one config slice a runtime writer keeps out of the resident DB ([`Self::equipment`]), and (as
+/// live C# process state (the player's level, the raid's daylight, the one equipment cell a
+/// barrier-invisible runtime writer keeps live — [`Self::live_equipment_mods`]), and (as
 /// [`Self::template_variants`]) the templates and loot pools, which vary by level *band* rather
-/// than by bot. Every other config slice lives on [`BotViewsWire`] / the resident DB.
+/// than by bot. Every config slice lives on [`BotViewsWire`] / the resident DB, `BotConfig.Equipment`
+/// included since ABI 34.
 ///
 /// Deserialized as a nested object rather than `#[serde(flatten)]`: flatten routes the whole map
 /// through serde's buffering path, which would cost more than the duplication it removes.
@@ -734,13 +754,10 @@ pub struct SharedBotVaryingWire {
     #[serde(default)]
     pub generating_player_level: Option<i32>,
     pub is_night_time: bool,
-    /// `BotConfig.Equipment`, minus the null values the C# projection drops
-    /// (`BotPayloadProjection.cs:123`). Stays on the varying block rather than going resident:
-    /// `ReplayRandomisationClamps` (`BotInventoryGenerator.cs:405-432`) mutates
-    /// `Randomisation[band].EquipmentMods` in place after every send and no write barrier sees it,
-    /// so the resident copy would freeze at the published values — see
-    /// [`crate::db::models::BotConfigLift`].
-    pub equipment: IndexMap<String, EquipmentFilters>,
+    /// Live role → band EquipmentMods, both arms, every send. The one cell in the equipment
+    /// graph that a barrier-invisible runtime writer (ReplayRandomisationClamps /
+    /// GenerateAndAddEquipmentToBot) touches AND Rust reads. Everything else is resident.
+    pub live_equipment_mods: IndexMap<String, Vec<LiveEquipmentModsBandWire>>,
     /// The wave's level-draw inputs. Present iff the wave is PMC: every other bot takes the
     /// constant `(1, 0)` without drawing (`BotLevelGenerator.cs:23-26`), so there is nothing to
     /// send. A PMC slice that arrives without it is an error envelope, never a panic.
@@ -751,6 +768,26 @@ pub struct SharedBotVaryingWire {
     /// template and loot pools at the top level instead.
     #[serde(default)]
     pub template_variants: Vec<TemplateVariantWire>,
+}
+
+/// One band of [`SharedBotVaryingWire::live_equipment_mods`]: the `levelRange` that identifies
+/// which resident [`RandomisationDetails`] it overlays, and that band's live `EquipmentMods` map.
+/// The C# sender enumerates the live `Randomisation` list the resident copy was published from and
+/// sends the bands that *carry* an `EquipmentMods` map (`BotPayloadProjection.cs:101`), so what
+/// arrives is that list's mod-carrying subsequence, in order — which is why
+/// [`crate::bot::resolve_equipment`] pairs duplicate ranges positionally against the resident bands
+/// whose [`RandomisationDetails::equipment_mods`] is `Some`, the matching subsequence.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LiveEquipmentModsBandWire {
+    /// `#[serde(default)]` to match [`RandomisationDetails::level_range`]: the serializer omits a
+    /// mod-nulled `LevelRange` outright (`JsonUtil` sets `WhenWritingNull`), so a strict field here
+    /// would fail every `GenerateBotInventory` request for the very data whose *publish* the
+    /// resident default just absorbed. The defaulted `(0, 0)` range matches no resident band, so
+    /// the band drops, consistent with its two siblings.
+    #[serde(default)]
+    pub level_range: MinMax<i32>,
+    pub equipment_mods: IndexMap<String, f64>,
 }
 
 /// The three request members that do vary per bot: identity, the test seed and the generation
@@ -898,6 +935,13 @@ mod tests {
             "disableLootOnBotTypes":["bosstest"],
             "lowProfileGasBlockTpls":["aaaaaaaaaaaaaaaaaaaaaaa8"],
             "lootItemResourceRandomization":{"assault":{"food":{"chanceMaxResourcePercent":60}}},
+            "equipment":{"assault":{"weaponModLimits":{"scopeLimit":2},
+                "forceRigWhenNoVest":true,"forceOnlyArmoredRigWhenNoArmor":false,
+                "randomisation":[{"levelRange":{"min":1,"max":99},
+                    "randomisedArmorSlots":["Headwear"],"equipmentMods":{"mod_nvg":40},
+                    "nighttimeChanges":{"equipmentModsModifiers":{"mod_nvg":90}}}],
+                "blacklist":[{"levelRange":{"min":1,"max":99},
+                    "equipment":{"Headwear":["aaaaaaaaaaaaaaaaaaaaaaa9"]}}]}},
             "pmcConfig":{"forceHealingItemsIntoSecure":true,
                 "forceArmband":{"enabled":true,"usec":"armband_usec","bear":"armband_bear"},
                 "weaponHasEnhancementChancePercent":25},
@@ -923,13 +967,8 @@ mod tests {
         "shared":{
         "generatingPlayerLevel":30,
         "isNightTime":true,
-        "equipment":{"assault":{"weaponModLimits":{"scopeLimit":2},
-            "forceRigWhenNoVest":true,"forceOnlyArmoredRigWhenNoArmor":false,
-            "randomisation":[{"levelRange":{"min":1,"max":99},
-                "randomisedArmorSlots":["Headwear"],"equipmentMods":{"mod_nvg":40},
-                "nighttimeChanges":{"equipmentModsModifiers":{"mod_nvg":90}}}],
-            "blacklist":[{"levelRange":{"min":1,"max":99},
-                "equipment":{"Headwear":["aaaaaaaaaaaaaaaaaaaaaaa9"]}}]}}},
+        "liveEquipmentMods":{"assault":[{"levelRange":{"min":1,"max":99},
+            "equipmentMods":{"mod_nvg":40}}]}},
         "lootPools":{"backpackLoot":{"aaaaaaaaaaaaaaaaaaaaaab1":4}}
     }"#;
 
@@ -994,7 +1033,17 @@ mod tests {
 
         assert_eq!(parsed.shared.generating_player_level, Some(30));
         assert!(parsed.shared.is_night_time);
-        let assault_equipment = &parsed.shared.equipment["assault"];
+        // The only equipment cell still on the varying block: role → the live bands, keyed by the
+        // `levelRange` the merge pairs them on.
+        let live_band = &parsed.shared.live_equipment_mods["assault"][0];
+        assert_eq!(
+            (live_band.level_range.min, live_band.level_range.max),
+            (1, 99)
+        );
+        assert_eq!(live_band.equipment_mods["mod_nvg"], 40.0);
+
+        // Everything else rides the views (or, off the other arm, the resident `spt-bot` stem).
+        let assault_equipment = &parsed.views_override.as_ref().unwrap().equipment["assault"];
         assert_eq!(
             assault_equipment
                 .weapon_mod_limits
@@ -1028,7 +1077,7 @@ mod tests {
                 .equipment_mods_modifiers["mod_nvg"],
             90.0
         );
-        // The two equipment blacklists are no longer wire members at all: the bands ride
+        // The two equipment blacklists are no longer wire members at all: the bands ride the views'
         // `equipment` and `select_equipment_blacklist` picks one per resolution.
         let blacklist_band = &assault_equipment.blacklist.as_ref().unwrap()[0];
         assert_eq!(blacklist_band.level_range.min, 1);
@@ -1045,7 +1094,7 @@ mod tests {
         assert!(parsed.loot_pools.combined_pool_loot.is_empty());
 
         let views = parsed.views_override.as_ref().unwrap();
-        // The twelve config members that went resident: on the views block on this arm, off the
+        // The thirteen config members that went resident: on the views block on this arm, off the
         // resident stems on the other.
         assert_eq!(views.bosses, vec!["bossknight"]);
         assert_eq!(views.durability.default.weapon.lowest_max, 60);

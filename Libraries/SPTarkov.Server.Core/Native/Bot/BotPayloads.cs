@@ -150,6 +150,15 @@ internal record BotViewsOverride
     [JsonPropertyName("lootItemResourceRandomization")]
     public required Dictionary<string, RandomisedResourceDetails> LootItemResourceRandomization { get; set; }
 
+    /// <summary>
+    /// <c>BotConfig.Equipment</c> minus its null values - a null entry is a role the legacy path
+    /// would have thrown on, and dropping it makes the native side take its "no equipment filters
+    /// for role" exit instead. The one cell a runtime writer keeps live rides
+    /// <see cref="SharedBotVarying.LiveEquipmentMods"/> on both arms and is overlaid onto this.
+    /// </summary>
+    [JsonPropertyName("equipment")]
+    public required Dictionary<string, EquipmentFilters> Equipment { get; set; }
+
     [JsonPropertyName("pmcConfig")]
     public required PmcConfig PmcConfig { get; set; }
 
@@ -170,10 +179,10 @@ internal record BotViewsOverride
 
 /// <summary>
 /// The request members that do not vary between the bots of one wave and are not database views:
-/// live C# process state (the player's level, the raid's daylight), the one config slice a runtime
-/// writer keeps out of the resident DB (<see cref="Equipment"/>), and (as
+/// live C# process state (the player's level, the raid's daylight, the one equipment cell a runtime
+/// writer keeps out of the resident DB - <see cref="LiveEquipmentMods"/>), and (as
 /// <see cref="TemplateVariants"/>) the templates and loot pools, which vary by level band rather
-/// than by bot. Every other config slice, and every database view, lives on
+/// than by bot. Every config slice, and every database view, lives on
 /// <see cref="BotViewsOverride"/> or the resident DB.
 /// </summary>
 internal record SharedBotVarying
@@ -185,7 +194,7 @@ internal record SharedBotVarying
     /// weapon-mod path to <b>0</b> (<c>BotEquipmentModGenerator.cs:546</c>), and level 0 matches no
     /// <c>levelRange</c> where level 1 may, so a pre-defaulted <c>1</c> could not tell "level 1 with
     /// a profile" from "no profile" and would collapse that divergence. The native side applies both
-    /// defaults and picks both blacklist bands out of <see cref="Equipment"/> itself.
+    /// defaults and picks both blacklist bands out of <c>BotConfig.Equipment</c> itself.
     ///
     /// <c>required</c> like every sibling, though it is nullable: a construction site that forgot it
     /// would silently ship "no profile" and flip the weapon-mod list to the level-0 band.
@@ -197,15 +206,12 @@ internal record SharedBotVarying
     public required bool IsNightTime { get; set; }
 
     /// <summary>
-    /// <c>BotConfig.Equipment</c> minus its null values. Deliberately <b>not</b> resident:
-    /// <see cref="BotInventoryGenerator.ReplayRandomisationClamps"/> writes the nighttime mod
-    /// chances back into <c>Equipment[role].Randomisation[band].EquipmentMods</c> through the
-    /// dictionary indexer after every native send, which trips no write barrier, so a published
-    /// copy would freeze at the config's on-disk values and diverge from the second bot of a
-    /// nighttime raid on.
+    ///     Live role → band EquipmentMods, both arms. The only cell of the equipment graph a
+    ///     barrier-invisible runtime writer touches and Rust reads; everything else reads
+    ///     resident (spt-bot lift) or from <see cref="BotViewsOverride.Equipment" />.
     /// </summary>
-    [JsonPropertyName("equipment")]
-    public required Dictionary<string, EquipmentFilters> Equipment { get; set; }
+    [JsonPropertyName("liveEquipmentMods")]
+    public required Dictionary<string, List<LiveEquipmentModsBand>> LiveEquipmentMods { get; set; }
 
     /// <summary>
     /// The wave's level-draw inputs, for the native side to draw each bot's level with. Set only
@@ -224,6 +230,23 @@ internal record SharedBotVarying
     /// </summary>
     [JsonPropertyName("templateVariants")]
     public List<BotTemplateVariantView>? TemplateVariants { get; set; }
+}
+
+/// <summary>
+/// One band of <see cref="SharedBotVarying.LiveEquipmentMods"/>: the <c>levelRange</c> that
+/// identifies which <c>Randomisation</c> band it overlays, and that band's live
+/// <c>EquipmentMods</c> map. The projection sends the bands of the live <c>Randomisation</c> list
+/// that <i>carry</i> an <c>EquipmentMods</c> map, in that list's own order, so the overlay is a
+/// subsequence rather than the whole list - which is why the native merge pairs positionally
+/// among the resident bands that carry one too, and never onto a band whose map is null.
+/// </summary>
+internal record LiveEquipmentModsBand
+{
+    [JsonPropertyName("levelRange")]
+    public required MinMax<int> LevelRange { get; set; }
+
+    [JsonPropertyName("equipmentMods")]
+    public required Dictionary<string, double> EquipmentMods { get; set; }
 }
 
 /// <summary>

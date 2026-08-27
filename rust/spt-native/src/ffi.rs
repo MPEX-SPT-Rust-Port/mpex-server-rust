@@ -2075,6 +2075,7 @@ mod tests {
             "disableLootOnBotTypes":[],
             "lowProfileGasBlockTpls":[],
             "lootItemResourceRandomization":{{}},
+            "equipment":{{}},
             "pmcConfig":{{}},
             "repairKitWeapon":{{"rarityWeight":{{}},"bonusTypeWeight":{{}},"Common":{{}},
                 "Rare":{{}}}},
@@ -2102,7 +2103,7 @@ mod tests {
             "shared":{{
             "generatingPlayerLevel":20,
             "isNightTime":false,
-            "equipment":{{}}
+            "liveEquipmentMods":{{}}
             }}
         }}"#
         )
