@@ -1610,6 +1610,29 @@ mod tests {
         generate_inventory_batch(request).unwrap().bots
     }
 
+    /// Nothing C#-side can observe the batch entry point's merge today:
+    /// `BotWaveBatcher.WaveCanWriteNighttimeClamps` declines the batch for exactly the waves whose
+    /// clamps would show it, so the safety of `generate_inventory_batch`'s `resolve_equipment`
+    /// hoist otherwise rests on another class's dispatch policy. This gates the hoist directly — a
+    /// nighttime batch that reaches the export anyway (a direct caller, or a narrowed decline
+    /// policy) must still compute clamps off the *live* overlay mods, not the published ones.
+    #[test]
+    fn the_batch_arm_computes_clamps_off_the_live_overlay_mods() {
+        let (envelope, slice) = split_batch(nighttime_request());
+
+        let bots = batch(envelope, vec![slice]);
+
+        let result = bots[0].result.as_ref().unwrap();
+        assert_eq!(
+            result
+                .randomisation_clamps
+                .iter()
+                .map(|(slot, chance)| (slot.as_str(), *chance))
+                .collect::<Vec<_>>(),
+            vec![("front_plate", 70.0), ("mod_nvg", 100.0)]
+        );
+    }
+
     #[test]
     fn batch_isolates_a_failing_bot() {
         let (mut envelope, good) = split_batch(base_request());

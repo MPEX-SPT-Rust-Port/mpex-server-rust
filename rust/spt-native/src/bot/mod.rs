@@ -754,10 +754,11 @@ mod tests {
         let merged = resolve_equipment(&views, &live);
 
         assert_eq!(merged.keys().collect::<Vec<_>>(), ["pmc"]);
-        let mods = merged["pmc"].randomisation.as_ref().unwrap()[0]
-            .equipment_mods
-            .as_ref()
-            .unwrap();
+        let bands = merged["pmc"].randomisation.as_ref().unwrap();
+        // Dropped means *dropped*: an implementation that appended the unmatched band as a new
+        // element would keep the mods assert below green.
+        assert_eq!(bands.len(), 1);
+        let mods = bands[0].equipment_mods.as_ref().unwrap();
         assert_eq!(mods["mod_nvg"], 95.0);
     }
 
