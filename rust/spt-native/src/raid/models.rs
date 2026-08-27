@@ -184,3 +184,80 @@ pub struct BossTimeUpdateWire {
     pub index: usize, // into the request bossSpawns array — the ORIGINAL list, not the kept one
     pub time: f64,
 }
+
+// ---- Export 3: spt_adjust_bot_hostility_settings ----
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdjustHostilityRequest {
+    /// pmcConfig.HostilitySettings, insertion-ordered (IndexMap — the C# foreach order).
+    pub hostility_settings: IndexMap<String, HostilityConfigWire>,
+    /// None mirrors a null AdditionalHostilitySettings — every role then reports unmatched
+    /// (legacy warns per role and continues; the per-entry FirstOrDefault no-ops).
+    pub location_settings: Option<Vec<LocationHostilityWire>>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocationHostilityWire {
+    pub bot_role: Option<String>,
+    pub always_enemies_is_null: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HostilityConfigWire {
+    pub additional_enemy_types: Option<Vec<String>>,
+    /// `ChancedEnemies is not null` — verified at LLS:308, a PURE null check: a non-null EMPTY
+    /// list still enters the branch and clears the location list.
+    pub has_chanced_enemies: bool,
+    pub additional_friendly_types: Option<Vec<String>>,
+    pub bear_enemy_chance: Option<f64>,
+    pub usec_enemy_chance: Option<f64>,
+    pub savage_enemy_chance: Option<f64>,
+    pub savage_player_behaviour: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdjustHostilityResponse {
+    /// One entry per config role, in config insertion order. The applier walks this single list,
+    /// so legacy's warn/apply INTERLEAVING (one loop, LLS:283-362) is preserved.
+    pub entries: Vec<HostilityEntryWire>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HostilityEntryWire {
+    pub role: String,
+    /// None → unmatched: the applier warns (Quirk 12) and skips. Some(i) indexes the
+    /// builder-materialized AdditionalHostilitySettings list.
+    pub matched_index: Option<usize>,
+    pub add_always_enemies: Vec<String>,
+    /// True when the config's ChancedEnemies is non-null: the applier runs the LEGACY loop
+    /// verbatim (clear + probe-as-you-fill, LLS:310-326) from the live config list for `role`.
+    pub run_chanced_enemies_loop: bool,
+    /// Some (EMPTY INCLUDED) → reset then fill (LLS:330-336: non-null triggers the clear).
+    pub set_always_friends: Option<Vec<String>>,
+    pub bear_enemy_chance: Option<f64>,
+    pub usec_enemy_chance: Option<f64>,
+    pub savage_enemy_chance: Option<f64>,
+    pub savage_player_behaviour: Option<String>,
+}
+
+// ---- Export 4: spt_adjust_extracts ----
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdjustExtractsRequest {
+    pub player_side: Option<String>,
+    pub map_found: bool,
+    pub extract_sides: Vec<Option<String>>, // AllExtracts[i].Side, from the materialized list
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdjustExtractsResponse {
+    pub warn_unknown_map: bool,
+    pub append_extract_indices: Vec<usize>,
+}

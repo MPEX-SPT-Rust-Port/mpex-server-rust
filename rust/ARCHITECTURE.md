@@ -93,7 +93,7 @@ different assembly: `Libraries/SPTarkov.Common/Native/NativeMethods.cs`, with
 | `src/ragfair/` | One batch of dynamic flea offers: the assort walk, pricing, barter schemes, the offers |
 | `src/quest/` | One repeatable quest of any of the four types, its rewards, and the mutated quest-type pool |
 | `src/scav_case/` | One scav case craft's rewards: the pools, the per-rarity picks, the money/ammo/preset arms |
-| `src/raid/` | One scav raid's setup: the reduced raid time, the loot percents and the train-exit changes. The one family that rides no resident DB |
+| `src/raid/` | One scav raid's setup: the reduced raid time, the loot percents and the train-exit changes, plus the raid-start bot-hostility and scav-extract deltas. The one family that rides no resident DB |
 | `src/base_class.rs` | The whole `ItemBaseClassService` cache in one call, over `loot/item_helper.rs`'s `ItemBaseClassCache` |
 | `src/linked_items.rs` | The whole `RagfairLinkedItemService` table in one call: the bidirectional slot/chamber/cartridge walk plus the revolver camora-ammo edge case |
 | `src/profile.rs` | The disk half of `SaveServer`: list, load, save, delete over `user/profiles/`, with `FileUtil.WriteFileAsync`'s temp-then-rename protocol. Stateless — the directory arrives in every request — and profile bytes are opaque, written and read verbatim. The live `SptProfile` graph, the MD5 dirty-check and `BackupService` all stay C# |
@@ -158,7 +158,16 @@ PascalCase again, inbound this time) alongside the map's exit names, wave times 
 answers with **deltas, not a mutated map** — `{escapeTimeLimit, exitUpdates, aborted, abortedExitName,
 mapSettingsMissingValue, waveAdjustments?}`. Every `index` in that response addresses the request's own
 projection order, which is what lets the C# side apply the deltas to the live `LocationBase` objects it
-built the request from. It draws nothing, so it carries no `testSeed`, and it names no epoch either. The
+built the request from. It draws nothing, so it carries no `testSeed`, and it names no epoch either.
+The family's raid-start pair, `spt_adjust_bot_hostility_settings` and `spt_adjust_extracts`, are two more of
+them, and deltas again: the first answers `{entries}` — **one entry per config role, in the request map's
+insertion order**, `{role, matchedIndex?, addAlwaysEnemies, runChancedEnemiesLoop, setAlwaysFriends?,
+bearEnemyChance?, usecEnemyChance?, savageEnemyChance?, savagePlayerBehaviour?}`, a null `matchedIndex`
+meaning the role matched no location entry — one ordered list, because the C# applier walks it once and so
+keeps legacy's warn/apply interleaving. The second answers `{warnUnknownMap, appendExtractIndices}`, indices
+into the request's own extract projection. Neither carries the map or location name: both warnings are
+re-emitted C#-side, from the live objects the request was projected from. Like their siblings they name no
+epoch, and they draw nothing, so neither carries a `testSeed`. The
 twenty-one generation/verify/publish/load/digest/profile exports hand back a heap buffer on success, which the
 caller releases with `spt_buf_free`; so do `spt_console_read_line` and `spt_log_format`.
 
@@ -397,13 +406,15 @@ where they look like they do in today's C# file. One native call generates **one
 The one family that rides **no** resident DB: every config and location member it reads is projected into the
 request, so a call names no epoch. Like `scav_case`, its `mod.rs` holds the entry point and carries a `//!`
 header — read it first, because it states the family's citation convention: a bare `` `:N` `` is a line of
-`Services/InRaid/RaidTimeAdjustmentService.cs`. One native call adjusts **one** raid.
+`Services/InRaid/RaidTimeAdjustmentService.cs`, and an `LLS:N` (`raid_start.rs` only) one of
+`Services/InRaid/LocationLifecycleService.cs`. One native call adjusts **one** raid.
 
 | Module | Stands in for | What it does |
 |---|---|---|
-| `mod.rs` | `Services/InRaid/RaidTimeAdjustmentService.cs` (entry) | `get_raid_adjustments` and `make_adjustments_to_map` — both `catch_unwind` the pass, so a panic arrives as an error message rather than `STATUS_PANIC` (see *Conventions*); only the first installs the seed guard, because only the first draws |
+| `mod.rs` | `Services/InRaid/RaidTimeAdjustmentService.cs`, `Services/InRaid/LocationLifecycleService.cs` (entries) | `get_raid_adjustments`, `make_adjustments_to_map`, `adjust_bot_hostility_settings` and `adjust_extracts` — all four `catch_unwind` the pass, so a panic arrives as an error message rather than `STATUS_PANIC` (see *Conventions*); only the first installs the seed guard, because only the first draws |
 | `adjustments.rs` | `Services/InRaid/RaidTimeAdjustmentService.cs` (`:35-193`, `:201-374`) | `GetRaidAdjustments` with `GetMapSettings` and `GetExitAdjustments` — the chance roll, the weighted reduction percent, the loot-percent floors, and the per-train-exit disable-or-reduce walk — plus `MakeAdjustmentsToMap` with `AdjustWaves` and `AdjustPMCSpawns`: the exit-update walk and its unmatched-name abort, the twice-applied wave reduction, and the pmc keep-and-offset passes. `AdjustLootMultipliers` is *not* here: it rewrites the live `LocationConfig` in place and stays C# on both arms, the family's one decline-set carve-out |
-| `models.rs` | `Models/Spt/Location/RaidChanges.cs` (both exports' inner half) | Wire types — a fresh contract, mirrored member-for-member C#-side |
+| `raid_start.rs` | `Services/InRaid/LocationLifecycleService.cs` (`LLS:251-275`, `LLS:281-363`) | `AdjustExtracts` and `AdjustBotHostilitySettings` — the scav-side/unknown-map gates and the ignore-case scav-extract filter, and the per-config-role location match with the ops each match earns. The two loops that write through live references stay C#-side: the chanced-enemy probe-as-you-fill and the `Exits.Union` |
+| `models.rs` | `Models/Spt/Location/RaidChanges.cs` (both time exports' inner half) | Wire types — a fresh contract, mirrored member-for-member C#-side |
 
 ### Conventions
 

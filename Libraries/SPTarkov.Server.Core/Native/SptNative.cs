@@ -113,6 +113,8 @@ internal enum LootExport
     ScavCaseRewards,
     RaidAdjustments,
     MakeAdjustmentsToMap,
+    AdjustBotHostilitySettings,
+    AdjustExtracts,
     ItemBaseClass,
     RagfairLinkedItems,
 }
@@ -271,6 +273,29 @@ public static class SptNative
             LootExport.MakeAdjustmentsToMap,
             JsonSerializer.SerializeToUtf8Bytes(request, LootJsonOptions)
         );
+    }
+
+    /// <summary>
+    /// Works out one map's bot-hostility deltas at raid start: per config role, which entry of the
+    /// location's <c>AdditionalHostilitySettings</c> it matched and which of the config's ops to run
+    /// on it, in config order. Deltas, not a mutated map - the caller warns and applies. Draws
+    /// nothing and names no epoch.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">The pass failed, or the native side misbehaved.</exception>
+    public static TResponse AdjustBotHostilitySettings<TResponse>(ReadOnlySpan<byte> requestUtf8)
+    {
+        return Generate<TResponse>(LootExport.AdjustBotHostilitySettings, requestUtf8);
+    }
+
+    /// <summary>
+    /// Works out which of a map's extracts a scav player's exit list gains: indices into the
+    /// request's own <c>AllExtracts</c> projection, plus the unknown-map warning flag. The append
+    /// itself stays C#-side. Draws nothing and names no epoch.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">The pass failed, or the native side misbehaved.</exception>
+    public static TResponse AdjustExtracts<TResponse>(ReadOnlySpan<byte> requestUtf8)
+    {
+        return Generate<TResponse>(LootExport.AdjustExtracts, requestUtf8);
     }
 
     /// <summary>
@@ -1015,6 +1040,13 @@ public static class SptNative
                     &outPtr,
                     &outLen
                 ),
+                LootExport.AdjustBotHostilitySettings => NativeMethods.AdjustBotHostilitySettings(
+                    requestPtr,
+                    (nuint)requestUtf8.Length,
+                    &outPtr,
+                    &outLen
+                ),
+                LootExport.AdjustExtracts => NativeMethods.AdjustExtracts(requestPtr, (nuint)requestUtf8.Length, &outPtr, &outLen),
                 LootExport.ItemBaseClass => NativeMethods.BuildItemBaseClassCache(requestPtr, (nuint)requestUtf8.Length, &outPtr, &outLen),
                 LootExport.RagfairLinkedItems => NativeMethods.BuildRagfairLinkedItemTable(
                     requestPtr,

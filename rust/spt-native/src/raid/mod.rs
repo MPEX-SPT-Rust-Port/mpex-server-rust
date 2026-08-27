@@ -1,4 +1,5 @@
-//! The raid-setup family: `Services/InRaid/RaidTimeAdjustmentService.cs`, ported bug-for-bug.
+//! The raid-setup family: `Services/InRaid/RaidTimeAdjustmentService.cs` and the two raid-start
+//! halves of `Services/InRaid/LocationLifecycleService.cs`, ported bug-for-bug.
 //!
 //! Citation convention for this module: a bare `` `:N` `` is a line of
 //! `RaidTimeAdjustmentService.cs`; citations naming a file (`LocationConfig.cs:264`) are that
@@ -6,12 +7,14 @@
 
 pub mod adjustments;
 pub mod models;
+pub mod raid_start;
 
 use std::any::Any;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use crate::loot::random_util::TestSeedGuard;
 use crate::raid::models::{
+    AdjustExtractsRequest, AdjustExtractsResponse, AdjustHostilityRequest, AdjustHostilityResponse,
     GetRaidAdjustmentsRequest, GetRaidAdjustmentsResponse, MakeAdjustmentsRequest,
     MakeAdjustmentsResponse,
 };
@@ -61,6 +64,36 @@ pub fn make_adjustments_to_map(
 ) -> Result<MakeAdjustmentsResponse, RaidError> {
     catch_unwind(AssertUnwindSafe(|| adjustments::make_adjustments(&request)))
         .unwrap_or_else(|payload| Err(panic_message(payload)))
+}
+
+/// The module boundary: one map's bot-hostility deltas at raid start. Draws nothing, like
+/// [`make_adjustments_to_map`], so no seed guard — the `catch_unwind` is the same backstop.
+///
+/// # Errors
+///
+/// [`RaidError::Failed`] on Quirk 10, the one failure this pass can reach — or a panic.
+pub fn adjust_bot_hostility_settings(
+    request: AdjustHostilityRequest,
+) -> Result<AdjustHostilityResponse, RaidError> {
+    catch_unwind(AssertUnwindSafe(|| {
+        raid_start::adjust_bot_hostility_settings(&request)
+    }))
+    .unwrap_or_else(|payload| Err(panic_message(payload)))
+}
+
+/// The module boundary: which of a map's extracts a scav player's exit list gains. The pass itself
+/// cannot fail — only a port bug caught by the `catch_unwind` can turn this into an `Err`.
+///
+/// # Errors
+///
+/// [`RaidError::Failed`] carrying a panic message. Legacy has no throw point here.
+pub fn adjust_extracts(
+    request: AdjustExtractsRequest,
+) -> Result<AdjustExtractsResponse, RaidError> {
+    catch_unwind(AssertUnwindSafe(|| {
+        Ok(raid_start::adjust_extracts(&request))
+    }))
+    .unwrap_or_else(|payload| Err(panic_message(payload)))
 }
 
 /// The text a caught panic carries — `panic!`/`expect` payloads are a `String` or a `&str`.

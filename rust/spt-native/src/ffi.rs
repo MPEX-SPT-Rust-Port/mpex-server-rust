@@ -23,7 +23,10 @@ use crate::loot::loot_generator::{
 use crate::quest::{QuestError, generate_repeatable_quest};
 use crate::ragfair::models::{DynamicOffersHeader, DynamicOffersResult};
 use crate::ragfair::offer_generator::{RagfairError, generate_dynamic_offers};
-use crate::raid::{RaidError, get_raid_adjustments, make_adjustments_to_map};
+use crate::raid::{
+    RaidError, adjust_bot_hostility_settings, adjust_extracts, get_raid_adjustments,
+    make_adjustments_to_map,
+};
 use crate::runtime::runtime;
 use crate::scav_case::{ScavCaseError, generate_scav_case_rewards};
 use crate::verify;
@@ -672,6 +675,61 @@ pub unsafe extern "C" fn spt_make_adjustments_to_map(
             |response| {
                 serde_json::to_vec(&response)
                     .expect("raid adjustment response serialization cannot fail")
+            },
+        )
+    }
+}
+
+/// One map's bot-hostility deltas at raid start: per config role, which entry of the location's
+/// `AdditionalHostilitySettings` it matched and which of the config's ops to run on it, in config
+/// order. Deltas, not a mutated map, and the warnings are the caller's — it holds the live config
+/// the unmatched-role message interpolates. Names no epoch, draws nothing.
+///
+/// # Safety
+/// See `spt_generate_static_containers`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn spt_adjust_bot_hostility_settings(
+    req_ptr: *const u8,
+    req_len: usize,
+    out_ptr: *mut *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    unsafe {
+        run_generator_with(
+            req_ptr,
+            req_len,
+            out_ptr,
+            out_len,
+            adjust_bot_hostility_settings,
+            |response| {
+                serde_json::to_vec(&response).expect("hostility response serialization cannot fail")
+            },
+        )
+    }
+}
+
+/// Which of a map's extracts a scav player's exit list gains: indices into the request's own
+/// `AllExtracts` projection, plus the unknown-map warning flag. The append itself — a deferred
+/// `Union` over the live extract instances — stays C#-side. Names no epoch, draws nothing.
+///
+/// # Safety
+/// See `spt_generate_static_containers`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn spt_adjust_extracts(
+    req_ptr: *const u8,
+    req_len: usize,
+    out_ptr: *mut *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    unsafe {
+        run_generator_with(
+            req_ptr,
+            req_len,
+            out_ptr,
+            out_len,
+            adjust_extracts,
+            |response| {
+                serde_json::to_vec(&response).expect("extracts response serialization cannot fail")
             },
         )
     }
@@ -2968,6 +3026,114 @@ mod tests {
         );
     }
 
+    /// Two config roles against one location entry, so the response carries a matched and an
+    /// unmatched entry in config order — and every op member is live on the matched one.
+    fn hostility_request() -> serde_json::Value {
+        serde_json::json!({
+            "hostilitySettings": {
+                "assault": {
+                    "additionalEnemyTypes": ["pmcBot"],
+                    "hasChancedEnemies": true,
+                    "additionalFriendlyTypes": [],
+                    "bearEnemyChance": 50.0,
+                    "savagePlayerBehaviour": "AlwaysEnemy"
+                },
+                "bossBully": { "hasChancedEnemies": false }
+            },
+            "locationSettings": [{ "botRole": "ASSAULT", "alwaysEnemiesIsNull": false }]
+        })
+    }
+
+    #[test]
+    fn adjust_bot_hostility_settings_roundtrips_result_json() {
+        let request = serde_json::to_vec(&hostility_request()).unwrap();
+
+        let (status, out) = call_generate(spt_adjust_bot_hostility_settings, &request);
+        assert_eq!(status, STATUS_OK);
+
+        let response: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        let entries = response["entries"].as_array().unwrap();
+        // One per config role, in config insertion order — the interleaving contract.
+        assert_eq!(entries.len(), 2);
+
+        assert_eq!(entries[0]["role"], "assault");
+        assert_eq!(entries[0]["matchedIndex"], 0);
+        assert_eq!(
+            entries[0]["addAlwaysEnemies"],
+            serde_json::json!(["pmcBot"])
+        );
+        assert_eq!(entries[0]["runChancedEnemiesLoop"], true);
+        // Quirk: an empty `additionalFriendlyTypes` still clears, so it must not arrive as null.
+        assert_eq!(entries[0]["setAlwaysFriends"], serde_json::json!([]));
+        assert_eq!(entries[0]["bearEnemyChance"], 50.0);
+        assert!(entries[0]["usecEnemyChance"].is_null());
+        assert_eq!(entries[0]["savagePlayerBehaviour"], "AlwaysEnemy");
+
+        assert_eq!(entries[1]["role"], "bossBully");
+        assert!(entries[1]["matchedIndex"].is_null());
+    }
+
+    #[test]
+    fn an_unparseable_hostility_request_returns_bad_args_with_the_parse_error() {
+        let (status, out) = call_generate(
+            spt_adjust_bot_hostility_settings,
+            b"{\"hostilitySettings\":",
+        );
+
+        assert_eq!(status, STATUS_BAD_ARGS);
+        let message = String::from_utf8(out).unwrap();
+        assert!(
+            message.contains("EOF while parsing"),
+            "expected the serde error, got: {message}"
+        );
+    }
+
+    #[test]
+    fn a_hostility_failure_returns_status_error_and_the_message() {
+        // Quirk 10: a null `AlwaysEnemies` with enemy types to add is the legacy NRE point.
+        let mut request = hostility_request();
+        request["locationSettings"][0]["alwaysEnemiesIsNull"] = serde_json::json!(true);
+
+        let (status, out) = call_generate(
+            spt_adjust_bot_hostility_settings,
+            &serde_json::to_vec(&request).unwrap(),
+        );
+
+        assert_eq!(status, STATUS_ERROR);
+        let message = String::from_utf8(out).unwrap();
+        assert!(message.contains("assault"), "{message}");
+    }
+
+    #[test]
+    fn adjust_extracts_roundtrips_result_json() {
+        let request = serde_json::to_vec(&serde_json::json!({
+            "playerSide": "Savage",
+            "mapFound": true,
+            "extractSides": ["Pmc", "SCAV", null, "scav"]
+        }))
+        .unwrap();
+
+        let (status, out) = call_generate(spt_adjust_extracts, &request);
+        assert_eq!(status, STATUS_OK);
+
+        let response: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(response["warnUnknownMap"], false);
+        // Indices into the request's own `AllExtracts` projection, ignore-case on `Side`.
+        assert_eq!(response["appendExtractIndices"], serde_json::json!([1, 3]));
+    }
+
+    #[test]
+    fn an_unparseable_extracts_request_returns_bad_args_with_the_parse_error() {
+        let (status, out) = call_generate(spt_adjust_extracts, b"{\"playerSide\":");
+
+        assert_eq!(status, STATUS_BAD_ARGS);
+        let message = String::from_utf8(out).unwrap();
+        assert!(
+            message.contains("EOF while parsing"),
+            "expected the serde error, got: {message}"
+        );
+    }
+
     /// `child` is an Item whose chain climbs through the `node` root to a `root` the view never
     /// holds — the three-template shape `base_class`'s own tests pin, here across the boundary.
     const BASE_CLASS_REQUEST: &[u8] = br#"{"epoch":0,"viewsOverride":{"itemsView":{
@@ -3309,6 +3475,26 @@ mod tests {
 
         let status = unsafe {
             spt_make_adjustments_to_map(
+                std::ptr::null(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(status, STATUS_BAD_ARGS);
+
+        let status = unsafe {
+            spt_adjust_bot_hostility_settings(
+                std::ptr::null(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(status, STATUS_BAD_ARGS);
+
+        let status = unsafe {
+            spt_adjust_extracts(
                 std::ptr::null(),
                 0,
                 std::ptr::null_mut(),
