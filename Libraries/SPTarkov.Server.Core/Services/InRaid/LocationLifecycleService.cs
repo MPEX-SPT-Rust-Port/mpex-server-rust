@@ -382,6 +382,15 @@ public class LocationLifecycleService(
         {
             LastPathTaken = LootGenerationPath.Native;
 
+            // Legacy returns after this one compare, before the map lookup - so the projection
+            // waits for it too, or every PMC raid start pays a lookup and an FFI round trip the
+            // native side discards at the same test. IsSide is in the frozen set, so on this arm it
+            // is guaranteed unpatched and this is the very test raid_start.rs runs
+            if (!IsSide(playerSide, Savage))
+            {
+                return;
+            }
+
             var (nativeRequest, extracts) = _requestBuilder!.BuildAdjustExtractsRequest(playerSide, location);
             var deltas = _requestBuilder.SendAdjustExtracts(nativeRequest);
             ApplyExtractDeltas(deltas, location, locationData, extracts);

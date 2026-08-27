@@ -1097,8 +1097,10 @@ in `NativeMethods.cs` and `SptNative.cs`. The two services keep their full 4.1.2
 - **Two builder touch-order fidelity notes.** The hostility builder no longer dereferences
   `BotLocationModifier` when the config loop would run zero iterations — legacy no-ops there, so the
   early deref was a *new* exception rather than a booked type change, and the fidelity bar books only
-  type changes. The extracts builder's early `GetLocation` **is** booked unobservable: the `TryGetValue`
-  chain cannot throw, and the identical string is already dereferenced 82 lines earlier.
+  type changes. The extracts pass gates on the side *before* calling its builder — legacy returns
+  after one string compare for every PMC raid, so the projection, the `GetLocation` deref and the FFI
+  crossing wait for a scav side; on the native arm `IsSide` is frozen-set-guaranteed unpatched, so
+  the C#-side gate is the very test `raid_start.rs` would have run.
 - **Quirk 4's "a `None` time seeds the offset" sub-state is unreachable** and the spec and plan still
   assert it — recorded here so nobody re-litigates it. The offset filter's pmc set is a strict subset of
   the keep filter's, and the keep filter admits a pmc spawn only with `Some(time) > start`, so every
