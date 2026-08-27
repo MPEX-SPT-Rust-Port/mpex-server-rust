@@ -13,14 +13,20 @@ namespace SPTarkov.Server.Core.Native.Raid;
 
 /// <summary>
 /// Assembles the raid-setup requests out of the live database and config - everything
-/// <c>RaidTimeAdjustmentService</c> would have read for itself - and sends them.
+/// <c>RaidTimeAdjustmentService</c> and <c>LocationLifecycleService</c> would have read for
+/// themselves - and sends them.
 ///
 /// It also owns the family's frozen member set: <see cref="AnyFrozenMemberPatched"/> is consulted by
 /// the legacy-path predicates of <em>both</em> raid-setup services, so a Harmony patch on any one of
 /// the six forces legacy at every one of their call sites.
 /// </summary>
 [Injectable]
-public class RaidNativeRequestBuilder(GlobalTable globalTable, LocationConfig locationConfig)
+public class RaidNativeRequestBuilder(
+    GlobalTable globalTable,
+    LocationTable locationTable,
+    LocationConfig locationConfig,
+    PmcConfig pmcConfig
+)
 {
     /// <summary>
     ///     The six members a mod can Harmony-patch to take over part of raid setup - the four
@@ -128,6 +134,96 @@ public class RaidNativeRequestBuilder(GlobalTable globalTable, LocationConfig lo
     public MakeAdjustmentsResponse SendMakeAdjustments(MakeAdjustmentsRequest request)
     {
         return SptNative.MakeAdjustmentsToMap(request);
+    }
+
+    /// <summary>
+    ///     One raid-start hostility pass's inputs, plus the location settings list they were
+    ///     projected from.
+    ///
+    ///     <c>AdditionalHostilitySettings</c> is an <c>IEnumerable</c>, so it is materialised
+    ///     exactly once here and handed back: every <c>matchedIndex</c> in the response indexes
+    ///     <em>this</em> list. A null one stays null - that is the map with no hostility settings at
+    ///     all, where legacy's <c>?.FirstOrDefault</c> leaves every role unmatched.
+    /// </summary>
+    /// <param name="location">The map to work out hostility deltas for</param>
+    public (AdjustHostilityRequest Request, List<AdditionalHostilitySettings>? LocationSettings) BuildAdjustHostilityRequest(
+        LocationBase location
+    )
+    {
+        var hostilityList = location.BotLocationModifier.AdditionalHostilitySettings?.ToList();
+
+        var request = new AdjustHostilityRequest
+        {
+            // ToDictionary copies in source enumeration order, which is the order the legacy
+            // foreach walks - and the order the native side reads back into its IndexMap
+            HostilitySettings = pmcConfig.HostilitySettings.ToDictionary(
+                botId => botId.Key,
+                botId => new HostilityConfigWire
+                {
+                    AdditionalEnemyTypes = botId.Value.AdditionalEnemyTypes,
+
+                    // A pure null check, exactly as legacy tests it: a non-null empty list is still
+                    // the branch that clears the location's list
+                    HasChancedEnemies = botId.Value.ChancedEnemies is not null,
+                    AdditionalFriendlyTypes = botId.Value.AdditionalFriendlyTypes,
+                    BearEnemyChance = botId.Value.BearEnemyChance,
+                    UsecEnemyChance = botId.Value.UsecEnemyChance,
+                    SavageEnemyChance = botId.Value.SavageEnemyChance,
+                    SavagePlayerBehaviour = botId.Value.SavagePlayerBehaviour,
+                }
+            ),
+            LocationSettings = hostilityList
+                ?.Select(botSettings => new LocationHostilityWire
+                {
+                    BotRole = botSettings.BotRole,
+                    AlwaysEnemiesIsNull = botSettings.AlwaysEnemies is null,
+                })
+                .ToList(),
+        };
+
+        return (request, hostilityList);
+    }
+
+    /// <summary>
+    ///     Works out one map's bot-hostility deltas natively.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">The pass failed, or the native side misbehaved.</exception>
+    public AdjustHostilityResponse SendAdjustBotHostilitySettings(AdjustHostilityRequest request)
+    {
+        return SptNative.AdjustBotHostilitySettings(request);
+    }
+
+    /// <summary>
+    ///     One extract pass's inputs, plus the extract list they were projected from.
+    ///
+    ///     <c>AllExtracts</c> is an <c>IEnumerable</c> on a location that may not exist at all, so
+    ///     the lookup happens once here and the materialised list is handed back: every appended
+    ///     index indexes <em>this</em> list, never a re-fetched one. Null covers both halves of
+    ///     legacy's single null check - an unknown map and a map with no extract data.
+    /// </summary>
+    /// <param name="playerSide">The side the player is entering the raid on</param>
+    /// <param name="location">The map's name, as the client spelled it</param>
+    public (AdjustExtractsRequest Request, List<AllExtractsExit>? Extracts) BuildAdjustExtractsRequest(string playerSide, string location)
+    {
+        var mapExtracts = locationTable.GetLocation(location)?.AllExtracts?.ToList();
+
+        var request = new AdjustExtractsRequest
+        {
+            PlayerSide = playerSide,
+            MapFound = mapExtracts is not null,
+            ExtractSides = mapExtracts?.Select(extract => extract.Side).ToList() ?? [],
+        };
+
+        return (request, mapExtracts);
+    }
+
+    /// <summary>
+    ///     Works out which extracts a scav player's exit list gains natively.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">The pass failed, or the native side misbehaved.</exception>
+    public AdjustExtractsResponse SendAdjustExtracts(AdjustExtractsRequest request)
+    {
+        return SptNative.AdjustExtracts(request);
     }
 
     /// <summary>

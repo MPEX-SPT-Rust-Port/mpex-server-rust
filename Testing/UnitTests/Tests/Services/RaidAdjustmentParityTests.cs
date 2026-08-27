@@ -1,3 +1,4 @@
+using System.Reflection;
 using NUnit.Framework;
 using SPTarkov.Server.Core.Generators;
 using SPTarkov.Server.Core.Generators.Loot;
@@ -15,13 +16,15 @@ using SPTarkov.Server.Core.Utils.Cloners;
 namespace UnitTests.Tests.Services;
 
 /// <summary>
-/// Golden parity gate on the scav raid time port: the same seed must make the legacy C# path and the
+/// Golden parity gate on the raid-setup port: the same seed must make the legacy C# path and the
 /// spt-native path produce the same <see cref="RaidChanges"/> and park the same thing on the
-/// session, and the map-adjustment pass must leave the same <c>LocationBase</c> behind whichever arm
-/// applied it.
+/// session, and the map-adjustment and raid-start passes must leave the same <c>LocationBase</c>
+/// behind whichever arm applied it.
 ///
-/// State this fixture mutates, all of it restored in <see cref="Adjust"/>'s and
-/// <see cref="AdjustMap"/>'s <c>finally</c>:
+/// State this fixture mutates, all of it restored in <see cref="Adjust"/>'s,
+/// <see cref="AdjustMap"/>'s, <see cref="AdjustHostility"/>'s and <see cref="AdjustRaidExtracts"/>'s
+/// <c>finally</c> - the last two also replace <c>PmcConfig.HostilitySettings</c> wholesale, which is
+/// a single reference assignment to put back:
 /// <see cref="LocationConfig.ForceLegacyRaidAdjustments"/> on the shared config singleton - the path
 /// selector - the one <c>ScavRaidTimeSettings.Maps</c> entry a case forces,
 /// <see cref="RandomUtil.RandomSource"/>, which is the seam the legacy path draws through,
@@ -49,9 +52,30 @@ public class RaidAdjustmentParityTests
     /// </summary>
     private const string ScavSide = "Savage";
 
+    /// <summary>
+    /// The map every raid-start case works a clone of: four <c>AdditionalHostilitySettings</c>
+    /// entries covering both shipped config roles, and 17 scav extracts among 26.
+    /// </summary>
+    private const string RaidStartMap = "bigmap";
+
+    /// <summary>
+    /// Both raid-start passes are <c>protected</c>, and a subclass that exposed them would flip the
+    /// path predicate to legacy - so they are called by reflection, on the real registered instance.
+    /// </summary>
+    private static readonly MethodInfo _adjustExtracts = typeof(LocationLifecycleService).GetMethod(
+        "AdjustExtracts",
+        BindingFlags.Instance | BindingFlags.NonPublic
+    )!;
+
+    private static readonly MethodInfo _adjustBotHostilitySettings = typeof(LocationLifecycleService).GetMethod(
+        "AdjustBotHostilitySettings",
+        BindingFlags.Instance | BindingFlags.NonPublic
+    )!;
+
     private readonly MongoId _sessionId = new();
 
     private RaidTimeAdjustmentService _raidTimeAdjustmentService = default!;
+    private LocationLifecycleService _locationLifecycleService = default!;
     private LocationConfig _locationConfig = default!;
     private LocationTable _locationTable = default!;
     private RandomUtil _randomUtil = default!;
@@ -67,6 +91,7 @@ public class RaidAdjustmentParityTests
         var di = DI.GetInstance();
 
         _raidTimeAdjustmentService = di.GetService<RaidTimeAdjustmentService>();
+        _locationLifecycleService = di.GetService<LocationLifecycleService>();
         _locationConfig = di.GetService<LocationConfig>();
         _locationTable = di.GetService<LocationTable>();
         _randomUtil = di.GetService<RandomUtil>();
@@ -498,6 +523,298 @@ public class RaidAdjustmentParityTests
             Does.Contain(_locationTable.GetLocation("labyrinth")!.Base.Id),
             "the native error does not name the map the legacy key miss named"
         );
+    }
+
+    /// <summary>
+    /// The whole hostility pass against shipped data: the config's two roles match the map's
+    /// <c>pmcBEAR</c> and <c>pmcUSEC</c> entries case-insensitively, and every op the pass has - the
+    /// enemy adds, the chanced-enemy refill, the friendly reset and the four scalars - is exercised
+    /// by the shipped config.
+    /// </summary>
+    [Test]
+    public void HostilityAdjustmentsMatchOnBothPaths()
+    {
+        var legacy = AdjustHostility(forceLegacy: true);
+        var native = AdjustHostility(forceLegacy: false);
+
+        AssertMapParity(legacy, native, "hostility");
+
+        // A case that matched nothing would be comparing two untouched clones
+        var config = _pmcConfig.HostilitySettings["pmcbear"];
+        var applied = Settings(native, "pmcBEAR");
+        Assert.That(applied.SavagePlayerBehaviour, Is.EqualTo(config.SavagePlayerBehaviour), "the ignore-case role match found nothing");
+        Assert.That(applied.BearEnemyChance, Is.EqualTo(config.BearEnemyChance));
+        Assert.That(applied.ChancedEnemies, Has.Count.EqualTo(config.ChancedEnemies!.Count), "the chanced enemies were not refilled");
+        Assert.That(applied.AlwaysEnemies, Is.SupersetOf(config.AdditionalEnemyTypes!));
+    }
+
+    /// <summary>
+    /// An unmatched role warns and skips inside the same loop that applies the matched ones, so the
+    /// role after it still lands - which is what the single ordered entry list preserves.
+    /// </summary>
+    [Test]
+    public void AnUnmatchedHostilityRoleWarnsAndSkipsOnBothPaths()
+    {
+        var legacy = AdjustHostility(forceLegacy: true, UnmatchedRoleConfig());
+        var native = AdjustHostility(forceLegacy: false, UnmatchedRoleConfig());
+
+        AssertMapParity(legacy, native, "unmatched-hostility-role");
+
+        Assert.That(Settings(native, "pmcBEAR").SavageEnemyChance, Is.EqualTo(34), "the role after the unmatched one was skipped too");
+    }
+
+    /// <summary>
+    /// Quirk 8's live merge branch: the clear precedes the loop, but the probe target is the list the
+    /// loop itself refills, so a second config entry with the same <c>Role</c> reaches the merge and
+    /// writes <c>EnemyChance</c> on the instance the first one appended. Unreachable on shipped data,
+    /// preserved bug-for-bug.
+    /// </summary>
+    [Test]
+    public void DuplicateRoleChancedEnemiesMergeIdenticallyOnBothPaths()
+    {
+        var legacy = AdjustHostility(forceLegacy: true, DuplicateRoleConfig());
+        var native = AdjustHostility(forceLegacy: false, DuplicateRoleConfig());
+
+        AssertMapParity(legacy, native, "duplicate-chanced-role");
+
+        var chancedEnemies = Settings(native, "pmcBEAR").ChancedEnemies;
+        Assert.That(chancedEnemies, Has.Count.EqualTo(1), "the duplicate role was appended instead of merged");
+        Assert.That(chancedEnemies![0].EnemyChance, Is.EqualTo(90), "the merge did not write the later chance");
+    }
+
+    /// <summary>
+    /// Quirk 8's null check is pure: a non-null <em>empty</em> config list still enters the branch,
+    /// so it clears the location's list and refills it with nothing.
+    /// </summary>
+    [Test]
+    public void AnEmptyChancedEnemiesListStillClearsOnBothPaths()
+    {
+        Assert.That(
+            Settings(_locationTable.GetLocation(RaidStartMap)!.Base, "pmcBEAR").ChancedEnemies,
+            Is.Not.Empty,
+            "bigmap's pmcBEAR entry lost its chanced enemies, so this case no longer proves the clear"
+        );
+
+        var legacy = AdjustHostility(forceLegacy: true, EmptyChancedEnemiesConfig());
+        var native = AdjustHostility(forceLegacy: false, EmptyChancedEnemiesConfig());
+
+        AssertMapParity(legacy, native, "empty-chanced-enemies");
+
+        Assert.That(Settings(native, "pmcBEAR").ChancedEnemies, Is.Empty, "the empty list did not clear the location's own");
+    }
+
+    /// <summary>
+    /// Aliasing channel 3: the refill appends the live <c>PmcConfig</c> instances themselves, so a
+    /// later write through the map reaches the config. Structural, so the native arm has to hand the
+    /// applier the very same objects rather than decoded copies.
+    /// </summary>
+    [Test]
+    public void ChancedEnemyInstancesAreTheLiveConfigObjectsOnTheNativeArm()
+    {
+        var config = EmptyChancedEnemiesConfig();
+        config["pmcbear"].ChancedEnemies!.Add(new ChancedEnemy { Role = "assault", EnemyChance = 10 });
+
+        var native = AdjustHostility(forceLegacy: false, config);
+
+        Assert.That(Settings(native, "pmcBEAR").ChancedEnemies![0], Is.SameAs(config["pmcbear"].ChancedEnemies![0]));
+    }
+
+    /// <summary>
+    /// The ordinary scav append against shipped data: <c>bigmap</c> carries 17 scav extracts among
+    /// its 26, and an <c>AllExtractsExit</c> never equals a base <c>Exit</c>, so the union's dedup
+    /// drops none of them.
+    /// </summary>
+    [Test]
+    public void ScavExtractsAreAppendedIdenticallyOnBothPaths()
+    {
+        var legacy = AdjustRaidExtracts(ScavSide, RaidStartMap, forceLegacy: true);
+        var native = AdjustRaidExtracts(ScavSide, RaidStartMap, forceLegacy: false);
+
+        AssertMapParity(legacy, native, "scav-extracts");
+
+        var originalExitCount = _locationTable.GetLocation(RaidStartMap)!.Base.Exits.Count();
+        Assert.That(native.Exits.Count(), Is.GreaterThan(originalExitCount), "no extract was appended");
+    }
+
+    /// <summary>
+    /// The side gate precedes the map lookup, so a pmc-side raid keeps the map's own exits.
+    /// </summary>
+    [Test]
+    public void ANonScavSideIsANoOpOnBothPaths()
+    {
+        var legacy = AdjustRaidExtracts("Usec", RaidStartMap, forceLegacy: true);
+        var native = AdjustRaidExtracts("Usec", RaidStartMap, forceLegacy: false);
+
+        AssertMapParity(legacy, native, "non-scav-side");
+
+        var originalExitCount = _locationTable.GetLocation(RaidStartMap)!.Base.Exits.Count();
+        Assert.That(native.Exits.Count(), Is.EqualTo(originalExitCount), "a non-scav side had its exits replaced");
+    }
+
+    /// <summary>
+    /// A map the location table does not have warns and makes no adjustment - the map name the
+    /// warning prints never crosses the wire, so the applier is what emits it.
+    /// </summary>
+    [Test]
+    public void AnUnknownExtractMapWarnsOnBothPaths()
+    {
+        var legacy = AdjustRaidExtracts(ScavSide, "no map is called this", forceLegacy: true);
+        var native = AdjustRaidExtracts(ScavSide, "no map is called this", forceLegacy: false);
+
+        AssertMapParity(legacy, native, "unknown-extract-map");
+
+        var originalExitCount = _locationTable.GetLocation(RaidStartMap)!.Base.Exits.Count();
+        Assert.That(native.Exits.Count(), Is.EqualTo(originalExitCount), "the unknown map still adjusted the exits");
+    }
+
+    /// <summary>
+    /// The appended exits are the location table's own <c>AllExtracts</c> instances, not copies -
+    /// the same live-object aliasing legacy's deferred <c>Where</c> hands the union.
+    /// </summary>
+    [Test]
+    public void AppendedExtractInstancesAreTheLiveTableObjects()
+    {
+        var native = AdjustRaidExtracts(ScavSide, RaidStartMap, forceLegacy: false);
+
+        var liveExtract = _locationTable
+            .GetLocation(RaidStartMap)!
+            .AllExtracts.First(extract => string.Equals(extract.Side, "scav", StringComparison.OrdinalIgnoreCase));
+
+        Assert.That(native.Exits, Has.Some.SameAs(liveExtract), "the appended extract was a copy, not the table's own instance");
+    }
+
+    /// <summary>
+    /// One hostility pass on one path, against a fresh clone of the raid-start map and whichever
+    /// config map the case owns, with every singleton it touches restored afterwards.
+    /// </summary>
+    /// <param name="forceLegacy">Which path to take</param>
+    /// <param name="hostilitySettings">
+    ///     Replaces <c>pmcConfig.HostilitySettings</c> for the duration of the call; null leaves the
+    ///     shipped one alone
+    /// </param>
+    private LocationBase AdjustHostility(bool forceLegacy, Dictionary<string, HostilitySettings>? hostilitySettings = null)
+    {
+        var expected = forceLegacy ? LootGenerationPath.Legacy : LootGenerationPath.Native;
+        var map = _cloner.Clone(_locationTable.GetLocation(RaidStartMap)!.Base)!;
+
+        var originalSettings = _pmcConfig.HostilitySettings;
+        var originalForce = _locationConfig.ForceLegacyRaidAdjustments;
+
+        try
+        {
+            if (hostilitySettings is not null)
+            {
+                _pmcConfig.HostilitySettings = hostilitySettings;
+            }
+
+            _locationConfig.ForceLegacyRaidAdjustments = forceLegacy;
+
+            _adjustBotHostilitySettings.Invoke(_locationLifecycleService, [map]);
+
+            // Fail fast on silent fallback before comparing anything
+            Assert.That(
+                _locationLifecycleService.LastPathTaken,
+                Is.EqualTo(expected),
+                $"the hostility pass did not take the {expected} path"
+            );
+
+            return map;
+        }
+        finally
+        {
+            _pmcConfig.HostilitySettings = originalSettings;
+            _locationConfig.ForceLegacyRaidAdjustments = originalForce;
+        }
+    }
+
+    /// <summary>
+    /// One extract pass on one path, against a fresh clone of the raid-start map.
+    /// </summary>
+    /// <param name="playerSide">The side the raid is being entered on</param>
+    /// <param name="location">The map name the extract lookup is made with</param>
+    /// <param name="forceLegacy">Which path to take</param>
+    private LocationBase AdjustRaidExtracts(string playerSide, string location, bool forceLegacy)
+    {
+        var expected = forceLegacy ? LootGenerationPath.Legacy : LootGenerationPath.Native;
+        var map = _cloner.Clone(_locationTable.GetLocation(RaidStartMap)!.Base)!;
+        var originalForce = _locationConfig.ForceLegacyRaidAdjustments;
+
+        try
+        {
+            _locationConfig.ForceLegacyRaidAdjustments = forceLegacy;
+
+            _adjustExtracts.Invoke(_locationLifecycleService, [playerSide, location, map]);
+
+            // Fail fast on silent fallback before comparing anything
+            Assert.That(
+                _locationLifecycleService.LastPathTaken,
+                Is.EqualTo(expected),
+                $"the extract pass did not take the {expected} path"
+            );
+
+            return map;
+        }
+        finally
+        {
+            _locationConfig.ForceLegacyRaidAdjustments = originalForce;
+        }
+    }
+
+    /// <summary>
+    /// One map's hostility entry for a bot role. Every raid-start case reads its result through
+    /// this, so a pass that wrote the wrong entry shows up as a missing write.
+    /// </summary>
+    private static AdditionalHostilitySettings Settings(LocationBase map, string botRole)
+    {
+        return map.BotLocationModifier.AdditionalHostilitySettings!.First(settings => settings.BotRole == botRole);
+    }
+
+    /// <summary>
+    /// A role no map has, ahead of one every map has: the warn-and-skip has to leave the second one
+    /// applying. Fresh instances per call - the passes write config objects in place.
+    /// </summary>
+    private static Dictionary<string, HostilitySettings> UnmatchedRoleConfig()
+    {
+        return new Dictionary<string, HostilitySettings>
+        {
+            ["noBotIsCalledThis"] = new() { BearEnemyChance = 12 },
+            ["pmcbear"] = new() { SavageEnemyChance = 34 },
+        };
+    }
+
+    /// <summary>
+    /// Mod-shaped: one role whose chanced enemies name the same <c>Role</c> twice.
+    /// </summary>
+    private static Dictionary<string, HostilitySettings> DuplicateRoleConfig()
+    {
+        return new Dictionary<string, HostilitySettings>
+        {
+            ["pmcbear"] = new()
+            {
+                ChancedEnemies =
+                [
+                    new ChancedEnemy { Role = "assault", EnemyChance = 10 },
+                    new ChancedEnemy { Role = "assault", EnemyChance = 90 },
+                ],
+            },
+        };
+    }
+
+    /// <summary>
+    /// A non-null, empty chanced-enemy list - the pure-null-check case.
+    /// </summary>
+    private static Dictionary<string, HostilitySettings> EmptyChancedEnemiesConfig()
+    {
+        return new Dictionary<string, HostilitySettings> { ["pmcbear"] = new() { ChancedEnemies = [] } };
+    }
+
+    /// <summary>
+    /// The whole adjusted map, for the raid-start passes: a delta applied to the wrong member, or one
+    /// the native arm forgot, shows up here whatever it was.
+    /// </summary>
+    private void AssertMapParity(LocationBase legacy, LocationBase native, string what)
+    {
+        Assert.That(_jsonUtil.Serialize(native), Is.EqualTo(_jsonUtil.Serialize(legacy)), $"{what}: the adjusted maps differ");
     }
 
     /// <summary>

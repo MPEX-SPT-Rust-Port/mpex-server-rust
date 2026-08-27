@@ -282,9 +282,12 @@ public static class SptNative
     /// nothing and names no epoch.
     /// </summary>
     /// <exception cref="InvalidOperationException">The pass failed, or the native side misbehaved.</exception>
-    public static TResponse AdjustBotHostilitySettings<TResponse>(ReadOnlySpan<byte> requestUtf8)
+    public static AdjustHostilityResponse AdjustBotHostilitySettings(AdjustHostilityRequest request)
     {
-        return Generate<TResponse>(LootExport.AdjustBotHostilitySettings, requestUtf8);
+        return Generate<AdjustHostilityResponse>(
+            LootExport.AdjustBotHostilitySettings,
+            JsonSerializer.SerializeToUtf8Bytes(request, LootJsonOptions)
+        );
     }
 
     /// <summary>
@@ -293,9 +296,9 @@ public static class SptNative
     /// itself stays C#-side. Draws nothing and names no epoch.
     /// </summary>
     /// <exception cref="InvalidOperationException">The pass failed, or the native side misbehaved.</exception>
-    public static TResponse AdjustExtracts<TResponse>(ReadOnlySpan<byte> requestUtf8)
+    public static AdjustExtractsResponse AdjustExtracts(AdjustExtractsRequest request)
     {
-        return Generate<TResponse>(LootExport.AdjustExtracts, requestUtf8);
+        return Generate<AdjustExtractsResponse>(LootExport.AdjustExtracts, JsonSerializer.SerializeToUtf8Bytes(request, LootJsonOptions));
     }
 
     /// <summary>

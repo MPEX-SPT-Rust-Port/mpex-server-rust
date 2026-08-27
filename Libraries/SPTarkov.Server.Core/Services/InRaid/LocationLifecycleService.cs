@@ -20,6 +20,7 @@ using SPTarkov.Server.Core.Models.Eft.Quests;
 using SPTarkov.Server.Core.Models.Enums;
 using SPTarkov.Server.Core.Models.Spt.Config;
 using SPTarkov.Server.Core.Models.Spt.Tables;
+using SPTarkov.Server.Core.Native.Raid;
 using SPTarkov.Server.Core.Servers;
 using SPTarkov.Server.Core.Services.Bot;
 using SPTarkov.Server.Core.Services.Commerce;
@@ -30,6 +31,16 @@ using SPTarkov.Server.Core.Utils.Cloners;
 
 namespace SPTarkov.Server.Core.Services.InRaid;
 
+/// <summary>
+/// The two raid-start adjustment passes - <see cref="AdjustExtracts"/> and
+/// <see cref="AdjustBotHostilitySettings"/> - run in <c>rust/spt-native</c> by default;
+/// <see cref="RaidNativeRequestBuilder"/> projects the live database and config into the native
+/// payload. The full C# implementations are retained below as the legacy path - they are the frozen
+/// mod contract - and run instead of the native path when a Harmony patch on any member of the
+/// family's frozen set is detected, when a mod substituted the service, when the frozen constructor
+/// built the instance or when <see cref="LocationConfig.ForceLegacyRaidAdjustments"/> is set, so mod
+/// hooks fire with genuine baseline semantics. The rest of the service is unaffected.
+/// </summary>
 [Injectable(InjectionType.Singleton)]
 public class LocationLifecycleService(
     ISptLogger<LocationLifecycleService> logger,
@@ -74,6 +85,123 @@ public class LocationLifecycleService(
     protected const string Pmc = "pmc";
     protected const string Savage = "savage";
     protected const string Scav = "scav";
+
+    private readonly RaidNativeRequestBuilder? _requestBuilder;
+
+    /// <summary>
+    ///     The frozen constructor plus the native request builder. Additive and apicompat-verified.
+    /// </summary>
+    public LocationLifecycleService(
+        ISptLogger<LocationLifecycleService> logger,
+        GlobalTable globalTable,
+        TemplateTable templateTable,
+        LocationTable locationTable,
+        RewardHelper rewardHelper,
+        TimeUtil timeUtil,
+        ProfileHelper profileHelper,
+        BackupService backupService,
+        ProfileActivityService profileActivityService,
+        BotNameService botNameService,
+        ICloner cloner,
+        RaidTimeAdjustmentService raidTimeAdjustmentService,
+        LocationLootGenerator locationLootGenerator,
+        ServerLocalisationService serverLocalisationService,
+        BotLootCacheService botLootCacheService,
+        LootGenerator lootGenerator,
+        MailSendService mailSendService,
+        TraderHelper traderHelper,
+        RandomUtil randomUtil,
+        InRaidHelper inRaidHelper,
+        PlayerScavGenerator playerScavGenerator,
+        SaveServer saveServer,
+        HealthHelper healthHelper,
+        PmcChatResponseService pmcChatResponseService,
+        PmcWaveGenerator pmcWaveGenerator,
+        QuestHelper questHelper,
+        InsuranceService insuranceService,
+        MatchBotDetailsCacheService matchBotDetailsCacheService,
+        BtrDeliveryService btrDeliveryService,
+        LocationConfig locationConfig,
+        InRaidConfig inRaidConfig,
+        TraderConfig traderConfig,
+        RagfairConfig ragfairConfig,
+        HideoutConfig hideoutConfig,
+        PmcConfig pmcConfig,
+        LostOnDeathConfig lostOnDeathConfig,
+        SeasonalEventConfig seasonalEventConfig,
+        RaidNativeRequestBuilder requestBuilder
+    )
+        : this(
+            logger,
+            globalTable,
+            templateTable,
+            locationTable,
+            rewardHelper,
+            timeUtil,
+            profileHelper,
+            backupService,
+            profileActivityService,
+            botNameService,
+            cloner,
+            raidTimeAdjustmentService,
+            locationLootGenerator,
+            serverLocalisationService,
+            botLootCacheService,
+            lootGenerator,
+            mailSendService,
+            traderHelper,
+            randomUtil,
+            inRaidHelper,
+            playerScavGenerator,
+            saveServer,
+            healthHelper,
+            pmcChatResponseService,
+            pmcWaveGenerator,
+            questHelper,
+            insuranceService,
+            matchBotDetailsCacheService,
+            btrDeliveryService,
+            locationConfig,
+            inRaidConfig,
+            traderConfig,
+            ragfairConfig,
+            hideoutConfig,
+            pmcConfig,
+            lostOnDeathConfig,
+            seasonalEventConfig
+        )
+    {
+        _requestBuilder = requestBuilder;
+    }
+
+    /// <summary>
+    ///     Which implementation the most recent raid-start adjustment call ran - the spt-native path
+    ///     or the retained C# path. Test seam; also handy in a debugger.
+    /// </summary>
+    internal LootGenerationPath LastPathTaken { get; private set; }
+
+    /// <summary>
+    ///     The legacy path runs when the frozen constructor built this instance (it has no native
+    ///     seam to dispatch to), when forced by config, when any member of the family's frozen set
+    ///     carries a live Harmony patch - a patch on a <c>RaidTimeAdjustmentService</c> member
+    ///     counts, the set is family-wide - or when a mod has substituted the service itself.
+    /// </summary>
+    private bool UseLegacyPath()
+    {
+        if (_requestBuilder is null || locationConfig.ForceLegacyRaidAdjustments)
+        {
+            return true;
+        }
+
+        if (RaidNativeRequestBuilder.AnyFrozenMemberPatched())
+        {
+            return true;
+        }
+
+        // A mod registered its own subclass with a higher TypePriority, so the container handed us
+        // an implementation the native side does not have
+        return GetType() != typeof(LocationLifecycleService);
+    }
 
     /// <summary>
     /// Check player type for pmc or scav
@@ -250,6 +378,19 @@ public class LocationLifecycleService(
     /// <param name="locationData"> Maps location base data </param>
     protected void AdjustExtracts(string playerSide, string location, LocationBase locationData)
     {
+        if (!UseLegacyPath())
+        {
+            LastPathTaken = LootGenerationPath.Native;
+
+            var (nativeRequest, extracts) = _requestBuilder!.BuildAdjustExtractsRequest(playerSide, location);
+            var deltas = _requestBuilder.SendAdjustExtracts(nativeRequest);
+            ApplyExtractDeltas(deltas, location, locationData, extracts);
+
+            return;
+        }
+
+        LastPathTaken = LootGenerationPath.Legacy;
+
         var playerIsScav = IsSide(playerSide, Savage);
         if (!playerIsScav)
         {
@@ -275,11 +416,59 @@ public class LocationLifecycleService(
     }
 
     /// <summary>
+    ///     Lands one native extract pass's deltas on the live map, and re-emits the warning the
+    ///     native side has no map name for.
+    /// </summary>
+    /// <param name="deltas">What the native pass worked out</param>
+    /// <param name="location"> ID of map being loaded </param>
+    /// <param name="locationData"> Maps location base data </param>
+    /// <param name="mapExtracts">
+    ///     The extract list the request was projected from, which every appended index indexes. Null
+    ///     when the map had none, which is the warning branch and never reaches the append.
+    /// </param>
+    private void ApplyExtractDeltas(
+        AdjustExtractsResponse deltas,
+        string location,
+        LocationBase locationData,
+        List<AllExtractsExit>? mapExtracts
+    )
+    {
+        if (deltas.WarnUnknownMap)
+        {
+            logger.Warning($"Unable to find map: {location} extract data, no adjustments made");
+
+            return;
+        }
+
+        if (deltas.AppendExtractIndices.Count > 0)
+        {
+            // Deferred on purpose, exactly like the legacy Where this stands in for: the union's
+            // operand is a lazy sequence of the location table's own live instances
+            var scavExtracts = deltas.AppendExtractIndices.Select(index => mapExtracts![index]);
+
+            locationData.Exits = locationData.Exits.Union(scavExtracts);
+        }
+    }
+
+    /// <summary>
     ///     Adjust the bot hostility values prior to entering a raid
     /// </summary>
     /// <param name="location"> Map to adjust values of </param>
     protected void AdjustBotHostilitySettings(LocationBase location)
     {
+        if (!UseLegacyPath())
+        {
+            LastPathTaken = LootGenerationPath.Native;
+
+            var (nativeRequest, hostilityList) = _requestBuilder!.BuildAdjustHostilityRequest(location);
+            var deltas = _requestBuilder.SendAdjustBotHostilitySettings(nativeRequest);
+            ApplyHostilityDeltas(deltas, location, hostilityList);
+
+            return;
+        }
+
+        LastPathTaken = LootGenerationPath.Legacy;
+
         foreach (var botId in pmcConfig.HostilitySettings)
         {
             var configHostilityChanges = pmcConfig.HostilitySettings[botId.Key];
@@ -358,6 +547,105 @@ public class LocationLifecycleService(
             if (configHostilityChanges.SavagePlayerBehaviour is not null)
             {
                 locationBotHostilityDetails.SavagePlayerBehaviour = configHostilityChanges.SavagePlayerBehaviour;
+            }
+        }
+    }
+
+    /// <summary>
+    ///     Lands one native hostility pass's deltas on the live map, in the order the legacy body
+    ///     wrote them, and re-emits the warning the native side has no logger for.
+    /// </summary>
+    /// <param name="deltas">What the native pass worked out, one entry per config role in config order</param>
+    /// <param name="location">The map to write to - read only for the warning, which names its Id</param>
+    /// <param name="hostilityList">
+    ///     The hostility list the request was projected from, which every matched index indexes.
+    ///     Never <c>AdditionalHostilitySettings</c> re-enumerated - that is a fresh sequence, not
+    ///     this one.
+    /// </param>
+    private void ApplyHostilityDeltas(
+        AdjustHostilityResponse deltas,
+        LocationBase location,
+        List<AdditionalHostilitySettings>? hostilityList
+    )
+    {
+        foreach (var entry in deltas.Entries)
+        {
+            // No matching bot in config, skip
+            if (entry.MatchedIndex is null)
+            {
+                // The whole KeyValuePair is what legacy interpolates, so the pair is re-indexed out
+                // of the live dictionary the role was projected from moments ago
+                var botId = pmcConfig.HostilitySettings.First(hostilitySetting => hostilitySetting.Key == entry.Role);
+
+                logger.Warning($"No bot: {botId} hostility values found on: {location.Id}, can only edit existing. Skipping");
+
+                continue;
+            }
+
+            var locationBotHostilityDetails = hostilityList![entry.MatchedIndex.Value];
+
+            // Add new permanent enemies if they don't already exist
+            foreach (var enemyTypeToAdd in entry.AddAlwaysEnemies)
+            {
+                locationBotHostilityDetails.AlwaysEnemies.Add(enemyTypeToAdd);
+            }
+
+            // Add/edit chance settings. The legacy loop verbatim: it clears first and then probes
+            // the list it is itself refilling, so a duplicate role merges onto the live instance the
+            // earlier pass appended
+            if (entry.RunChancedEnemiesLoop)
+            {
+                locationBotHostilityDetails.ChancedEnemies = [];
+                foreach (var chanceDetailsToApply in pmcConfig.HostilitySettings[entry.Role].ChancedEnemies!)
+                {
+                    var locationBotDetails = locationBotHostilityDetails.ChancedEnemies.FirstOrDefault(botChance =>
+                        botChance.Role == chanceDetailsToApply.Role
+                    );
+                    if (locationBotDetails is not null)
+                    // Existing
+                    {
+                        locationBotDetails.EnemyChance = chanceDetailsToApply.EnemyChance;
+                    }
+                    else
+                    // Add new
+                    {
+                        locationBotHostilityDetails.ChancedEnemies.Add(chanceDetailsToApply);
+                    }
+                }
+            }
+
+            // Add new permanent friends if they don't already exist
+            if (entry.SetAlwaysFriends is not null)
+            {
+                locationBotHostilityDetails.AlwaysFriends = [];
+                foreach (var friendlyTypeToAdd in entry.SetAlwaysFriends)
+                {
+                    locationBotHostilityDetails.AlwaysFriends.Add(friendlyTypeToAdd);
+                }
+            }
+
+            // Adjust vs bear hostility chance
+            if (entry.BearEnemyChance is not null)
+            {
+                locationBotHostilityDetails.BearEnemyChance = entry.BearEnemyChance;
+            }
+
+            // Adjust vs usec hostility chance
+            if (entry.UsecEnemyChance is not null)
+            {
+                locationBotHostilityDetails.UsecEnemyChance = entry.UsecEnemyChance;
+            }
+
+            // Adjust vs savage hostility chance
+            if (entry.SavageEnemyChance is not null)
+            {
+                locationBotHostilityDetails.SavageEnemyChance = entry.SavageEnemyChance;
+            }
+
+            // Adjust vs scav hostility behaviour
+            if (entry.SavagePlayerBehaviour is not null)
+            {
+                locationBotHostilityDetails.SavagePlayerBehaviour = entry.SavagePlayerBehaviour;
             }
         }
     }

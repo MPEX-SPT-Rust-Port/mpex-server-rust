@@ -214,6 +214,165 @@ public class RaidAdjustmentWireContractTests
     }
 
     /// <summary>
+    /// Every request member of the third export, read back off the entries it produces. Each
+    /// assertion is the only channel its member has: drop <c>hostilitySettings</c> and nothing comes
+    /// back at all, drop a <c>botRole</c> and every role reports unmatched, drop
+    /// <c>hasChancedEnemies</c> and the location's list is never cleared.
+    /// </summary>
+    [Test]
+    public void AdjustBotHostilitySettingsRoundTripsThroughTheRealLibrary()
+    {
+        var response = Send(BuildHostilityRequest());
+
+        // hostilitySettings, in its own insertion order - a map that crossed as an unordered bag
+        // would interleave the warnings differently
+        Assert.That(response.Entries.Select(entry => entry.Role), Is.EqualTo(new[] { "pmcbear", "noBotIsCalledThis" }));
+
+        // locationSettings[].botRole, matched ignore-case against the config key
+        var matched = response.Entries[0];
+        Assert.That(matched.MatchedIndex, Is.EqualTo(1), "the ignore-case role match did not cross");
+        Assert.That(matched.AddAlwaysEnemies, Is.EqualTo(new[] { "assault" }), "additionalEnemyTypes did not cross");
+        Assert.That(matched.RunChancedEnemiesLoop, Is.True, "hasChancedEnemies did not cross");
+        Assert.That(matched.SetAlwaysFriends, Is.Empty, "an empty additionalFriendlyTypes crossed as a null");
+        Assert.That(matched.BearEnemyChance, Is.EqualTo(11));
+        Assert.That(matched.UsecEnemyChance, Is.EqualTo(22));
+        Assert.That(matched.SavageEnemyChance, Is.EqualTo(33));
+        Assert.That(matched.SavagePlayerBehaviour, Is.EqualTo("AlwaysEnemies"));
+
+        // A null matchedIndex is the only thing the applier's warn-and-skip reads
+        Assert.That(response.Entries[1].MatchedIndex, Is.Null);
+        Assert.That(response.Entries[1].RunChancedEnemiesLoop, Is.False);
+    }
+
+    /// <summary>
+    /// <c>alwaysEnemiesIsNull</c> reaches the caller through one channel only - the error that stands
+    /// in for the legacy NRE.
+    /// </summary>
+    [Test]
+    public void ANullAlwaysEnemiesWithEnemyTypesCrossesBackAsAnError()
+    {
+        var request = BuildHostilityRequest();
+        request.LocationSettings![1].AlwaysEnemiesIsNull = true;
+
+        var error = Assert.Throws<InvalidOperationException>(() => Send(request));
+
+        Assert.That(error!.Message, Does.Contain("pmcbear"), "the error does not name the role that would have NREd");
+    }
+
+    /// <summary>
+    /// A null <c>locationSettings</c> - the map with no hostility settings at all - leaves every role
+    /// unmatched rather than failing the parse.
+    /// </summary>
+    [Test]
+    public void ANullLocationSettingsLeavesEveryRoleUnmatched()
+    {
+        var request = BuildHostilityRequest();
+        request.LocationSettings = null;
+
+        var response = Send(request);
+
+        Assert.That(response.Entries.Select(entry => entry.MatchedIndex), Is.All.Null);
+    }
+
+    /// <summary>
+    /// Every request member of the fourth export. <c>playerSide</c> and <c>mapFound</c> each gate a
+    /// whole early return, and the indices are into <c>extractSides</c>'s own order.
+    /// </summary>
+    [Test]
+    public void AdjustExtractsRoundTripsThroughTheRealLibrary()
+    {
+        var response = Send(BuildExtractsRequest());
+
+        Assert.That(response.WarnUnknownMap, Is.False);
+        Assert.That(response.AppendExtractIndices, Is.EqualTo(new[] { 1, 3 }), "the extract sides did not cross");
+    }
+
+    /// <summary>
+    /// <c>mapFound</c>, which is the applier's only cue to warn - and the side gate that precedes it,
+    /// which is what keeps a pmc-side raid silent about an unknown map.
+    /// </summary>
+    [Test]
+    public void AnUnknownMapCrossesBackAsTheWarningFlagOnlyForAScav()
+    {
+        var request = BuildExtractsRequest();
+        request.MapFound = false;
+
+        var response = Send(request);
+
+        Assert.That(response.WarnUnknownMap, Is.True);
+        Assert.That(response.AppendExtractIndices, Is.Empty);
+
+        request.PlayerSide = "Usec";
+
+        var pmcResponse = Send(request);
+
+        Assert.That(pmcResponse.WarnUnknownMap, Is.False, "the side gate did not precede the map lookup");
+        Assert.That(pmcResponse.AppendExtractIndices, Is.Empty);
+    }
+
+    /// <summary>
+    /// A request with every member set: two config roles, one matched ignore-case against the second
+    /// location entry and one matching nothing.
+    /// </summary>
+    private static AdjustHostilityRequest BuildHostilityRequest()
+    {
+        return new AdjustHostilityRequest
+        {
+            HostilitySettings = new Dictionary<string, HostilityConfigWire>
+            {
+                ["pmcbear"] = new()
+                {
+                    AdditionalEnemyTypes = ["assault"],
+                    HasChancedEnemies = true,
+                    // Empty rather than absent: the reset-then-fill branch triggers on non-null
+                    AdditionalFriendlyTypes = [],
+                    BearEnemyChance = 11,
+                    UsecEnemyChance = 22,
+                    SavageEnemyChance = 33,
+                    SavagePlayerBehaviour = "AlwaysEnemies",
+                },
+                ["noBotIsCalledThis"] = new() { HasChancedEnemies = false },
+            },
+            LocationSettings =
+            [
+                new LocationHostilityWire { BotRole = "assault", AlwaysEnemiesIsNull = false },
+                // Matched ignore-case, and at index 1 so a response that always answered 0 fails
+                new LocationHostilityWire { BotRole = "pmcBEAR", AlwaysEnemiesIsNull = false },
+            ],
+        };
+    }
+
+    private static AdjustHostilityResponse Send(AdjustHostilityRequest request)
+    {
+        return SptNative.Generate<AdjustHostilityResponse>(
+            LootExport.AdjustBotHostilitySettings,
+            JsonSerializer.SerializeToUtf8Bytes(request, JsonUtil.JsonSerializerOptionsNoIndent)
+        );
+    }
+
+    /// <summary>
+    /// A scav-side request over four extracts, two of them scav - one spelled in another case, and a
+    /// null side beside them that must not match.
+    /// </summary>
+    private static AdjustExtractsRequest BuildExtractsRequest()
+    {
+        return new AdjustExtractsRequest
+        {
+            PlayerSide = "Savage",
+            MapFound = true,
+            ExtractSides = ["Pmc", "Scav", null, "scav"],
+        };
+    }
+
+    private static AdjustExtractsResponse Send(AdjustExtractsRequest request)
+    {
+        return SptNative.Generate<AdjustExtractsResponse>(
+            LootExport.AdjustExtracts,
+            JsonSerializer.SerializeToUtf8Bytes(request, JsonUtil.JsonSerializerOptionsNoIndent)
+        );
+    }
+
+    /// <summary>
     /// A request with every member set: two matching exit changes, three waves of which one
     /// survives, and five boss spawns covering both of the pmc name tests.
     /// </summary>
