@@ -23,6 +23,10 @@ use crate::loot::loot_generator::{
 use crate::quest::{QuestError, generate_repeatable_quest};
 use crate::ragfair::models::{DynamicOffersHeader, DynamicOffersResult};
 use crate::ragfair::offer_generator::{RagfairError, generate_dynamic_offers};
+use crate::raid::{
+    RaidError, adjust_bot_hostility_settings, adjust_extracts, get_raid_adjustments,
+    make_adjustments_to_map,
+};
 use crate::runtime::runtime;
 use crate::scav_case::{ScavCaseError, generate_scav_case_rewards};
 use crate::verify;
@@ -119,6 +123,22 @@ impl FfiFailure for ScavCaseError {
             ScavCaseError::StaleEpoch => {
                 "resident DB epoch mismatch; republish and retry".to_string()
             }
+        }
+    }
+}
+
+impl FfiFailure for RaidError {
+    fn status(&self) -> i32 {
+        // No stale-epoch arm: the raid family rides no resident DB, so every failure is a
+        // generation failure. The exhaustive match is the tripwire if that ever stops being true.
+        match self {
+            RaidError::Failed(_) => STATUS_ERROR,
+        }
+    }
+
+    fn into_message(self) -> String {
+        match self {
+            RaidError::Failed(message) => message,
         }
     }
 }
@@ -598,6 +618,118 @@ pub unsafe extern "C" fn spt_generate_scav_case_rewards(
             |request| generate_scav_case_rewards(request, &mut DiagSink::Pipeline),
             |response| {
                 serde_json::to_vec(&response).expect("scav case response serialization cannot fail")
+            },
+        )
+    }
+}
+
+/// One scav raid's time adjustment: the reduced raid time, the loot percents and the train-exit
+/// changes. The family rides no resident DB — every config and location member it reads is
+/// projected into the request — so the call names no epoch and can never answer
+/// `STATUS_STALE_EPOCH`.
+///
+/// # Safety
+/// See `spt_generate_static_containers`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn spt_get_raid_adjustments(
+    req_ptr: *const u8,
+    req_len: usize,
+    out_ptr: *mut *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    unsafe {
+        run_generator_with(
+            req_ptr,
+            req_len,
+            out_ptr,
+            out_len,
+            get_raid_adjustments,
+            |response| {
+                serde_json::to_vec(&response).expect("raid response serialization cannot fail")
+            },
+        )
+    }
+}
+
+/// One map's raid-setup deltas, off the changes `spt_get_raid_adjustments` produced: the escape
+/// time limit, the per-exit updates and - when the map's settings enable them - the wave and
+/// PMC-spawn adjustments. Deltas, not a mutated map: the caller applies them to the live
+/// `LocationBase`. Names no epoch, and draws nothing, so it carries no `testSeed` either.
+///
+/// # Safety
+/// See `spt_generate_static_containers`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn spt_make_adjustments_to_map(
+    req_ptr: *const u8,
+    req_len: usize,
+    out_ptr: *mut *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    unsafe {
+        run_generator_with(
+            req_ptr,
+            req_len,
+            out_ptr,
+            out_len,
+            make_adjustments_to_map,
+            |response| {
+                serde_json::to_vec(&response)
+                    .expect("raid adjustment response serialization cannot fail")
+            },
+        )
+    }
+}
+
+/// One map's bot-hostility deltas at raid start: per config role, which entry of the location's
+/// `AdditionalHostilitySettings` it matched and which of the config's ops to run on it, in config
+/// order. Deltas, not a mutated map, and the warnings are the caller's — it holds the live config
+/// the unmatched-role message interpolates. Names no epoch, draws nothing.
+///
+/// # Safety
+/// See `spt_generate_static_containers`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn spt_adjust_bot_hostility_settings(
+    req_ptr: *const u8,
+    req_len: usize,
+    out_ptr: *mut *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    unsafe {
+        run_generator_with(
+            req_ptr,
+            req_len,
+            out_ptr,
+            out_len,
+            adjust_bot_hostility_settings,
+            |response| {
+                serde_json::to_vec(&response).expect("hostility response serialization cannot fail")
+            },
+        )
+    }
+}
+
+/// Which of a map's extracts a scav player's exit list gains: indices into the request's own
+/// `AllExtracts` projection, plus the unknown-map warning flag. The append itself — a deferred
+/// `Union` over the live extract instances — stays C#-side. Names no epoch, draws nothing.
+///
+/// # Safety
+/// See `spt_generate_static_containers`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn spt_adjust_extracts(
+    req_ptr: *const u8,
+    req_len: usize,
+    out_ptr: *mut *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    unsafe {
+        run_generator_with(
+            req_ptr,
+            req_len,
+            out_ptr,
+            out_len,
+            adjust_extracts,
+            |response| {
+                serde_json::to_vec(&response).expect("extracts response serialization cannot fail")
             },
         )
     }
@@ -1564,7 +1696,7 @@ mod tests {
         assert_eq!(spt_native_abi_version(), crate::ABI_VERSION);
         assert_eq!(
             crate::ABI_VERSION,
-            34,
+            35,
             "bump SptNative.ExpectedAbiVersion too"
         );
     }
@@ -2670,6 +2802,339 @@ mod tests {
         );
     }
 
+    /// A scav-side raid adjustment on a 60-minute map, seeded. The 100% chance always passes the
+    /// 1-99 roll, and the two weights sum to 6 over 2 entries — missing `GetWeightedValue`'s
+    /// `sum == count` early exit, so the pick is an even split steered by a real `GetDouble` draw.
+    /// That is what makes the reproducibility assertion below mean something.
+    fn raid_request() -> serde_json::Value {
+        serde_json::json!({
+            "side": "Savage",
+            "location": "bigmap",
+            "escapeTimeLimit": 60.0,
+            "survivedSecondsRequirement": 1_000,
+            "trainArrivalDelayObservedSeconds": 88,
+            "mapSettings": {
+                "found": true,
+                "value": {
+                    "reducedChancePercent": 100.0,
+                    "reductionPercentWeights": { "20": 3.0, "40": 3.0 },
+                    "reduceLootByPercent": true,
+                    "minDynamicLootPercent": 50.0,
+                    "minStaticLootPercent": 90.0
+                }
+            },
+            // One exit per branch of the `GetExitAdjustments` walk, against the 36-minute raid the
+            // seed picks: EarlyTrain can depart by minute 15.9, so it is assumed gone and disabled;
+            // LateTrain cannot depart before minute 35.9, so its times are reduced instead.
+            "trainExits": [
+                {
+                    "name": "EarlyTrain",
+                    "minTime": 800.0,
+                    "maxTime": 900.0,
+                    "count": 60,
+                    "exfiltrationTime": 5.0
+                },
+                {
+                    "name": "LateTrain",
+                    "minTime": 2_000.0,
+                    "maxTime": 2_200.0,
+                    "count": 60,
+                    "exfiltrationTime": 5.0
+                }
+            ],
+            "testSeed": 42
+        })
+    }
+
+    #[test]
+    fn get_raid_adjustments_roundtrips_result_json_reproducibly() {
+        let request = serde_json::to_vec(&raid_request()).unwrap();
+
+        let (status, out) = call_generate(spt_get_raid_adjustments, &request);
+        assert_eq!(status, STATUS_OK);
+
+        // The seed guard is installed by the module entry point, not by `ffi.rs`, so a second call
+        // through the export is what proves the install actually reaches the draws: the same
+        // `testSeed` must give a byte-identical response.
+        let (repeat_status, repeat) = call_generate(spt_get_raid_adjustments, &request);
+        assert_eq!(repeat_status, STATUS_OK);
+        assert_eq!(out, repeat, "the same testSeed must replay the same raid");
+
+        let response: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(response["applied"], true);
+        assert_eq!(response["mapSettingsMissingValue"], false);
+        // Pinned, not just "one of 20/40": an ignored seed would leave this drifting per run.
+        assert_eq!(response["chosenReductionPercent"], 40);
+
+        let changes = &response["raidChanges"];
+        // floor(reduce_value_by_percent(60, 40)) == 36, so 24 minutes (1440s) are already elapsed.
+        assert_eq!(changes["raidTimeMinutes"], 36.0);
+        assert_eq!(changes["simulatedRaidStartSeconds"], 1_440.0);
+        // max(1000 - 1440, 0).
+        assert_eq!(changes["newSurviveTimeSeconds"], 0.0);
+        assert_eq!(changes["originalSurvivalTimeSeconds"], 1_000.0);
+        // 100 - 40 = 60, floored per member: the dynamic floor is below it, the static above.
+        assert_eq!(changes["dynamicLootPercent"], 60.0);
+        assert_eq!(changes["staticLootPercent"], 90.0);
+
+        // The exit changes carry `ExtractChange`'s PascalCase names, not the envelope's camelCase.
+        let exits = changes["exitChanges"].as_array().unwrap();
+        assert_eq!(exits.len(), 2);
+        // Quirk 14: the disable branch sets `Chance = 0` and leaves both times null.
+        assert_eq!(exits[0]["Name"], "EarlyTrain");
+        assert_eq!(exits[0]["Chance"], 0.0);
+        assert!(exits[0]["MinTime"].is_null());
+        assert!(exits[0]["MaxTime"].is_null());
+        // The reduce branch takes 1440s (the 24 elapsed minutes) off both times.
+        assert_eq!(exits[1]["Name"], "LateTrain");
+        assert!(exits[1]["Chance"].is_null());
+        assert_eq!(exits[1]["MinTime"], 560.0);
+        assert_eq!(exits[1]["MaxTime"], 760.0);
+    }
+
+    #[test]
+    fn an_unparseable_raid_request_returns_bad_args_with_the_parse_error() {
+        let (status, out) = call_generate(spt_get_raid_adjustments, b"{\"location\":");
+
+        assert_eq!(status, STATUS_BAD_ARGS);
+        let message = String::from_utf8(out).unwrap();
+        assert!(
+            message.contains("EOF while parsing"),
+            "expected the serde error, got: {message}"
+        );
+    }
+
+    #[test]
+    fn a_raid_failure_returns_status_error_and_the_message() {
+        // Quirk 11: a location absent from `scavRaidTimeSettings.maps` is the legacy
+        // `KeyNotFoundException` point. No stale case — the raid family names no epoch.
+        let mut request = raid_request();
+        request["mapSettings"]["found"] = serde_json::json!(false);
+
+        let (status, out) = call_generate(
+            spt_get_raid_adjustments,
+            &serde_json::to_vec(&request).unwrap(),
+        );
+
+        assert_eq!(status, STATUS_ERROR);
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "Unable to find scav raid time settings for map: bigmap"
+        );
+    }
+
+    /// One map's deltas, with a branch of each half live: an exit change that matches the second
+    /// exit, a wave that survives the `TimeMax > start` filter and one that does not, and three
+    /// boss spawns covering both the ignore-case keep test and the case-sensitive offset pass.
+    /// Draws nothing, so there is no `testSeed` to carry.
+    fn make_adjustments_request() -> serde_json::Value {
+        serde_json::json!({
+            "mapId": "bigmap",
+            "raidChanges": {
+                "raidTimeMinutes": 36.0,
+                "simulatedRaidStartSeconds": 100.0,
+                // PascalCase inner, mirroring `ExtractChange`'s own `[JsonPropertyName]`s — the
+                // one member of this request that is not camelCase.
+                "exitChanges": [
+                    { "Name": "Exit_E", "MinTime": 10.0, "MaxTime": 20.0, "Chance": 0.0 }
+                ]
+            },
+            "mapSettings": { "found": true, "value": true },
+            "exits": ["Exit_W", "Exit_E"],
+            "waves": [
+                { "timeMin": 50, "timeMax": 60 },
+                { "timeMin": 500, "timeMax": 600 }
+            ],
+            "bossSpawns": [
+                { "bossName": "pmcUSEC", "time": 300.0 },
+                { "bossName": "bossTagilla", "time": 50.0 },
+                { "bossName": "pmcBEAR", "time": 1_000.0 }
+            ]
+        })
+    }
+
+    #[test]
+    fn make_adjustments_to_map_roundtrips_result_json() {
+        let request = serde_json::to_vec(&make_adjustments_request()).unwrap();
+
+        let (status, out) = call_generate(spt_make_adjustments_to_map, &request);
+        assert_eq!(status, STATUS_OK);
+
+        let response: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        // Quirk 13: the escape time limit rides through unconditionally.
+        assert_eq!(response["escapeTimeLimit"], 36.0);
+        assert_eq!(response["aborted"], false);
+        assert!(response["abortedExitName"].is_null());
+        assert_eq!(response["mapSettingsMissingValue"], false);
+
+        // The PascalCase members of the request's `exitChanges` reached the update, which a
+        // mismatched rename would have left null.
+        let updates = response["exitUpdates"].as_array().unwrap();
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0]["index"], 1);
+        assert_eq!(updates[0]["chance"], 0.0);
+        assert_eq!(updates[0]["minTime"], 10.0);
+        assert_eq!(updates[0]["maxTime"], 20.0);
+
+        let waves = &response["waveAdjustments"];
+        assert_eq!(waves["waveKeepIndices"], serde_json::json!([1]));
+        // Quirk 2: the surviving wave loses the 100-second start twice.
+        assert_eq!(
+            waves["waveTimes"],
+            serde_json::json!([{ "timeMin": 300, "timeMax": 400 }])
+        );
+        assert_eq!(waves["removedWaveCount"], 1);
+
+        // The non-pmc spawn is kept despite sitting below the start time.
+        assert_eq!(waves["bossKeepIndices"], serde_json::json!([0, 1, 2]));
+        assert_eq!(waves["removedBossCount"], 0);
+        // Quirk 4: the earliest pmc seeds the offset and lands on the floor of 1, and the indices
+        // are the request list's, not the kept list's.
+        assert_eq!(waves["pmcStartSeconds"], 300.0);
+        assert_eq!(
+            waves["bossTimeUpdates"],
+            serde_json::json!([{ "index": 0, "time": 1.0 }, { "index": 2, "time": 700.0 }])
+        );
+    }
+
+    #[test]
+    fn an_unparseable_make_adjustments_request_returns_bad_args_with_the_parse_error() {
+        let (status, out) = call_generate(spt_make_adjustments_to_map, b"{\"mapId\":");
+
+        assert_eq!(status, STATUS_BAD_ARGS);
+        let message = String::from_utf8(out).unwrap();
+        assert!(
+            message.contains("EOF while parsing"),
+            "expected the serde error, got: {message}"
+        );
+    }
+
+    #[test]
+    fn a_make_adjustments_failure_returns_status_error_and_the_message() {
+        // Quirk 11 again, from the `MakeAdjustmentsToMap` side of the same resolve.
+        let mut request = make_adjustments_request();
+        request["mapSettings"]["found"] = serde_json::json!(false);
+
+        let (status, out) = call_generate(
+            spt_make_adjustments_to_map,
+            &serde_json::to_vec(&request).unwrap(),
+        );
+
+        assert_eq!(status, STATUS_ERROR);
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "Unable to find scav raid time settings for map: bigmap"
+        );
+    }
+
+    /// Two config roles against one location entry, so the response carries a matched and an
+    /// unmatched entry in config order — and every op member is live on the matched one.
+    fn hostility_request() -> serde_json::Value {
+        serde_json::json!({
+            "hostilitySettings": {
+                "assault": {
+                    "additionalEnemyTypes": ["pmcBot"],
+                    "hasChancedEnemies": true,
+                    "additionalFriendlyTypes": [],
+                    "bearEnemyChance": 50.0,
+                    "savagePlayerBehaviour": "AlwaysEnemy"
+                },
+                "bossBully": { "hasChancedEnemies": false }
+            },
+            "locationSettings": [{ "botRole": "ASSAULT", "alwaysEnemiesIsNull": false }]
+        })
+    }
+
+    #[test]
+    fn adjust_bot_hostility_settings_roundtrips_result_json() {
+        let request = serde_json::to_vec(&hostility_request()).unwrap();
+
+        let (status, out) = call_generate(spt_adjust_bot_hostility_settings, &request);
+        assert_eq!(status, STATUS_OK);
+
+        let response: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        let entries = response["entries"].as_array().unwrap();
+        // One per config role, in config insertion order — the interleaving contract.
+        assert_eq!(entries.len(), 2);
+
+        assert_eq!(entries[0]["role"], "assault");
+        assert_eq!(entries[0]["matchedIndex"], 0);
+        assert_eq!(
+            entries[0]["addAlwaysEnemies"],
+            serde_json::json!(["pmcBot"])
+        );
+        assert_eq!(entries[0]["runChancedEnemiesLoop"], true);
+        // Quirk: an empty `additionalFriendlyTypes` still clears, so it must not arrive as null.
+        assert_eq!(entries[0]["setAlwaysFriends"], serde_json::json!([]));
+        assert_eq!(entries[0]["bearEnemyChance"], 50.0);
+        assert!(entries[0]["usecEnemyChance"].is_null());
+        assert_eq!(entries[0]["savagePlayerBehaviour"], "AlwaysEnemy");
+
+        assert_eq!(entries[1]["role"], "bossBully");
+        assert!(entries[1]["matchedIndex"].is_null());
+    }
+
+    #[test]
+    fn an_unparseable_hostility_request_returns_bad_args_with_the_parse_error() {
+        let (status, out) = call_generate(
+            spt_adjust_bot_hostility_settings,
+            b"{\"hostilitySettings\":",
+        );
+
+        assert_eq!(status, STATUS_BAD_ARGS);
+        let message = String::from_utf8(out).unwrap();
+        assert!(
+            message.contains("EOF while parsing"),
+            "expected the serde error, got: {message}"
+        );
+    }
+
+    #[test]
+    fn a_hostility_failure_returns_status_error_and_the_message() {
+        // Quirk 10: a null `AlwaysEnemies` with enemy types to add is the legacy NRE point.
+        let mut request = hostility_request();
+        request["locationSettings"][0]["alwaysEnemiesIsNull"] = serde_json::json!(true);
+
+        let (status, out) = call_generate(
+            spt_adjust_bot_hostility_settings,
+            &serde_json::to_vec(&request).unwrap(),
+        );
+
+        assert_eq!(status, STATUS_ERROR);
+        let message = String::from_utf8(out).unwrap();
+        assert!(message.contains("assault"), "{message}");
+    }
+
+    #[test]
+    fn adjust_extracts_roundtrips_result_json() {
+        let request = serde_json::to_vec(&serde_json::json!({
+            "playerSide": "Savage",
+            "mapFound": true,
+            "extractSides": ["Pmc", "SCAV", null, "scav"]
+        }))
+        .unwrap();
+
+        let (status, out) = call_generate(spt_adjust_extracts, &request);
+        assert_eq!(status, STATUS_OK);
+
+        let response: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(response["warnUnknownMap"], false);
+        // Indices into the request's own `AllExtracts` projection, ignore-case on `Side`.
+        assert_eq!(response["appendExtractIndices"], serde_json::json!([1, 3]));
+    }
+
+    #[test]
+    fn an_unparseable_extracts_request_returns_bad_args_with_the_parse_error() {
+        let (status, out) = call_generate(spt_adjust_extracts, b"{\"playerSide\":");
+
+        assert_eq!(status, STATUS_BAD_ARGS);
+        let message = String::from_utf8(out).unwrap();
+        assert!(
+            message.contains("EOF while parsing"),
+            "expected the serde error, got: {message}"
+        );
+    }
+
     /// `child` is an Item whose chain climbs through the `node` root to a `root` the view never
     /// holds — the three-template shape `base_class`'s own tests pin, here across the boundary.
     const BASE_CLASS_REQUEST: &[u8] = br#"{"epoch":0,"viewsOverride":{"itemsView":{
@@ -2991,6 +3456,46 @@ mod tests {
 
         let status = unsafe {
             spt_generate_dynamic_loot(
+                std::ptr::null(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(status, STATUS_BAD_ARGS);
+
+        let status = unsafe {
+            spt_get_raid_adjustments(
+                std::ptr::null(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(status, STATUS_BAD_ARGS);
+
+        let status = unsafe {
+            spt_make_adjustments_to_map(
+                std::ptr::null(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(status, STATUS_BAD_ARGS);
+
+        let status = unsafe {
+            spt_adjust_bot_hostility_settings(
+                std::ptr::null(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(status, STATUS_BAD_ARGS);
+
+        let status = unsafe {
+            spt_adjust_extracts(
                 std::ptr::null(),
                 0,
                 std::ptr::null_mut(),

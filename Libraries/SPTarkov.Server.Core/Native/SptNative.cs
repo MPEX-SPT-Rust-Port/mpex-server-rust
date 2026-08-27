@@ -11,6 +11,7 @@ using SPTarkov.Server.Core.Native.Bot;
 using SPTarkov.Server.Core.Native.Db;
 using SPTarkov.Server.Core.Native.Loot;
 using SPTarkov.Server.Core.Native.Ragfair;
+using SPTarkov.Server.Core.Native.Raid;
 using SPTarkov.Server.Core.Native.RepeatableQuests;
 using SPTarkov.Server.Core.Native.ScavCase;
 using SPTarkov.Server.Core.Utils;
@@ -110,13 +111,17 @@ internal enum LootExport
     BotInventoryBatch,
     RepeatableQuest,
     ScavCaseRewards,
+    RaidAdjustments,
+    MakeAdjustmentsToMap,
+    AdjustBotHostilitySettings,
+    AdjustExtracts,
     ItemBaseClass,
     RagfairLinkedItems,
 }
 
 public static class SptNative
 {
-    private const uint ExpectedAbiVersion = 34;
+    private const uint ExpectedAbiVersion = 35;
 
     // ffi.rs
     private const int StatusOk = 0;
@@ -239,6 +244,61 @@ public static class SptNative
     public static ScavCaseRewardsResponse GenerateScavCaseRewards(ScavCaseRewardsRequest request)
     {
         return Generate<ScavCaseRewardsResponse>(LootExport.ScavCaseRewards, JsonSerializer.SerializeToUtf8Bytes(request, LootJsonOptions));
+    }
+
+    /// <summary>
+    /// Rolls one scav raid's time adjustment: the reduced raid time, the loot percents and the
+    /// train-exit changes. The raid family rides no resident DB - every config and location member
+    /// it reads is projected into the request - so the call names no epoch and can never go stale.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">Generation failed, or the native side misbehaved.</exception>
+    public static GetRaidAdjustmentsResponse GetRaidAdjustments(GetRaidAdjustmentsRequest request)
+    {
+        return Generate<GetRaidAdjustmentsResponse>(
+            LootExport.RaidAdjustments,
+            JsonSerializer.SerializeToUtf8Bytes(request, LootJsonOptions)
+        );
+    }
+
+    /// <summary>
+    /// Works out one map's raid-setup deltas from the changes <see cref="GetRaidAdjustments"/>
+    /// produced: the escape time limit, the per-exit updates and - when the map's settings enable
+    /// them - the wave and PMC-spawn adjustments. Deltas, not a mutated map: the caller applies
+    /// them to the live <c>LocationBase</c>. Draws nothing, so the call carries no seed.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">The pass failed, or the native side misbehaved.</exception>
+    public static MakeAdjustmentsResponse MakeAdjustmentsToMap(MakeAdjustmentsRequest request)
+    {
+        return Generate<MakeAdjustmentsResponse>(
+            LootExport.MakeAdjustmentsToMap,
+            JsonSerializer.SerializeToUtf8Bytes(request, LootJsonOptions)
+        );
+    }
+
+    /// <summary>
+    /// Works out one map's bot-hostility deltas at raid start: per config role, which entry of the
+    /// location's <c>AdditionalHostilitySettings</c> it matched and which of the config's ops to run
+    /// on it, in config order. Deltas, not a mutated map - the caller warns and applies. Draws
+    /// nothing and names no epoch.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">The pass failed, or the native side misbehaved.</exception>
+    public static AdjustHostilityResponse AdjustBotHostilitySettings(AdjustHostilityRequest request)
+    {
+        return Generate<AdjustHostilityResponse>(
+            LootExport.AdjustBotHostilitySettings,
+            JsonSerializer.SerializeToUtf8Bytes(request, LootJsonOptions)
+        );
+    }
+
+    /// <summary>
+    /// Works out which of a map's extracts a scav player's exit list gains: indices into the
+    /// request's own <c>AllExtracts</c> projection, plus the unknown-map warning flag. The append
+    /// itself stays C#-side. Draws nothing and names no epoch.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">The pass failed, or the native side misbehaved.</exception>
+    public static AdjustExtractsResponse AdjustExtracts(AdjustExtractsRequest request)
+    {
+        return Generate<AdjustExtractsResponse>(LootExport.AdjustExtracts, JsonSerializer.SerializeToUtf8Bytes(request, LootJsonOptions));
     }
 
     /// <summary>
@@ -976,6 +1036,20 @@ public static class SptNative
                     &outPtr,
                     &outLen
                 ),
+                LootExport.RaidAdjustments => NativeMethods.GetRaidAdjustments(requestPtr, (nuint)requestUtf8.Length, &outPtr, &outLen),
+                LootExport.MakeAdjustmentsToMap => NativeMethods.MakeAdjustmentsToMap(
+                    requestPtr,
+                    (nuint)requestUtf8.Length,
+                    &outPtr,
+                    &outLen
+                ),
+                LootExport.AdjustBotHostilitySettings => NativeMethods.AdjustBotHostilitySettings(
+                    requestPtr,
+                    (nuint)requestUtf8.Length,
+                    &outPtr,
+                    &outLen
+                ),
+                LootExport.AdjustExtracts => NativeMethods.AdjustExtracts(requestPtr, (nuint)requestUtf8.Length, &outPtr, &outLen),
                 LootExport.ItemBaseClass => NativeMethods.BuildItemBaseClassCache(requestPtr, (nuint)requestUtf8.Length, &outPtr, &outLen),
                 LootExport.RagfairLinkedItems => NativeMethods.BuildRagfairLinkedItemTable(
                     requestPtr,

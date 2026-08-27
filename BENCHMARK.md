@@ -1303,6 +1303,35 @@ resident templates root (`{epoch}`-only wire), ineligible sends carry the old pr
 (21.49 against 15.38 ms) is the sitting — read the native delta against that bar. The warmups
 absorb the first send, so no distinct publish-carrying first-send number surfaced.
 
+## Map/raid setup
+
+`55fbbd8` — 2026-08-27. **There is no fixture and there will not be one.** Phase 5's decision 11 is
+the precedent: take the cheap number rather than argue the cost away, but do not build an
+`[Explicit]` harness for a family that runs at menu and raid-start frequency — once per raid-time
+query, once per raid start — where no throughput exists to win. So the figures below are the free
+ones the parity run already prints, not a measurement.
+
+Two Release invocations of `dotnet test -c Release --filter "FullyQualifiedName~RaidAdjustment"`,
+72 tests, **11.60 s and 11.81 s** total wall — most of which is the shared database-load fixture the
+suite builds once. Per-test, as the `verbosity=detailed` invocation reports them:
+
+| Case | reads |
+|---|---|
+| `AScavRequestMatchesOnBothPaths` — both arms of `GetRaidAdjustments` on a shipped map plus a whole-map compare | **< 1 ms** (3 of 4 cases; lighthouse at seed 42 read 2 ms) |
+| `*RoundTripsThroughTheRealLibrary` — one request build + one FFI crossing + one response decode, per export | **< 1 ms** (`spt_get_raid_adjustments`, `spt_adjust_extracts`), **1 ms** (`spt_make_adjustments_to_map`, `spt_adjust_bot_hostility_settings`) |
+| the map-shaped parity cases (`MapAdjustmentsMatchOnBothPaths` and siblings) | 8 – 13 ms |
+
+**That 8–13 ms band is the harness, not the call.** Every map-shaped case clones the whole
+`LocationBase` twice — once per arm — and serializes both clones to compare them, and the control for
+it is already in the table: `ANonScavSideIsANoOpOnBothPaths` reads **10 ms** for a case where
+*neither* arm adjusts anything at all.
+
+**No throughput claim is made, and no speedup figure exists.** Nothing in this run separates the two
+arms — the parity cases time both together and are dominated by the compare, and NUnit's per-test
+resolution bottoms out at "< 1 ms", which is where the interesting calls sit. The number these
+figures support is the only one the family needs: a raid's setup crossing costs on the order of a
+millisecond, against a raid.
+
 ## Caveats
 
 - **Spread is wide.** Treat differences under ~10% between runs as noise; no outlier rejection, no

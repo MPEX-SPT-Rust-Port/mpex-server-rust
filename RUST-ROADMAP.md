@@ -8,16 +8,17 @@ What is ported to `rust/spt-native`, what is known-broken, and what comes next. 
 ## Status
 
 Ported and native by default: the loot family, the bot family, dynamic ragfair offer generation, the
-repeatable-quest family, scav case rewards, the item base-class cache build and the ragfair
-linked-item table. Each keeps its full 4.1.2 C# implementation as a **legacy path**, selected
-automatically when a mod hooks it or manually via a config flag. The log pipeline is ported too and
-has no legacy path: `SPTLoggerDispatcher` hands every line to the crate, and the crate owns the
-terminal outright — raw `Console.Write*`, prompts, title and clear all cross the boundary.
+repeatable-quest family, scav case rewards, the item base-class cache build, the ragfair
+linked-item table and map/raid setup. Each keeps its full 4.1.2 C# implementation as a **legacy
+path**, selected automatically when a mod hooks it or manually via a config flag. The log pipeline is
+ported too and has no legacy path: `SPTLoggerDispatcher` hands every line to the crate, and the
+crate owns the terminal outright — raw `Console.Write*`, prompts, title and clear all cross the
+boundary.
 
-Thirty-five C-ABI exports (`src/ffi.rs`) carry all of it, JSON in and JSON out — except the ragfair
+Thirty-nine C-ABI exports (`src/ffi.rs`) carry all of it, JSON in and JSON out — except the ragfair
 response (a framed MessagePack envelope), `spt_db_load` and `spt_profile_load` (a JSON header frame
 followed by the loaded file bytes), and the log and console exports (the fields of one line, or raw
-bytes, directly). Current ABI 34.
+bytes, directly). Current ABI 35.
 
 Since Phase 6b those exports are reached two ways, one per process. A shipped Linux build resolves
 them out of the `mpex-server` executable, which links the crate as an rlib; dev builds, the test run
@@ -55,6 +56,9 @@ and every lever short of the remaining state-ownership phases is spent.
 | The `IsLogEnabled` gate and the line a mod `ILogHandler` renders | `SPTLoggerDispatcher.IsLogEnabled`, `BaseLogHandler.FormatMessage` | `spt_log_enabled`, `spt_log_format` |
 | Generator diagnostics, localised and logged natively as they happen | `DatabaseImporter` → `SptNative.SetServerLocales` | `spt_locales_set` |
 | Profile persistence — every live listing, read, write (temp-then-rename) and delete under `user/profiles/`; serialization, the MD5 dirty-check and `BackupService` stay C# | `SaveServer.LoadAsync` / `LoadProfileAsync` / `SaveProfileAsync` / `RemoveProfile` | `spt_profile_list`, `spt_profile_load`, `spt_profile_save`, `spt_profile_delete` |
+| One scav raid's time adjustment — the weighted reduction draw, the loot percents and the train-exit changes | `RaidTimeAdjustmentService.GetRaidAdjustments` | `spt_get_raid_adjustments` |
+| Map setup for a shortened raid — exit retiming, wave drop/retime, PMC spawn pruning and offset; the loot multipliers are the carve-out and stay C# | `RaidTimeAdjustmentService.MakeAdjustmentsToMap` | `spt_make_adjustments_to_map` |
+| Raid start — per-role bot hostility merges and the scav extract append | `LocationLifecycleService.AdjustBotHostilitySettings` / `AdjustExtracts` | `spt_adjust_bot_hostility_settings`, `spt_adjust_extracts` |
 
 Also working: mod-added fields on game data survive the round trip (`#[serde(flatten)] extra` maps
 mirroring Ceciler's `[JsonExtensionData]`); native generator diagnostics render and log themselves
@@ -428,10 +432,10 @@ against C#'s `OrdinalIgnoreCase`. The parity gates would catch any of them.
    **on** since Phase 2, counts only where `WriteBarrier.Installed`), or anyone with
    `DisableNativeRequestCache` — send the C#-built view bundle as `viewsOverride` on every call,
    never touching resident state. Full protocol: the epoch-protocol section of
-   `docs/superpowers/specs/2026-08-17-rust-state-ownership-design.md`. All thirteen generation
-   exports ride it (flips #1-#6), both slice caches are gone, and the eligibility rule plus the
-   stale-epoch self-heal live once in `Native/Db/ResidentDbDispatch`; a family's own
-   `ResidentDbEligible()` is a one-line wrapper.
+   `docs/superpowers/specs/2026-08-17-rust-state-ownership-design.md`. Thirteen of the seventeen
+   generation exports ride it (flips #1-#6) — the raid four carry no epoch at all — both slice
+   caches are gone, and the eligibility rule plus the stale-epoch self-heal live once in
+   `Native/Db/ResidentDbDispatch`; a family's own `ResidentDbEligible()` is a one-line wrapper.
 4. **RNG parity.** Both sides draw through the shared xoshiro256\*\* source behind test-only seams
    (`Utils/RandomSource.cs` / `random_util.rs`), pinned by twin known-answer tests. Production C#
    randomness stays bit-for-bit unchanged.
@@ -456,7 +460,8 @@ adds `LocationConfig` (extended in place — it post-dates the baseline — with
 the four quest generators add `QuestConfig` + `RepeatableQuestNativeRequestBuilder`,
 `ScavCaseRewardGenerator` adds `ScavCaseNativeRequestBuilder` plus a further overload for the loot
 pair, `ItemBaseClassService` adds `ItemBaseClassNativeRequestBuilder` + `ItemConfig`,
-`RagfairLinkedItemService` adds `RagfairLinkedItemNativeRequestBuilder` + `RagfairConfig`, and
+`RagfairLinkedItemService` adds `RagfairLinkedItemNativeRequestBuilder` + `RagfairConfig`,
+`RaidTimeAdjustmentService` and `LocationLifecycleService` each add `RaidNativeRequestBuilder`, and
 `BotInventoryGenerator` adds the loaded-mod list + `DbPublisher`, chaining its frozen 4.1.2 primary
 constructor. The container selects the overload; anything built through the frozen constructor gets a
 null builder — or a null `DbPublisher`, which `ResidentDbDispatch.Eligible` answers `false` to — and
@@ -468,14 +473,16 @@ and `RepeatableQuestHelper` needed no change.
 no per-generator flag. Elsewhere: `BotConfig.ForceLegacyBotGeneration` and `ForcePerBotGeneration`,
 `RagfairConfig.ForceLegacyRagfairGeneration` and `ForceLegacyRagfairLinkedItemBuild`,
 `QuestConfig.ForceLegacyRepeatableQuestGeneration`, `ScavCaseConfig.ForceLegacyScavCaseGeneration`,
-`ItemConfig.ForceLegacyItemBaseClassHydration`, and `CoreConfig.ForceLegacyDatabaseImport` — the one
-flag that is not a generation path. Plus `TrustNativeRequestCacheWithMods` /
-`DisableNativeRequestCache`, the resident-DB eligibility gate, on `RagfairConfig`, `QuestConfig`,
-`ItemConfig`, `LocationConfig` (covering both loot generators), `ScavCaseConfig` and `BotConfig`
-(covering both bot exports); the linked-item table reads `RagfairConfig`'s pair. Only
-`forceLegacyLootGeneration` is serialised into a shipped `.json` (`location.json`); the rest are C#
-defaults a user adds to the file to change — and since Phase 2 `TrustNativeRequestCacheWithMods`
-defaults **on** in all six, so it is the flag a user adds to turn *off*.
+`ItemConfig.ForceLegacyItemBaseClassHydration`, `LocationConfig.ForceLegacyRaidAdjustments` (covering
+all four raid exports across both services, on the `ForceLegacyLootGeneration` precedent), and
+`CoreConfig.ForceLegacyDatabaseImport` — the one flag that is not a generation path. Plus
+`TrustNativeRequestCacheWithMods` / `DisableNativeRequestCache`, the resident-DB eligibility gate, on
+`RagfairConfig`, `QuestConfig`, `ItemConfig`, `LocationConfig` (covering both loot generators),
+`ScavCaseConfig` and `BotConfig` (covering both bot exports); the linked-item table reads
+`RagfairConfig`'s pair. Only `forceLegacyLootGeneration` is serialised into a shipped `.json`
+(`location.json`); the rest are C# defaults a user adds to the file to change — and since Phase 2
+`TrustNativeRequestCacheWithMods` defaults **on** in all six, so it is the flag a user adds to turn
+*off*.
 
 **What flips to legacy.** Loot flips only on a *protected* member patch. Every other family flips on
 a patch of any public/protected/protected-internal member of its frozen set, **except** the
@@ -483,7 +490,16 @@ dispatcher entry point itself — a patch there wraps whichever path runs, by de
 bots, the four generator classes; ragfair, `RagfairOfferGenerator`, `RagfairPriceService`,
 `RagfairServerHelper`, `RagfairAssortGenerator`; quests, the four `*QuestGenerator`s plus
 `RepeatableQuestRewardGenerator` and `RepeatableQuestHelper`; scav case, base class and the
-linked-item table, their own class only. A container-substituted subclass also flips — **except
+linked-item table, their own class only. Map/raid setup is the one **family-wide** set that spans two
+services and is **member-scoped** on one of them: seven methods — `RaidTimeAdjustmentService`'s
+`GetMapSettings`, `AdjustWaves`, `AdjustPMCSpawns` and `GetExitAdjustments`, plus
+`LocationLifecycleService`'s `AdjustExtracts`, `AdjustBotHostilitySettings` and `IsSide` (the side
+test the native extract pass reimplements — its unmoved callers see a patch either way, so without
+the entry the moved pass would half-fire the hook) — and a patch on any one
+of them declines all four exports at once. Whole-type on `LocationLifecycleService` would de-native the
+family on a patch to any of its 23 methods, `StartLocalRaidAsync` chief among them (member-scoped
+precedent: the seasonal pair above). `AdjustLootMultipliers` is deliberately outside it, the carve-out.
+A container-substituted subclass also flips — **except
 loot**, whose `UseLegacyPath` ends at the patch scan, so a `LootGenerator`/`LocationLootGenerator`
 subclass at a higher `TypePriority` still runs native. Bots additionally flip on an
 `InventoryMagGenComponents` set that isn't exactly the four built-ins. `PickupQuestGenerator`
@@ -991,7 +1007,7 @@ same wiring but has never been executed on Windows.
 
 **Phase 6b — rlib linkage flip (landed 2026-08-21, no ABI bump).** The resident DB's statics now live
 in the executable: `mpex-server` links `spt-native` as an rlib and is linked with
-`-Wl,--export-dynamic`, so all 35 exports sit in its own `.dynsym`, and the two
+`-Wl,--export-dynamic`, so all 39 exports sit in its own `.dynsym`, and the two
 `SetDllImportResolver` callbacks try `NativeLibrary.GetMainProgramHandle()` before the cdylib. The
 published Linux tree therefore ships no cdylib and `SPT.Server.Linux` is no longer a working
 direct-run fallback there.
@@ -1127,9 +1143,122 @@ a sabotage run showed the whole tree stayed green with the batch-path merge blin
 had rested entirely on `BotWaveBatcher`'s nighttime decline policy). Wire and `BuildRequest` numbers
 are in BENCHMARK.md § Equipment split.
 
+**Map/raid setup (ABI 35, landed 2026-08-27).** The whole of `RaidTimeAdjustmentService`'s algorithm
+plus `LocationLifecycleService`'s two `LocationBase` passes moved to `src/raid/`, behind four exports:
+`spt_get_raid_adjustments`, `spt_make_adjustments_to_map`, `spt_adjust_bot_hostility_settings` and
+`spt_adjust_extracts`. `Native/` grew 909 lines across four files — `Native/Raid/RaidPayloads.cs`
+(525), `Native/Raid/RaidNativeRequestBuilder.cs` (297), plus the `[LibraryImport]` and wrapper entries
+in `NativeMethods.cs` and `SptNative.cs`. The two services keep their full 4.1.2 bodies.
+
+- **Deltas cross, not objects, and that is what the aliasing forced.** Each export takes a small
+  C#-projected request carrying only the members the algorithm reads and answers with keep-index
+  lists, per-index field updates, append selections and warning flags; a thin C# applier mutates the
+  *original* objects in legacy order. Three live-object channels thread through what looks like a
+  clone-only mutation — `AdjustPMCSpawns` offsets `.Time` on live `PmcConfig.CustomPmcWaves` instances
+  the PMC splice appended by reference (a permanent config mutation that compounds across shortened
+  raids — an upstream bug, preserved), `AdjustBotHostilitySettings` appends live `ChancedEnemy`
+  instances into the clone, and `AdjustExtracts` assigns a deferred `Exits.Union` over live
+  `AllExtractsExit` instances. A whole-`LocationBase` round trip would sever all three, so it would
+  need a replay block anyway — at which point the object crossing pays for nothing, while costing a
+  29-record model mirror and megabytes per raid start (at `LLS:211`/`:213` the clone already carries
+  the generated loot). Deltas keep the reference identity structurally: the applier writes the very
+  objects legacy wrote, and the `Exits.Union` statement is kept verbatim. Precedent is the repo's own —
+  the bot level draw riding back for the caller to write, `ReplayRandomisationClamps`, the quest
+  `QuestTypePool`'s `CopyPoolInto`.
+- **The carve-out is `AdjustLootMultipliers`,** which runs C#-side on **both** arms and is excluded
+  from the frozen set: it writes the live `LocationConfig` multiplier dictionaries through the indexer,
+  and `GenerateLocationLoot` reads them a few lines later when it builds *its* native request. Phase 4
+  ruled this exact write is why the multipliers stay per-call in the loot family's varying block. A
+  patch on it therefore does **not** decline the raid family to legacy, and fires on the native arm —
+  pinned by `RaidAdjustmentHookLivenessTests`.
+- **No resident state, no new root, no epoch** — Phase 5's precedent. Option C was costed and declined:
+  `EscapeTimeLimit` and `Exits` sit untyped in `LocationBaseView::extra`, `scavRaidTimeSettings` untyped
+  in `LocationConfigLift::extra`, and `SurvivedSecondsRequirement` has no globals lift at all, so going
+  resident means new lifts, a changed digest surface and the whole eligibility/trust/stale-heal
+  machinery — to amortize a ~2 KB payload on a menu-frequency endpoint, while *adding* a stale window
+  per-call projection does not have. **It is the named upgrade path** if a later phase wants those lifts
+  for other reasons; it is owned by no phase today. Consequence: the four exports carry no `epoch` and
+  no `viewsOverride`, `TrustNativeRequestCacheWithMods`/`DisableNativeRequestCache` do not apply, and
+  `FfiFailure` has a single arm — raid never returns `STATUS_STALE_EPOCH`.
+- **The ABI number has five sites, not three.** `lib.rs:19`, `SptNative.ExpectedAbiVersion`
+  (`SptNative.cs:124`) and the `ffi.rs` tripwire assert are the lockstep three; prose adds two more:
+  `rust/ARCHITECTURE.md`'s module map ("currently N") and this file's own "Current ABI N" sentence at
+  the top. Any renumber — the parallel-branch collision rule, whichever of two same-number bumps
+  lands second, which is exactly how this family landed at 35 behind the equipment split's 34 — is
+  those five paths, explicitly enumerated. A blanket docs-grep for the stale number is **unsafe
+  post-merge**: the previous family's ledger keeps its own historical number legitimately at a dozen
+  sites, so grep only to confirm the five, never to rewrite every hit.
+  **The export counts are a second silent-merge surface, and a worse one**, because nothing asserts
+  them: the count sits in prose — as "Thirty-nine" and as bare `39` — across `ARCHITECTURE.md`, this
+  file and `rust/ARCHITECTURE.md` (no per-file tally here; a prior one was wrong twice over, so grep
+  is the procedure), and a parallel branch adding exports writes *its* number into the same files
+  on adjacent-but-distinct lines — so git merges both cleanly and leaves the tree internally
+  inconsistent with no conflict to notice. The integrator's procedure is therefore to **re-derive the
+  count, never to sum the branch deltas**: `grep -c '#\[unsafe(no_mangle)\]' rust/spt-native/src/ffi.rs`
+  is the ground truth. "Seventeen" (the generation subset) and "twenty-five" (the buffer-returning
+  subset) move with it, as do the bare-numeric `39`s in the rlib-anchor prose.
+- **No standing benchmark fixture**, by ruling rather than omission: menu and raid-start frequency has
+  no throughput to win, so Phase 5's decision 11 applies — the free number off the parity run is
+  recorded (BENCHMARK.md § Map/raid setup) and no `[Explicit]` harness is added.
+- **Booked divergences — all exception-type changes, no behavioural one.** One is reachable on shipped
+  data without a mod: `labyrinth` is in `LocationTable` but absent from `scavRaidTimeSettings.maps`, so
+  its missing-key `KeyNotFoundException` becomes an `InvalidOperationException` naming the map (whether
+  the shipped client flow can queue a scav there is unverified). The rest need a mod-shaped config: null
+  `AlwaysEnemies` with additional enemy types (NRE → error) and a non-numeric `ReductionPercentWeights`
+  key (`FormatException` → error). `MakeAdjustmentsToMap`'s error paths apply no deltas where legacy
+  left a partially-mutated, then-abandoned clone — unobservable, the multiplier side effect being
+  identical on both arms. And the two appliers read a **snapshot** where legacy re-reads after its own
+  write — `adjustments.rs:463` takes the pmc offset's operand from the request where RTAS:362 re-reads
+  the live `spawn.Time`, and the wave applier writes absolute `WaveTimes` where legacy compounds two
+  subtractions in place — which diverges only if one `BossLocationSpawn`/`Wave` instance appears at
+  two kept indices. **Mod-reachable**, the fourth mod-shaped divergence: the clone yields distinct
+  objects, but the PMC splice appends the config's own instances by reference
+  (`PmcWaveGenerator.ApplyWaveChangesToMap`), and `AddPmcWaveToLocation` accepts the same
+  `BossLocationSpawn` twice — legacy then compounds the offset on the aliased instance, landing on
+  the live `PmcConfig` object and accumulating across raids, where the delta write is
+  last-write-wins. The parity fixture cannot construct the shape: its `WithWaves`/`WithBossSpawns`
+  builders clone prototypes per call precisely to prevent instance sharing. Inherent to the delta
+  protocol, so booked rather than mitigated.
+- **`AdjustBotHostilitySettings` Quirk-10 error path applies no deltas where legacy left earlier roles
+  applied.** Unobservable: the clone half is abandoned identically, and the one surviving mutation — the
+  duplicate-`Role` merge write onto the live `PmcConfig` `ChancedEnemy` (LLS:316-324) — is idempotent
+  and value-independent (LLS:310 clears and the loop recomputes first := last every run);
+  `pmcConfig.HostilitySettings` has no other reader. Reachable only with mod config. The native error
+  message *text* is invented — legacy NREs with no message — so the spec books the type change, not the
+  text.
+- **Null `ExitChanges` on a session-parked `RaidChanges`** would NRE in legacy at RTAS:62 and fails JSON
+  parse natively (`Vec` rejects null) → BAD_ARGS → `InvalidOperationException`. Unreachable: RTAS:215
+  always writes `[]`. It is booked because the request DTO carries the **real** `RaidChanges` record
+  rather than a mirror — a required-`List` mirror could not hold the null the divergence depends on.
+- **Two log lines are dropped and booked.** The train-disable debug line (RTAS:351) — its
+  `mostPossibleTimeRemainingAfterDeparture` operand is a per-exit intermediate the wire does not carry —
+  and the negative-weight warning inside `GetWeightedValue` (WeightedRandomHelper.cs:80), which fires
+  mid-draw where the applier cannot see it and which the Rust twin already drops. Neither is
+  load-bearing. Every other message is re-emitted verbatim C#-side from the delta fields, under the same
+  `IsLogEnabled` guards; only *timing* moves (after the call, not during).
+- **Two builder touch-order fidelity notes.** The hostility builder no longer dereferences
+  `BotLocationModifier` when the config loop would run zero iterations — legacy no-ops there, so the
+  early deref was a *new* exception rather than a booked type change, and the fidelity bar books only
+  type changes. The extracts pass gates on the side *before* calling its builder — legacy returns
+  after one string compare for every PMC raid, so the projection, the `GetLocation` deref and the FFI
+  crossing wait for a scav side; on the native arm `IsSide` is frozen-set-guaranteed unpatched, so
+  the C#-side gate is the very test `raid_start.rs` would have run. The map builder's three arrays
+  (`Exits`, `Waves`, `BossLocationSpawn` — none `required`, so a mod-added base.json omitting one
+  deserializes to null) project null-tolerantly as empty: legacy's touch conditions (non-empty
+  `ExitChanges`, `AdjustWaves`, the chance roll) are partly native-side and cannot be reproduced at
+  projection time, so the empty projection lands every absent-array case on legacy's *no-op* side.
+  The residual booked divergence is the would-have-touched half: an absent array legacy would have
+  enumerated NREs there and no-ops (exits: warns) natively.
+- **Quirk 4's "a `None` time seeds the offset" sub-state is unreachable** and the spec and plan still
+  assert it — recorded here so nobody re-litigates it. The offset filter's pmc set is a strict subset of
+  the keep filter's, and the keep filter admits a pmc spawn only with `Some(time) > start`, so every
+  spawn that reaches the offset has a time. The dead legs are ported and commented anyway, per the
+  fidelity bar; their reachable halves are tested.
+
 **The ported 4.1.2 quirks are documented at their call sites** as numbered `Quirk N` comments in
 `rust/spt-native/src/quest/*.rs`, `src/scav_case/generator.rs`, `src/base_class.rs`,
-`src/linked_items.rs` and `src/loot/container_extensions.rs`; grep case-insensitively for `quirk`,
+`src/linked_items.rs`, `src/loot/container_extensions.rs` and `src/raid/*.rs`; grep
+case-insensitively for `quirk`,
 which also turns up unnumbered ones in the bot, loot and ragfair modules. Some numbers have no Rust
 site because the quirk lives on the C# side or on no code at all. The behaviour these preserve is
 deliberate; reverting one silently diverges from C#. The bare `:N` line numbers in those comments are

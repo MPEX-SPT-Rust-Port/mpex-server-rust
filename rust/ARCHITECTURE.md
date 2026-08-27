@@ -37,7 +37,7 @@ frozen 4.1.2 mod surface has `Spectre.Console.Color` baked into `ISptLogger<T>`,
 that name. Built on every build, but incrementally. Its own header covers the fidelity gaps.
 
 **The split-brain rule, post-6b:** exactly one linkage path may be live *per process*. `mpex-server` links
-`spt-native` as an rlib and, via `-Wl,--export-dynamic` in `.cargo/config.toml`, carries all 35
+`spt-native` as an rlib and, via `-Wl,--export-dynamic` in `.cargo/config.toml`, carries all 39
 `#[unsafe(no_mangle)]` exports in its own `.dynsym`; the resident DB's statics therefore live in the executable.
 The published Linux tree ships **no cdylib** (`ExcludeSptNativeFromPublish` in `SPTarkov.Server.csproj`), so
 there is nothing for a second copy to come from. The cdylib is still built and still lives in `bin/`, which is
@@ -54,7 +54,7 @@ tree only.
 Two things that follow, and that a reader will otherwise trip over:
 
 - **The launcher must reference `spt_native` in its own source.** An rlib nothing references is discarded whole
-  by the linker, taking all 35 exports with it, silently, at link time. `src/main.rs` carries a deliberate
+  by the linker, taking all 39 exports with it, silently, at link time. `src/main.rs` carries a deliberate
   anchor call and `scripts/smoke-mpex-server.sh` checks the launcher still exports them — retention is
   all-or-nothing, so a nonzero count is the whole check and no export count needs maintaining. Any path
   reference suffices; the anchor is a call behind `black_box` only so that deleting it looks like a behaviour
@@ -76,7 +76,7 @@ different assembly: `Libraries/SPTarkov.Common/Native/NativeMethods.cs`, with
 
 | Path | Role |
 |---|---|
-| `src/lib.rs` | Module roots and `ABI_VERSION` (currently 33; must equal `SptNative.ExpectedAbiVersion`) |
+| `src/lib.rs` | Module roots and `ABI_VERSION` (currently 35; must equal `SptNative.ExpectedAbiVersion`) |
 | `src/ffi.rs` | The C-ABI surface. The **only** module containing `unsafe` |
 | `src/runtime.rs` | Process-wide multi-thread tokio runtime, `OnceLock`-built. Used only by `verify` and the fused load |
 | `src/verify.rs` | Hashes `SPT_Data` with XXH3-128 and diffs it against `checks.dat`. `verify_collecting` is the same walk with a `want` predicate that whole-reads and returns matching files' bytes, so the fused load reads each file once |
@@ -93,6 +93,7 @@ different assembly: `Libraries/SPTarkov.Common/Native/NativeMethods.cs`, with
 | `src/ragfair/` | One batch of dynamic flea offers: the assort walk, pricing, barter schemes, the offers |
 | `src/quest/` | One repeatable quest of any of the four types, its rewards, and the mutated quest-type pool |
 | `src/scav_case/` | One scav case craft's rewards: the pools, the per-rarity picks, the money/ammo/preset arms |
+| `src/raid/` | One scav raid's setup: the reduced raid time, the loot percents and the train-exit changes, plus the raid-start bot-hostility and scav-extract deltas. The one family that rides no resident DB |
 | `src/base_class.rs` | The whole `ItemBaseClassService` cache in one call, over `loot/item_helper.rs`'s `ItemBaseClassCache` |
 | `src/linked_items.rs` | The whole `RagfairLinkedItemService` table in one call: the bidirectional slot/chamber/cartridge walk plus the revolver camora-ammo edge case |
 | `src/profile.rs` | The disk half of `SaveServer`: list, load, save, delete over `user/profiles/`, with `FileUtil.WriteFileAsync`'s temp-then-rename protocol. Stateless — the directory arrives in every request — and profile bytes are opaque, written and read verbatim. The live `SptProfile` graph, the MD5 dirty-check and `BackupService` all stay C# |
@@ -122,8 +123,9 @@ trades that for build time — `opt-level = 1`, sixteen codegen units, line-tabl
 
 ### FFI boundary (`ffi.rs`)
 
-Thirty-five `extern "C"` exports: two trivial (`spt_native_abi_version`, `spt_buf_free`), thirteen taking a
-UTF-8 JSON generation request, four taking a profile-persistence request (`{schema, dir}`, plus `id`
+Thirty-nine `extern "C"` exports: two trivial (`spt_native_abi_version`, `spt_buf_free`), seventeen taking a
+UTF-8 JSON generation request (the newest four are the raid-setup family's, described after this list),
+four taking a profile-persistence request (`{schema, dir}`, plus `id`
 on all but `spt_profile_list` and the profile text on `spt_profile_save` — see *`src/profile.rs`*;
 `spt_profile_load` returns a framed byte response, `[u32-LE header length][{"found":bool}][file
 bytes]`),
@@ -145,8 +147,28 @@ one process, never across builds or machines —
 `spt_locales_set` taking the resolved server-locale table as JSON, and eleven
 for the log pipeline and the terminal it owns (`spt_logger_init`, `spt_logger_reinit`, `spt_log_emit`,
 `spt_logger_close`, `spt_log_set_tap`, `spt_log_enabled`, `spt_log_format`, `spt_console_write`,
-`spt_console_read_line`, `spt_console_set_title`, `spt_console_clear` — see *The log pipeline*). The
-twenty-one generation/verify/publish/load/digest/profile exports hand back a heap buffer on success, which the
+`spt_console_read_line`, `spt_console_set_title`, `spt_console_clear` — see *The log pipeline*).
+The four raid-setup exports, then. The first, `spt_get_raid_adjustments`, takes one scav raid's time
+adjustment, JSON in and JSON out (`{applied, chosenReductionPercent, mapSettingsMissingValue, raidChanges}`,
+whose `raidChanges` is the real `RaidChanges` record and whose `exitChanges` entries carry
+`ExtractChange`'s PascalCase names), and **names no resident-DB epoch** because every config and location
+member it reads is projected into the request. The second, `spt_make_adjustments_to_map`, takes
+`spt_get_raid_adjustments`' own `raidChanges` back (`exitChanges`
+PascalCase again, inbound this time) alongside the map's exit names, wave times and boss spawns, and
+answers with **deltas, not a mutated map** — `{escapeTimeLimit, exitUpdates, aborted, abortedExitName,
+mapSettingsMissingValue, waveAdjustments?}`. Every `index` in that response addresses the request's own
+projection order, which is what lets the C# side apply the deltas to the live `LocationBase` objects it
+built the request from. It draws nothing, so it carries no `testSeed`, and it names no epoch either.
+The family's raid-start pair, `spt_adjust_bot_hostility_settings` and `spt_adjust_extracts`, are two more of
+them, and deltas again: the first answers `{entries}` — **one entry per config role, in the request map's
+insertion order**, `{role, matchedIndex?, addAlwaysEnemies, runChancedEnemiesLoop, setAlwaysFriends?,
+bearEnemyChance?, usecEnemyChance?, savageEnemyChance?, savagePlayerBehaviour?}`, a null `matchedIndex`
+meaning the role matched no location entry — one ordered list, because the C# applier walks it once and so
+keeps legacy's warn/apply interleaving. The second answers `{warnUnknownMap, appendExtractIndices}`, indices
+into the request's own extract projection. Neither carries the map or location name: both warnings are
+re-emitted C#-side, from the live objects the request was projected from. Like their siblings they name no
+epoch, and they draw nothing, so neither carries a `testSeed`. The
+twenty-five generation/verify/publish/load/digest/profile exports hand back a heap buffer on success, which the
 caller releases with `spt_buf_free`; so do `spt_console_read_line` and `spt_log_format`.
 
 - `spt_db_load`'s optional `handbookPriceOverride` member carries `ItemConfig.HandbookPriceOverride` —
@@ -167,11 +189,14 @@ caller releases with `spt_buf_free`; so do `spt_console_read_line` and `spt_log_
   the runtime around a hand-written wrapper, and `spt_db_resident_digest`, because it takes no request to
   parse — just a null check, a `catch_unwind` and a `write_buffer`.
 - Status codes: `STATUS_OK` 0, `STATUS_BAD_ARGS` 1, `STATUS_PANIC` 2, `STATUS_ERROR` 3, `STATUS_STALE_EPOCH` 4
-  (every generation export since flip #6). **Quest and scav case never return 2**: they catch the generator's
-  panic themselves and report it as 3 carrying the message, because those families port a C#-sanctioned throw
-  as a panic — a generation failure, not a library bug. The cost is that a real port bug in those two also
-  arrives as 3, indistinguishable from a sanctioned failure. Deliberate.
-- **Every family rides the resident DB (Phase 1 complete at flip #6, ABI 27): ragfair, the repeatable
+  (every generation export since flip #6 **except the four raid ones**). **Quest, scav case and raid never
+  return 2**: they catch the generator's panic themselves and report it as 3 carrying the message. Quest and
+  scav case do it because they port a C#-sanctioned throw as a panic — a generation failure, not a library
+  bug; raid returns both of its sanctioned throws as a `RaidError` and keeps the `catch_unwind` as a
+  backstop. The cost is that a real port bug in those three also arrives as 3, indistinguishable from a
+  sanctioned failure. Deliberate. Raid never returns 4 either: it rides no resident DB, so its `FfiFailure`
+  impl has a single arm.
+- **Every family but raid rides the resident DB (Phase 1 complete at flip #6, ABI 27): ragfair, the repeatable
   quest, the two startup one-shots (base-class cache, linked-item table), the loot pair — location loot and
   reward loot — the scav case, and the bot family's two exports.** `spt_db_publish` (called by C#'s
   `DbPublisher` whenever `DatabaseMutationStamp` has moved) makes six roots resident in `db.rs` — templates,
@@ -377,13 +402,29 @@ where they look like they do in today's C# file. One native call generates **one
 | `generator.rs` | `Generators/ScavCaseRewardGenerator.cs` | The craft: the reward pool (rebuilt per request, not cached on an instance), the per-rarity counts and price bands, the picks, and the money/ammo/preset arms |
 | `models.rs` | — | Request/response envelopes only; the DB/EFT types they carry are `loot::models`' |
 
+### `src/raid/`
+
+The one family that rides **no** resident DB: every config and location member it reads is projected into the
+request, so a call names no epoch. Like `scav_case`, its `mod.rs` holds the entry point and carries a `//!`
+header — read it first, because it states the family's citation convention: a bare `` `:N` `` is a line of
+`Services/InRaid/RaidTimeAdjustmentService.cs`, and an `LLS:N` (`raid_start.rs` only) one of
+`Services/InRaid/LocationLifecycleService.cs`. One native call adjusts **one** raid.
+
+| Module | Stands in for | What it does |
+|---|---|---|
+| `mod.rs` | `Services/InRaid/RaidTimeAdjustmentService.cs`, `Services/InRaid/LocationLifecycleService.cs` (entries) | `get_raid_adjustments`, `make_adjustments_to_map`, `adjust_bot_hostility_settings` and `adjust_extracts` — all four `catch_unwind` the pass, so a panic arrives as an error message rather than `STATUS_PANIC` (see *Conventions*); only the first installs the seed guard, because only the first draws |
+| `adjustments.rs` | `Services/InRaid/RaidTimeAdjustmentService.cs` (`:35-193`, `:201-374`) | `GetRaidAdjustments` with `GetMapSettings` and `GetExitAdjustments` — the chance roll, the weighted reduction percent, the loot-percent floors, and the per-train-exit disable-or-reduce walk — plus `MakeAdjustmentsToMap` with `AdjustWaves` and `AdjustPMCSpawns`: the exit-update walk and its unmatched-name abort, the twice-applied wave reduction, and the pmc keep-and-offset passes. `AdjustLootMultipliers` is *not* here: it rewrites the live `LocationConfig` in place and stays C# on both arms, the family's one decline-set carve-out |
+| `raid_start.rs` | `Services/InRaid/LocationLifecycleService.cs` (`LLS:251-275`, `LLS:281-363`) | `AdjustExtracts` and `AdjustBotHostilitySettings` — the scav-side/unknown-map gates and the ignore-case scav-extract filter, and the per-config-role location match with the ops each match earns. The two loops that write through live references stay C#-side: the chanced-enemy probe-as-you-fill and the `Exits.Union` |
+| `models.rs` | `Models/Spt/Location/RaidChanges.cs` (both time exports' inner half) | Wire types — a fresh contract, mirrored member-for-member C#-side |
+
 ### Conventions
 
 These are what keep the port correct; break one and output silently diverges from C#.
 
 - **Every ported module names its C# source in its `//!` header**, with a line range where the port is a slice
   of a larger file. Read that header before changing anything. (The modules with no C# counterpart — the
-  infrastructure, `db.rs`, and every family `mod.rs` but `scav_case`'s — say so or carry no header at all.)
+  infrastructure, `db.rs`, and every family `mod.rs` but `scav_case`'s and `raid`'s — say so or carry no
+  header at all.)
 - **Deviations are marked `Deviation:`, at the scope they apply to** — module header, item doc, or the line
   itself. Grep the bare form; the bolding is inconsistent between families.
 - **RNG draw order is a contract.** The bot family states it up front: its generator modules open with an
@@ -469,7 +510,7 @@ over the server-assembly probe, `spectre-facade`'s two.
 
 | External System | Integration Type | Notes |
 |-------------------|-------------------|-------|
-| `SPTarkov.Server.Core` | Sync FFI, C ABI | `Native/NativeMethods.cs` + `SptNative.cs` and the per-family projections. Thirty-five exports; `ABI_VERSION` must equal `SptNative.ExpectedAbiVersion` |
+| `SPTarkov.Server.Core` | Sync FFI, C ABI | `Native/NativeMethods.cs` + `SptNative.cs` and the per-family projections. Thirty-nine exports; `ABI_VERSION` must equal `SptNative.ExpectedAbiVersion` |
 | `SPTarkov.Common` | Sync FFI, C ABI | The eleven log and console exports plus `spt_buf_free`, from a second `Native/NativeMethods.cs` — Common cannot reference Core |
 | `SPT_Data/` on disk | Batch, async over tokio | `spt_verify_database` hashes `configs/` + `database/` with XXH3-128; `spt_db_load` (since ABI 29) does that walk *and* reads `database/` in one pass, installing the five database roots — never the configs root, which only `spt_db_publish` builds — and handing the eager bytes back to `DatabaseImporter`; `gen_checks` writes `checks.dat` on Release builds |
 | `user/profiles/` on disk | Blocking read/write per call | `spt_profile_*` (since Phase 5) own every live listing, read, write and delete; the directory arrives in each request. `BackupService` (C#) still copies and restores beside them |
@@ -485,7 +526,7 @@ over the server-assembly probe, `spectre-facade`'s two.
 | Component | Responsibility |
 |-----------|-----------------|
 | [root `ARCHITECTURE.md`](../ARCHITECTURE.md) | The boundary as seen from C#, under *Native Rust layer* |
-| [`Libraries/SPTarkov.Server.Core/ARCHITECTURE.md`](../Libraries/SPTarkov.Server.Core/ARCHITECTURE.md) | `Native/`, the eleven dual-path classes, the `ForceLegacy*` config flags |
+| [`Libraries/SPTarkov.Server.Core/ARCHITECTURE.md`](../Libraries/SPTarkov.Server.Core/ARCHITECTURE.md) | `Native/`, the thirteen dual-path classes, the `ForceLegacy*` config flags |
 | [`Libraries/ARCHITECTURE.md`](../Libraries/ARCHITECTURE.md) | `SPTarkov.Common`'s logging front end and the Spectre facade reference chain |
 | [`CLAUDE.md`](../CLAUDE.md) | Build coupling, cross-RID rules, the ABI-bump requirement |
 | [`RUST-ROADMAP.md`](../RUST-ROADMAP.md) | Port status, exceptions in force, known divergences, the flip ledgers cited above |

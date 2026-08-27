@@ -11,8 +11,9 @@ pub mod loot;
 pub mod profile;
 pub mod quest;
 pub mod ragfair;
+pub mod raid;
 pub mod runtime;
 pub mod scav_case;
 pub mod verify;
 
-pub const ABI_VERSION: u32 = 34;
+pub const ABI_VERSION: u32 = 35;
