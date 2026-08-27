@@ -11,6 +11,7 @@ using SPTarkov.Server.Core.Native.Bot;
 using SPTarkov.Server.Core.Native.Db;
 using SPTarkov.Server.Core.Native.Loot;
 using SPTarkov.Server.Core.Native.Ragfair;
+using SPTarkov.Server.Core.Native.Raid;
 using SPTarkov.Server.Core.Native.RepeatableQuests;
 using SPTarkov.Server.Core.Native.ScavCase;
 using SPTarkov.Server.Core.Utils;
@@ -248,9 +249,12 @@ public static class SptNative
     /// it reads is projected into the request - so the call names no epoch and can never go stale.
     /// </summary>
     /// <exception cref="InvalidOperationException">Generation failed, or the native side misbehaved.</exception>
-    public static TResponse GetRaidAdjustments<TResponse>(ReadOnlySpan<byte> requestUtf8)
+    public static GetRaidAdjustmentsResponse GetRaidAdjustments(GetRaidAdjustmentsRequest request)
     {
-        return Generate<TResponse>(LootExport.RaidAdjustments, requestUtf8);
+        return Generate<GetRaidAdjustmentsResponse>(
+            LootExport.RaidAdjustments,
+            JsonSerializer.SerializeToUtf8Bytes(request, LootJsonOptions)
+        );
     }
 
     /// <summary>

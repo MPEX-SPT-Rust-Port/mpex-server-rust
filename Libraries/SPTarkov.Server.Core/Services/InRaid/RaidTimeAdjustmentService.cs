@@ -2,6 +2,7 @@ using Microsoft.Extensions.Logging;
 using SPTarkov.Common.Models.Logging;
 using SPTarkov.DI.Annotations;
 using SPTarkov.Server.Core.Constants;
+using SPTarkov.Server.Core.Generators.Loot;
 using SPTarkov.Server.Core.Helpers;
 using SPTarkov.Server.Core.Models.Common;
 using SPTarkov.Server.Core.Models.Eft.Common;
@@ -10,11 +11,21 @@ using SPTarkov.Server.Core.Models.Enums;
 using SPTarkov.Server.Core.Models.Spt.Config;
 using SPTarkov.Server.Core.Models.Spt.Location;
 using SPTarkov.Server.Core.Models.Spt.Tables;
+using SPTarkov.Server.Core.Native.Raid;
 using SPTarkov.Server.Core.Services.Profile;
 using SPTarkov.Server.Core.Utils;
 
 namespace SPTarkov.Server.Core.Services.InRaid;
 
+/// <summary>
+/// Raid setup runs in <c>rust/spt-native</c> by default; <see cref="RaidNativeRequestBuilder"/>
+/// projects the live database and config into the native payload. The full C# implementation is
+/// retained below as the legacy path - it is the frozen mod contract - and runs instead of the
+/// native path when a Harmony patch on any member of the family's frozen set is detected, when a mod
+/// substituted the service, when the frozen constructor built the instance or when
+/// <see cref="LocationConfig.ForceLegacyRaidAdjustments"/> is set, so mod hooks fire with genuine
+/// baseline semantics.
+/// </summary>
 [Injectable(InjectionType.Singleton)]
 public class RaidTimeAdjustmentService(
     ISptLogger<RaidTimeAdjustmentService> logger,
@@ -26,6 +37,62 @@ public class RaidTimeAdjustmentService(
     LocationConfig locationConfig
 )
 {
+    private readonly RaidNativeRequestBuilder? _requestBuilder;
+
+    /// <summary>
+    ///     The frozen constructor plus the native request builder. Additive and apicompat-verified.
+    /// </summary>
+    public RaidTimeAdjustmentService(
+        ISptLogger<RaidTimeAdjustmentService> logger,
+        GlobalTable globalTable,
+        LocationTable locationTable,
+        RandomUtil randomUtil,
+        WeightedRandomHelper weightedRandomHelper,
+        ProfileActivityService profileActivityService,
+        LocationConfig locationConfig,
+        RaidNativeRequestBuilder requestBuilder
+    )
+        : this(logger, globalTable, locationTable, randomUtil, weightedRandomHelper, profileActivityService, locationConfig)
+    {
+        _requestBuilder = requestBuilder;
+    }
+
+    /// <summary>
+    ///     Which implementation the most recent adjustment call ran - the spt-native path or the
+    ///     retained C# path. Test seam; also handy in a debugger.
+    /// </summary>
+    internal LootGenerationPath LastPathTaken { get; private set; }
+
+    /// <summary>
+    ///     Test-only seed forwarded as <see cref="GetRaidAdjustmentsRequest.TestSeed"/> on every
+    ///     native request.
+    /// </summary>
+    internal ulong? NativeTestSeed { get; set; }
+
+    /// <summary>
+    ///     The legacy path runs when the frozen constructor built this instance (it has no native
+    ///     seam to dispatch to), when forced by config, when any member of the family's frozen set
+    ///     carries a live Harmony patch, or when a mod has substituted the service itself - running
+    ///     the retained C# implementation is the only way those hooks and replacements can take
+    ///     effect with real baseline semantics.
+    /// </summary>
+    private bool UseLegacyPath()
+    {
+        if (_requestBuilder is null || locationConfig.ForceLegacyRaidAdjustments)
+        {
+            return true;
+        }
+
+        if (RaidNativeRequestBuilder.AnyFrozenMemberPatched())
+        {
+            return true;
+        }
+
+        // A mod registered its own subclass with a higher TypePriority, so the container handed us
+        // an implementation the native side does not have
+        return GetType() != typeof(RaidTimeAdjustmentService);
+    }
+
     /// <summary>
     ///     Make alterations to the base map data passed in
     ///     Loot multipliers/waves/wave start times
@@ -199,6 +266,57 @@ public class RaidTimeAdjustmentService(
     /// <param name="request">Raid adjustment request</param>
     /// <returns>Response to send to client</returns>
     public RaidChanges GetRaidAdjustments(MongoId sessionId, GetRaidTimeRequest request)
+    {
+        if (UseLegacyPath())
+        {
+            LastPathTaken = LootGenerationPath.Legacy;
+
+            return GetRaidAdjustmentsLegacy(sessionId, request);
+        }
+
+        LastPathTaken = LootGenerationPath.Native;
+
+        // The same dereference the legacy body opens with, so a null location or an unknown map
+        // still throws here and not one call deeper
+        var mapBase = locationTable.GetLocation(request.Location.ToLowerInvariant()).Base;
+        var nativeRequest = _requestBuilder!.BuildGetRaidAdjustmentsRequest(request, mapBase, NativeTestSeed);
+        var response = _requestBuilder.SendGetRaidAdjustments(nativeRequest);
+
+        if (response.MapSettingsMissingValue)
+        {
+            logger.Warning($"Unable to find scav raid time settings for map: {request.Location}, using defaults");
+        }
+
+        if (response.Applied)
+        {
+            if (logger.IsLogEnabled(LogLevel.Debug))
+            {
+                logger.Debug(
+                    $"Reduced: {request.Location} raid time by: {response.ChosenReductionPercent}% to {response.RaidChanges.RaidTimeMinutes} minutes"
+                );
+
+                foreach (var exitChange in response.RaidChanges.ExitChanges ?? [])
+                {
+                    // The disable branch is the one that sets a Chance, and its own debug line is a
+                    // booked drop - the value it printed never crosses the wire
+                    if (exitChange.Chance is null)
+                    {
+                        logger.Debug($"Train appears between: {exitChange.MinTime} and: {exitChange.MaxTime} seconds raid time");
+                    }
+                }
+            }
+
+            // Store state to use in loot generation
+            profileActivityService.GetProfileActivityRaidData(sessionId).RaidAdjustments = response.RaidChanges;
+        }
+
+        return response.RaidChanges;
+    }
+
+    /// <summary>
+    ///     The retained C# implementation of <see cref="GetRaidAdjustments"/>, unchanged.
+    /// </summary>
+    private RaidChanges GetRaidAdjustmentsLegacy(MongoId sessionId, GetRaidTimeRequest request)
     {
         var mapBase = locationTable.GetLocation(request.Location.ToLowerInvariant()).Base;
         var baseEscapeTimeMinutes = mapBase.EscapeTimeLimit;

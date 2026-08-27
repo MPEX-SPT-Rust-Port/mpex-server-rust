@@ -18,6 +18,15 @@ public record LocationConfig : BaseConfig
     public bool ForceLegacyLootGeneration { get; set; }
 
     /// <summary>
+    ///     Route raid setup - the scav raid time adjustment and the map alterations it drives -
+    ///     through the retained C# implementation instead of spt-native. Escape hatch for mods that
+    ///     hook raid internals outside the frozen members of RaidTimeAdjustmentService and
+    ///     LocationLifecycleService (hooks on those are detected automatically).
+    /// </summary>
+    [JsonPropertyName("forceLegacyRaidAdjustments")]
+    public bool ForceLegacyRaidAdjustments { get; set; }
+
+    /// <summary>
     ///     Keep the native resident-DB fast path live with mods loaded. On by default since the
     ///     Phase 2 write barriers: the Ceciler-injected barriers on the model setters reachable
     ///     from the published roots make a mod's scalar writes visible to the mutation stamp
