@@ -35,6 +35,13 @@ pub struct MapSettingsState {
 pub struct ScavRaidTimeLocationSettingsWire {
     pub reduced_chance_percent: f64, // non-nullable C# double — legacy always consumes the draw
     /// Insertion order defines the cumulative-weight walk (Quirk 6) — IndexMap mandatory.
+    ///
+    /// `default`, because the C# member is non-nullable only by annotation: a mod config's
+    /// `"reductionPercentWeights": null` deserializes as null, which `WhenWritingNull` then *omits*
+    /// from the request. Without the default, serde rejected the whole request before any logic ran
+    /// — every call failed where legacy NREs only on the ~N% of calls whose chance roll passes. An
+    /// empty map errors inside the weighted draw instead, on the same rolls legacy does.
+    #[serde(default)]
     pub reduction_percent_weights: IndexMap<String, f64>,
     pub reduce_loot_by_percent: bool,
     pub min_dynamic_loot_percent: f64, // non-nullable C# double
@@ -260,4 +267,28 @@ pub struct AdjustExtractsRequest {
 pub struct AdjustExtractsResponse {
     pub warn_unknown_map: bool,
     pub append_extract_indices: Vec<usize>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The one intentional hole in the otherwise-strict request contract: a mod config's null
+    /// `reductionPercentWeights` is omitted by `WhenWritingNull` C#-side, and the request must
+    /// still parse — to an empty map, which fails inside the weighted draw on the same rolls
+    /// legacy NREs on, not up front on every call.
+    #[test]
+    fn missing_reduction_percent_weights_parses_to_an_empty_map() {
+        let settings: ScavRaidTimeLocationSettingsWire = serde_json::from_str(
+            r#"{
+                "reducedChancePercent": 5.0,
+                "reduceLootByPercent": true,
+                "minDynamicLootPercent": 50.0,
+                "minStaticLootPercent": 90.0
+            }"#,
+        )
+        .expect("a request whose config carried null weights must parse");
+
+        assert!(settings.reduction_percent_weights.is_empty());
+    }
 }
