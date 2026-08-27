@@ -182,7 +182,7 @@ fallback — nine generators (`LocationLootGenerator`, `LootGenerator`, `BotInve
 `RagfairOfferGenerator`, `ScavCaseRewardGenerator` and the four `RepeatableQuests/` quest-type
 generators) and four services (`ItemBaseClassService`, `RagfairLinkedItemService`,
 `RaidTimeAdjustmentService` and `LocationLifecycleService` — the last two share one frozen set, so a
-patch on any of its six members declines both). Each holds a frozen list of 4.1.2 members and uses
+patch on any of its seven members declines both). Each holds a frozen list of 4.1.2 members and uses
 HarmonyX to detect a live patch before dispatching, as does `BotWaveBatcher`.
 
 Two families fold collaborators into the native call, so those collaborators run legacy-only while

@@ -60,6 +60,8 @@ public class RaidAdjustmentHookLivenessTests
 
     private static readonly MethodInfo _adjustBotHostilitySettings = Member(typeof(LocationLifecycleService), "AdjustBotHostilitySettings");
 
+    private static readonly MethodInfo _isSide = Member(typeof(LocationLifecycleService), "IsSide");
+
     private readonly MongoId _sessionId = new();
 
     private RaidTimeAdjustmentService _raidTimeAdjustmentService = default!;
@@ -222,8 +224,12 @@ public class RaidAdjustmentHookLivenessTests
     /// contents: the time-adjustment half is swept off the type - its whole public and protected
     /// surface minus the two dispatchers and the carve-out - so a new member added there without
     /// being added to the set fails loudly rather than silently going unhookable. The lifecycle half
-    /// is named, because that service's protected surface is the entire post-raid pipeline and only
-    /// these two passes ever left C#.
+    /// is named, because that service's protected surface is the entire post-raid pipeline. The
+    /// named tail is a checklist, not a claim: it must hold every <c>LocationLifecycleService</c>
+    /// member whose body the native arm dispatches <em>or reimplements</em> - today
+    /// <c>AdjustExtracts</c>, <c>AdjustBotHostilitySettings</c> and <c>IsSide</c> (the side test
+    /// <c>raid_start.rs</c> carries as <c>is_side</c>). A future port that moves another lifecycle
+    /// member natively must extend this tail alongside the builder's set.
     /// </summary>
     [Test]
     public void TheHookableSetIsTheFrozenSurfaceMinusTheDispatchersAndTheCarveOut()
@@ -254,8 +260,8 @@ public class RaidAdjustmentHookLivenessTests
     }
 
     /// <summary>
-    /// The six members a mod can patch to take over part of raid setup, recomputed independently of
-    /// the builder's own list.
+    /// The seven members a mod can patch to take over part of raid setup, recomputed independently
+    /// of the builder's own list.
     /// </summary>
     private static List<MethodInfo> FrozenSurface()
     {
@@ -276,6 +282,7 @@ public class RaidAdjustmentHookLivenessTests
                 ),
             _adjustExtracts,
             _adjustBotHostilitySettings,
+            _isSide,
         ];
     }
 

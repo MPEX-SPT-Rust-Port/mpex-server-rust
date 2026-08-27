@@ -18,7 +18,7 @@ namespace SPTarkov.Server.Core.Native.Raid;
 ///
 /// It also owns the family's frozen member set: <see cref="AnyFrozenMemberPatched"/> is consulted by
 /// the legacy-path predicates of <em>both</em> raid-setup services, so a Harmony patch on any one of
-/// the six forces legacy at every one of their call sites.
+/// the seven forces legacy at every one of their call sites.
 /// </summary>
 [Injectable]
 public class RaidNativeRequestBuilder(
@@ -29,11 +29,13 @@ public class RaidNativeRequestBuilder(
 )
 {
     /// <summary>
-    ///     The six members a mod can Harmony-patch to take over part of raid setup - the four
-    ///     <c>RaidTimeAdjustmentService</c> halves and the two <c>LocationLifecycleService</c> ones.
-    ///     One shared set on purpose: the two services' native paths cover overlapping work, so a
-    ///     patch anywhere in it has to route <em>all</em> of it back to C# for the hook to see
-    ///     genuine baseline semantics.
+    ///     The seven members a mod can Harmony-patch to take over part of raid setup - the four
+    ///     <c>RaidTimeAdjustmentService</c> halves, the two <c>LocationLifecycleService</c> passes,
+    ///     and <c>IsSide</c>, whose body the native extract pass reimplements: a patch on it must
+    ///     route the side tests back to C#, or its other call sites would see the hook while the
+    ///     moved pass silently would not. One shared set on purpose: the two services' native paths
+    ///     cover overlapping work, so a patch anywhere in it has to route <em>all</em> of it back to
+    ///     C# for the hook to see genuine baseline semantics.
     ///
     ///     Excluded are the two entry points, <c>MakeAdjustmentsToMap</c> and
     ///     <c>GetRaidAdjustments</c> - they are the dispatchers, and a patch there wraps whichever
@@ -47,6 +49,7 @@ public class RaidNativeRequestBuilder(
         FrozenMember(typeof(RaidTimeAdjustmentService), "GetExitAdjustments"),
         FrozenMember(typeof(LocationLifecycleService), "AdjustExtracts"),
         FrozenMember(typeof(LocationLifecycleService), "AdjustBotHostilitySettings"),
+        FrozenMember(typeof(LocationLifecycleService), "IsSide"),
     ];
 
     /// <summary>

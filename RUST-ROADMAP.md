@@ -429,9 +429,11 @@ bots, the four generator classes; ragfair, `RagfairOfferGenerator`, `RagfairPric
 `RagfairServerHelper`, `RagfairAssortGenerator`; quests, the four `*QuestGenerator`s plus
 `RepeatableQuestRewardGenerator` and `RepeatableQuestHelper`; scav case, base class and the
 linked-item table, their own class only. Map/raid setup is the one **family-wide** set that spans two
-services and is **member-scoped** on one of them: six methods — `RaidTimeAdjustmentService`'s
+services and is **member-scoped** on one of them: seven methods — `RaidTimeAdjustmentService`'s
 `GetMapSettings`, `AdjustWaves`, `AdjustPMCSpawns` and `GetExitAdjustments`, plus
-`LocationLifecycleService`'s `AdjustExtracts` and `AdjustBotHostilitySettings` — and a patch on any one
+`LocationLifecycleService`'s `AdjustExtracts`, `AdjustBotHostilitySettings` and `IsSide` (the side
+test the native extract pass reimplements — its unmoved callers see a patch either way, so without
+the entry the moved pass would half-fire the hook) — and a patch on any one
 of them declines all four exports at once. Whole-type on `LocationLifecycleService` would de-native the
 family on a patch to any of its 23 methods, `StartLocalRaidAsync` chief among them (member-scoped
 precedent: the seasonal pair above). `AdjustLootMultipliers` is deliberately outside it, the carve-out.
