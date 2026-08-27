@@ -527,7 +527,7 @@ over the server-assembly probe, `spectre-facade`'s two.
 | Component | Responsibility |
 |-----------|-----------------|
 | [root `ARCHITECTURE.md`](../ARCHITECTURE.md) | The boundary as seen from C#, under *Native Rust layer* |
-| [`Libraries/SPTarkov.Server.Core/ARCHITECTURE.md`](../Libraries/SPTarkov.Server.Core/ARCHITECTURE.md) | `Native/`, the eleven dual-path classes, the `ForceLegacy*` config flags |
+| [`Libraries/SPTarkov.Server.Core/ARCHITECTURE.md`](../Libraries/SPTarkov.Server.Core/ARCHITECTURE.md) | `Native/`, the thirteen dual-path classes, the `ForceLegacy*` config flags |
 | [`Libraries/ARCHITECTURE.md`](../Libraries/ARCHITECTURE.md) | `SPTarkov.Common`'s logging front end and the Spectre facade reference chain |
 | [`CLAUDE.md`](../CLAUDE.md) | Build coupling, cross-RID rules, the ABI-bump requirement |
 | [`RUST-ROADMAP.md`](../RUST-ROADMAP.md) | Port status, exceptions in force, known divergences, the flip ledgers cited above |

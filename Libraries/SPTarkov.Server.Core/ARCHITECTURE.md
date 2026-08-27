@@ -128,11 +128,12 @@ Registration happens in one place — the host's `ProgramHelpers.RegisterSptServ
 exists. It maps each file in `SPT_Data/configs/` to a `BaseConfig` subclass in `Models/Spt/Config/`;
 the host registers each as its own singleton, so services inject e.g. `BotConfig` directly.
 
-Seven `ForceLegacy*` flags are the Rust-port escape hatches, one per dual-path family:
+Eight `ForceLegacy*` flags are the Rust-port escape hatches, one per dual-path family:
 `LocationConfig.ForceLegacyLootGeneration`, `BotConfig.ForceLegacyBotGeneration`,
 `RagfairConfig.ForceLegacyRagfairGeneration`, `RagfairConfig.ForceLegacyRagfairLinkedItemBuild`,
-`QuestConfig.ForceLegacyRepeatableQuestGeneration`, `ScavCaseConfig.ForceLegacyScavCaseGeneration`
-and `ItemConfig.ForceLegacyItemBaseClassHydration`. Narrower knobs:
+`QuestConfig.ForceLegacyRepeatableQuestGeneration`, `ScavCaseConfig.ForceLegacyScavCaseGeneration`,
+`ItemConfig.ForceLegacyItemBaseClassHydration` and `LocationConfig.ForceLegacyRaidAdjustments`
+(the raid family is one flag across two services). Narrower knobs:
 `BotConfig.ForcePerBotGeneration` (unbatch waves without leaving native) and, on the six configs
 backing the resident-DB families (`LocationConfig`, `ItemConfig`, `ScavCaseConfig`, `QuestConfig`,
 `RagfairConfig`, `BotConfig`), `TrustNativeRequestCacheWithMods` / `DisableNativeRequestCache` —
@@ -175,11 +176,13 @@ its own generator diagnostics against that startup snapshot.
 
 ### Dual-path (Rust) sites
 
-**Eleven** classes forward to Rust by default and keep their 4.1.2 implementation as a legacy
+**Thirteen** classes forward to Rust by default and keep their 4.1.2 implementation as a legacy
 fallback — nine generators (`LocationLootGenerator`, `LootGenerator`, `BotInventoryGenerator`,
 `RagfairOfferGenerator`, `ScavCaseRewardGenerator` and the four `RepeatableQuests/` quest-type
-generators) and two services (`ItemBaseClassService`, `RagfairLinkedItemService`). Each holds a
-frozen list of 4.1.2 members and uses HarmonyX to detect a live patch before dispatching, as does
+generators) and four services (`ItemBaseClassService`, `RagfairLinkedItemService`,
+`RaidTimeAdjustmentService` and `LocationLifecycleService` — the last two share one frozen set, so a
+patch on any of its six members declines both). Each holds a frozen list of 4.1.2 members and uses
+HarmonyX to detect a live patch before dispatching, as does
 `BotWaveBatcher`.
 
 Two families fold collaborators into the native call, so those collaborators run legacy-only while
@@ -270,7 +273,7 @@ Repo-wide style rules are in [CLAUDE.md](../../CLAUDE.md). Core-specific:
 |-------------------|-------------------|-------|
 | Escape from Tarkov game client | Sync HTTP | `Models/Eft/` mirrors its wire types field-for-field; `SptHttpListener` owns the wire concerns. GET, PUT, POST only |
 | Game client (notifications) | Async WebSocket | `Servers/WebSocketServer` + `IWebSocketConnectionHandler`; payloads in `Models/Eft/Ws/`. Every matching handler is notified, not just the first |
-| `rust/spt-native` (cdylib) | Sync FFI, C ABI | `Native/NativeMethods.cs` (`[LibraryImport]`) + `SptNative`; eleven dual-path classes, plus `DbPublisher`'s resident-DB publishes and `spt_locales_set` |
+| `rust/spt-native` (cdylib) | Sync FFI, C ABI | `Native/NativeMethods.cs` (`[LibraryImport]`) + `SptNative`; thirteen dual-path classes, plus `DbPublisher`'s resident-DB publishes and `spt_locales_set` |
 | `SPT_Data/configs/` | Batch read pre-DI | `Loaders/ConfigLoader`, a static class — it runs before the container exists |
 | `user/profiles/` | Async read/write | `Servers/SaveServer`; `Routers/SaveLoad/` and `Migration/` patch old data on load |
 | Mod assemblies | Reflective + HarmonyX | `[Injectable]` replacement via `IOnDIConstruct`; a live patch on a frozen 4.1.2 member flips that family to its legacy path |

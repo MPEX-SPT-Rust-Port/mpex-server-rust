@@ -370,9 +370,10 @@ against C#'s `OrdinalIgnoreCase`. The parity gates would catch any of them.
    **on** since Phase 2, counts only where `WriteBarrier.Installed`), or anyone with
    `DisableNativeRequestCache` — send the C#-built view bundle as `viewsOverride` on every call,
    never touching resident state. Full protocol: the epoch-protocol section of
-   `docs/superpowers/specs/2026-08-17-rust-state-ownership-design.md`. All thirteen generation
-   exports ride it (flips #1-#6), both slice caches are gone, and the eligibility rule plus the
-   stale-epoch self-heal live once in `Native/Db/ResidentDbDispatch`; a family's own
+   `docs/superpowers/specs/2026-08-17-rust-state-ownership-design.md`. Thirteen of the seventeen
+   generation exports ride it (flips #1-#6) — the raid four carry no epoch at all — both slice
+   caches are gone, and the eligibility rule plus the stale-epoch self-heal live once in
+   `Native/Db/ResidentDbDispatch`; a family's own
    `ResidentDbEligible()` is a one-line wrapper.
 4. **RNG parity.** Both sides draw through the shared xoshiro256\*\* source behind test-only seams
    (`Utils/RandomSource.cs` / `random_util.rs`), pinned by twin known-answer tests. Production C#
