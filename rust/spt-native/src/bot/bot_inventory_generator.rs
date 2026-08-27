@@ -1510,14 +1510,13 @@ mod tests {
         assert_ne!(rolled(base_request()), rolled(other));
     }
 
-    #[test]
-    fn nighttime_clamps_are_recorded_but_change_nothing_this_call() {
+    /// `base_request` at night, with the assault band split across the two homes it now has: the
+    /// structure is resident (here, the override arm's views) and carries the *published* mods
+    /// (`front_plate` 5), while the live ones (`front_plate` 40, `mod_nvg` 95) ride the varying
+    /// block. The clamp values tell which side of the merge fed them.
+    fn nighttime_request() -> Value {
         let mut request = base_request();
         request["shared"]["isNightTime"] = json!(true);
-        // The band is split across the two homes it now has: the structure is resident (here, the
-        // override arm's views) and carries the *published* mods, the live ones ride the varying
-        // block, and the clamps below are computed from the live values only because
-        // `resolve_equipment` replaced the published map wholesale.
         request["viewsOverride"]["equipment"]["assault"] = json!({
             "randomisation": [{
                 "levelRange": {"min": 1, "max": 99},
@@ -1532,7 +1531,12 @@ mod tests {
             "equipmentMods": {"front_plate": 40, "mod_nvg": 95, "mod_absent_modifier": 10},
         }]);
 
-        let result = generate(request).unwrap();
+        request
+    }
+
+    #[test]
+    fn nighttime_clamps_are_recorded_but_change_nothing_this_call() {
+        let result = generate(nighttime_request()).unwrap();
 
         // Clamped into 0-100 off the *live* mods (published `front_plate` was 5, not 40, and
         // `stale_slot` is gone), and a modifier with no matching `equipmentMods` entry is skipped.
@@ -1552,6 +1556,32 @@ mod tests {
         let mut night = base_request();
         night["shared"]["isNightTime"] = json!(true);
         assert_eq!(worn(&generate(night).unwrap()), baseline);
+    }
+
+    /// The wire tolerance behind the resident `levelRange` defaults, on the overlay: a mod-authored
+    /// band whose null `LevelRange` the serializer omitted (`JsonUtil` sets `WhenWritingNull`)
+    /// parses instead of failing every request, and its defaulted `(0, 0)` range matches no
+    /// resident band, so it drops — the clamps come off the *published* mods, not the live ones.
+    #[test]
+    fn an_overlay_band_without_a_level_range_parses_and_drops() {
+        let mut request = nighttime_request();
+        request["shared"]["liveEquipmentMods"]["assault"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("levelRange");
+
+        let result = generate(request).unwrap();
+
+        // Published `front_plate` is 5, so 5 + 30 — not the live 40 + 30 — and the published map
+        // has no `mod_nvg` for its modifier to land on.
+        assert_eq!(
+            result
+                .randomisation_clamps
+                .iter()
+                .map(|(slot, chance)| (slot.as_str(), *chance))
+                .collect::<Vec<_>>(),
+            vec![("front_plate", 35.0)]
+        );
     }
 
     /// The single-bot request reshaped into a batch envelope with one slice pulled out. The two

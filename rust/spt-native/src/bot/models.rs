@@ -179,7 +179,9 @@ pub struct ModLimitsWire {
 pub struct RandomisationDetails {
     /// `#[serde(default)]` for [`EquipmentFilterDetails::level_range`]'s reason, which applies with
     /// more force here: these bands are resident now, so a mod-authored band with no `levelRange`
-    /// would fail the *publish* rather than one call.
+    /// would fail the *publish* rather than one call. The same tolerance reaches the override arm
+    /// (`BotViewsWire.equipment` shares this type): such a band becomes a `(0, 0)` band that
+    /// matches no level instead of failing the request loudly.
     #[serde(default, rename = "levelRange")]
     pub level_range: MinMax<i32>,
     /// Slots whose pool is rebuilt from `items.json` instead of the bot's own mod pool.
@@ -778,6 +780,12 @@ pub struct SharedBotVaryingWire {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LiveEquipmentModsBandWire {
+    /// `#[serde(default)]` to match [`RandomisationDetails::level_range`]: the serializer omits a
+    /// mod-nulled `LevelRange` outright (`JsonUtil` sets `WhenWritingNull`), so a strict field here
+    /// would fail every `GenerateBotInventory` request for the very data whose *publish* the
+    /// resident default just absorbed. The defaulted `(0, 0)` range matches no resident band, so
+    /// the band drops, consistent with its two siblings.
+    #[serde(default)]
     pub level_range: MinMax<i32>,
     pub equipment_mods: IndexMap<String, f64>,
 }
