@@ -106,6 +106,9 @@ internal static unsafe partial class NativeMethods
     [LibraryImport(LibraryName, EntryPoint = "spt_get_achievement_statistics")]
     internal static partial int GetAchievementStatistics(byte* requestUtf8, nuint requestLen, byte** outPtr, nuint* outLen);
 
+    [LibraryImport(LibraryName, EntryPoint = "spt_generate_weather")]
+    internal static partial int GenerateWeather(byte* requestUtf8, nuint requestLen, byte** outPtr, nuint* outLen);
+
     [LibraryImport(LibraryName, EntryPoint = "spt_db_publish")]
     internal static partial int DbPublish(byte* requestUtf8, nuint requestLen, byte** outPtr, nuint* outLen);
 

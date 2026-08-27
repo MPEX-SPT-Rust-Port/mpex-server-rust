@@ -13,6 +13,14 @@ public record WeatherConfig : BaseConfig
     [JsonPropertyName("acceleration")]
     public double? Acceleration { get; set; }
 
+    /// <summary>
+    ///     Forces <c>WeatherGenerator.GenerateWeather</c> onto its retained C# implementation
+    ///     instead of the <c>spt_generate_weather</c> pass. Off by default; the escape hatch for a
+    ///     mod that needs the legacy bodies without patching one of the frozen members.
+    /// </summary>
+    [JsonPropertyName("forceLegacyWeatherGeneration")]
+    public bool ForceLegacyWeatherGeneration { get; set; }
+
     [JsonPropertyName("weather")]
     public required WeatherValues Weather { get; set; }
 

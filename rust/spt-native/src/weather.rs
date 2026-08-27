@@ -38,7 +38,7 @@ impl WeatherError {
 
 /// One `Dictionary<WeatherPreset, double>` entry. The state rides an ordered pair list end to end
 /// because the pick walks it in enumeration order (`WeightedRandomHelper.cs:23-108`).
-#[derive(Deserialize, Serialize)]
+#[derive(Debug, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PresetWeightEntry {
     pub preset: i32,
@@ -117,7 +117,7 @@ pub struct GenerateWeatherRequest {
     pub test_seed: Option<u64>,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GenerateWeatherResponse {
     pub chosen_preset: i32,
@@ -662,6 +662,145 @@ mod tests {
         let result = generate_weather(request_with(&[], None, &[]));
 
         assert!(result.is_err());
+    }
+
+    /// The shipped `SUNNY` block's shape: every weighted table has several candidates and every
+    /// range is wide, so the pinned outputs below are a function of the seed and the draw order
+    /// rather than of the fixture - unlike [`full_block`], which is deliberately degenerate.
+    fn kat_block() -> PresetWeightsWire {
+        PresetWeightsWire {
+            clouds: Some(weighted(&[("-1", 5.0), ("-0.8", 2.0)])),
+            wind_speed: Some(weighted(&[
+                ("0", 6.0),
+                ("1", 3.0),
+                ("2", 2.0),
+                ("3", 1.0),
+                ("4", 1.0),
+            ])),
+            wind_direction: Some(
+                (1..=8)
+                    .map(|direction| WeightedDirectionEntry {
+                        direction,
+                        weight: 1.0,
+                    })
+                    .collect(),
+            ),
+            wind_gustiness: Some(MinMaxWire { min: 0.0, max: 1.0 }),
+            rain: Some(weighted(&[("1", 2.0), ("2", 1.0), ("3", 1.0)])),
+            rain_intensity: Some(MinMaxWire { min: 0.0, max: 1.0 }),
+            fog: Some(weighted(&[
+                ("0.0013", 30.0),
+                ("0.0018", 6.0),
+                ("0.002", 4.0),
+                ("0.004", 3.0),
+                ("0.006", 1.0),
+            ])),
+            temp_day: Some(MinMaxWire {
+                min: 9.0,
+                max: 32.0,
+            }),
+            temp_night: Some(MinMaxWire {
+                min: 2.0,
+                max: 16.0,
+            }),
+            pressure: Some(MinMaxWire {
+                min: 760.0,
+                max: 780.0,
+            }),
+        }
+    }
+
+    /// One pass on one arm at the KAT seed. The state holds the forced preset alone, so the pick
+    /// costs no draw and the whole stream belongs to that arm's own draws plus the temperature.
+    fn kat(preset: i32) -> GenerateWeatherResponse {
+        let _guard = TestSeedGuard::install(20260827);
+        let request = request_with_blocks(
+            &[(preset, 5.0)],
+            None,
+            &[],
+            vec![(preset, Some(kat_block()))],
+        );
+
+        generate_weather(request).unwrap()
+    }
+
+    /// Known answer, sunny arm: pressure, fog, windGustiness, windDirection, windSpeed, clouds,
+    /// then the temperature. Captured from a run whose C# parity fixture was green, so a change to
+    /// any draw, rounding or arm ordering moves these numbers and fails here.
+    #[test]
+    fn sunny_arm_known_answer() {
+        assert_eq!(
+            kat(SUNNY),
+            GenerateWeatherResponse {
+                chosen_preset: SUNNY,
+                refilled: false,
+                updated_preset_weights: vec![PresetWeightEntry {
+                    preset: SUNNY,
+                    weight: 5.0,
+                }],
+                cloud: -1.0,
+                wind_speed: 0.0,
+                wind_gustiness: 0.42,
+                rain: 0.0,
+                rain_intensity: 0.0,
+                fog: 0.0013,
+                pressure: 769.705,
+                temperature: 19.77,
+                wind_direction: 5,
+            }
+        );
+    }
+
+    /// Known answer, cloudy arm: the same draws as sunny with clouds hoisted to the front, so the
+    /// whole stream after it is shifted by one draw and the pins below differ from sunny's.
+    #[test]
+    fn cloudy_arm_known_answer() {
+        assert_eq!(
+            kat(CLOUDY),
+            GenerateWeatherResponse {
+                chosen_preset: CLOUDY,
+                refilled: false,
+                updated_preset_weights: vec![PresetWeightEntry {
+                    preset: CLOUDY,
+                    weight: 5.0,
+                }],
+                cloud: -1.0,
+                wind_speed: 1.0,
+                wind_gustiness: 0.8,
+                rain: 0.0,
+                rain_intensity: 0.0,
+                fog: 0.0013,
+                pressure: 768.018,
+                temperature: 19.77,
+                wind_direction: 4,
+            }
+        );
+    }
+
+    /// Known answer, rainy arm: clouds, pressure, fog, rainIntensity, rain, windGustiness,
+    /// windDirection, windSpeed - the only arm that draws the two rain members.
+    #[test]
+    fn rainy_arm_known_answer() {
+        assert_eq!(
+            kat(RAINY),
+            GenerateWeatherResponse {
+                chosen_preset: RAINY,
+                refilled: false,
+                updated_preset_weights: vec![PresetWeightEntry {
+                    preset: RAINY,
+                    weight: 5.0,
+                }],
+                cloud: -1.0,
+                wind_speed: 0.0,
+                wind_gustiness: 0.61,
+                rain: 1.0,
+                rain_intensity: 0.804,
+                fog: 0.0013,
+                pressure: 768.018,
+                temperature: 27.63,
+                wind_direction: 8,
+            }
+        );
     }
 
     #[test]

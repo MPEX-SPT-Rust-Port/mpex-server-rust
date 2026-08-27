@@ -15,6 +15,7 @@ using SPTarkov.Server.Core.Native.Ragfair;
 using SPTarkov.Server.Core.Native.Raid;
 using SPTarkov.Server.Core.Native.RepeatableQuests;
 using SPTarkov.Server.Core.Native.ScavCase;
+using SPTarkov.Server.Core.Native.Weather;
 using SPTarkov.Server.Core.Utils;
 
 namespace SPTarkov.Server.Core.Native;
@@ -120,6 +121,7 @@ internal enum LootExport
     ItemBaseClass,
     RagfairLinkedItems,
     AchievementStatistics,
+    Weather,
 }
 
 public static class SptNative
@@ -332,6 +334,18 @@ public static class SptNative
             LootExport.AchievementStatistics,
             JsonSerializer.SerializeToUtf8Bytes(request, LootJsonOptions)
         );
+    }
+
+    /// <summary>
+    /// Picks a weather preset out of the caller's state and draws the whole weather object for it -
+    /// <c>WeatherGenerator.GenerateWeather</c> plus the three <c>IWeatherPreset</c> strategies. The
+    /// season lookup, the day/night test and the date/time tail stay C#-side; what crosses is the
+    /// state, the resolved preset blocks and the night flag. Draws, and names no epoch.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">The pass failed, or the native side misbehaved.</exception>
+    public static GenerateWeatherResponse GenerateWeather(GenerateWeatherRequest request)
+    {
+        return Generate<GenerateWeatherResponse>(LootExport.Weather, JsonSerializer.SerializeToUtf8Bytes(request, LootJsonOptions));
     }
 
     /// <summary>
@@ -1102,6 +1116,7 @@ public static class SptNative
                     &outPtr,
                     &outLen
                 ),
+                LootExport.Weather => NativeMethods.GenerateWeather(requestPtr, (nuint)requestUtf8.Length, &outPtr, &outLen),
                 _ => throw new ArgumentOutOfRangeException(nameof(export), export, null),
             };
         }
