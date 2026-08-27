@@ -6,6 +6,7 @@ using SPTarkov.Server.Core.Models.Common;
 using SPTarkov.Server.Core.Models.Eft.Ragfair;
 using SPTarkov.Server.Core.Models.Enums;
 using SPTarkov.Server.Core.Models.Spt.Config;
+using SPTarkov.Server.Core.Native.Achievements;
 using SPTarkov.Server.Core.Native.BaseClass;
 using SPTarkov.Server.Core.Native.Bot;
 using SPTarkov.Server.Core.Native.Db;
@@ -118,6 +119,7 @@ internal enum LootExport
     ApplyPmcWaveChanges,
     ItemBaseClass,
     RagfairLinkedItems,
+    AchievementStatistics,
 }
 
 public static class SptNative
@@ -313,6 +315,21 @@ public static class SptNative
     {
         return Generate<ApplyPmcWavesResponse>(
             LootExport.ApplyPmcWaveChanges,
+            JsonSerializer.SerializeToUtf8Bytes(request, LootJsonOptions)
+        );
+    }
+
+    /// <summary>
+    /// The percentage of profiles holding each achievement, in the achievement table's own order -
+    /// <c>AchievementController.GetAchievementStatics</c>'s counting loop. The profile fetch and
+    /// the blacklist filter stay C#-side; the whole projection crosses in the request. Draws
+    /// nothing and names no epoch.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">The pass failed, or the native side misbehaved.</exception>
+    public static AchievementStatisticsResponse GetAchievementStatistics(AchievementStatisticsRequest request)
+    {
+        return Generate<AchievementStatisticsResponse>(
+            LootExport.AchievementStatistics,
             JsonSerializer.SerializeToUtf8Bytes(request, LootJsonOptions)
         );
     }
@@ -1074,6 +1091,12 @@ public static class SptNative
                 ),
                 LootExport.ItemBaseClass => NativeMethods.BuildItemBaseClassCache(requestPtr, (nuint)requestUtf8.Length, &outPtr, &outLen),
                 LootExport.RagfairLinkedItems => NativeMethods.BuildRagfairLinkedItemTable(
+                    requestPtr,
+                    (nuint)requestUtf8.Length,
+                    &outPtr,
+                    &outLen
+                ),
+                LootExport.AchievementStatistics => NativeMethods.GetAchievementStatistics(
                     requestPtr,
                     (nuint)requestUtf8.Length,
                     &outPtr,

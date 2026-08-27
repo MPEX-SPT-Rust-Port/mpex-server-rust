@@ -61,6 +61,14 @@ public record CoreConfig : BaseConfig
     /// </summary>
     [JsonPropertyName("forceLegacyDatabaseImport")]
     public bool ForceLegacyDatabaseImport { get; set; }
+
+    /// <summary>
+    ///     Count the achievement completion percentages through the retained C# loop instead of the
+    ///     native pass. The two agree on everything the shipped data can produce; flip this on if a
+    ///     mod's achievement table makes the native pass disagree.
+    /// </summary>
+    [JsonPropertyName("forceLegacyAchievementStatistics")]
+    public bool ForceLegacyAchievementStatistics { get; set; }
 }
 
 public record BsgLogging
