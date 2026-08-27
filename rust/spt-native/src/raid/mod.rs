@@ -7,6 +7,7 @@
 
 pub mod adjustments;
 pub mod models;
+pub mod pmc_waves;
 pub mod raid_start;
 
 use std::any::Any;
@@ -15,8 +16,8 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use crate::loot::random_util::TestSeedGuard;
 use crate::raid::models::{
     AdjustExtractsRequest, AdjustExtractsResponse, AdjustHostilityRequest, AdjustHostilityResponse,
-    GetRaidAdjustmentsRequest, GetRaidAdjustmentsResponse, MakeAdjustmentsRequest,
-    MakeAdjustmentsResponse,
+    ApplyPmcWavesRequest, ApplyPmcWavesResponse, GetRaidAdjustmentsRequest,
+    GetRaidAdjustmentsResponse, MakeAdjustmentsRequest, MakeAdjustmentsResponse,
 };
 
 /// What a raid-setup pass can fail with: the message of a C#-sanctioned throw carried back to the
@@ -92,6 +93,21 @@ pub fn adjust_extracts(
 ) -> Result<AdjustExtractsResponse, RaidError> {
     catch_unwind(AssertUnwindSafe(|| {
         Ok(raid_start::adjust_extracts(&request))
+    }))
+    .unwrap_or_else(|payload| Err(panic_message(payload)))
+}
+
+/// The module boundary: which of a location's boss waves the PMC-wave pass removes. The pass
+/// itself cannot fail — only a port bug caught by the `catch_unwind` can turn this into an `Err`.
+///
+/// # Errors
+///
+/// [`RaidError::Failed`] carrying a panic message. Legacy has no throw point here.
+pub fn apply_pmc_wave_changes(
+    request: ApplyPmcWavesRequest,
+) -> Result<ApplyPmcWavesResponse, RaidError> {
+    catch_unwind(AssertUnwindSafe(|| {
+        Ok(pmc_waves::apply_pmc_wave_changes(&request))
     }))
     .unwrap_or_else(|payload| Err(panic_message(payload)))
 }

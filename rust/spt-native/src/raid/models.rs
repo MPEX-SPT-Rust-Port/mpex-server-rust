@@ -269,6 +269,33 @@ pub struct AdjustExtractsResponse {
     pub append_extract_indices: Vec<usize>,
 }
 
+// ---- Export 5: spt_apply_pmc_wave_changes ----
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyPmcWavesRequest {
+    pub remove_existing_pmc_waves: bool,
+    /// `CustomPmcWaves.TryGetValue(location.Id.ToLowerInvariant(), …)` (PmcWaveGenerator.cs:56) —
+    /// the lowercasing stays the caller's, like every other map lookup in this family.
+    pub waves_found: bool,
+    /// The found list's `Count`, the `> 0` half of the same guard: zero waves to add is a no-op.
+    pub wave_count: i32,
+    /// `BossLocationSpawn[i].BossName`, from the materialized live list. Nullable, and a null never
+    /// matches the `pmcTypes` set (PmcWaveGenerator.cs:58).
+    pub boss_names: Vec<Option<String>>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyPmcWavesResponse {
+    /// The whole removal guard (PmcWaveGenerator.cs:54-56): false leaves `BossLocationSpawn`
+    /// untouched, and the applier's append is skipped with it.
+    pub apply: bool,
+    /// Which indices of the request's own `bossNames` projection to drop — the complement of
+    /// legacy's `Where` keep-filter (PmcWaveGenerator.cs:59).
+    pub remove_indices: Vec<usize>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -24,8 +24,8 @@ use crate::quest::{QuestError, generate_repeatable_quest};
 use crate::ragfair::models::{DynamicOffersHeader, DynamicOffersResult};
 use crate::ragfair::offer_generator::{RagfairError, generate_dynamic_offers};
 use crate::raid::{
-    RaidError, adjust_bot_hostility_settings, adjust_extracts, get_raid_adjustments,
-    make_adjustments_to_map,
+    RaidError, adjust_bot_hostility_settings, adjust_extracts, apply_pmc_wave_changes,
+    get_raid_adjustments, make_adjustments_to_map,
 };
 use crate::runtime::runtime;
 use crate::scav_case::{ScavCaseError, generate_scav_case_rewards};
@@ -730,6 +730,34 @@ pub unsafe extern "C" fn spt_adjust_extracts(
             adjust_extracts,
             |response| {
                 serde_json::to_vec(&response).expect("extracts response serialization cannot fail")
+            },
+        )
+    }
+}
+
+/// Which of a location's boss waves the PMC-wave pass removes: indices into the request's own
+/// `BossLocationSpawn` projection, plus the flag saying the removal guard opened at all. The append
+/// that follows stays C#-side — it puts the live config's own wave objects into the location by
+/// reference. Names no epoch, draws nothing.
+///
+/// # Safety
+/// See `spt_generate_static_containers`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn spt_apply_pmc_wave_changes(
+    req_ptr: *const u8,
+    req_len: usize,
+    out_ptr: *mut *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    unsafe {
+        run_generator_with(
+            req_ptr,
+            req_len,
+            out_ptr,
+            out_len,
+            apply_pmc_wave_changes,
+            |response| {
+                serde_json::to_vec(&response).expect("pmc wave response serialization cannot fail")
             },
         )
     }
@@ -3124,6 +3152,38 @@ mod tests {
     }
 
     #[test]
+    fn apply_pmc_wave_changes_roundtrips_result_json() {
+        // The camelCase names here are the contract `Native/Raid/RaidPayloads.cs` mirrors.
+        let request = serde_json::to_vec(&serde_json::json!({
+            "removeExistingPmcWaves": true,
+            "wavesFound": true,
+            "waveCount": 2,
+            "bossNames": ["bossBully", "pmcUSEC", null, "pmcBEAR", "pmcusec"]
+        }))
+        .unwrap();
+
+        let (status, out) = call_generate(spt_apply_pmc_wave_changes, &request);
+        assert_eq!(status, STATUS_OK);
+
+        let response: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(response["apply"], true);
+        // Case-SENSITIVE on the two names, and a null `BossName` is kept.
+        assert_eq!(response["removeIndices"], serde_json::json!([1, 3]));
+    }
+
+    #[test]
+    fn an_unparseable_pmc_wave_request_returns_bad_args_with_the_parse_error() {
+        let (status, out) = call_generate(spt_apply_pmc_wave_changes, b"{\"wavesFound\":");
+
+        assert_eq!(status, STATUS_BAD_ARGS);
+        let message = String::from_utf8(out).unwrap();
+        assert!(
+            message.contains("EOF while parsing"),
+            "expected the serde error, got: {message}"
+        );
+    }
+
+    #[test]
     fn an_unparseable_extracts_request_returns_bad_args_with_the_parse_error() {
         let (status, out) = call_generate(spt_adjust_extracts, b"{\"playerSide\":");
 
@@ -3496,6 +3556,16 @@ mod tests {
 
         let status = unsafe {
             spt_adjust_extracts(
+                std::ptr::null(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(status, STATUS_BAD_ARGS);
+
+        let status = unsafe {
+            spt_apply_pmc_wave_changes(
                 std::ptr::null(),
                 0,
                 std::ptr::null_mut(),
