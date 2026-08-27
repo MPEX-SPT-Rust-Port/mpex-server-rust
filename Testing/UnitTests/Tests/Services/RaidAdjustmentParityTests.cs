@@ -1,6 +1,8 @@
 using NUnit.Framework;
+using SPTarkov.Server.Core.Generators;
 using SPTarkov.Server.Core.Generators.Loot;
 using SPTarkov.Server.Core.Models.Common;
+using SPTarkov.Server.Core.Models.Eft.Common;
 using SPTarkov.Server.Core.Models.Eft.Game;
 using SPTarkov.Server.Core.Models.Spt.Config;
 using SPTarkov.Server.Core.Models.Spt.Location;
@@ -8,21 +10,29 @@ using SPTarkov.Server.Core.Models.Spt.Tables;
 using SPTarkov.Server.Core.Services.InRaid;
 using SPTarkov.Server.Core.Services.Profile;
 using SPTarkov.Server.Core.Utils;
+using SPTarkov.Server.Core.Utils.Cloners;
 
 namespace UnitTests.Tests.Services;
 
 /// <summary>
 /// Golden parity gate on the scav raid time port: the same seed must make the legacy C# path and the
 /// spt-native path produce the same <see cref="RaidChanges"/> and park the same thing on the
-/// session.
+/// session, and the map-adjustment pass must leave the same <c>LocationBase</c> behind whichever arm
+/// applied it.
 ///
-/// State this fixture mutates, all of it restored in <see cref="Adjust"/>'s <c>finally</c>:
+/// State this fixture mutates, all of it restored in <see cref="Adjust"/>'s and
+/// <see cref="AdjustMap"/>'s <c>finally</c>:
 /// <see cref="LocationConfig.ForceLegacyRaidAdjustments"/> on the shared config singleton - the path
 /// selector - the one <c>ScavRaidTimeSettings.Maps</c> entry a case forces,
 /// <see cref="RandomUtil.RandomSource"/>, which is the seam the legacy path draws through,
-/// <c>NativeTestSeed</c>, and the session's parked adjustments. Map entries are always
-/// <em>replaced</em> rather than edited in place, so restoring the original reference restores
-/// everything. Nothing here reads resident database state, so no mutation stamp bumps are needed.
+/// <c>NativeTestSeed</c>, the session's parked adjustments, and - because the multiplier half runs
+/// against the live config on both arms - the two loot multiplier dictionaries. Map entries are
+/// always <em>replaced</em> rather than edited in place, so restoring the original reference
+/// restores everything. Nothing here reads resident database state, so no mutation stamp bumps are
+/// needed.
+///
+/// The map cases always work on a <see cref="ICloner"/> clone, which is what the real pipeline hands
+/// the pass, so the resident location table is never written to.
 ///
 /// The one leak: <see cref="ProfileActivityService"/> has no removal API, so the fixture's session
 /// stays in its cache. It is left inert - its parked adjustments are nulled in the same
@@ -47,6 +57,9 @@ public class RaidAdjustmentParityTests
     private RandomUtil _randomUtil = default!;
     private ProfileActivityService _profileActivityService = default!;
     private JsonUtil _jsonUtil = default!;
+    private ICloner _cloner = default!;
+    private PmcConfig _pmcConfig = default!;
+    private PmcWaveGenerator _pmcWaveGenerator = default!;
 
     [OneTimeSetUp]
     public void OneTimeSetUp()
@@ -59,6 +72,9 @@ public class RaidAdjustmentParityTests
         _randomUtil = di.GetService<RandomUtil>();
         _profileActivityService = di.GetService<ProfileActivityService>();
         _jsonUtil = di.GetService<JsonUtil>();
+        _cloner = di.GetService<ICloner>();
+        _pmcConfig = di.GetService<PmcConfig>();
+        _pmcWaveGenerator = di.GetService<PmcWaveGenerator>();
     }
 
     /// <summary>
@@ -218,6 +234,449 @@ public class RaidAdjustmentParityTests
 
         Assert.That(native.Parked, Is.SameAs(native.Changes));
     }
+
+    /// <summary>
+    /// The ordinary map-adjustment pass against shipped <c>bigmap</c> data, with the wave half on:
+    /// real exits, real waves and real boss spawns, compared as the whole <c>LocationBase</c>.
+    ///
+    /// One wave and one PMC spawn are added that actually survive, because no shipped map has any
+    /// that do - every shipped wave carries a null <c>TimeMax</c> and every shipped PMC spawn a
+    /// <c>Time</c> of -1, so real data on its own only ever exercises the drop half.
+    /// </summary>
+    [Test]
+    public void MapAdjustmentsMatchOnBothPaths()
+    {
+        var changes = MapChanges(simulatedRaidStartSeconds: 600);
+
+        var legacy = AdjustMap("bigmap", changes, forceLegacy: true, WithASurvivorOfEach, WithAdjustWaves(true));
+        var native = AdjustMap("bigmap", changes, forceLegacy: false, WithASurvivorOfEach, WithAdjustWaves(true));
+
+        AssertMapParity(legacy, native, "bigmap");
+
+        // A case that adjusted nothing would be comparing two untouched clones
+        var original = _locationTable.GetLocation("bigmap")!.Base;
+        Assert.That(native.Map.EscapeTimeLimit, Is.EqualTo(30));
+
+        // Only the added wave survives - the shipped ones all have a null TimeMax - and it loses the
+        // 600 start seconds twice
+        Assert.That(native.Map.Waves, Has.Count.EqualTo(1), "the shipped waves were expected to drop and the added one to survive");
+        Assert.That(native.Map.Waves[0].TimeMin, Is.EqualTo(800));
+        Assert.That(native.Map.Waves[0].TimeMax, Is.EqualTo(3800));
+
+        // The shipped PMC spawns all sit at -1 and drop; the added one survives and is offset to the
+        // floor of 1
+        Assert.That(native.Map.BossLocationSpawn, Has.Count.LessThan(original.BossLocationSpawn.Count), "no shipped PMC spawn was dropped");
+        Assert.That(native.Map.BossLocationSpawn[^1].BossName, Is.EqualTo("pmcUSEC"));
+        Assert.That(native.Map.BossLocationSpawn[^1].Time, Is.EqualTo(1));
+    }
+
+    /// <summary>
+    /// One exit change naming an exit the map does not have returns out of the whole method, so the
+    /// changes before it land, the wave half never runs, and only a debug line marks it.
+    /// </summary>
+    [Test]
+    public void AnUnmatchedExitChangeAbortsIdenticallyOnBothPaths()
+    {
+        var firstExit = _locationTable.GetLocation("bigmap")!.Base.Exits.First().Name;
+        var changes = MapChanges(
+            simulatedRaidStartSeconds: 600,
+            exitChanges:
+            [
+                new ExtractChange
+                {
+                    Name = firstExit,
+                    MinTime = 111,
+                    MaxTime = 222,
+                    Chance = 33,
+                },
+                new ExtractChange { Name = "no exit is called this" },
+            ]
+        );
+
+        var legacy = AdjustMap("bigmap", changes, forceLegacy: true, replaceSettings: WithAdjustWaves(true));
+        var native = AdjustMap("bigmap", changes, forceLegacy: false, replaceSettings: WithAdjustWaves(true));
+
+        AssertMapParity(legacy, native, "aborted-exit");
+
+        var adjustedExit = native.Map.Exits.First();
+        Assert.That(adjustedExit.MinTime, Is.EqualTo(111), "the change before the unmatched one was lost");
+        Assert.That(adjustedExit.MaxTime, Is.EqualTo(222));
+        Assert.That(adjustedExit.Chance, Is.EqualTo(33));
+        Assert.That(native.Map.EscapeTimeLimit, Is.EqualTo(30), "the escape time limit precedes the exit walk");
+        Assert.That(
+            native.Map.Waves,
+            Has.Count.EqualTo(_locationTable.GetLocation("bigmap")!.Base.Waves.Count),
+            "the abort did not stop the wave half"
+        );
+    }
+
+    /// <summary>
+    /// The abort precedes the map-settings resolve, so a map with no settings entry at all - which
+    /// throws on both arms otherwise - returns silently once an exit change fails to match.
+    /// </summary>
+    [Test]
+    public void AnAbortedRunSkipsTheMissingSettingsThrowOnBothPaths()
+    {
+        Assert.That(
+            _locationConfig.ScavRaidTimeSettings.Maps.ContainsKey("labyrinth"),
+            Is.False,
+            "labyrinth gained a scav raid time settings entry, so this case no longer covers the settings-less map"
+        );
+
+        var changes = MapChanges(simulatedRaidStartSeconds: 600, exitChanges: [new ExtractChange { Name = "no exit is called this" }]);
+
+        var legacy = AdjustMap("labyrinth", changes, forceLegacy: true);
+        var native = AdjustMap("labyrinth", changes, forceLegacy: false);
+
+        AssertMapParity(legacy, native, "aborted-settings-less");
+
+        Assert.That(native.Map.EscapeTimeLimit, Is.EqualTo(30));
+    }
+
+    /// <summary>
+    /// Quirk 2: the wave time loop runs twice - once in <c>AdjustWaves</c>, once again in
+    /// <c>AdjustPMCSpawns</c> over the list the first pass already reduced - so every surviving wave
+    /// loses the start seconds twice.
+    /// </summary>
+    [Test]
+    public void SurvivingWavesLoseTwiceTheStartSecondsOnBothPaths()
+    {
+        var changes = MapChanges(simulatedRaidStartSeconds: 100);
+
+        var legacy = AdjustMap("bigmap", changes, forceLegacy: true, WithWaves(NewWave(300, 500)), WithAdjustWaves(true));
+        var native = AdjustMap("bigmap", changes, forceLegacy: false, WithWaves(NewWave(300, 500)), WithAdjustWaves(true));
+
+        AssertMapParity(legacy, native, "double-subtraction");
+
+        Assert.That(native.Map.Waves, Has.Count.EqualTo(1));
+        Assert.That(native.Map.Waves[0].TimeMin, Is.EqualTo(100), "the start seconds came off once, not twice");
+        Assert.That(native.Map.Waves[0].TimeMax, Is.EqualTo(300));
+    }
+
+    /// <summary>
+    /// Quirk 3: the keep test is a lifted <c>&gt;</c>, which is false whenever either side is null -
+    /// so a wave with no <c>TimeMax</c> drops itself.
+    /// </summary>
+    [Test]
+    public void ANullTimeMaxWaveIsDroppedOnBothPaths()
+    {
+        var changes = MapChanges(simulatedRaidStartSeconds: 100);
+        var waves = WithWaves(NewWave(10, null), NewWave(300, 500), NewWave(5, 50));
+
+        var legacy = AdjustMap("bigmap", changes, forceLegacy: true, waves, WithAdjustWaves(true));
+        var native = AdjustMap("bigmap", changes, forceLegacy: false, waves, WithAdjustWaves(true));
+
+        AssertMapParity(legacy, native, "null-timemax");
+
+        Assert.That(native.Map.Waves, Has.Count.EqualTo(1), "the null TimeMax wave survived");
+        Assert.That(native.Map.Waves[0].TimeMax, Is.EqualTo(300));
+    }
+
+    /// <summary>
+    /// Quirk 4, all of it: the keep test is <c>OrdinalIgnoreCase</c> and treats a null name as "not
+    /// a pmc", the offset filter beside it is a case-sensitive constant pattern, and the offset
+    /// itself floors at 1 rather than at 0.
+    /// </summary>
+    [Test]
+    public void BossKeepAndOffsetClampToOneOnBothPaths()
+    {
+        var changes = MapChanges(simulatedRaidStartSeconds: 100);
+        var spawns = WithBossSpawns(
+            NewSpawn("pmcUSEC", 200),
+            NewSpawn("PMCUSEC", 300),
+            NewSpawn("pmcBEAR", 50),
+            NewSpawn(null, 10),
+            NewSpawn("bossKilla", 20)
+        );
+
+        var legacy = AdjustMap("bigmap", changes, forceLegacy: true, spawns, WithAdjustWaves(true));
+        var native = AdjustMap("bigmap", changes, forceLegacy: false, spawns, WithAdjustWaves(true));
+
+        AssertMapParity(legacy, native, "boss-keep-and-offset");
+
+        Assert.That(native.Map.BossLocationSpawn, Has.Count.EqualTo(4), "only the early pmcBEAR should have been dropped");
+        Assert.That(native.Map.BossLocationSpawn[0].Time, Is.EqualTo(1), "the offset did not floor at 1");
+        Assert.That(native.Map.BossLocationSpawn[1].Time, Is.EqualTo(300), "the case-sensitive offset filter matched PMCUSEC");
+        Assert.That(native.Map.BossLocationSpawn[2].BossName, Is.Null, "the null-named spawn was dropped");
+    }
+
+    /// <summary>
+    /// Aliasing channel 1: the two multiplier calls run in C# on both arms, against the live
+    /// <see cref="LocationConfig"/> dictionaries rather than against the clone.
+    /// </summary>
+    [Test]
+    public void TheLiveConfigMultipliersAreScaledIdenticallyOnBothArms()
+    {
+        var changes = MapChanges(simulatedRaidStartSeconds: 600, dynamicLootPercent: 50, staticLootPercent: 25);
+
+        var legacy = AdjustMap("bigmap", changes, forceLegacy: true, replaceSettings: WithAdjustWaves(true));
+        var native = AdjustMap("bigmap", changes, forceLegacy: false, replaceSettings: WithAdjustWaves(true));
+
+        Assert.That(native.LooseLootMultiplier, Is.EqualTo(legacy.LooseLootMultiplier), "the loose loot multipliers differ");
+        Assert.That(native.StaticLootMultiplier, Is.EqualTo(legacy.StaticLootMultiplier), "the static loot multipliers differ");
+
+        // Both that the scaling happened at all and that the fixture put it back
+        Assert.That(native.LooseLootMultiplier, Is.Not.EqualTo(_locationConfig.LooseLootMultiplier));
+        Assert.That(native.StaticLootMultiplier, Is.Not.EqualTo(_locationConfig.StaticLootMultiplier));
+    }
+
+    /// <summary>
+    /// Aliasing channel 2: the PMC wave splice puts the live <c>PmcConfig.CustomPmcWaves</c>
+    /// instances into the clone, so the spawn-time offset is a permanent config mutation that
+    /// compounds across raids. An upstream bug, preserved deliberately - and structural, so the
+    /// native arm has to write the very same objects.
+    /// </summary>
+    [Test]
+    public void APmcSpawnTimeWriteLandsOnTheLiveConfigObject()
+    {
+        var wavesKey = _locationTable.GetLocation("bigmap")!.Base.Id.ToLowerInvariant();
+        var originalRemove = _pmcConfig.RemoveExistingPmcWaves;
+        var wavesPresent = _pmcConfig.CustomPmcWaves.TryGetValue(wavesKey, out var originalWaves);
+
+        try
+        {
+            var early = NewSpawn("pmcUSEC", 500);
+            var late = NewSpawn("pmcUSEC", 900);
+
+            // The channel is gated on both of these - the generator no-ops without them
+            _pmcConfig.RemoveExistingPmcWaves = true;
+            _pmcConfig.CustomPmcWaves[wavesKey] = [early, late];
+
+            var changes = MapChanges(simulatedRaidStartSeconds: 100);
+
+            AdjustMap("bigmap", changes, forceLegacy: false, _pmcWaveGenerator.ApplyWaveChangesToMap, WithAdjustWaves(true));
+
+            Assert.That(early.Time, Is.EqualTo(1), "the offset did not land on the config's own instance");
+            Assert.That(late.Time, Is.EqualTo(400));
+
+            // The next raid splices the same instances into a fresh clone and offsets them again
+            AdjustMap("bigmap", changes, forceLegacy: false, _pmcWaveGenerator.ApplyWaveChangesToMap, WithAdjustWaves(true));
+
+            Assert.That(late.Time, Is.EqualTo(1), "the offset did not compound across raids");
+            Assert.That(early.Time, Is.EqualTo(1));
+        }
+        finally
+        {
+            _pmcConfig.RemoveExistingPmcWaves = originalRemove;
+
+            if (wavesPresent)
+            {
+                _pmcConfig.CustomPmcWaves[wavesKey] = originalWaves!;
+            }
+            else
+            {
+                _pmcConfig.CustomPmcWaves.Remove(wavesKey);
+            }
+        }
+    }
+
+    /// <summary>
+    /// The one booked divergence reachable on shipped data without a mod: <c>labyrinth</c> is in the
+    /// location table and absent from <c>scavRaidTimeSettings.maps</c>, so the settings resolve
+    /// throws - a <c>KeyNotFoundException</c> on the legacy arm, and the native arm's
+    /// message-carrying <see cref="InvalidOperationException"/> instead. Both still throw, and
+    /// neither applies a wave delta.
+    /// </summary>
+    [Test]
+    public void AMissingMapSettingsKeyThrowsOnBothArms()
+    {
+        Assert.That(
+            _locationConfig.ScavRaidTimeSettings.Maps.ContainsKey("labyrinth"),
+            Is.False,
+            "labyrinth gained a scav raid time settings entry, so this case no longer covers the settings-less map"
+        );
+
+        var changes = MapChanges(simulatedRaidStartSeconds: 600);
+
+        Assert.Throws<KeyNotFoundException>(() => AdjustMap("labyrinth", changes, forceLegacy: true));
+
+        var error = Assert.Throws<InvalidOperationException>(() => AdjustMap("labyrinth", changes, forceLegacy: false));
+
+        // The un-lowercased id, which is what the warning on the sibling branch prints too
+        Assert.That(
+            error!.Message,
+            Does.Contain(_locationTable.GetLocation("labyrinth")!.Base.Id),
+            "the native error does not name the map the legacy key miss named"
+        );
+    }
+
+    /// <summary>
+    /// One map adjustment on one path, against a fresh clone, with every singleton it touches
+    /// restored afterwards.
+    /// </summary>
+    /// <param name="location">The map to clone and adjust</param>
+    /// <param name="changes">The changes a <c>GetRaidAdjustments</c> call would have parked</param>
+    /// <param name="forceLegacy">Which path to take</param>
+    /// <param name="prepare">Runs on the clone before the adjustment, as the pipeline's PMC splice does</param>
+    /// <param name="replaceSettings">
+    ///     Replaces the map's settings entry for the duration of the call; null leaves it alone
+    /// </param>
+    private MapAdjustment AdjustMap(
+        string location,
+        RaidChanges changes,
+        bool forceLegacy,
+        Action<LocationBase>? prepare = null,
+        Func<ScavRaidTimeLocationSettings?, ScavRaidTimeLocationSettings?>? replaceSettings = null
+    )
+    {
+        var expected = forceLegacy ? LootGenerationPath.Legacy : LootGenerationPath.Native;
+        var mapBase = _cloner.Clone(_locationTable.GetLocation(location)!.Base);
+        prepare?.Invoke(mapBase);
+
+        var maps = _locationConfig.ScavRaidTimeSettings.Maps;
+
+        // The key the pass itself resolves with, which is the map's own id and not the name it was
+        // asked for by
+        var settingsKey = mapBase.Id.ToLowerInvariant();
+        var settingsPresent = maps.TryGetValue(settingsKey, out var originalSettings);
+        var originalForce = _locationConfig.ForceLegacyRaidAdjustments;
+
+        // AdjustLootMultipliers only ever overwrites keys it found, so putting the values back is
+        // the whole restore
+        var looseMultipliers = new Dictionary<string, double>(_locationConfig.LooseLootMultiplier);
+        var staticMultipliers = new Dictionary<string, double>(_locationConfig.StaticLootMultiplier);
+
+        try
+        {
+            if (replaceSettings is not null)
+            {
+                maps[settingsKey] = replaceSettings(originalSettings);
+            }
+
+            _locationConfig.ForceLegacyRaidAdjustments = forceLegacy;
+
+            _raidTimeAdjustmentService.MakeAdjustmentsToMap(changes, mapBase);
+
+            // Fail fast on silent fallback before comparing anything
+            Assert.That(_raidTimeAdjustmentService.LastPathTaken, Is.EqualTo(expected), $"the adjustment did not take the {expected} path");
+
+            return new MapAdjustment(
+                mapBase,
+                new Dictionary<string, double>(_locationConfig.LooseLootMultiplier),
+                new Dictionary<string, double>(_locationConfig.StaticLootMultiplier)
+            );
+        }
+        finally
+        {
+            if (replaceSettings is not null)
+            {
+                if (settingsPresent)
+                {
+                    maps[settingsKey] = originalSettings;
+                }
+                else
+                {
+                    maps.Remove(settingsKey);
+                }
+            }
+
+            _locationConfig.ForceLegacyRaidAdjustments = originalForce;
+
+            foreach (var (key, value) in looseMultipliers)
+            {
+                _locationConfig.LooseLootMultiplier[key] = value;
+            }
+
+            foreach (var (key, value) in staticMultipliers)
+            {
+                _locationConfig.StaticLootMultiplier[key] = value;
+            }
+        }
+    }
+
+    /// <summary>
+    /// The whole adjusted map, not just the members a case names: a delta applied to the wrong
+    /// member, or one the native arm forgot, shows up here whatever it was.
+    /// </summary>
+    private void AssertMapParity(MapAdjustment legacy, MapAdjustment native, string what)
+    {
+        Assert.That(_jsonUtil.Serialize(native.Map), Is.EqualTo(_jsonUtil.Serialize(legacy.Map)), $"{what}: the adjusted maps differ");
+    }
+
+    /// <summary>
+    /// A parked <see cref="RaidChanges"/> as <c>GetRaidAdjustments</c> would have left it. The loot
+    /// percents default to 100 so no case scales the live multipliers by accident.
+    /// </summary>
+    private static RaidChanges MapChanges(
+        double simulatedRaidStartSeconds,
+        List<ExtractChange>? exitChanges = null,
+        double dynamicLootPercent = 100,
+        double staticLootPercent = 100
+    )
+    {
+        return new RaidChanges
+        {
+            DynamicLootPercent = dynamicLootPercent,
+            StaticLootPercent = staticLootPercent,
+            SimulatedRaidStartSeconds = simulatedRaidStartSeconds,
+            RaidTimeMinutes = 30,
+            NewSurviveTimeSeconds = 100,
+            OriginalSurvivalTimeSeconds = 1000,
+            ExitChanges = exitChanges ?? [],
+        };
+    }
+
+    private static Func<ScavRaidTimeLocationSettings?, ScavRaidTimeLocationSettings?> WithAdjustWaves(bool adjustWaves)
+    {
+        return original => original! with { AdjustWaves = adjustWaves };
+    }
+
+    /// <summary>
+    /// Deterministic waves in place of the map's own, and no boss spawns beside them. The
+    /// prototypes are copied per call: the pass writes the wave objects in place, so handing the
+    /// same instances to both arms would have the second one adjusting what the first already did.
+    /// </summary>
+    private static Action<LocationBase> WithWaves(params Wave[] waves)
+    {
+        return map =>
+        {
+            map.Waves = waves.Select(wave => wave with { }).ToList();
+            map.BossLocationSpawn = [];
+        };
+    }
+
+    /// <summary>
+    /// Deterministic boss spawns in place of the map's own, copied per call for the same reason
+    /// <see cref="WithWaves"/> copies.
+    /// </summary>
+    private static Action<LocationBase> WithBossSpawns(params BossLocationSpawn[] spawns)
+    {
+        return map =>
+        {
+            map.Waves = [];
+            map.BossLocationSpawn = spawns.Select(spawn => spawn with { }).ToList();
+        };
+    }
+
+    /// <summary>
+    /// One wave and one PMC spawn late enough to survive the simulated start, on top of the map's
+    /// own. Fresh instances per call - the pass writes them in place.
+    /// </summary>
+    private static void WithASurvivorOfEach(LocationBase map)
+    {
+        map.Waves.Add(NewWave(2000, 5000));
+        map.BossLocationSpawn.Add(NewSpawn("pmcUSEC", 5000));
+    }
+
+    private static Wave NewWave(int timeMin, int? timeMax)
+    {
+        return new Wave { TimeMin = timeMin, TimeMax = timeMax };
+    }
+
+    private static BossLocationSpawn NewSpawn(string? bossName, double time)
+    {
+        return new BossLocationSpawn { BossName = bossName, Time = time };
+    }
+
+    /// <summary>
+    /// One path's map adjustment: the map it left behind, and the live multiplier dictionaries as
+    /// they stood immediately after the call.
+    /// </summary>
+    private sealed record MapAdjustment(
+        LocationBase Map,
+        Dictionary<string, double> LooseLootMultiplier,
+        Dictionary<string, double> StaticLootMultiplier
+    );
 
     /// <summary>
     /// One adjustment on one path, with every singleton it touches restored afterwards.

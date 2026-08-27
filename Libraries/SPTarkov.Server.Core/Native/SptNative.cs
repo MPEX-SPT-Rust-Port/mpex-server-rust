@@ -265,9 +265,12 @@ public static class SptNative
     /// them to the live <c>LocationBase</c>. Draws nothing, so the call carries no seed.
     /// </summary>
     /// <exception cref="InvalidOperationException">The pass failed, or the native side misbehaved.</exception>
-    public static TResponse MakeAdjustmentsToMap<TResponse>(ReadOnlySpan<byte> requestUtf8)
+    public static MakeAdjustmentsResponse MakeAdjustmentsToMap(MakeAdjustmentsRequest request)
     {
-        return Generate<TResponse>(LootExport.MakeAdjustmentsToMap, requestUtf8);
+        return Generate<MakeAdjustmentsResponse>(
+            LootExport.MakeAdjustmentsToMap,
+            JsonSerializer.SerializeToUtf8Bytes(request, LootJsonOptions)
+        );
     }
 
     /// <summary>

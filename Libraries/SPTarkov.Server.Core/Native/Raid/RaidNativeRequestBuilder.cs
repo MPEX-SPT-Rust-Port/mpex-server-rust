@@ -5,6 +5,7 @@ using SPTarkov.Server.Core.Models.Eft.Common;
 using SPTarkov.Server.Core.Models.Eft.Game;
 using SPTarkov.Server.Core.Models.Enums;
 using SPTarkov.Server.Core.Models.Spt.Config;
+using SPTarkov.Server.Core.Models.Spt.Location;
 using SPTarkov.Server.Core.Models.Spt.Tables;
 using SPTarkov.Server.Core.Services.InRaid;
 
@@ -86,6 +87,47 @@ public class RaidNativeRequestBuilder(GlobalTable globalTable, LocationConfig lo
     public GetRaidAdjustmentsResponse SendGetRaidAdjustments(GetRaidAdjustmentsRequest request)
     {
         return SptNative.GetRaidAdjustments(request);
+    }
+
+    /// <summary>
+    ///     One map-adjustment pass's inputs, plus the exit list they were projected from.
+    ///
+    ///     <c>LocationBase.Exits</c> is an <c>IEnumerable</c>, so it is materialised exactly once
+    ///     here and handed back: every <c>index</c> in the response indexes <em>this</em> list, and
+    ///     an applier that re-enumerated the property could be indexing a different sequence.
+    /// </summary>
+    /// <param name="raidAdjustments">The changes the session parked</param>
+    /// <param name="mapBase">The map to work out deltas for</param>
+    public (MakeAdjustmentsRequest Request, List<Exit> Exits) BuildMakeAdjustmentsRequest(RaidChanges raidAdjustments, LocationBase mapBase)
+    {
+        var exits = mapBase.Exits.ToList();
+
+        // The same load-bearing lowercasing legacy GetMapSettings does, and TryGetValue so the
+        // projection itself cannot throw ahead of the exit walk that legacy runs first
+        var found = locationConfig.ScavRaidTimeSettings.Maps.TryGetValue(mapBase.Id.ToLowerInvariant(), out var mapSettings);
+
+        var request = new MakeAdjustmentsRequest
+        {
+            MapId = mapBase.Id,
+            RaidChanges = raidAdjustments,
+            MapSettings = new MapSettingsAdjustState { Found = found, Value = mapSettings?.AdjustWaves },
+            Exits = exits.Select(exit => exit.Name).ToList(),
+            Waves = mapBase.Waves.Select(wave => new WaveTimesWire { TimeMin = wave.TimeMin, TimeMax = wave.TimeMax }).ToList(),
+            BossSpawns = mapBase
+                .BossLocationSpawn.Select(boss => new BossSpawnWire { BossName = boss.BossName, Time = boss.Time })
+                .ToList(),
+        };
+
+        return (request, exits);
+    }
+
+    /// <summary>
+    ///     Works out one map's raid-setup deltas natively.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">The pass failed, or the native side misbehaved.</exception>
+    public MakeAdjustmentsResponse SendMakeAdjustments(MakeAdjustmentsRequest request)
+    {
+        return SptNative.MakeAdjustmentsToMap(request);
     }
 
     /// <summary>

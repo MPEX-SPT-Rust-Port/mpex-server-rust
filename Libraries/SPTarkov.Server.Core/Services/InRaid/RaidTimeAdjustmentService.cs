@@ -122,6 +122,19 @@ public class RaidTimeAdjustmentService(
             AdjustLootMultipliers(locationConfig.StaticLootMultiplier, raidAdjustments.StaticLootPercent);
         }
 
+        if (!UseLegacyPath())
+        {
+            LastPathTaken = LootGenerationPath.Native;
+
+            var (nativeRequest, exits) = _requestBuilder!.BuildMakeAdjustmentsRequest(raidAdjustments, mapBase);
+            var deltas = _requestBuilder.SendMakeAdjustments(nativeRequest);
+            ApplyMapAdjustmentDeltas(deltas, raidAdjustments, mapBase, exits);
+
+            return;
+        }
+
+        LastPathTaken = LootGenerationPath.Legacy;
+
         // Adjust the escape time limit
         mapBase.EscapeTimeLimit = raidAdjustments.RaidTimeMinutes;
 
@@ -162,6 +175,109 @@ public class RaidTimeAdjustmentService(
             AdjustWaves(mapBase, raidAdjustments);
 
             AdjustPMCSpawns(mapBase, raidAdjustments);
+        }
+    }
+
+    /// <summary>
+    ///     Lands one native pass's deltas on the live map, in the order the legacy body wrote them,
+    ///     and re-emits the log lines the native side has no logger for.
+    /// </summary>
+    /// <param name="deltas">What the native pass worked out</param>
+    /// <param name="raidAdjustments">The changes the pass ran on - read only for its debug lines</param>
+    /// <param name="mapBase">The map to write to</param>
+    /// <param name="exits">
+    ///     The exit list the request was projected from, which every exit index indexes. Never
+    ///     <c>mapBase.Exits</c> re-enumerated - that is a fresh sequence, not this one.
+    /// </param>
+    private void ApplyMapAdjustmentDeltas(
+        MakeAdjustmentsResponse deltas,
+        RaidChanges raidAdjustments,
+        LocationBase mapBase,
+        List<Exit> exits
+    )
+    {
+        mapBase.EscapeTimeLimit = deltas.EscapeTimeLimit;
+
+        foreach (var exitUpdate in deltas.ExitUpdates)
+        {
+            var exitToChange = exits[exitUpdate.Index];
+
+            if (exitUpdate.Chance is not null)
+            {
+                exitToChange.Chance = exitUpdate.Chance;
+            }
+
+            if (exitUpdate.MinTime is not null)
+            {
+                exitToChange.MinTime = exitUpdate.MinTime;
+            }
+
+            if (exitUpdate.MaxTime is not null)
+            {
+                exitToChange.MaxTime = exitUpdate.MaxTime;
+            }
+        }
+
+        if (deltas.Aborted)
+        {
+            // The unmatched-exit return: the updates above are what legacy had already written when
+            // it bailed, and the map settings are never even looked at
+            if (logger.IsLogEnabled(LogLevel.Debug))
+            {
+                logger.Debug($"Exit with Id: {deltas.AbortedExitName} not found, skipping");
+            }
+
+            return;
+        }
+
+        if (deltas.MapSettingsMissingValue)
+        {
+            logger.Warning($"Unable to find scav raid time settings for map: {mapBase.Id}, using defaults");
+        }
+
+        if (deltas.WaveAdjustments is not { } waveAdjustments)
+        {
+            return;
+        }
+
+        // Both lists are reassigned below, so the originals - the ones every keep and time index
+        // points into - have to be held first
+        var originalWaves = mapBase.Waves;
+        var originalSpawns = mapBase.BossLocationSpawn;
+
+        mapBase.Waves = waveAdjustments.WaveKeepIndices.Select(index => originalWaves[index]).ToList();
+        for (var index = 0; index < mapBase.Waves.Count; index++)
+        {
+            mapBase.Waves[index].TimeMin = waveAdjustments.WaveTimes[index].TimeMin;
+            mapBase.Waves[index].TimeMax = waveAdjustments.WaveTimes[index].TimeMax;
+        }
+
+        if (logger.IsLogEnabled(LogLevel.Debug))
+        {
+            logger.Debug(
+                $"Removed: {waveAdjustments.RemovedWaveCount} wave from map due to simulated raid start time of: {raidAdjustments.SimulatedRaidStartSeconds / 60} minutes"
+            );
+        }
+
+        mapBase.BossLocationSpawn = waveAdjustments.BossKeepIndices.Select(index => originalSpawns[index]).ToList();
+
+        foreach (var bossTimeUpdate in waveAdjustments.BossTimeUpdates)
+        {
+            // Into the original list on purpose: legacy offset the spawn objects themselves, and on
+            // a map that took the custom-PMC splice those objects are the live PmcConfig's
+            originalSpawns[bossTimeUpdate.Index].Time = bossTimeUpdate.Time;
+        }
+
+        if (logger.IsLogEnabled(LogLevel.Debug))
+        {
+            if (waveAdjustments.PmcStartSeconds is not null)
+            {
+                logger.Debug($"Offset PMC spawns by: {waveAdjustments.PmcStartSeconds} seconds");
+            }
+
+            logger.Debug(
+                $"Removed: {waveAdjustments.RemovedBossCount} boss waves from map due to simulated raid start time of: {raidAdjustments.SimulatedRaidStartSeconds / 60} minutes"
+            );
         }
     }
 
