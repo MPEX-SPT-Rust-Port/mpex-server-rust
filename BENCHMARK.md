@@ -849,6 +849,64 @@ The time share of `BuildModPoolSlotOrder` had never been measured separately fro
 `BuildRequest`, so the before/after pair above is the first decomposition of that projection into a
 member and a remainder — and the remainder is 0.23 ms, which is the more useful half of the result.
 
+### Equipment split (ABI 34)
+
+`f3586ac` — 2026-08-26, after `BotConfig.Equipment` went resident. What stays on the wire is the
+`liveEquipmentMods` overlay: role → band → `EquipmentMods`, the only cells a barrier-invisible
+runtime writer touches and Rust reads.
+
+**Wire, by arithmetic rather than a fresh request probe.** `shared.equipment` measured **39,811 B**
+and the member no longer exists on the varying block, so that is what leaves an eligible send. The
+"before" figure is the `shared.equipment` row of § Phase 4's member table — **that table is
+pre-mod-pool, so its request totals no longer stand, but the row does**, because the projection
+expression behind it never changed between the two readings. The overlay that replaced it measures
+**777 B** off shipped `bot.json`: five bands across two roles
+(`pmc` 4, `exusec` 1), the only roles whose `randomisation` list carries a non-null `equipmentMods`.
+
+**Net: 39,811 − 777 = 39,034 B off every eligible send** — per bot on the single-bot path, per wave
+on the batch one, since a send is one FFI call. The override arm nets approximately zero and is very
+slightly worse: the member moves from `shared` into `viewsOverride` inside the same request and the
+overlay is added on top, so an ineligible send grows by those 777 B.
+
+Measured once with a throwaway Release probe over `SptNativeBotWireTests`' request (it builds both
+arms off the live database), serialised through `JsonUtil.JsonSerializerOptionsNoIndent` — the same
+route the flip-6 and Phase 4 byte figures took, because no committed fixture reports bytes. That
+probe also read the relocated member at 39,631 B on the override arm, 0.5% under the Phase 4 row,
+which is the cross-check on using that row as the "before".
+
+**None of this is observable in `BotPayloadSizeTests`, by design.** Both of its fixtures build the
+override arm, which is the wire a regression would inflate — and that is exactly the arm where the
+member only changes address. `BatchAmortisesTheSharedBlock`'s `< single/9` bound is unaffected in
+kind — both sides of that comparison move by the same 777 B — and stays as written, as does
+`RequestStaysUnderTheWireBudget`'s 4,300,000 B ceiling.
+
+**`BuildRequest` wall time — unchanged by this split, which the pair shows only after
+decomposition.** Same fixture and command as the mod-pool pair above (`BotBenchmarkTests`,
+`[Explicit]`, Release, n=20 after 2 warmups), before at `a8535ba`, after at `f3586ac`:
+
+```
+assault BuildRequest only    n=20  mean=0.29 ms  median=0.24 ms  min=0.20 ms  max=0.44 ms   (a8535ba, before)
+assault BuildRequest only    n=20  mean=0.95 ms  median=0.84 ms  min=0.76 ms  max=1.62 ms   (f3586ac, after)
+usec BuildRequest only       n=20  mean=0.13 ms  median=0.12 ms  min=0.09 ms  max=0.38 ms   (a8535ba, before)
+usec BuildRequest only       n=20  mean=0.14 ms  median=0.13 ms  min=0.11 ms  max=0.21 ms   (f3586ac, after)
+```
+
+usec is flat. Assault reads 3.4x worse and reproduced (0.81 ms median on a second invocation), so it
+is not noise — but it is not this change either. A decomposition probe in the same Release build
+times the parts of assault's `BuildRequest`: `BuildSharedVarying`, the only method the split touched,
+is **0.01 ms** (both roles), while `BuildLootPools` is **0.63 ms of a 0.66 ms total**. `BuildLootPools`,
+`BotLootCacheService` and the rest of that path are byte-identical across the two commits —
+`git diff a8535ba..HEAD` touches `BotPayloadProjection` in two hunks, `BuildSharedVarying` and
+`BuildViewsOverride`, and nothing else on the C# request path. Read the assault pair as loot-cache and
+host state, not as a projection regression. Note also what `BuildRequest` never contained: the 39,811 B
+member's *serialisation* cost is paid in the wrapper's serialise step, which this fixture does not
+time, so the wire saving does not show up here at all.
+
+**Publish delta: expected ~zero, and only its shape was confirmed.** The configs root already carried
+the equipment JSON at every publish — it landed in `BotConfigLift.extra`, parsed but unread — so the
+new cost is a typed parse of bytes that were already crossing and already being parsed into a map. No
+publish arm was re-timed for this change.
+
 ### Batched wave
 
 `ae325d8` — 2026-08-18, after the level fold (ABI 22). `BotBatchTests.WaveCostPerBot`, medians of 5

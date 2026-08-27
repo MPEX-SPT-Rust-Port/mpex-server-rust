@@ -146,8 +146,9 @@ public class BotBenchmarkTests
 
     /// <summary>
     /// The projection half of the native path on its own - the resident arm's per-call varying block
-    /// (the player's level, the raid's daylight, BotConfig.Equipment, and the caller's level inputs
-    /// and band variants), rebuilt per bot.
+    /// (the player's level, the raid's daylight, the live EquipmentMods bands, and the caller's
+    /// level inputs and band variants), rebuilt per bot. The rest of BotConfig.Equipment is resident
+    /// since ABI 34 and is no longer in this number.
     /// </summary>
     private List<double> MeasureProjection(string role)
     {
