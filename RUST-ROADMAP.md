@@ -18,7 +18,7 @@ boundary.
 Thirty-nine C-ABI exports (`src/ffi.rs`) carry all of it, JSON in and JSON out — except the ragfair
 response (a framed MessagePack envelope), `spt_db_load` and `spt_profile_load` (a JSON header frame
 followed by the loaded file bytes), and the log and console exports (the fields of one line, or raw
-bytes, directly). Current ABI 34.
+bytes, directly). Current ABI 35.
 
 Since Phase 6b those exports are reached two ways, one per process. A shipped Linux build resolves
 them out of the `mpex-server` executable, which links the crate as an rlib; dev builds, the test run
@@ -1143,7 +1143,7 @@ a sabotage run showed the whole tree stayed green with the batch-path merge blin
 had rested entirely on `BotWaveBatcher`'s nighttime decline policy). Wire and `BuildRequest` numbers
 are in BENCHMARK.md § Equipment split.
 
-**Map/raid setup (ABI 34, landed 2026-08-27).** The whole of `RaidTimeAdjustmentService`'s algorithm
+**Map/raid setup (ABI 35, landed 2026-08-27).** The whole of `RaidTimeAdjustmentService`'s algorithm
 plus `LocationLifecycleService`'s two `LocationBase` passes moved to `src/raid/`, behind four exports:
 `spt_get_raid_adjustments`, `spt_make_adjustments_to_map`, `spt_adjust_bot_hostility_settings` and
 `spt_adjust_extracts`. `Native/` grew 909 lines across four files — `Native/Raid/RaidPayloads.cs`
@@ -1180,11 +1180,14 @@ in `NativeMethods.cs` and `SptNative.cs`. The two services keep their full 4.1.2
   for other reasons; it is owned by no phase today. Consequence: the four exports carry no `epoch` and
   no `viewsOverride`, `TrustNativeRequestCacheWithMods`/`DisableNativeRequestCache` do not apply, and
   `FfiFailure` has a single arm — raid never returns `STATUS_STALE_EPOCH`.
-- **ABI 34 has four constant sites, not three.** `lib.rs:19`, `SptNative.ExpectedAbiVersion`
-  (`SptNative.cs:124`) and the `ffi.rs` tripwire assert (`:1699`) are the lockstep three; this family
-  added a fourth in prose at `rust/ARCHITECTURE.md:79` ("currently 34"). Any renumber — the
-  parallel-branch collision rule, whichever of two same-number bumps lands second — is four sites plus
-  a docs grep for the stale number, not three.
+- **The ABI number has five sites, not three.** `lib.rs:19`, `SptNative.ExpectedAbiVersion`
+  (`SptNative.cs:124`) and the `ffi.rs` tripwire assert are the lockstep three; prose adds two more:
+  `rust/ARCHITECTURE.md`'s module map ("currently N") and this file's own "Current ABI N" sentence at
+  the top. Any renumber — the parallel-branch collision rule, whichever of two same-number bumps
+  lands second, which is exactly how this family landed at 35 behind the equipment split's 34 — is
+  those five paths, explicitly enumerated. A blanket docs-grep for the stale number is **unsafe
+  post-merge**: the previous family's ledger keeps its own historical number legitimately at a dozen
+  sites, so grep only to confirm the five, never to rewrite every hit.
   **The export counts are a second silent-merge surface, and a worse one**, because nothing asserts
   them: the count sits in prose — as "Thirty-nine" and as bare `39` — across `ARCHITECTURE.md`, this
   file and `rust/ARCHITECTURE.md` (no per-file tally here; a prior one was wrong twice over, so grep
