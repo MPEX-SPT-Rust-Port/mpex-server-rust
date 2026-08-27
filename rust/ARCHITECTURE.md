@@ -37,7 +37,7 @@ frozen 4.1.2 mod surface has `Spectre.Console.Color` baked into `ISptLogger<T>`,
 that name. Built on every build, but incrementally. Its own header covers the fidelity gaps.
 
 **The split-brain rule, post-6b:** exactly one linkage path may be live *per process*. `mpex-server` links
-`spt-native` as an rlib and, via `-Wl,--export-dynamic` in `.cargo/config.toml`, carries all 35
+`spt-native` as an rlib and, via `-Wl,--export-dynamic` in `.cargo/config.toml`, carries all 39
 `#[unsafe(no_mangle)]` exports in its own `.dynsym`; the resident DB's statics therefore live in the executable.
 The published Linux tree ships **no cdylib** (`ExcludeSptNativeFromPublish` in `SPTarkov.Server.csproj`), so
 there is nothing for a second copy to come from. The cdylib is still built and still lives in `bin/`, which is
@@ -54,7 +54,7 @@ tree only.
 Two things that follow, and that a reader will otherwise trip over:
 
 - **The launcher must reference `spt_native` in its own source.** An rlib nothing references is discarded whole
-  by the linker, taking all 35 exports with it, silently, at link time. `src/main.rs` carries a deliberate
+  by the linker, taking all 39 exports with it, silently, at link time. `src/main.rs` carries a deliberate
   anchor call and `scripts/smoke-mpex-server.sh` checks the launcher still exports them — retention is
   all-or-nothing, so a nonzero count is the whole check and no export count needs maintaining. Any path
   reference suffices; the anchor is a call behind `black_box` only so that deleting it looks like a behaviour
@@ -123,8 +123,9 @@ trades that for build time — `opt-level = 1`, sixteen codegen units, line-tabl
 
 ### FFI boundary (`ffi.rs`)
 
-Thirty-five `extern "C"` exports: two trivial (`spt_native_abi_version`, `spt_buf_free`), thirteen taking a
-UTF-8 JSON generation request — the newest of them, `spt_get_raid_adjustments`, is the raid-setup family's:
+Thirty-nine `extern "C"` exports: two trivial (`spt_native_abi_version`, `spt_buf_free`), seventeen taking a
+UTF-8 JSON generation request — the newest four of them are the raid-setup family's, and the first of those,
+`spt_get_raid_adjustments`, takes
 one scav raid's time adjustment, JSON in and JSON out (`{applied, chosenReductionPercent,
 mapSettingsMissingValue, raidChanges}`, whose `raidChanges` is the real `RaidChanges` record and whose
 `exitChanges` entries carry `ExtractChange`'s PascalCase names), and **naming no resident-DB epoch**
@@ -168,7 +169,7 @@ keeps legacy's warn/apply interleaving. The second answers `{warnUnknownMap, app
 into the request's own extract projection. Neither carries the map or location name: both warnings are
 re-emitted C#-side, from the live objects the request was projected from. Like their siblings they name no
 epoch, and they draw nothing, so neither carries a `testSeed`. The
-twenty-one generation/verify/publish/load/digest/profile exports hand back a heap buffer on success, which the
+twenty-five generation/verify/publish/load/digest/profile exports hand back a heap buffer on success, which the
 caller releases with `spt_buf_free`; so do `spt_console_read_line` and `spt_log_format`.
 
 - `spt_db_load`'s optional `handbookPriceOverride` member carries `ItemConfig.HandbookPriceOverride` —
@@ -189,7 +190,8 @@ caller releases with `spt_buf_free`; so do `spt_console_read_line` and `spt_log_
   the runtime around a hand-written wrapper, and `spt_db_resident_digest`, because it takes no request to
   parse — just a null check, a `catch_unwind` and a `write_buffer`.
 - Status codes: `STATUS_OK` 0, `STATUS_BAD_ARGS` 1, `STATUS_PANIC` 2, `STATUS_ERROR` 3, `STATUS_STALE_EPOCH` 4
-  (every generation export since flip #6). **Quest, scav case and raid never return 2**: they catch the
+  (every generation export since flip #6 **except the four raid ones** — they are generation exports that
+  name no epoch, so 4 is not in their vocabulary at all). **Quest, scav case and raid never return 2**: they catch the
   generator's panic themselves and report it as 3 carrying the message. Quest and scav case do it because they
   port a C#-sanctioned throw as a panic — a generation failure, not a library bug; raid returns both of its
   sanctioned throws as a `RaidError` and keeps the `catch_unwind` as a backstop. The cost is that a real port
@@ -509,7 +511,7 @@ over the server-assembly probe, `spectre-facade`'s two.
 
 | External System | Integration Type | Notes |
 |-------------------|-------------------|-------|
-| `SPTarkov.Server.Core` | Sync FFI, C ABI | `Native/NativeMethods.cs` + `SptNative.cs` and the per-family projections. Thirty-five exports; `ABI_VERSION` must equal `SptNative.ExpectedAbiVersion` |
+| `SPTarkov.Server.Core` | Sync FFI, C ABI | `Native/NativeMethods.cs` + `SptNative.cs` and the per-family projections. Thirty-nine exports; `ABI_VERSION` must equal `SptNative.ExpectedAbiVersion` |
 | `SPTarkov.Common` | Sync FFI, C ABI | The eleven log and console exports plus `spt_buf_free`, from a second `Native/NativeMethods.cs` — Common cannot reference Core |
 | `SPT_Data/` on disk | Batch, async over tokio | `spt_verify_database` hashes `configs/` + `database/` with XXH3-128; `spt_db_load` (since ABI 29) does that walk *and* reads `database/` in one pass, installing the five database roots — never the configs root, which only `spt_db_publish` builds — and handing the eager bytes back to `DatabaseImporter`; `gen_checks` writes `checks.dat` on Release builds |
 | `user/profiles/` on disk | Blocking read/write per call | `spt_profile_*` (since Phase 5) own every live listing, read, write and delete; the directory arrives in each request. `BackupService` (C#) still copies and restores beside them |
