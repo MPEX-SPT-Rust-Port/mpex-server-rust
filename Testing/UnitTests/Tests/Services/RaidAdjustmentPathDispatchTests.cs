@@ -36,9 +36,9 @@ namespace UnitTests.Tests.Services;
 /// whole frozen set.
 ///
 /// The two scopes are deliberately different and both are pinned here: the patch check is
-/// family-wide - one shared set, all four call sites - while the substituted-service check is
+/// family-wide - one shared set, all five call sites - while the substituted-service check is
 /// per-service, so a replaced <see cref="RaidTimeAdjustmentService"/> falls back at its own two call
-/// sites and leaves the lifecycle service on the native path.
+/// sites and leaves the lifecycle service and <see cref="PmcWaveGenerator"/> on the native path.
 ///
 /// Mutates the shared <see cref="LocationConfig"/> singleton's force flag, restored per case, and
 /// never runs in parallel. Every pass works on a clone, which is what the real pipeline hands it, so
@@ -84,6 +84,7 @@ public class RaidAdjustmentPathDispatchTests
 
     private RaidTimeAdjustmentService _raidTimeAdjustmentService = default!;
     private LocationLifecycleService _locationLifecycleService = default!;
+    private PmcWaveGenerator _pmcWaveGenerator = default!;
     private LocationConfig _locationConfig = default!;
     private LocationTable _locationTable = default!;
     private ICloner _cloner = default!;
@@ -96,6 +97,7 @@ public class RaidAdjustmentPathDispatchTests
 
         _raidTimeAdjustmentService = di.GetService<RaidTimeAdjustmentService>();
         _locationLifecycleService = di.GetService<LocationLifecycleService>();
+        _pmcWaveGenerator = di.GetService<PmcWaveGenerator>();
         _locationConfig = di.GetService<LocationConfig>();
         _locationTable = di.GetService<LocationTable>();
         _cloner = di.GetService<ICloner>();
@@ -120,6 +122,7 @@ public class RaidAdjustmentPathDispatchTests
     {
         AssertRaidTimeCallSites(_raidTimeAdjustmentService, LootGenerationPath.Native, "stock");
         AssertLifecycleCallSites(_locationLifecycleService, LootGenerationPath.Native, "stock");
+        AssertPmcWaveCallSite(_pmcWaveGenerator, LootGenerationPath.Native, "stock");
     }
 
     [Test]
@@ -129,6 +132,7 @@ public class RaidAdjustmentPathDispatchTests
 
         AssertRaidTimeCallSites(_raidTimeAdjustmentService, LootGenerationPath.Legacy, "force flag");
         AssertLifecycleCallSites(_locationLifecycleService, LootGenerationPath.Legacy, "force flag");
+        AssertPmcWaveCallSite(_pmcWaveGenerator, LootGenerationPath.Legacy, "force flag");
     }
 
     /// <summary>
@@ -147,6 +151,12 @@ public class RaidAdjustmentPathDispatchTests
 
         AssertLifecycleCallSites(
             (LocationLifecycleService)Construct(typeof(LocationLifecycleService), narrowest: true),
+            LootGenerationPath.Legacy,
+            "frozen constructor"
+        );
+
+        AssertPmcWaveCallSite(
+            (PmcWaveGenerator)Construct(typeof(PmcWaveGenerator), narrowest: true),
             LootGenerationPath.Legacy,
             "frozen constructor"
         );
@@ -170,6 +180,8 @@ public class RaidAdjustmentPathDispatchTests
             LootGenerationPath.Native,
             "hand-built"
         );
+
+        AssertPmcWaveCallSite((PmcWaveGenerator)Construct(typeof(PmcWaveGenerator)), LootGenerationPath.Native, "hand-built");
     }
 
     /// <summary>
@@ -200,6 +212,21 @@ public class RaidAdjustmentPathDispatchTests
     }
 
     /// <summary>
+    /// The same per-service scope on the family's fifth call site: a mod-registered
+    /// <see cref="PmcWaveGenerator"/> subclass falls back at its own pass and leaves both services
+    /// native.
+    /// </summary>
+    [Test]
+    public void AReplacedPmcWaveGeneratorRoutesToTheLegacyPathAtItsOwnCallSiteOnly()
+    {
+        var generator = (PmcWaveGenerator)Construct(typeof(TestPmcWaveGeneratorSubclass));
+
+        AssertPmcWaveCallSite(generator, LootGenerationPath.Legacy, "replaced pmc wave generator");
+        AssertRaidTimeCallSites(_raidTimeAdjustmentService, LootGenerationPath.Native, "replaced pmc wave generator");
+        AssertLifecycleCallSites(_locationLifecycleService, LootGenerationPath.Native, "replaced pmc wave generator");
+    }
+
+    /// <summary>
     /// Both <see cref="RaidTimeAdjustmentService"/> call sites, each asserted against the path it was
     /// expected to take.
     /// </summary>
@@ -223,6 +250,15 @@ public class RaidAdjustmentPathDispatchTests
 
         _adjustBotHostilitySettings.Invoke(service, [Clone()]);
         Assert.That(service.LastPathTaken, Is.EqualTo(expected), $"{what}: AdjustBotHostilitySettings took the wrong path");
+    }
+
+    /// <summary>
+    /// The family's fifth call site, asserted against the path it was expected to take.
+    /// </summary>
+    private void AssertPmcWaveCallSite(PmcWaveGenerator generator, LootGenerationPath expected, string what)
+    {
+        generator.ApplyWaveChangesToMap(Clone());
+        Assert.That(generator.LastPathTaken, Is.EqualTo(expected), $"{what}: ApplyWaveChangesToMap took the wrong path");
     }
 
     private LocationBase Clone()
@@ -374,4 +410,14 @@ public class RaidAdjustmentPathDispatchTests
             seasonalEventConfig,
             requestBuilder
         ) { }
+
+    /// <summary>
+    /// The same stand-in for the PMC wave generator.
+    /// </summary>
+    private class TestPmcWaveGeneratorSubclass(
+        LocationTable locationTable,
+        PmcConfig pmcConfig,
+        RaidNativeRequestBuilder requestBuilder,
+        LocationConfig locationConfig
+    ) : PmcWaveGenerator(locationTable, pmcConfig, requestBuilder, locationConfig) { }
 }

@@ -115,6 +115,7 @@ internal enum LootExport
     MakeAdjustmentsToMap,
     AdjustBotHostilitySettings,
     AdjustExtracts,
+    ApplyPmcWaveChanges,
     ItemBaseClass,
     RagfairLinkedItems,
 }
@@ -299,6 +300,21 @@ public static class SptNative
     public static AdjustExtractsResponse AdjustExtracts(AdjustExtractsRequest request)
     {
         return Generate<AdjustExtractsResponse>(LootExport.AdjustExtracts, JsonSerializer.SerializeToUtf8Bytes(request, LootJsonOptions));
+    }
+
+    /// <summary>
+    /// Works out which of a map's boss waves the custom-PMC splice drops: indices into the request's
+    /// own <c>bossNames</c> projection, plus the flag for whether the splice runs at all. The removal
+    /// and the append that follows stay C#-side - the append puts the live config's own wave objects
+    /// into the location by reference. Draws nothing and names no epoch.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">The pass failed, or the native side misbehaved.</exception>
+    public static ApplyPmcWavesResponse ApplyPmcWaveChanges(ApplyPmcWavesRequest request)
+    {
+        return Generate<ApplyPmcWavesResponse>(
+            LootExport.ApplyPmcWaveChanges,
+            JsonSerializer.SerializeToUtf8Bytes(request, LootJsonOptions)
+        );
     }
 
     /// <summary>
@@ -1050,6 +1066,12 @@ public static class SptNative
                     &outLen
                 ),
                 LootExport.AdjustExtracts => NativeMethods.AdjustExtracts(requestPtr, (nuint)requestUtf8.Length, &outPtr, &outLen),
+                LootExport.ApplyPmcWaveChanges => NativeMethods.ApplyPmcWaveChanges(
+                    requestPtr,
+                    (nuint)requestUtf8.Length,
+                    &outPtr,
+                    &outLen
+                ),
                 LootExport.ItemBaseClass => NativeMethods.BuildItemBaseClassCache(requestPtr, (nuint)requestUtf8.Length, &outPtr, &outLen),
                 LootExport.RagfairLinkedItems => NativeMethods.BuildRagfairLinkedItemTable(
                     requestPtr,

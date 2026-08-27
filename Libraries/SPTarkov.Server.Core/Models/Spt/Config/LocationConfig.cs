@@ -18,10 +18,11 @@ public record LocationConfig : BaseConfig
     public bool ForceLegacyLootGeneration { get; set; }
 
     /// <summary>
-    ///     Route raid setup - the scav raid time adjustment and the map alterations it drives -
-    ///     through the retained C# implementation instead of spt-native. Escape hatch for mods that
-    ///     hook raid internals outside the frozen members of RaidTimeAdjustmentService and
-    ///     LocationLifecycleService (hooks on those are detected automatically).
+    ///     Route raid setup - the scav raid time adjustment, the map alterations it drives and the
+    ///     custom-PMC wave splice - through the retained C# implementation instead of spt-native.
+    ///     Escape hatch for mods that hook raid internals outside the frozen members of
+    ///     RaidTimeAdjustmentService, LocationLifecycleService and PmcWaveGenerator (hooks on those
+    ///     are detected automatically).
     /// </summary>
     [JsonPropertyName("forceLegacyRaidAdjustments")]
     public bool ForceLegacyRaidAdjustments { get; set; }

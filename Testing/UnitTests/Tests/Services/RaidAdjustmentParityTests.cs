@@ -496,6 +496,62 @@ public class RaidAdjustmentParityTests
     }
 
     /// <summary>
+    /// The whole PMC wave pass against a prepared spawn list: every arm of the removal filter - a
+    /// non-PMC name, both PMC names and a null one - and the append behind it, compared as the whole
+    /// <c>LocationBase</c>.
+    /// </summary>
+    [Test]
+    public void PmcWaveChangesMatchLegacyAndPreserveConfigAliasing()
+    {
+        // The very same instances on both arms: the pass appends them by reference and writes
+        // nothing to them, which is what lets one config list serve both passes
+        var waves = new List<BossLocationSpawn> { NewSpawn("pmcUSEC", 500), NewSpawn("pmcBEAR", 900) };
+
+        var legacySpawns = PmcWaveSpawns();
+        var nativeSpawns = PmcWaveSpawns();
+
+        var legacy = ApplyPmcWaves(forceLegacy: true, removeExistingPmcWaves: true, waves, legacySpawns);
+        var native = ApplyPmcWaves(forceLegacy: false, removeExistingPmcWaves: true, waves, nativeSpawns);
+
+        AssertMapParity(legacy, native, "pmc-waves");
+
+        // A pass that dropped nothing and appended nothing would compare equal above and still be
+        // wrong: the two PMC-named spawns go, the null-named one stays, and the two waves land
+        Assert.That(native.BossLocationSpawn, Has.Count.EqualTo(4), "the removal filter did not drop exactly the two PMC spawns");
+
+        // Aliasing channel 2's other half: the append puts the live config instances into the clone,
+        // which is what lets the later spawn-time offset land on them (spec D3)
+        Assert.That(native.BossLocationSpawn[^2], Is.SameAs(waves[0]), "the appended wave was a copy, not the config's own instance");
+        Assert.That(native.BossLocationSpawn[^1], Is.SameAs(waves[1]));
+
+        // Legacy's .Where().ToList() replaces the reference rather than editing the list in place
+        Assert.That(native.BossLocationSpawn, Is.Not.SameAs(nativeSpawns), "the native arm edited the pre-call list in place");
+        Assert.That(legacy.BossLocationSpawn, Is.Not.SameAs(legacySpawns));
+    }
+
+    /// <summary>
+    /// Legacy appends only <em>inside</em> the <c>RemoveExistingPmcWaves</c> branch, so a false flag
+    /// means no append either - the list is left exactly as it was, reference and all. Preserved
+    /// bug-for-bug (the tier-1 tail design's Port 1).
+    /// </summary>
+    [Test]
+    public void PmcWaveNoOpGatesMatchLegacy()
+    {
+        var waves = new List<BossLocationSpawn> { NewSpawn("pmcUSEC", 500) };
+
+        var legacySpawns = PmcWaveSpawns();
+        var nativeSpawns = PmcWaveSpawns();
+
+        var legacy = ApplyPmcWaves(forceLegacy: true, removeExistingPmcWaves: false, waves, legacySpawns);
+        var native = ApplyPmcWaves(forceLegacy: false, removeExistingPmcWaves: false, waves, nativeSpawns);
+
+        AssertMapParity(legacy, native, "pmc-waves-no-op");
+
+        Assert.That(native.BossLocationSpawn, Is.SameAs(nativeSpawns), "the native arm touched the list the flag told it to leave alone");
+        Assert.That(legacy.BossLocationSpawn, Is.SameAs(legacySpawns));
+    }
+
+    /// <summary>
     /// The one booked divergence reachable on shipped data without a mod: <c>labyrinth</c> is in the
     /// location table and absent from <c>scavRaidTimeSettings.maps</c>, so the settings resolve
     /// throws - a <c>KeyNotFoundException</c> on the legacy arm, and the native arm's
@@ -782,6 +838,73 @@ public class RaidAdjustmentParityTests
         {
             _locationConfig.ForceLegacyRaidAdjustments = originalForce;
         }
+    }
+
+    /// <summary>
+    /// One PMC wave pass on one path, against a fresh clone of the raid-start map, with the two
+    /// config members the pass reads replaced for the duration of the call.
+    /// </summary>
+    /// <param name="forceLegacy">Which path to take</param>
+    /// <param name="removeExistingPmcWaves">The config flag the whole pass is gated behind</param>
+    /// <param name="customWaves">The map's <c>CustomPmcWaves</c> entry for the call</param>
+    /// <param name="spawns">
+    ///     The map's boss spawns for the call, handed in so the caller owns the list instance the
+    ///     reference-replacement assertions compare against
+    /// </param>
+    private LocationBase ApplyPmcWaves(
+        bool forceLegacy,
+        bool removeExistingPmcWaves,
+        List<BossLocationSpawn> customWaves,
+        List<BossLocationSpawn> spawns
+    )
+    {
+        var expected = forceLegacy ? LootGenerationPath.Legacy : LootGenerationPath.Native;
+        var map = _cloner.Clone(_locationTable.GetLocation(RaidStartMap)!.Base)!;
+        map.BossLocationSpawn = spawns;
+
+        // The key the pass itself resolves with, which is the map's own lowercased id
+        var wavesKey = map.Id.ToLowerInvariant();
+        var originalRemove = _pmcConfig.RemoveExistingPmcWaves;
+        var wavesPresent = _pmcConfig.CustomPmcWaves.TryGetValue(wavesKey, out var originalWaves);
+        var originalForce = _locationConfig.ForceLegacyRaidAdjustments;
+
+        try
+        {
+            _pmcConfig.RemoveExistingPmcWaves = removeExistingPmcWaves;
+            _pmcConfig.CustomPmcWaves[wavesKey] = customWaves;
+            _locationConfig.ForceLegacyRaidAdjustments = forceLegacy;
+
+            _pmcWaveGenerator.ApplyWaveChangesToMap(map);
+
+            // Fail fast on silent fallback before comparing anything
+            Assert.That(_pmcWaveGenerator.LastPathTaken, Is.EqualTo(expected), $"the wave pass did not take the {expected} path");
+
+            return map;
+        }
+        finally
+        {
+            _pmcConfig.RemoveExistingPmcWaves = originalRemove;
+
+            if (wavesPresent)
+            {
+                _pmcConfig.CustomPmcWaves[wavesKey] = originalWaves!;
+            }
+            else
+            {
+                _pmcConfig.CustomPmcWaves.Remove(wavesKey);
+            }
+
+            _locationConfig.ForceLegacyRaidAdjustments = originalForce;
+        }
+    }
+
+    /// <summary>
+    /// The four spawns every arm of the removal filter needs: a non-PMC name, both PMC names and a
+    /// null one. Fresh instances per call, so each arm owns the list it hands the pass.
+    /// </summary>
+    private static List<BossLocationSpawn> PmcWaveSpawns()
+    {
+        return [NewSpawn("bossBully", 10), NewSpawn("pmcUSEC", 20), NewSpawn(null, 30), NewSpawn("pmcBEAR", 40)];
     }
 
     /// <summary>

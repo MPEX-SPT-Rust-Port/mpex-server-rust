@@ -1,5 +1,9 @@
 using System.Text.Json;
 using NUnit.Framework;
+using SPTarkov.Server.Core.Generators;
+using SPTarkov.Server.Core.Generators.Loot;
+using SPTarkov.Server.Core.Models.Eft.Common;
+using SPTarkov.Server.Core.Models.Spt.Config;
 using SPTarkov.Server.Core.Models.Spt.Location;
 using SPTarkov.Server.Core.Native;
 using SPTarkov.Server.Core.Native.Raid;
@@ -15,11 +19,20 @@ namespace UnitTests.Tests.Services;
 ///
 /// The requests go through the internal <c>Generate</c> ladder rather than the typed wrapper so the
 /// bytes on the wire are the fixture's own, and they carry the same options production serialises
-/// with.
+/// with. The one exception is the fifth export's null-projection case, which is a question about
+/// what the <em>builder</em> puts on the wire, so it goes through the real builder and applier - and
+/// is why the fixture mutates the config singletons its own <c>finally</c> restores, and never runs
+/// in parallel.
 /// </summary>
 [TestFixture]
+[NonParallelizable]
 public class RaidAdjustmentWireContractTests
 {
+    private PmcWaveGenerator _pmcWaveGenerator = default!;
+    private RaidNativeRequestBuilder _requestBuilder = default!;
+    private PmcConfig _pmcConfig = default!;
+    private LocationConfig _locationConfig = default!;
+
     /// <summary>
     /// The container build is what publishes <see cref="JsonUtil.JsonSerializerOptionsNoIndent"/>,
     /// and the payload options are that property - so a run filtered down to this fixture alone
@@ -28,7 +41,12 @@ public class RaidAdjustmentWireContractTests
     [OneTimeSetUp]
     public void OneTimeSetUp()
     {
-        DI.GetInstance();
+        var di = DI.GetInstance();
+
+        _pmcWaveGenerator = di.GetService<PmcWaveGenerator>();
+        _requestBuilder = di.GetService<RaidNativeRequestBuilder>();
+        _pmcConfig = di.GetService<PmcConfig>();
+        _locationConfig = di.GetService<LocationConfig>();
     }
 
     /// <summary>
@@ -308,6 +326,56 @@ public class RaidAdjustmentWireContractTests
 
         Assert.That(pmcResponse.WarnUnknownMap, Is.False, "the side gate did not precede the map lookup");
         Assert.That(pmcResponse.AppendExtractIndices, Is.Empty);
+    }
+
+    /// <summary>
+    /// A mod-added <c>base.json</c> that omitted <c>BossLocationSpawn</c> altogether. The projection
+    /// sends an empty <c>bossNames</c> rather than dereferencing it, and with all three gates passing
+    /// the applier assigns a fresh list and appends the config's waves into it - where legacy NREs on
+    /// the unguarded <c>.Where</c>. The booked divergence under the tier-1 tail design's Port 1
+    /// preserved quirks, so only the native arm is asserted: there is no legacy behaviour to match.
+    /// </summary>
+    [Test]
+    public void ANullBossLocationSpawnProjectsAnEmptyListAndAppendsNatively()
+    {
+        // Not in the location table, so nothing else can be resolving this key
+        var location = new LocationBase { Id = "NullSpawnMap" };
+        var wavesKey = location.Id.ToLowerInvariant();
+        var waves = new List<BossLocationSpawn>
+        {
+            new() { BossName = "pmcUSEC", Time = 500 },
+        };
+
+        var originalRemove = _pmcConfig.RemoveExistingPmcWaves;
+        var originalForce = _locationConfig.ForceLegacyRaidAdjustments;
+
+        try
+        {
+            _pmcConfig.RemoveExistingPmcWaves = true;
+            _pmcConfig.CustomPmcWaves[wavesKey] = waves;
+            _locationConfig.ForceLegacyRaidAdjustments = false;
+
+            var (request, wavesToAdd) = _requestBuilder.BuildApplyPmcWavesRequest(location);
+
+            Assert.That(request.BossNames, Is.Empty, "the null spawn list did not project an empty bossNames");
+            Assert.That(request.RemoveExistingPmcWaves, Is.True);
+            Assert.That(request.WavesFound, Is.True, "the lowercased config lookup did not resolve");
+            Assert.That(request.WaveCount, Is.EqualTo(1));
+            Assert.That(wavesToAdd, Is.SameAs(waves), "the builder handed back a copy of the config's list");
+
+            _pmcWaveGenerator.ApplyWaveChangesToMap(location);
+
+            Assert.That(_pmcWaveGenerator.LastPathTaken, Is.EqualTo(LootGenerationPath.Native));
+            Assert.That(location.BossLocationSpawn, Has.Count.EqualTo(1), "the applier did not assign a fresh list and append into it");
+            Assert.That(location.BossLocationSpawn[0], Is.SameAs(waves[0]), "the appended wave was a copy, not the config's own instance");
+            Assert.That(location.BossLocationSpawn, Is.Not.SameAs(waves), "the applier handed the location the config's own list");
+        }
+        finally
+        {
+            _pmcConfig.RemoveExistingPmcWaves = originalRemove;
+            _pmcConfig.CustomPmcWaves.Remove(wavesKey);
+            _locationConfig.ForceLegacyRaidAdjustments = originalForce;
+        }
     }
 
     /// <summary>

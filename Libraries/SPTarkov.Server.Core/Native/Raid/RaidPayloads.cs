@@ -526,3 +526,58 @@ public record AdjustExtractsResponse
     [JsonPropertyName("appendExtractIndices")]
     public required List<int> AppendExtractIndices { get; set; }
 }
+
+/// <summary>
+/// One PMC wave pass's inputs, projected down to the three gates and the names the removal filter
+/// tests. The waves themselves never cross: the append hands the location the live
+/// <c>PmcConfig.CustomPmcWaves</c> instances by reference, and a serde round trip would mint copies
+/// and break that aliasing channel.
+/// </summary>
+public record ApplyPmcWavesRequest
+{
+    /// <summary>
+    ///     <c>pmcConfig.RemoveExistingPmcWaves</c>, the flag legacy gates the whole body behind -
+    ///     the lookup and both writes.
+    /// </summary>
+    [JsonPropertyName("removeExistingPmcWaves")]
+    public required bool RemoveExistingPmcWaves { get; set; }
+
+    /// <summary>
+    ///     Whether <c>CustomPmcWaves</c> had an entry for the map, resolved caller-side with the same
+    ///     load-bearing lowercasing every other lookup in this family does - and only once the flag
+    ///     above is set, exactly as legacy gates it.
+    /// </summary>
+    [JsonPropertyName("wavesFound")]
+    public required bool WavesFound { get; set; }
+
+    /// <summary>
+    ///     The found list's <c>Count</c>, the third gate: zero waves to add is a no-op.
+    /// </summary>
+    [JsonPropertyName("waveCount")]
+    public required int WaveCount { get; set; }
+
+    /// <summary>
+    ///     Each <c>BossLocationSpawn.BossName</c>, in the order of the live list every
+    ///     <see cref="ApplyPmcWavesResponse.RemoveIndices"/> entry indexes. Nullable, and a null one
+    ///     never matches the two PMC names - <c>HashSet.Contains(null)</c> is false.
+    /// </summary>
+    [JsonPropertyName("bossNames")]
+    public required List<string?> BossNames { get; set; }
+}
+
+public record ApplyPmcWavesResponse
+{
+    /// <summary>
+    ///     All three gates passed. False leaves <c>BossLocationSpawn</c> untouched, and the applier's
+    ///     append is skipped with it - legacy appends only inside the removal branch.
+    /// </summary>
+    [JsonPropertyName("apply")]
+    public required bool Apply { get; set; }
+
+    /// <summary>
+    ///     Into the request's own <c>bossNames</c> projection - the complement of legacy's keep
+    ///     filter. Empty when <see cref="Apply"/> is false.
+    /// </summary>
+    [JsonPropertyName("removeIndices")]
+    public required List<int> RemoveIndices { get; set; }
+}

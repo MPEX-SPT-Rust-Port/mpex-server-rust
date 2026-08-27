@@ -1,6 +1,7 @@
 using System.Reflection;
 using HarmonyLib;
 using NUnit.Framework;
+using SPTarkov.Server.Core.Generators;
 using SPTarkov.Server.Core.Generators.Loot;
 using SPTarkov.Server.Core.Models.Common;
 using SPTarkov.Server.Core.Models.Eft.Common;
@@ -17,12 +18,13 @@ namespace UnitTests.Tests.Services;
 
 /// <summary>
 /// Pins the mod hook contract for raid setup: a Harmony patch on any member of the family's frozen
-/// set must route <em>all four</em> call sites - both <see cref="RaidTimeAdjustmentService"/> ones and
-/// both <see cref="LocationLifecycleService"/> ones - to the legacy path, because those are the only
-/// bodies the patch can hook. The set is deliberately family-wide, so a patch on a lifecycle member
-/// forces the time-adjustment service back to C# as well.
+/// set must route <em>all five</em> call sites - both <see cref="RaidTimeAdjustmentService"/> ones,
+/// both <see cref="LocationLifecycleService"/> ones and <see cref="PmcWaveGenerator"/>'s - to the
+/// legacy path, because those are the only bodies the patch can hook. The set is deliberately
+/// family-wide, so a patch on a lifecycle member forces the time-adjustment service back to C# as
+/// well.
 ///
-/// The two entry points are the exceptions: they are the dispatchers, and a patch there wraps
+/// The three entry points are the exceptions: they are the dispatchers, and a patch there wraps
 /// whichever path runs. So is <c>AdjustLootMultipliers</c>, which never left C#.
 ///
 /// Harmony patches are process-wide, so every patch is removed in a finally and the fixture never
@@ -66,6 +68,7 @@ public class RaidAdjustmentHookLivenessTests
 
     private RaidTimeAdjustmentService _raidTimeAdjustmentService = default!;
     private LocationLifecycleService _locationLifecycleService = default!;
+    private PmcWaveGenerator _pmcWaveGenerator = default!;
     private LocationConfig _locationConfig = default!;
     private LocationTable _locationTable = default!;
     private ProfileActivityService _profileActivityService = default!;
@@ -79,6 +82,7 @@ public class RaidAdjustmentHookLivenessTests
 
         _raidTimeAdjustmentService = di.GetService<RaidTimeAdjustmentService>();
         _locationLifecycleService = di.GetService<LocationLifecycleService>();
+        _pmcWaveGenerator = di.GetService<PmcWaveGenerator>();
         _locationConfig = di.GetService<LocationConfig>();
         _locationTable = di.GetService<LocationTable>();
         _profileActivityService = di.GetService<ProfileActivityService>();
@@ -125,7 +129,7 @@ public class RaidAdjustmentHookLivenessTests
                 $"patch on {member.Name} was not registered"
             );
 
-            AssertAllFourCallSites(LootGenerationPath.Legacy, $"a patch on {member.Name}");
+            AssertAllFiveCallSites(LootGenerationPath.Legacy, $"a patch on {member.Name}");
         }
         finally
         {
@@ -148,7 +152,7 @@ public class RaidAdjustmentHookLivenessTests
         {
             harmony.Patch(member, postfix: new HarmonyMethod(typeof(RaidAdjustmentHookLivenessTests), nameof(PatchFired)));
 
-            AssertAllFourCallSites(LootGenerationPath.Legacy, $"a patch on {member.Name}");
+            AssertAllFiveCallSites(LootGenerationPath.Legacy, $"a patch on {member.Name}");
 
             Assert.That(_patchFired, Is.True, $"postfix on {member.Name} never ran on the legacy path");
         }
@@ -159,8 +163,8 @@ public class RaidAdjustmentHookLivenessTests
     }
 
     /// <summary>
-    /// The two entry points are deliberately not in the frozen set: a patch on either wraps whichever
-    /// path runs, so the family keeps its native bodies and the patch still sees the call.
+    /// The three entry points are deliberately not in the frozen set: a patch on any of them wraps
+    /// whichever path runs, so the family keeps its native bodies and the patch still sees the call.
     /// </summary>
     [TestCaseSource(nameof(EntryPoints))]
     public void HarmonyPatchOnAnEntryPointWrapsTheNativeBodyWithoutForcingLegacy(MethodInfo entryPoint)
@@ -177,7 +181,7 @@ public class RaidAdjustmentHookLivenessTests
                 postfix: new HarmonyMethod(typeof(RaidAdjustmentHookLivenessTests), nameof(Postfix))
             );
 
-            AssertAllFourCallSites(LootGenerationPath.Native, $"a patch on {entryPoint.Name}");
+            AssertAllFiveCallSites(LootGenerationPath.Native, $"a patch on {entryPoint.Name}");
 
             Assert.That(_prefixFired, Is.True, $"prefix on {entryPoint.Name} never ran");
             Assert.That(_postfixFired, Is.True, $"postfix on {entryPoint.Name} never ran");
@@ -205,13 +209,48 @@ public class RaidAdjustmentHookLivenessTests
             harmony.Patch(target, postfix: new HarmonyMethod(typeof(RaidAdjustmentHookLivenessTests), nameof(PatchFired)));
 
             // The multiplier calls are gated on a percent below 100, and they precede the dispatch
-            AssertAllFourCallSites(
+            AssertAllFiveCallSites(
                 LootGenerationPath.Native,
                 "a patch on AdjustLootMultipliers",
                 MapChanges(dynamicLootPercent: 50, staticLootPercent: 50)
             );
 
             Assert.That(_patchFired, Is.True, "postfix on AdjustLootMultipliers never ran on the native arm");
+        }
+        finally
+        {
+            harmony.UnpatchSelf();
+        }
+    }
+
+    /// <summary>
+    /// The strongest shape of the dispatcher rule, on the entry point whose whole legacy body is
+    /// inline in it: a prefix that returns false takes <c>ApplyWaveChangesToMap</c> over outright, so
+    /// the mod's own wave policy runs in place of either arm - and the postfix beside it still
+    /// observes the call. A mod that wants to replace this pass never needs the family to decline.
+    /// </summary>
+    [Test]
+    public void AHarmonyPrefixOnApplyWaveChangesToMapCanTakeThePassOverEntirely()
+    {
+        var harmony = new Harmony("unit-tests.raid-adjustment-hook-liveness.ApplyWaveChangesToMap.skip");
+        var target = Member(typeof(PmcWaveGenerator), nameof(PmcWaveGenerator.ApplyWaveChangesToMap));
+
+        _postfixFired = false;
+        try
+        {
+            harmony.Patch(
+                target,
+                prefix: new HarmonyMethod(typeof(RaidAdjustmentHookLivenessTests), nameof(SkippingPrefix)),
+                postfix: new HarmonyMethod(typeof(RaidAdjustmentHookLivenessTests), nameof(Postfix))
+            );
+
+            var map = Clone();
+            Assert.That(map.BossLocationSpawn, Is.Not.Empty, $"{RaidMap} lost its boss spawns, so the skip is no longer observable");
+
+            _pmcWaveGenerator.ApplyWaveChangesToMap(map);
+
+            Assert.That(map.BossLocationSpawn, Is.Empty, "the prefix did not take the pass over");
+            Assert.That(_postfixFired, Is.True, "the postfix never ran beside the skipping prefix");
         }
         finally
         {
@@ -230,6 +269,11 @@ public class RaidAdjustmentHookLivenessTests
     /// <c>AdjustExtracts</c>, <c>AdjustBotHostilitySettings</c> and <c>IsSide</c> (the side test
     /// <c>raid_start.rs</c> carries as <c>is_side</c>). A future port that moves another lifecycle
     /// member natively must extend this tail alongside the builder's set.
+    ///
+    /// <see cref="PmcWaveGenerator"/> adds nothing to it and is the reason the sweep half stays
+    /// typed to <see cref="RaidTimeAdjustmentService"/>: the generator's whole legacy body is inline
+    /// in <c>ApplyWaveChangesToMap</c>, which is a dispatcher, so the fifth export bypasses no
+    /// hookable member of its own. A port that splits that body into helpers has to add them here.
     /// </summary>
     [Test]
     public void TheHookableSetIsTheFrozenSurfaceMinusTheDispatchersAndTheCarveOut()
@@ -256,6 +300,7 @@ public class RaidAdjustmentHookLivenessTests
         {
             Member(typeof(RaidTimeAdjustmentService), nameof(RaidTimeAdjustmentService.MakeAdjustmentsToMap)),
             Member(typeof(RaidTimeAdjustmentService), nameof(RaidTimeAdjustmentService.GetRaidAdjustments)),
+            Member(typeof(PmcWaveGenerator), nameof(PmcWaveGenerator.ApplyWaveChangesToMap)),
         }.Select(member => new TestCaseData(member).SetArgDisplayNames(member.Name));
     }
 
@@ -297,7 +342,7 @@ public class RaidAdjustmentHookLivenessTests
     /// <summary>
     /// Every call site the family has, each asserted against the path it was expected to take.
     /// </summary>
-    private void AssertAllFourCallSites(LootGenerationPath expected, string what, RaidChanges? changes = null)
+    private void AssertAllFiveCallSites(LootGenerationPath expected, string what, RaidChanges? changes = null)
     {
         RunGetRaidAdjustments();
         Assert.That(_raidTimeAdjustmentService.LastPathTaken, Is.EqualTo(expected), $"{what}: GetRaidAdjustments took the wrong path");
@@ -314,6 +359,9 @@ public class RaidAdjustmentHookLivenessTests
             Is.EqualTo(expected),
             $"{what}: AdjustBotHostilitySettings took the wrong path"
         );
+
+        RunApplyWaveChangesToMap();
+        Assert.That(_pmcWaveGenerator.LastPathTaken, Is.EqualTo(expected), $"{what}: ApplyWaveChangesToMap took the wrong path");
     }
 
     /// <summary>
@@ -369,6 +417,16 @@ public class RaidAdjustmentHookLivenessTests
         _adjustBotHostilitySettings.Invoke(_locationLifecycleService, [Clone()]);
     }
 
+    /// <summary>
+    /// One PMC wave pass against a clone, which is what the real pipeline hands it. The shipped
+    /// config's own wave objects are spliced into the clone by reference and nothing writes to them,
+    /// so this leaves no state behind.
+    /// </summary>
+    private void RunApplyWaveChangesToMap()
+    {
+        _pmcWaveGenerator.ApplyWaveChangesToMap(Clone());
+    }
+
     private LocationBase Clone()
     {
         return _cloner.Clone(_locationTable.GetLocation(RaidMap)!.Base);
@@ -406,5 +464,15 @@ public class RaidAdjustmentHookLivenessTests
     private static void Postfix()
     {
         _postfixFired = true;
+    }
+
+    /// <summary>
+    /// A mod replacing the PMC wave pass outright: its own write, and <c>false</c> so the original
+    /// never runs.
+    /// </summary>
+    private static bool SkippingPrefix(LocationBase location)
+    {
+        location.BossLocationSpawn = [];
+        return false;
     }
 }
