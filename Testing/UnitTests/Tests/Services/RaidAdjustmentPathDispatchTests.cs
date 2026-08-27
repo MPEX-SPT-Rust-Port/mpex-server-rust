@@ -87,6 +87,7 @@ public class RaidAdjustmentPathDispatchTests
     private LocationConfig _locationConfig = default!;
     private LocationTable _locationTable = default!;
     private ICloner _cloner = default!;
+    private bool _originalForceLegacy;
 
     [OneTimeSetUp]
     public void OneTimeSetUp()
@@ -98,12 +99,16 @@ public class RaidAdjustmentPathDispatchTests
         _locationConfig = di.GetService<LocationConfig>();
         _locationTable = di.GetService<LocationTable>();
         _cloner = di.GetService<ICloner>();
+
+        _originalForceLegacy = _locationConfig.ForceLegacyRaidAdjustments;
     }
 
     [TearDown]
     public void TearDown()
     {
-        _locationConfig.ForceLegacyRaidAdjustments = false;
+        // The captured value, not false: a tree shipping the flag on would otherwise have it
+        // silently flipped for every fixture that runs after this one
+        _locationConfig.ForceLegacyRaidAdjustments = _originalForceLegacy;
     }
 
     /// <summary>
