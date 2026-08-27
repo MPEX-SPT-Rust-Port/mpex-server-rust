@@ -604,6 +604,24 @@ public class RaidAdjustmentParityTests
     }
 
     /// <summary>
+    /// Legacy touches <c>BotLocationModifier</c> only from inside its per-role loop, so a config with
+    /// no roles at all never reads it - and the member is not <c>required</c>, so a mod-added
+    /// <c>base.json</c> that omits it deserialises to null. Both are mod-shaped, and together they
+    /// are the one case where materialising the hostility list up front would throw where legacy
+    /// returns silently.
+    /// </summary>
+    [Test]
+    public void AnEmptyHostilityConfigNeverTouchesTheLocationModifierOnBothPaths()
+    {
+        var legacy = AdjustHostility(forceLegacy: true, new Dictionary<string, HostilitySettings>(), NoLocationModifier);
+        var native = AdjustHostility(forceLegacy: false, new Dictionary<string, HostilitySettings>(), NoLocationModifier);
+
+        AssertMapParity(legacy, native, "empty-hostility-config");
+
+        Assert.That(native.BotLocationModifier, Is.Null, "the pass put a modifier back on a map that had none");
+    }
+
+    /// <summary>
     /// Aliasing channel 3: the refill appends the live <c>PmcConfig</c> instances themselves, so a
     /// later write through the map reaches the config. Structural, so the native arm has to hand the
     /// applier the very same objects rather than decoded copies.
@@ -692,10 +710,16 @@ public class RaidAdjustmentParityTests
     ///     Replaces <c>pmcConfig.HostilitySettings</c> for the duration of the call; null leaves the
     ///     shipped one alone
     /// </param>
-    private LocationBase AdjustHostility(bool forceLegacy, Dictionary<string, HostilitySettings>? hostilitySettings = null)
+    /// <param name="prepare">Runs on the clone before the pass, as a mod's own base.json would have</param>
+    private LocationBase AdjustHostility(
+        bool forceLegacy,
+        Dictionary<string, HostilitySettings>? hostilitySettings = null,
+        Action<LocationBase>? prepare = null
+    )
     {
         var expected = forceLegacy ? LootGenerationPath.Legacy : LootGenerationPath.Native;
         var map = _cloner.Clone(_locationTable.GetLocation(RaidStartMap)!.Base)!;
+        prepare?.Invoke(map);
 
         var originalSettings = _pmcConfig.HostilitySettings;
         var originalForce = _locationConfig.ForceLegacyRaidAdjustments;
@@ -798,6 +822,14 @@ public class RaidAdjustmentParityTests
                 ],
             },
         };
+    }
+
+    /// <summary>
+    /// A map whose <c>base.json</c> omitted <c>BotLocationModifier</c> altogether.
+    /// </summary>
+    private static void NoLocationModifier(LocationBase map)
+    {
+        map.BotLocationModifier = null!;
     }
 
     /// <summary>

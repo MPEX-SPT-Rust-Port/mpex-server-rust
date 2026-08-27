@@ -150,7 +150,12 @@ public class RaidNativeRequestBuilder(
         LocationBase location
     )
     {
-        var hostilityList = location.BotLocationModifier.AdditionalHostilitySettings?.ToList();
+        // Legacy derefs BotLocationModifier inside its per-role loop, so a config with no roles at
+        // all never touches it - and the member is not `required`, so a mod-added base.json that
+        // omitted it deserialises to null. Materialising unconditionally would NRE where legacy
+        // no-ops, so the deref waits for a role to need it
+        var hostilityList =
+            pmcConfig.HostilitySettings.Count > 0 ? location.BotLocationModifier.AdditionalHostilitySettings?.ToList() : null;
 
         var request = new AdjustHostilityRequest
         {
