@@ -31,6 +31,7 @@ use crate::raid::{
 use crate::runtime::runtime;
 use crate::scav_case::{ScavCaseError, generate_scav_case_rewards};
 use crate::verify;
+use crate::weather::{WeatherError, generate_weather};
 
 pub const STATUS_OK: i32 = 0;
 pub const STATUS_BAD_ARGS: i32 = 1;
@@ -156,6 +157,22 @@ impl FfiFailure for AchievementError {
     fn into_message(self) -> String {
         match self {
             AchievementError::Failed(message) => message,
+        }
+    }
+}
+
+impl FfiFailure for WeatherError {
+    fn status(&self) -> i32 {
+        // No stale-epoch arm: the weather pass rides no resident DB — the season table and the
+        // preset blocks both cross in the request — so every failure is a generation failure.
+        match self {
+            WeatherError::Failed(_) => STATUS_ERROR,
+        }
+    }
+
+    fn into_message(self) -> String {
+        match self {
+            WeatherError::Failed(message) => message,
         }
     }
 }
@@ -804,6 +821,34 @@ pub unsafe extern "C" fn spt_get_achievement_statistics(
             |response| {
                 serde_json::to_vec(&response)
                     .expect("achievement statistics serialization cannot fail")
+            },
+        )
+    }
+}
+
+/// One `Weather` object's draws plus the preset-weight state transition —
+/// `WeatherGenerator.GenerateWeather` and the three `IWeatherPreset` strategies. The season's
+/// refill table, `isNight` and the date/time tail are all resolved C#-side and cross in the
+/// request. The only export of the three that draws, so the only one honouring `testSeed`.
+///
+/// # Safety
+/// See `spt_generate_static_containers`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn spt_generate_weather(
+    req_ptr: *const u8,
+    req_len: usize,
+    out_ptr: *mut *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    unsafe {
+        run_generator_with(
+            req_ptr,
+            req_len,
+            out_ptr,
+            out_len,
+            generate_weather,
+            |response| {
+                serde_json::to_vec(&response).expect("weather response serialization cannot fail")
             },
         )
     }
@@ -3271,6 +3316,64 @@ mod tests {
         assert_eq!(status, STATUS_ERROR);
         let message = String::from_utf8(out).unwrap();
         assert!(message.contains("duplicate achievement id: a"), "{message}");
+    }
+
+    /// Seeded, but every value is pinned *by construction* rather than by the seed: a
+    /// single-entry `refillWeights` picks RAINY with no draw at all, every weighted table has one
+    /// candidate, and every range is degenerate. The camelCase names here are the contract
+    /// `Native/Weather/` mirrors byte-for-byte.
+    const WEATHER_REQUEST: &[u8] = br#"{
+        "presetWeights": [],
+        "previousPreset": null,
+        "refillWeights": [{"preset": 2, "weight": 5.0}],
+        "presetBlocks": [{"preset": 2, "block": {
+            "clouds": [{"value": "0.5", "weight": 1.0}],
+            "windSpeed": [{"value": "1", "weight": 1.0}],
+            "windDirection": [{"direction": 3, "weight": 1.0}],
+            "windGustiness": {"min": 2.0, "max": 2.0},
+            "rain": [{"value": "2", "weight": 1.0}],
+            "rainIntensity": {"min": 3.0, "max": 3.0},
+            "fog": [{"value": "0.25", "weight": 1.0}],
+            "tempDay": {"min": 4.0, "max": 4.0},
+            "tempNight": {"min": 5.0, "max": 5.0},
+            "pressure": {"min": 1.0, "max": 1.0}
+        }}],
+        "isNight": false,
+        "testSeed": 42
+    }"#;
+
+    #[test]
+    fn generate_weather_roundtrips_result_json() {
+        let (status, out) = call_generate(spt_generate_weather, WEATHER_REQUEST);
+        assert_eq!(status, STATUS_OK);
+
+        // Byte-exact, so the assertion pins every response name Task 7's C# record must carry.
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            concat!(
+                r#"{"chosenPreset":2,"refilled":true,"#,
+                r#""updatedPresetWeights":[{"preset":2,"weight":5.0}],"#,
+                r#""cloud":0.5,"windSpeed":1.0,"windGustiness":2.0,"rain":2.0,"#,
+                r#""rainIntensity":3.0,"fog":0.25,"pressure":1.0,"temperature":4.0,"#,
+                r#""windDirection":3}"#
+            )
+        );
+    }
+
+    #[test]
+    fn an_absent_chosen_weather_block_crosses_as_an_error_message() {
+        let (status, out) = call_generate(
+            spt_generate_weather,
+            br#"{"presetWeights":[{"preset":1,"weight":5.0}],"refillWeights":[],
+                 "presetBlocks":[{"preset":1,"block":null}],"isNight":false}"#,
+        );
+
+        assert_eq!(status, STATUS_ERROR);
+        let message = String::from_utf8(out).unwrap();
+        assert!(
+            message.contains("no preset weights for chosen preset 1"),
+            "{message}"
+        );
     }
 
     /// `child` is an Item whose chain climbs through the `node` root to a `root` the view never

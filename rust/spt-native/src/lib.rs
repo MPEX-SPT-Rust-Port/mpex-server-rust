@@ -16,5 +16,6 @@ pub mod raid;
 pub mod runtime;
 pub mod scav_case;
 pub mod verify;
+pub mod weather;
 
 pub const ABI_VERSION: u32 = 36;
