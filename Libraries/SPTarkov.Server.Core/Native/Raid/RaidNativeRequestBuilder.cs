@@ -109,7 +109,13 @@ public class RaidNativeRequestBuilder(
     /// <param name="mapBase">The map to work out deltas for</param>
     public (MakeAdjustmentsRequest Request, List<Exit> Exits) BuildMakeAdjustmentsRequest(RaidChanges raidAdjustments, LocationBase mapBase)
     {
-        var exits = mapBase.Exits.ToList();
+        // None of the three arrays is `required`, so a mod-added base.json that omits one
+        // deserialises to null. Legacy touches each only conditionally - Exits behind a non-empty
+        // ExitChanges, Waves and BossLocationSpawn behind AdjustWaves - and those conditions are
+        // partly native-side, so the projection cannot wait for them the way the hostility builder
+        // does. An empty projection lands every absent-array case on legacy's no-op side instead of
+        // NREing here; the would-have-touched half is the booked divergence
+        var exits = mapBase.Exits?.ToList() ?? [];
 
         // The same load-bearing lowercasing legacy GetMapSettings does, and TryGetValue so the
         // projection itself cannot throw ahead of the exit walk that legacy runs first
@@ -121,9 +127,9 @@ public class RaidNativeRequestBuilder(
             RaidChanges = raidAdjustments,
             MapSettings = new MapSettingsAdjustState { Found = found, Value = mapSettings?.AdjustWaves },
             Exits = exits.Select(exit => exit.Name).ToList(),
-            Waves = mapBase.Waves.Select(wave => new WaveTimesWire { TimeMin = wave.TimeMin, TimeMax = wave.TimeMax }).ToList(),
-            BossSpawns = mapBase
-                .BossLocationSpawn.Select(boss => new BossSpawnWire { BossName = boss.BossName, Time = boss.Time })
+            Waves = (mapBase.Waves ?? []).Select(wave => new WaveTimesWire { TimeMin = wave.TimeMin, TimeMax = wave.TimeMax }).ToList(),
+            BossSpawns = (mapBase.BossLocationSpawn ?? [])
+                .Select(boss => new BossSpawnWire { BossName = boss.BossName, Time = boss.Time })
                 .ToList(),
         };
 
@@ -243,7 +249,9 @@ public class RaidNativeRequestBuilder(
     {
         var trainExits = new List<TrainExitWire>();
 
-        foreach (var exit in mapBase.Exits)
+        // Null-tolerant for the same reason as BuildMakeAdjustmentsRequest: legacy walks Exits only
+        // once the side and chance gates passed, which the projection cannot know yet
+        foreach (var exit in mapBase.Exits ?? [])
         {
             if (exit.PassageRequirement != RequirementState.Train)
             {

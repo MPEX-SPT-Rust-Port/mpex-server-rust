@@ -1100,7 +1100,13 @@ in `NativeMethods.cs` and `SptNative.cs`. The two services keep their full 4.1.2
   type changes. The extracts pass gates on the side *before* calling its builder — legacy returns
   after one string compare for every PMC raid, so the projection, the `GetLocation` deref and the FFI
   crossing wait for a scav side; on the native arm `IsSide` is frozen-set-guaranteed unpatched, so
-  the C#-side gate is the very test `raid_start.rs` would have run.
+  the C#-side gate is the very test `raid_start.rs` would have run. The map builder's three arrays
+  (`Exits`, `Waves`, `BossLocationSpawn` — none `required`, so a mod-added base.json omitting one
+  deserializes to null) project null-tolerantly as empty: legacy's touch conditions (non-empty
+  `ExitChanges`, `AdjustWaves`, the chance roll) are partly native-side and cannot be reproduced at
+  projection time, so the empty projection lands every absent-array case on legacy's *no-op* side.
+  The residual booked divergence is the would-have-touched half: an absent array legacy would have
+  enumerated NREs there and no-ops (exits: warns) natively.
 - **Quirk 4's "a `None` time seeds the offset" sub-state is unreachable** and the spec and plan still
   assert it — recorded here so nobody re-litigates it. The offset filter's pmc set is a strict subset of
   the keep filter's, and the keep filter admits a pmc spawn only with `Some(time) > start`, so every
