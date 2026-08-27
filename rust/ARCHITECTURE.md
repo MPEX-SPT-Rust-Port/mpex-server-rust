@@ -76,7 +76,7 @@ different assembly: `Libraries/SPTarkov.Common/Native/NativeMethods.cs`, with
 
 | Path | Role |
 |---|---|
-| `src/lib.rs` | Module roots and `ABI_VERSION` (currently 33; must equal `SptNative.ExpectedAbiVersion`) |
+| `src/lib.rs` | Module roots and `ABI_VERSION` (currently 34; must equal `SptNative.ExpectedAbiVersion`) |
 | `src/ffi.rs` | The C-ABI surface. The **only** module containing `unsafe` |
 | `src/runtime.rs` | Process-wide multi-thread tokio runtime, `OnceLock`-built. Used only by `verify` and the fused load |
 | `src/verify.rs` | Hashes `SPT_Data` with XXH3-128 and diffs it against `checks.dat`. `verify_collecting` is the same walk with a `want` predicate that whole-reads and returns matching files' bytes, so the fused load reads each file once |
@@ -93,6 +93,7 @@ different assembly: `Libraries/SPTarkov.Common/Native/NativeMethods.cs`, with
 | `src/ragfair/` | One batch of dynamic flea offers: the assort walk, pricing, barter schemes, the offers |
 | `src/quest/` | One repeatable quest of any of the four types, its rewards, and the mutated quest-type pool |
 | `src/scav_case/` | One scav case craft's rewards: the pools, the per-rarity picks, the money/ammo/preset arms |
+| `src/raid/` | One scav raid's setup: the reduced raid time, the loot percents and the train-exit changes. The one family that rides no resident DB |
 | `src/base_class.rs` | The whole `ItemBaseClassService` cache in one call, over `loot/item_helper.rs`'s `ItemBaseClassCache` |
 | `src/linked_items.rs` | The whole `RagfairLinkedItemService` table in one call: the bidirectional slot/chamber/cartridge walk plus the revolver camora-ammo edge case |
 | `src/profile.rs` | The disk half of `SaveServer`: list, load, save, delete over `user/profiles/`, with `FileUtil.WriteFileAsync`'s temp-then-rename protocol. Stateless — the directory arrives in every request — and profile bytes are opaque, written and read verbatim. The live `SptProfile` graph, the MD5 dirty-check and `BackupService` all stay C# |
@@ -123,7 +124,12 @@ trades that for build time — `opt-level = 1`, sixteen codegen units, line-tabl
 ### FFI boundary (`ffi.rs`)
 
 Thirty-five `extern "C"` exports: two trivial (`spt_native_abi_version`, `spt_buf_free`), thirteen taking a
-UTF-8 JSON generation request, four taking a profile-persistence request (`{schema, dir}`, plus `id`
+UTF-8 JSON generation request — the newest of them, `spt_get_raid_adjustments`, is the raid-setup family's:
+one scav raid's time adjustment, JSON in and JSON out (`{applied, chosenReductionPercent,
+mapSettingsMissingValue, raidChanges}`, whose `raidChanges` is the real `RaidChanges` record and whose
+`exitChanges` entries carry `ExtractChange`'s PascalCase names), and **naming no resident-DB epoch**
+because every config and location member it reads is projected into the request —
+four taking a profile-persistence request (`{schema, dir}`, plus `id`
 on all but `spt_profile_list` and the profile text on `spt_profile_save` — see *`src/profile.rs`*;
 `spt_profile_load` returns a framed byte response, `[u32-LE header length][{"found":bool}][file
 bytes]`),
@@ -167,11 +173,13 @@ caller releases with `spt_buf_free`; so do `spt_console_read_line` and `spt_log_
   the runtime around a hand-written wrapper, and `spt_db_resident_digest`, because it takes no request to
   parse — just a null check, a `catch_unwind` and a `write_buffer`.
 - Status codes: `STATUS_OK` 0, `STATUS_BAD_ARGS` 1, `STATUS_PANIC` 2, `STATUS_ERROR` 3, `STATUS_STALE_EPOCH` 4
-  (every generation export since flip #6). **Quest and scav case never return 2**: they catch the generator's
-  panic themselves and report it as 3 carrying the message, because those families port a C#-sanctioned throw
-  as a panic — a generation failure, not a library bug. The cost is that a real port bug in those two also
-  arrives as 3, indistinguishable from a sanctioned failure. Deliberate.
-- **Every family rides the resident DB (Phase 1 complete at flip #6, ABI 27): ragfair, the repeatable
+  (every generation export since flip #6). **Quest, scav case and raid never return 2**: they catch the
+  generator's panic themselves and report it as 3 carrying the message. Quest and scav case do it because they
+  port a C#-sanctioned throw as a panic — a generation failure, not a library bug; raid returns both of its
+  sanctioned throws as a `RaidError` and keeps the `catch_unwind` as a backstop. The cost is that a real port
+  bug in those three also arrives as 3, indistinguishable from a sanctioned failure. Deliberate. Raid never
+  returns 4 either: it rides no resident DB, so its `FfiFailure` impl has a single arm.
+- **Every family but raid rides the resident DB (Phase 1 complete at flip #6, ABI 27): ragfair, the repeatable
   quest, the two startup one-shots (base-class cache, linked-item table), the loot pair — location loot and
   reward loot — the scav case, and the bot family's two exports.** `spt_db_publish` (called by C#'s
   `DbPublisher` whenever `DatabaseMutationStamp` has moved) makes six roots resident in `db.rs` — templates,
@@ -377,13 +385,27 @@ where they look like they do in today's C# file. One native call generates **one
 | `generator.rs` | `Generators/ScavCaseRewardGenerator.cs` | The craft: the reward pool (rebuilt per request, not cached on an instance), the per-rarity counts and price bands, the picks, and the money/ammo/preset arms |
 | `models.rs` | — | Request/response envelopes only; the DB/EFT types they carry are `loot::models`' |
 
+### `src/raid/`
+
+The one family that rides **no** resident DB: every config and location member it reads is projected into the
+request, so a call names no epoch. Like `scav_case`, its `mod.rs` holds the entry point and carries a `//!`
+header — read it first, because it states the family's citation convention: a bare `` `:N` `` is a line of
+`Services/InRaid/RaidTimeAdjustmentService.cs`. One native call adjusts **one** raid.
+
+| Module | Stands in for | What it does |
+|---|---|---|
+| `mod.rs` | `Services/InRaid/RaidTimeAdjustmentService.cs` (entry) | `get_raid_adjustments` — installs the seed guard and `catch_unwind`s the pass, so a panic arrives as an error message rather than `STATUS_PANIC` (see *Conventions*) |
+| `adjustments.rs` | `Services/InRaid/RaidTimeAdjustmentService.cs` (`:201-374`) | `GetRaidAdjustments` and the two halves it calls, `GetMapSettings` and `GetExitAdjustments`: the chance roll, the weighted reduction percent, the loot-percent floors, and the per-train-exit disable-or-reduce walk |
+| `models.rs` | `Models/Spt/Location/RaidChanges.cs` (the response's inner half) | Wire types — a fresh contract, mirrored member-for-member C#-side |
+
 ### Conventions
 
 These are what keep the port correct; break one and output silently diverges from C#.
 
 - **Every ported module names its C# source in its `//!` header**, with a line range where the port is a slice
   of a larger file. Read that header before changing anything. (The modules with no C# counterpart — the
-  infrastructure, `db.rs`, and every family `mod.rs` but `scav_case`'s — say so or carry no header at all.)
+  infrastructure, `db.rs`, and every family `mod.rs` but `scav_case`'s and `raid`'s — say so or carry no
+  header at all.)
 - **Deviations are marked `Deviation:`, at the scope they apply to** — module header, item doc, or the line
   itself. Grep the bare form; the bolding is inconsistent between families.
 - **RNG draw order is a contract.** The bot family states it up front: its generator modules open with an

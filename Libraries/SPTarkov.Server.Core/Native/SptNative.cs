@@ -110,13 +110,14 @@ internal enum LootExport
     BotInventoryBatch,
     RepeatableQuest,
     ScavCaseRewards,
+    RaidAdjustments,
     ItemBaseClass,
     RagfairLinkedItems,
 }
 
 public static class SptNative
 {
-    private const uint ExpectedAbiVersion = 33;
+    private const uint ExpectedAbiVersion = 34;
 
     // ffi.rs
     private const int StatusOk = 0;
@@ -239,6 +240,17 @@ public static class SptNative
     public static ScavCaseRewardsResponse GenerateScavCaseRewards(ScavCaseRewardsRequest request)
     {
         return Generate<ScavCaseRewardsResponse>(LootExport.ScavCaseRewards, JsonSerializer.SerializeToUtf8Bytes(request, LootJsonOptions));
+    }
+
+    /// <summary>
+    /// Rolls one scav raid's time adjustment: the reduced raid time, the loot percents and the
+    /// train-exit changes. The raid family rides no resident DB - every config and location member
+    /// it reads is projected into the request - so the call names no epoch and can never go stale.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">Generation failed, or the native side misbehaved.</exception>
+    public static TResponse GetRaidAdjustments<TResponse>(ReadOnlySpan<byte> requestUtf8)
+    {
+        return Generate<TResponse>(LootExport.RaidAdjustments, requestUtf8);
     }
 
     /// <summary>
@@ -976,6 +988,7 @@ public static class SptNative
                     &outPtr,
                     &outLen
                 ),
+                LootExport.RaidAdjustments => NativeMethods.GetRaidAdjustments(requestPtr, (nuint)requestUtf8.Length, &outPtr, &outLen),
                 LootExport.ItemBaseClass => NativeMethods.BuildItemBaseClassCache(requestPtr, (nuint)requestUtf8.Length, &outPtr, &outLen),
                 LootExport.RagfairLinkedItems => NativeMethods.BuildRagfairLinkedItemTable(
                     requestPtr,
