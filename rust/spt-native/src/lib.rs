@@ -1,3 +1,4 @@
+pub mod achievements;
 pub mod base_class;
 pub mod bot;
 pub mod console;

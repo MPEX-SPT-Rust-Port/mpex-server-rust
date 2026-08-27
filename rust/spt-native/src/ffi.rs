@@ -9,6 +9,7 @@ use rayon::prelude::*;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
+use crate::achievements::{AchievementError, get_achievement_statistics};
 use crate::base_class::{self, BaseClassRequest, BaseClassResponse};
 use crate::bot::bot_inventory_generator::{generate_inventory, generate_inventory_batch};
 use crate::diag::DiagSink;
@@ -139,6 +140,22 @@ impl FfiFailure for RaidError {
     fn into_message(self) -> String {
         match self {
             RaidError::Failed(message) => message,
+        }
+    }
+}
+
+impl FfiFailure for AchievementError {
+    fn status(&self) -> i32 {
+        // No stale-epoch arm: the statistics pass rides no resident DB — the whole projection
+        // crosses in the request — so every failure is a generation failure.
+        match self {
+            AchievementError::Failed(_) => STATUS_ERROR,
+        }
+    }
+
+    fn into_message(self) -> String {
+        match self {
+            AchievementError::Failed(message) => message,
         }
     }
 }
@@ -758,6 +775,35 @@ pub unsafe extern "C" fn spt_apply_pmc_wave_changes(
             apply_pmc_wave_changes,
             |response| {
                 serde_json::to_vec(&response).expect("pmc wave response serialization cannot fail")
+            },
+        )
+    }
+}
+
+/// The percentage of profiles holding each achievement, in the achievement table's own order —
+/// `AchievementController.GetAchievementStatics`'s loop. The profile fetch and the
+/// `AchievementProfileIdBlacklist` filter stay C#-side; the whole projection crosses in the
+/// request. Names no epoch, draws nothing.
+///
+/// # Safety
+/// See `spt_generate_static_containers`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn spt_get_achievement_statistics(
+    req_ptr: *const u8,
+    req_len: usize,
+    out_ptr: *mut *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    unsafe {
+        run_generator_with(
+            req_ptr,
+            req_len,
+            out_ptr,
+            out_len,
+            get_achievement_statistics,
+            |response| {
+                serde_json::to_vec(&response)
+                    .expect("achievement statistics serialization cannot fail")
             },
         )
     }
@@ -3193,6 +3239,38 @@ mod tests {
             message.contains("EOF while parsing"),
             "expected the serde error, got: {message}"
         );
+    }
+
+    /// The camelCase names here are the contract `Native/Achievements/` mirrors byte-for-byte.
+    const ACHIEVEMENT_REQUEST: &[u8] = br#"{
+        "achievementIds": ["b", "a", "", "c"],
+        "profileCount": 8,
+        "completedSets": [["a", "b"], ["b"], ["a"]]
+    }"#;
+
+    #[test]
+    fn achievement_statistics_roundtrips_result_json() {
+        let (status, out) = call_generate(spt_get_achievement_statistics, ACHIEVEMENT_REQUEST);
+        assert_eq!(status, STATUS_OK);
+
+        // Byte-exact: the empty id is skipped, and the map keeps achievement order — which is
+        // observable JSON, so the assertion pins the order as well as the names.
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            r#"{"elements":{"b":25,"a":25,"c":0}}"#
+        );
+    }
+
+    #[test]
+    fn a_duplicate_achievement_id_crosses_as_an_error_message() {
+        let (status, out) = call_generate(
+            spt_get_achievement_statistics,
+            br#"{"achievementIds":["a","a"],"profileCount":1,"completedSets":[]}"#,
+        );
+
+        assert_eq!(status, STATUS_ERROR);
+        let message = String::from_utf8(out).unwrap();
+        assert!(message.contains("duplicate achievement id: a"), "{message}");
     }
 
     /// `child` is an Item whose chain climbs through the `node` root to a `root` the view never
