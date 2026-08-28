@@ -9,16 +9,17 @@ What is ported to `rust/spt-native`, what is known-broken, and what comes next. 
 
 Ported and native by default: the loot family, the bot family, dynamic ragfair offer generation, the
 repeatable-quest family, scav case rewards, the item base-class cache build, the ragfair
-linked-item table and map/raid setup. Each keeps its full 4.1.2 C# implementation as a **legacy
+linked-item table, map/raid setup (the PMC wave splice included), achievement statistics and weather
+generation. Each keeps its full 4.1.2 C# implementation as a **legacy
 path**, selected automatically when a mod hooks it or manually via a config flag. The log pipeline is
 ported too and has no legacy path: `SPTLoggerDispatcher` hands every line to the crate, and the
 crate owns the terminal outright — raw `Console.Write*`, prompts, title and clear all cross the
 boundary.
 
-Thirty-nine C-ABI exports (`src/ffi.rs`) carry all of it, JSON in and JSON out — except the ragfair
+Forty-two C-ABI exports (`src/ffi.rs`) carry all of it, JSON in and JSON out — except the ragfair
 response (a framed MessagePack envelope), `spt_db_load` and `spt_profile_load` (a JSON header frame
 followed by the loaded file bytes), and the log and console exports (the fields of one line, or raw
-bytes, directly). Current ABI 35.
+bytes, directly). Current ABI 36.
 
 Since Phase 6b those exports are reached two ways, one per process. A shipped Linux build resolves
 them out of the `mpex-server` executable, which links the crate as an rlib; dev builds, the test run
@@ -59,6 +60,9 @@ and every lever short of the remaining state-ownership phases is spent.
 | One scav raid's time adjustment — the weighted reduction draw, the loot percents and the train-exit changes | `RaidTimeAdjustmentService.GetRaidAdjustments` | `spt_get_raid_adjustments` |
 | Map setup for a shortened raid — exit retiming, wave drop/retime, PMC spawn pruning and offset; the loot multipliers are the carve-out and stay C# | `RaidTimeAdjustmentService.MakeAdjustmentsToMap` | `spt_make_adjustments_to_map` |
 | Raid start — per-role bot hostility merges and the scav extract append | `LocationLifecycleService.AdjustBotHostilitySettings` / `AdjustExtracts` | `spt_adjust_bot_hostility_settings`, `spt_adjust_extracts` |
+| The PMC wave splice — the existing-wave removal filter and the custom-wave append | `PmcWaveGenerator.ApplyWaveChangesToMap` | `spt_apply_pmc_wave_changes` |
+| Achievement completion percentages across every non-blacklisted profile | `AchievementController.GetAchievementStatics` | `spt_get_achievement_statistics` |
+| One weather roll — the preset state's refill/decay/pick and every per-preset draw | `WeatherGenerator.GenerateWeather` | `spt_generate_weather` |
 
 Also working: mod-added fields on game data survive the round trip (`#[serde(flatten)] extra` maps
 mirroring Ceciler's `[JsonExtensionData]`); native generator diagnostics render and log themselves
@@ -432,8 +436,9 @@ against C#'s `OrdinalIgnoreCase`. The parity gates would catch any of them.
    **on** since Phase 2, counts only where `WriteBarrier.Installed`), or anyone with
    `DisableNativeRequestCache` — send the C#-built view bundle as `viewsOverride` on every call,
    never touching resident state. Full protocol: the epoch-protocol section of
-   `docs/superpowers/specs/2026-08-17-rust-state-ownership-design.md`. Thirteen of the seventeen
-   generation exports ride it (flips #1-#6) — the raid four carry no epoch at all — both slice
+   `docs/superpowers/specs/2026-08-17-rust-state-ownership-design.md`. Thirteen of the twenty
+   generation exports ride it (flips #1-#6) — the raid five, achievement statistics and weather
+   carry no epoch at all — both slice
    caches are gone, and the eligibility rule plus the stale-epoch self-heal live once in
    `Native/Db/ResidentDbDispatch`; a family's own `ResidentDbEligible()` is a one-line wrapper.
 4. **RNG parity.** Both sides draw through the shared xoshiro256\*\* source behind test-only seams
@@ -461,7 +466,10 @@ the four quest generators add `QuestConfig` + `RepeatableQuestNativeRequestBuild
 `ScavCaseRewardGenerator` adds `ScavCaseNativeRequestBuilder` plus a further overload for the loot
 pair, `ItemBaseClassService` adds `ItemBaseClassNativeRequestBuilder` + `ItemConfig`,
 `RagfairLinkedItemService` adds `RagfairLinkedItemNativeRequestBuilder` + `RagfairConfig`,
-`RaidTimeAdjustmentService` and `LocationLifecycleService` each add `RaidNativeRequestBuilder`, and
+`RaidTimeAdjustmentService` and `LocationLifecycleService` each add `RaidNativeRequestBuilder`,
+`PmcWaveGenerator` adds it too (the fifth export rides the same builder),
+`AchievementController` adds `AchievementNativeRequestBuilder`,
+`WeatherGenerator` adds `WeatherNativeRequestBuilder`, and
 `BotInventoryGenerator` adds the loaded-mod list + `DbPublisher`, chaining its frozen 4.1.2 primary
 constructor. The container selects the overload; anything built through the frozen constructor gets a
 null builder — or a null `DbPublisher`, which `ResidentDbDispatch.Eligible` answers `false` to — and
@@ -474,7 +482,8 @@ no per-generator flag. Elsewhere: `BotConfig.ForceLegacyBotGeneration` and `Forc
 `RagfairConfig.ForceLegacyRagfairGeneration` and `ForceLegacyRagfairLinkedItemBuild`,
 `QuestConfig.ForceLegacyRepeatableQuestGeneration`, `ScavCaseConfig.ForceLegacyScavCaseGeneration`,
 `ItemConfig.ForceLegacyItemBaseClassHydration`, `LocationConfig.ForceLegacyRaidAdjustments` (covering
-all four raid exports across both services, on the `ForceLegacyLootGeneration` precedent), and
+all five raid exports across three classes, on the `ForceLegacyLootGeneration` precedent),
+`CoreConfig.ForceLegacyAchievementStatistics`, `WeatherConfig.ForceLegacyWeatherGeneration`, and
 `CoreConfig.ForceLegacyDatabaseImport` — the one flag that is not a generation path. Plus
 `TrustNativeRequestCacheWithMods` / `DisableNativeRequestCache`, the resident-DB eligibility gate, on
 `RagfairConfig`, `QuestConfig`, `ItemConfig`, `LocationConfig` (covering both loot generators),
@@ -490,20 +499,35 @@ dispatcher entry point itself — a patch there wraps whichever path runs, by de
 bots, the four generator classes; ragfair, `RagfairOfferGenerator`, `RagfairPriceService`,
 `RagfairServerHelper`, `RagfairAssortGenerator`; quests, the four `*QuestGenerator`s plus
 `RepeatableQuestRewardGenerator` and `RepeatableQuestHelper`; scav case, base class and the
-linked-item table, their own class only. Map/raid setup is the one **family-wide** set that spans two
+linked-item table, their own class only. Weather spans five classes with **seventeen** methods —
+`WeatherGenerator`'s `GetWeatherPresetWeightsBySeason`, `GenerateWeatherByPreset`,
+`GetWeatherWeightsByPreset`, `GetRaidTemperature` and `SetCurrentDateTime`, then `Generate` and
+`CanHandle` on each of `SunnyPreset`/`CloudyPreset`/`RainyPreset`, then `AbstractWeatherPreset`'s six
+draw helpers (`GetWeightedClouds`, `GetWeightedFog`, `GetWeightedRain`, `GetWeightedWindSpeed`,
+`GetWeightedWindDirection`, `GetRandomDouble`) — because the native arm reimplements every one of
+those bodies; without the preset entries a patch on `SunnyPreset.Generate` would leave the *type*
+check below intact and be silently bypassed. Map/raid setup is the one **family-wide** set that spans two
 services and is **member-scoped** on one of them: seven methods — `RaidTimeAdjustmentService`'s
 `GetMapSettings`, `AdjustWaves`, `AdjustPMCSpawns` and `GetExitAdjustments`, plus
 `LocationLifecycleService`'s `AdjustExtracts`, `AdjustBotHostilitySettings` and `IsSide` (the side
 test the native extract pass reimplements — its unmoved callers see a patch either way, so without
 the entry the moved pass would half-fire the hook) — and a patch on any one
-of them declines all four exports at once. Whole-type on `LocationLifecycleService` would de-native the
+of them declines all five exports at once: `PmcWaveGenerator.ApplyWaveChangesToMap` joined the family
+at ABI 36 and added **zero** members to that set, its only other members having no native arm.
+Whole-type on `LocationLifecycleService` would de-native the
 family on a patch to any of its 23 methods, `StartLocalRaidAsync` chief among them (member-scoped
 precedent: the seasonal pair above). `AdjustLootMultipliers` is deliberately outside it, the carve-out.
 A container-substituted subclass also flips — **except
 loot**, whose `UseLegacyPath` ends at the patch scan, so a `LootGenerator`/`LocationLootGenerator`
 subclass at a higher `TypePriority` still runs native. Bots additionally flip on an
-`InventoryMagGenComponents` set that isn't exactly the four built-ins. `PickupQuestGenerator`
-contributes **zero** frozen hookable members — its whole legacy body is inline in `Generate`.
+`InventoryMagGenComponents` set that isn't exactly the four built-ins; weather flips on the same
+shape one layer over, when the injected `IWeatherPreset` set's concrete types are not exactly
+`{SunnyPreset, CloudyPreset, RainyPreset}` — any extra, missing or substituted preset runs legacy,
+where the mod's own `CanHandle`/`Generate` fire for real. `PickupQuestGenerator`
+contributes **zero** frozen hookable members — its whole legacy body is inline in `Generate` — and so
+does `AchievementController`, which runs no frozen-member scan at all: `GetAchievements` is a bare
+field return that always runs C#, and nothing hookable is bypassed, so the flag, the null builder and
+the subclass check are its whole decline rule.
 
 **The bot wave batches before it iterates.** `BotController.GenerateBotWave` offers the wave to
 `BotWaveBatcher.TryGenerateWave` first; the batcher returns null — and the unchanged per-bot path
@@ -1007,7 +1031,7 @@ same wiring but has never been executed on Windows.
 
 **Phase 6b — rlib linkage flip (landed 2026-08-21, no ABI bump).** The resident DB's statics now live
 in the executable: `mpex-server` links `spt-native` as an rlib and is linked with
-`-Wl,--export-dynamic`, so all 39 exports sit in its own `.dynsym`, and the two
+`-Wl,--export-dynamic`, so all 42 exports sit in its own `.dynsym`, and the two
 `SetDllImportResolver` callbacks try `NativeLibrary.GetMainProgramHandle()` before the cdylib. The
 published Linux tree therefore ships no cdylib and `SPT.Server.Linux` is no longer a working
 direct-run fallback there.
@@ -1189,14 +1213,16 @@ in `NativeMethods.cs` and `SptNative.cs`. The two services keep their full 4.1.2
   post-merge**: the previous family's ledger keeps its own historical number legitimately at a dozen
   sites, so grep only to confirm the five, never to rewrite every hit.
   **The export counts are a second silent-merge surface, and a worse one**, because nothing asserts
-  them: the count sits in prose — as "Thirty-nine" and as bare `39` — across `ARCHITECTURE.md`, this
+  them: the count sits in prose — spelled out *and* as a bare numeral — across `ARCHITECTURE.md`, this
   file and `rust/ARCHITECTURE.md` (no per-file tally here; a prior one was wrong twice over, so grep
   is the procedure), and a parallel branch adding exports writes *its* number into the same files
   on adjacent-but-distinct lines — so git merges both cleanly and leaves the tree internally
   inconsistent with no conflict to notice. The integrator's procedure is therefore to **re-derive the
   count, never to sum the branch deltas**: `grep -c '#\[unsafe(no_mangle)\]' rust/spt-native/src/ffi.rs`
-  is the ground truth. "Seventeen" (the generation subset) and "twenty-five" (the buffer-returning
-  subset) move with it, as do the bare-numeric `39`s in the rlib-anchor prose.
+  is the ground truth. The two subset counts in `rust/ARCHITECTURE.md` — the generation exports and
+  the buffer-returning ones — move with it, as do the bare numerals in the rlib-anchor prose. The
+  literals are deliberately not quoted here: they went stale the first time this paragraph was
+  re-read, at ABI 36.
 - **No standing benchmark fixture**, by ruling rather than omission: menu and raid-start frequency has
   no throughput to win, so Phase 5's decision 11 applies — the free number off the parity run is
   recorded (BENCHMARK.md § Map/raid setup) and no `[Explicit]` harness is added.
@@ -1255,11 +1281,106 @@ in `NativeMethods.cs` and `SptNative.cs`. The two services keep their full 4.1.2
   spawn that reaches the offset has a time. The dead legs are ported and commented anyway, per the
   fidelity bar; their reachable halves are tested.
 
+**Tier 1 tail (ABI 36, landed 2026-08-27).** TODO.md's whole remaining tier 1 — #4 `PmcWaveGenerator`,
+#5 `AchievementController`, #6 `WeatherGenerator` — in one PR, behind `spt_apply_pmc_wave_changes`,
+`spt_get_achievement_statistics` and `spt_generate_weather`. **Completeness-only, by the queue's own
+framing: no measurable win, and BENCHMARK.md gets no section.** None of the three sits on a hot path:
+the wave splice runs once per raid start, and the other two answer cold client routes
+(`AchievementCallbacks`, `WeatherController.Generate` — weather also fills `RaidWeatherService`'s
+forecast cache, a loop deliberately left unbatched because its between-call time-period draw is
+C#-side state). All three ride the raid family's wire pattern — no epoch, no resident
+reads, no `viewsOverride`, everything in the request — so all three add a single-armed `FfiFailure`
+and none can return `STATUS_STALE_EPOCH`. `src/raid/pmc_waves.rs` (76 lines) joins the raid module as
+its fifth export; `src/achievements.rs` (170) and `src/weather.rs` (826) are crate-root modules on the
+`base_class.rs` shape.
+
+- **The PMC wave splice is the fifth raid export and added nothing to the family.** It shares
+  `RaidNativeRequestBuilder`, `LocationConfig.ForceLegacyRaidAdjustments` and the seven-member frozen
+  set unchanged — a patch on any of those seven declines all five. Booked divergences, all
+  projection-shaped and all on the raid family's existing null-tolerant-projection precedent:
+  a null `BossLocationSpawn` with every gate passing projects `[]` and no-ops into the append where
+  legacy NREs (unreachable on shipped data); `waveCount` projects `wavesToAdd?.Count ?? 0`, so a mod
+  config carrying a null list *value* (`"customPmcWaves": {"bigmap": null}`) no-ops natively where
+  legacy NREs on the unguarded `.Count` — mod-only, the model declares the dictionary `required` and
+  non-null-valued. The `location.Id.ToLowerInvariant()` lookup stays C#-side and is **gated behind
+  `RemoveExistingPmcWaves` exactly as legacy gates it**, which closes the null-`Id` quadrant rather
+  than booking it: with the flag false the builder sends `wavesFound=false, waveCount=0, bossNames=[]`
+  without touching `Id` or `BossLocationSpawn`, so both arms no-op; with it set, both arms NRE
+  identically. A null `BossName` survives the removal filter on both arms — `HashSet.Contains(null)`
+  is false, and the native side is an exact string match on the two PMC names.
+- **Achievement statistics contribute zero frozen members.** `ProfileHelper.GetProfiles`, the
+  `CoreConfig.Features.AchievementProfileIdBlacklist` filter and the whole profile projection stay
+  C#-side, so patches and blacklist mutations are live on **both** arms; the only other member of the
+  controller is a bare field return that always runs C#. Nothing hookable is bypassed, so there is no
+  `AnyFrozenMemberPatched` scan — `CoreConfig.ForceLegacyAchievementStatistics`, the null builder and
+  the subclass check are the whole decline rule. The response is an `IndexMap` in achievement-table
+  order, because the legacy dictionary serializes to the client in insertion order and that order is
+  observable JSON, and the percentage uses the banker's-rounding twin — `(int)Math.Round(double)` is
+  banker's, `f64::round` is not. **Booked divergence:** duplicate achievement ids make legacy's
+  `stats.Add` throw `ArgumentException` where native returns an error message crossing as the usual
+  `InvalidOperationException`. Unreachable on shipped data; the changed exception type is the
+  established pattern for mod-reachable malformed data.
+- **Weather froze seventeen members across five classes and added a type check on top.** The set
+  spans every body the native arm reimplements (listed under *What flips to legacy*); on top of it,
+  native runs only when the injected `IEnumerable<IWeatherPreset>`'s concrete types are exactly the
+  three built-ins — the bots' `InventoryMagGenComponents` precedent. The two catch different attacks:
+  the type check catches *substitution*, the frozen members catch a Harmony patch on a built-in
+  preset, which never changes the type set.
+- **Weather pre-resolves three things C#-side, and each is argued rather than assumed.**
+  `refillWeights` is fetched unconditionally where legacy fetches it only on refill — unobservable,
+  because every member whose patch could see the changed call pattern is frozen. `isNight` comes off
+  `weatherHelper.IsHourAtNightTime`, a **live collaborator call**, at the same seconds-as-ticks
+  expression legacy uses (an epoch-seconds value fed to the ticks constructor, so day/night comes off
+  a year-0001 date — fixing it would change generated weather server-wide). And the applier calls
+  `SetCurrentDateTime(result, timestamp)` with the **original, possibly-null** argument, never the
+  resolved one: the explicit-timestamp branch's `FormatToBsgDate` runs `ToUniversalTime()` on the
+  `Kind=Unspecified` result of `GetDateTimeFromTimeStamp`, which .NET reinterprets as *local* time, so
+  substituting the resolved value would shift `Date`/`Time` by the host offset on any non-UTC host —
+  and `WeatherController.Generate` passes a null timestamp on every `client/weather` request.
+- **Booked divergences (weather).** On null-timestamp calls `isNight` derives from its own
+  `GetTimeStamp()` read, one extra clock read ≤ 1 s ahead of the reads `SetCurrentDateTime` makes
+  later; there is no field-level skew, since `Date`/`Time`/`Timestamp` all come from
+  `SetCurrentDateTime` running legacy's exact branch, and the seconds-as-ticks quirk lands every epoch
+  value in hour 0 regardless. The rest are error-message-instead-of-exception cases, every one
+  mod-only: an absent chosen preset block (legacy `KeyNotFoundException` at the `["default"]` indexer),
+  which is also the route an **out-of-range preset** takes — a mod-shipped state key outside 1–3 has no
+  `presetBlocks` entry by construction, so native errors where legacy warns, falls back to the Sunny
+  *generator*, and then throws `KeyNotFoundException` on the same missing block anyway; an unparsable
+  picked weight value (legacy `FormatException`); a drawn-but-absent block member (legacy NRE — every
+  `PresetWeights` member but `Clouds` is nullable and legacy dereferences lazily, so the wire projects
+  member-wise null-tolerantly and native errors at the same place legacy NREs); the empty preset state
+  (legacy `ArgumentOutOfRangeException` out of `WeightedRandomHelper`'s uniform shortcut); and the
+  empty season table (`GetValueOrDefault("default")` returns null rather than throwing, so a config
+  missing both the season key and `"default"` projects empty and native errors on the next refill
+  where legacy NREs). One case diverges in *ordering* rather than type: with an empty state **and** an
+  empty refill table, legacy replaces the caller's `ref` dict with the clone *before* the pick throws,
+  where native errors before the applier touches the dict — observable only to a caller that catches,
+  and no caller does.
+- **Weighted values parse at draw time, only the picked one, and the two parsers disagree at the
+  edges — in both directions.** A non-numeric entry that is never picked never throws on either arm,
+  matching legacy. When one *is* picked, Rust's `str::parse::<f64>` accepts `inf`/`+inf`/`-inf`, which
+  `double.Parse(s, CultureInfo.InvariantCulture)` rejects as a `FormatException` (invariant culture's
+  symbol is `Infinity`, not `inf`); conversely C# accepts thousands separators — `double.Parse`'s
+  two-argument overload carries `NumberStyles.AllowThousands`, so `"1,234.5"` parses there and errors
+  natively. `Infinity` and `NaN` parse on both, case-insensitively. Mod-only either way: shipped
+  weather configs carry plain decimal strings.
+- **The `ICloner` on the refill path is never called natively** — the standing documented collaborator
+  hole, recorded here rather than fixed. Legacy clones the season table into the caller's state
+  through `cloner.Clone`; native rebuilds it from the wire with clone semantics but without the call,
+  so a patched or substituted `ICloner` does not observe the refill.
+- **No new resident state, no new root, no new flag beyond the two.**
+  `CoreConfig.ForceLegacyAchievementStatistics` and `WeatherConfig.ForceLegacyWeatherGeneration` are
+  C#-default `false` and unserialised, like every force-legacy flag but `forceLegacyLootGeneration`.
+  Weather is the only one of the three that draws, so it is the only one carrying `testSeed`; its
+  parity fixture re-seeds **both arms before every call**, because `TestSeedGuard::install` starts a
+  fresh xoshiro stream per FFI call while a single legacy `SeededRandomSource` continues its stream
+  across calls — a one-seed multi-call comparison fails by construction.
+
 **The ported 4.1.2 quirks are documented at their call sites** as numbered `Quirk N` comments in
 `rust/spt-native/src/quest/*.rs`, `src/scav_case/generator.rs`, `src/base_class.rs`,
 `src/linked_items.rs`, `src/loot/container_extensions.rs` and `src/raid/*.rs`; grep
 case-insensitively for `quirk`,
-which also turns up unnumbered ones in the bot, loot and ragfair modules. Some numbers have no Rust
+which also turns up unnumbered ones in the bot, loot, ragfair and weather modules. Some numbers have no Rust
 site because the quirk lives on the C# side or on no code at all. The behaviour these preserve is
 deliberate; reverting one silently diverges from C#. The bare `:N` line numbers in those comments are
 the 4.1.2 body the port was written against, not the current file.

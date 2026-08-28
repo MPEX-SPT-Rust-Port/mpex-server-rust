@@ -128,14 +128,18 @@ Registration happens in one place — the host's `ProgramHelpers.RegisterSptServ
 exists. It maps each file in `SPT_Data/configs/` to a `BaseConfig` subclass in `Models/Spt/Config/`;
 the host registers each as its own singleton, so services inject e.g. `BotConfig` directly.
 
-Eight `ForceLegacy*` flags are the Rust-port escape hatches, one per dual-path family:
+Ten `ForceLegacy*` flags are the Rust-port escape hatches, one per dual-path family:
 `LocationConfig.ForceLegacyLootGeneration`, `BotConfig.ForceLegacyBotGeneration`,
 `RagfairConfig.ForceLegacyRagfairGeneration`, `RagfairConfig.ForceLegacyRagfairLinkedItemBuild`,
 `QuestConfig.ForceLegacyRepeatableQuestGeneration`, `ScavCaseConfig.ForceLegacyScavCaseGeneration`,
-`ItemConfig.ForceLegacyItemBaseClassHydration` and `LocationConfig.ForceLegacyRaidAdjustments`
-(the raid family is one flag across two services). `CoreConfig.ForceLegacyDatabaseImport` is a ninth
-`ForceLegacy*` flag but is **not** in that count — the database import is not a dual-path generation
-family. Narrower knobs: `BotConfig.ForcePerBotGeneration` (unbatch waves without leaving native)
+`ItemConfig.ForceLegacyItemBaseClassHydration`, `LocationConfig.ForceLegacyRaidAdjustments`
+(the raid family is one flag across three classes — the two in-raid services plus `PmcWaveGenerator`),
+`CoreConfig.ForceLegacyAchievementStatistics` and `WeatherConfig.ForceLegacyWeatherGeneration`.
+`CoreConfig.ForceLegacyDatabaseImport` is an eleventh `ForceLegacy*` flag but is **not** in that
+count, and **the config it lives on is not what excludes it** — `ForceLegacyAchievementStatistics`
+sits on `CoreConfig` too and does count. What excludes it is that the database import is not a
+dual-path *generation* family: there is no per-call native/legacy dispatcher to flip, only a
+startup-path choice. Narrower knobs: `BotConfig.ForcePerBotGeneration` (unbatch waves without leaving native)
 and, on the six configs backing the resident-DB families (`LocationConfig`, `ItemConfig`,
 `ScavCaseConfig`, `QuestConfig`, `RagfairConfig`, `BotConfig`), `TrustNativeRequestCacheWithMods` /
 `DisableNativeRequestCache` — the names are legacy, they now gate resident-DB eligibility rather
@@ -273,7 +277,7 @@ Repo-wide style rules are in [CLAUDE.md](../../CLAUDE.md). Core-specific:
 |-------------------|-------------------|-------|
 | Escape from Tarkov game client | Sync HTTP | `Models/Eft/` mirrors its wire types field-for-field; `SptHttpListener` owns the wire concerns. GET, PUT, POST only |
 | Game client (notifications) | Async WebSocket | `Servers/WebSocketServer` + `IWebSocketConnectionHandler`; payloads in `Models/Eft/Ws/`. Every matching handler is notified, not just the first |
-| `rust/spt-native` (cdylib) | Sync FFI, C ABI | `Native/NativeMethods.cs` (`[LibraryImport]`) + `SptNative`; thirteen dual-path classes, plus `DbPublisher`'s resident-DB publishes and `spt_locales_set` |
+| `rust/spt-native` (cdylib) | Sync FFI, C ABI | `Native/NativeMethods.cs` (`[LibraryImport]`) + `SptNative`; sixteen dual-path classes, plus `DbPublisher`'s resident-DB publishes and `spt_locales_set` |
 | `SPT_Data/configs/` | Batch read pre-DI | `Loaders/ConfigLoader`, a static class — it runs before the container exists |
 | `user/profiles/` | Async read/write | `Servers/SaveServer`; `Routers/SaveLoad/` and `Migration/` patch old data on load |
 | Mod assemblies | Reflective + HarmonyX | `[Injectable]` replacement via `IOnDIConstruct`; a live patch on a frozen 4.1.2 member flips that family to its legacy path |

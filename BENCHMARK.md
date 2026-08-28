@@ -1315,6 +1315,11 @@ Two Release invocations of `dotnet test -c Release --filter "FullyQualifiedName~
 72 tests, **11.60 s and 11.81 s** total wall — most of which is the shared database-load fixture the
 suite builds once. Per-test, as the `verbosity=detailed` invocation reports them:
 
+**The run predates the family's fifth export.** `spt_apply_pmc_wave_changes` landed at ABI 36 and is
+deliberately unmeasured — TODO.md #4 is a completeness-only port, so the ruling below (no fixture)
+covers it too. The four names in the round-trip row are the four that existed at `55fbbd8`, not the
+family as it stands.
+
 | Case | reads |
 |---|---|
 | `AScavRequestMatchesOnBothPaths` — both arms of `GetRaidAdjustments` on a shipped map plus a whole-map compare | **< 1 ms** (3 of 4 cases; lighthouse at seed 42 read 2 ms) |
