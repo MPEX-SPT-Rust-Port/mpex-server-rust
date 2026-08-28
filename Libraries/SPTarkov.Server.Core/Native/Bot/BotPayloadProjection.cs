@@ -170,7 +170,10 @@ internal static class BotPayloadProjection
                 BotLevel = botGenerationDetails.BotLevel,
                 IsPmc = botGenerationDetails.IsPmc,
                 IsPlayerScav = botGenerationDetails.IsPlayerScav,
-                GameVersion = botGenerationDetails.GameVersion,
+                // Only PMCs are ever given one (GenerateBotPrelude sets it inside its IsPmc branch),
+                // and both native reads of it are gated on isPmc - but the field is required on the
+                // wire, so a scav's null has to become the empty string rather than a missing member
+                GameVersion = botGenerationDetails.GameVersion ?? string.Empty,
                 Location = botGenerationDetails.Location,
                 BotDifficulty = botGenerationDetails.BotDifficulty ?? string.Empty,
                 ClearBotContainerCacheAfterGeneration = botGenerationDetails.ClearBotContainerCacheAfterGeneration,
