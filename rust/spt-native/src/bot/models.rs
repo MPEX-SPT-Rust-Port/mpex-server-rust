@@ -907,9 +907,9 @@ pub struct BotInventoryResult {
 
 /// The native slice of one `KarmaLevel` entry from `PlayerScavConfig`. Ships per call —
 /// override sends have no resident config to read, and the payload is small on a cold path.
-/// `itemLimits` deliberately does not cross (applied C#-side; spec § Seam). All four members
-/// are nullable C#-side — `#[serde(default)]` lands a missing member on an empty map instead
-/// of `STATUS_BAD_ARGS` (every sibling bot wire struct defaults its fields).
+/// `itemLimits` deliberately does not cross (applied C#-side; spec § Seam). `#[serde(default)]`
+/// on all four members is defensive rather than required — it lands a missing member on an empty
+/// map instead of `STATUS_BAD_ARGS`, the way every sibling bot wire struct defaults its fields.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct KarmaSettingsWire {
@@ -927,6 +927,22 @@ pub struct KarmaSettingsWire {
     /// `KarmaLevel.LootItemsToAddChancePercent` — tpl → % chance, iterated in insertion order.
     #[serde(default)]
     pub loot_items_to_add_chance_percent: IndexMap<String, f64>,
+}
+
+/// `spt_generate_player_scav` request: the single-bot request plus the karma slice. The template
+/// arrives with `generation` already karma-adjusted C#-side (item limits feed C#-side loot-pool
+/// hydration) and `chances`/`inventory` raw for the native karma pieces.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GeneratePlayerScavRequest {
+    pub epoch: u64,
+    #[serde(default)]
+    pub views_override: Option<Box<BotViewsWire>>,
+    pub shared: SharedBotVaryingWire,
+    pub bot: BotSliceWire,
+    pub template: BotTemplateWire,
+    pub loot_pools: BotLootCacheWire,
+    pub karma: KarmaSettingsWire,
 }
 
 #[cfg(test)]
