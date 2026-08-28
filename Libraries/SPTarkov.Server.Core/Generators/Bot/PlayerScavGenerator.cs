@@ -196,7 +196,12 @@ public class PlayerScavGenerator(
     /// </summary>
     private bool UseLegacyPath()
     {
-        if (_requestBuilder is null || _botInventoryGenerator is null || playerScavConfig.ForceLegacyPlayerScavGeneration)
+        if (
+            _requestBuilder is null
+            || _botInventoryGenerator is null
+            || _seasonalEventService is null
+            || playerScavConfig.ForceLegacyPlayerScavGeneration
+        )
         {
             return true;
         }

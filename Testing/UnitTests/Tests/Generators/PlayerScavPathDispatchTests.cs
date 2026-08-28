@@ -212,6 +212,36 @@ public class PlayerScavPathDispatchTests
     }
 
     /// <summary>
+    /// <c>ResidentDbDispatch.Eligible</c> is true whenever no mods are loaded, so every other case
+    /// in the player scav fixtures takes the resident-DB arm and the C#-built views override is
+    /// never assembled at all. The kill switch is the one flag that reaches the override arm
+    /// without leaving the native path (<c>ScavCaseResidentDbTests.KillSwitchForcesTheViewsOverride</c>
+    /// precedent).
+    /// </summary>
+    [Test]
+    public void TheKillSwitchForcesTheViewsOverrideWithoutLeavingTheNativePath()
+    {
+        _playerScavConfig.DisableNativeRequestCache = true;
+
+        try
+        {
+            var scav = Generate(_playerScavGenerator);
+
+            Assert.That(_playerScavGenerator.LastPathTaken, Is.EqualTo(LootGenerationPath.Native));
+            Assert.That(scav.Inventory!.Items, Is.Not.Empty, "the views-override arm produced no inventory");
+            Assert.That(
+                _playerScavGenerator.LastSendIncludedViewsOverride,
+                Is.True,
+                "the kill switch must force the C#-built views override"
+            );
+        }
+        finally
+        {
+            _playerScavConfig.DisableNativeRequestCache = false;
+        }
+    }
+
+    /// <summary>
     /// The native arm never calls <c>BotInventoryGenerator.GenerateInventory</c>, so a mod's
     /// subclass of it would be bypassed silently - and <c>BotInventoryGenerator.UseLegacyPath</c>
     /// carries no self-type check, so the fall back has to be decided on the player scav side.

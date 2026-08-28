@@ -5,6 +5,7 @@ using SPTarkov.Server.Core.Generators.Bot;
 using SPTarkov.Server.Core.Generators.Loot;
 using SPTarkov.Server.Core.Models.Common;
 using SPTarkov.Server.Core.Models.Eft.Common;
+using SPTarkov.Server.Core.Models.Enums;
 using SPTarkov.Server.Core.Models.Spt.Config;
 using SPTarkov.Server.Core.Services.Bot;
 using SPTarkov.Server.Core.Utils;
@@ -37,10 +38,22 @@ public class PlayerScavParityTests
     private const string KarmaLevelKey = "0";
 
     /// <summary>
+    /// The equipment slot the non-zero karma case suppresses. A 70% slot on the assault template,
+    /// so a -100 modifier takes it out of every roll instead of only most of them.
+    /// </summary>
+    private const string HeadwearSlotId = "Headwear";
+
+    /// <summary>
     /// A one-slot item the shipped config already hands out at higher karma levels, so it is known
     /// to fit the containers the additional-loot pass writes into.
     /// </summary>
     private static readonly MongoId _knownLootTpl = new("5c94bbff86f7747ee735c08f");
+
+    /// <summary>
+    /// The heaviest tpl in the assault template's Scabbard pool, and Scabbard is a 100% slot - so
+    /// it is a tpl that genuinely would have generated, not a blacklist entry that never bit.
+    /// </summary>
+    private static readonly MongoId _blacklistedScabbardTpl = new("57e26fc7245977162a14b800");
 
     private PlayerScavGenerator _playerScavGenerator = default!;
     private BotInventoryGenerator _botInventoryGenerator = default!;
@@ -75,13 +88,58 @@ public class PlayerScavParityTests
         karmaSettings.LootItemsToAddChancePercent = [];
         try
         {
-            var legacy = Normalize(GenerateArm(forceLegacy: true, Seed));
-            var native = Normalize(GenerateArm(forceLegacy: false, Seed));
-
-            LootJsonAssert.AssertEqual(legacy, native, $"karma={KarmaLevelKey}", Seed);
+            AssertTheArmsAgree($"karma={KarmaLevelKey}");
         }
         finally
         {
+            karmaSettings.LootItemsToAddChancePercent = originalChances;
+        }
+    }
+
+    /// <summary>
+    /// The same comparison with the karma level given real work to do. The shipped level the
+    /// fixture profile selects has all-zero <c>modifiers</c> and an empty <c>equipmentBlacklist</c>,
+    /// so the case above only ever reaches the zero-skip branches and never compares a
+    /// karma-adjusted legacy template against a karma-adjusted native one. Here the legacy arm
+    /// folds both into the template C#-side and the native arm folds them in inside the export,
+    /// which is precisely the seam the port moved. Karma application draws no randomness on either
+    /// arm, so the two streams stay aligned under the dual-seam seeding.
+    /// </summary>
+    [Test]
+    public void TheArmsAgreeFieldForFieldUnderNonZeroKarma()
+    {
+        var karmaSettings = _playerScavConfig.KarmaLevel[KarmaLevelKey];
+        var originalChances = karmaSettings.LootItemsToAddChancePercent;
+        var originalEquipmentModifiers = karmaSettings.Modifiers.Equipment;
+        var originalBlacklist = karmaSettings.EquipmentBlacklist;
+
+        karmaSettings.LootItemsToAddChancePercent = [];
+        karmaSettings.Modifiers.Equipment = new Dictionary<string, double> { { "Headwear", -100.0 } };
+        karmaSettings.EquipmentBlacklist = new Dictionary<EquipmentSlots, List<MongoId>>
+        {
+            { EquipmentSlots.Scabbard, [_blacklistedScabbardTpl] },
+        };
+        try
+        {
+            var scav = AssertTheArmsAgree($"karma={KarmaLevelKey}+modifiers");
+
+            // Two arms agreeing on a karma slice neither of them applied would be a vacuous pass,
+            // so pin the effect as well as the agreement.
+            Assert.That(
+                scav.Inventory!.Items!.Any(item => item.SlotId == HeadwearSlotId),
+                Is.False,
+                "the -100 headwear modifier did not take: the slot still generated"
+            );
+            Assert.That(
+                scav.Inventory!.Items!.Any(item => item.Template == _blacklistedScabbardTpl),
+                Is.False,
+                "the equipment blacklist did not take: the blacklisted scabbard still generated"
+            );
+        }
+        finally
+        {
+            karmaSettings.EquipmentBlacklist = originalBlacklist;
+            karmaSettings.Modifiers.Equipment = originalEquipmentModifiers;
             karmaSettings.LootItemsToAddChancePercent = originalChances;
         }
     }
@@ -114,6 +172,20 @@ public class PlayerScavParityTests
         _playerScavGenerator.Generate(_sessionId);
 
         Assert.That(_playerScavGenerator.LastPathTaken, Is.EqualTo(LootGenerationPath.Native));
+    }
+
+    /// <summary>
+    /// Both arms at the same seed, compared field for field under the two sanctioned masks. Returns
+    /// the native scav, so a caller can additionally pin that the config it mutated actually bit.
+    /// </summary>
+    private PmcData AssertTheArmsAgree(string label)
+    {
+        var legacy = GenerateArm(forceLegacy: true, Seed);
+        var native = GenerateArm(forceLegacy: false, Seed);
+
+        LootJsonAssert.AssertEqual(Normalize(legacy), Normalize(native), label, Seed);
+
+        return native;
     }
 
     private void AssertCertainAdditionalLootIsAdded(bool forceLegacy)
@@ -195,10 +267,16 @@ public class PlayerScavParityTests
                 _playerScavGenerator.LastPathTaken,
                 Is.EqualTo(forceLegacy ? LootGenerationPath.Legacy : LootGenerationPath.Native)
             );
-            // Fail fast on silent fallback before comparing anything (BotParityTests precedent):
-            // the legacy arm's inventory must still ride the native bot export, or the parity
-            // diff reads like a karma-seam leak.
-            Assert.That(_botInventoryGenerator.LastPathTaken, Is.EqualTo(LootGenerationPath.Native));
+            if (forceLegacy)
+            {
+                // Fail fast on silent fallback before comparing anything (BotParityTests
+                // precedent): the legacy arm's inventory must still ride the native bot export, or
+                // the parity diff reads like a karma-seam leak. Legacy-only, because the native arm
+                // never calls GenerateInventory at all - there the field still holds whatever the
+                // previous arm left in it.
+                Assert.That(_botInventoryGenerator.LastPathTaken, Is.EqualTo(LootGenerationPath.Native));
+            }
+
             return result;
         }
         finally
