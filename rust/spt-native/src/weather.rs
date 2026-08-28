@@ -188,7 +188,9 @@ fn generate(request: &GenerateWeatherRequest) -> Result<GenerateWeatherResponse,
     // `GetWeatherWeightsByPreset` (`:116-121`), already run C#-side including its `["default"]`
     // fallback. Absent = legacy's `KeyNotFoundException`, as a message — which is also where an
     // out-of-range chosen preset lands, since D10 enumerates the enum and mints no entry for it
-    // (spec step 8: no native warning arm, no native fallback).
+    // (spec step 8: no native warning arm, no native fallback). The dispatcher no longer sends
+    // such presets — out-of-enum keys decline to legacy C#-side — so only a direct FFI caller
+    // can land here that way.
     let block = request
         .preset_blocks
         .iter()

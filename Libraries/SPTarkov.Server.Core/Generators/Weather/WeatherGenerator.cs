@@ -18,7 +18,8 @@ namespace SPTarkov.Server.Core.Generators.Weather;
 /// the legacy path - it is the frozen mod contract - and runs instead of the native path when a
 /// Harmony patch on any member of the frozen set is detected, when the injected
 /// <see cref="IWeatherPreset"/> set is not exactly the three built-ins, when a mod substituted the
-/// generator, when the frozen constructor built the instance or when
+/// generator, when the frozen constructor built the instance, when a crossing weight table carries a
+/// <see cref="WeatherPreset"/> key outside the enum or when
 /// <see cref="WeatherConfig.ForceLegacyWeatherGeneration"/> is set, so mod hooks fire with genuine
 /// baseline semantics.
 /// </summary>
@@ -102,6 +103,19 @@ public class WeatherGenerator(
     }
 
     /// <summary>
+    ///     Whether a weight table carries a <see cref="WeatherPreset"/> key outside the enum.
+    ///     <c>EftEnumConverter</c> parses an undefined numeric JSON key into the enum, so a
+    ///     config-edited <c>weather.json</c> can put one into the crossing tables. Legacy still
+    ///     generates for such a key - <see cref="GenerateWeatherByPreset"/> warns and falls back to
+    ///     the sunny generator - while the native arm mints preset blocks for the defined members
+    ///     only and has no fallback arm of its own, so it has to run legacy instead.
+    /// </summary>
+    private static bool HasOutOfEnumPresetKey(Dictionary<WeatherPreset, double>? weights)
+    {
+        return weights is not null && weights.Keys.Any(preset => !Enum.IsDefined(preset));
+    }
+
+    /// <summary>
     /// Generate a weather object to send to client
     /// </summary>
     /// <param name="currentSeason">What season is weather being generated for</param>
@@ -118,64 +132,72 @@ public class WeatherGenerator(
     {
         if (!UseLegacyPath())
         {
-            LastPathTaken = LootGenerationPath.Native;
+            // Fetched ahead of the path decision: the out-of-enum guard below and the request read
+            // the same table, and the native arm keeps its single unconditional fetch
+            var refillWeights = GetWeatherPresetWeightsBySeason(currentSeason);
 
-            // effectiveTimestamp exists ONLY to derive isNight - SetCurrentDateTime below gets the
-            // ORIGINAL nullable timestamp. Substituting the resolved value would flip null-timestamp
-            // calls (client/weather, always null) onto the branch whose FormatToBsgDate applies
-            // ToUniversalTime() to a Kind=Unspecified DateTime - a host-timezone Date/Time shift
-            var effectiveTimestamp = timestamp ?? timeUtil.GetTimeStamp();
-
-            // The seconds-as-ticks quirk preserved at legacy's exact expression - and the live
-            // WeatherHelper call keeps a patch there firing on this arm
-            var isNight = weatherHelper.IsHourAtNightTime(new DateTime(effectiveTimestamp).Hour);
-
-            var request = _requestBuilder!.BuildGenerateWeatherRequest(
-                presetWeights,
-                previousPreset,
-                GetWeatherPresetWeightsBySeason(currentSeason),
-                isNight,
-                NativeTestSeed
-            );
-            var response = _requestBuilder.SendGenerateWeather(request);
-
-            var result = new Models.Eft.Weather.Weather
+            if (!HasOutOfEnumPresetKey(presetWeights) && !HasOutOfEnumPresetKey(refillWeights))
             {
-                Pressure = response.Pressure,
-                Temperature = response.Temperature,
-                Fog = response.Fog,
-                RainIntensity = response.RainIntensity,
-                Rain = response.Rain,
-                WindGustiness = response.WindGustiness,
-                WindDirection = (WindDirection)response.WindDirection,
-                WindSpeed = response.WindSpeed,
-                Cloud = response.Cloud,
-                Time = string.Empty,
-                Date = string.Empty,
-                Timestamp = 0,
-                SptInRaidTimestamp = 0,
-            };
+                LastPathTaken = LootGenerationPath.Native;
 
-            SetCurrentDateTime(result, timestamp); // the ORIGINAL nullable argument - see above
-            result.SptChosenPreset = (WeatherPreset)response.ChosenPreset;
+                // effectiveTimestamp exists ONLY to derive isNight - SetCurrentDateTime below gets
+                // the ORIGINAL nullable timestamp. Substituting the resolved value would flip
+                // null-timestamp calls (client/weather, always null) onto the branch whose
+                // FormatToBsgDate applies ToUniversalTime() to a Kind=Unspecified DateTime - a
+                // host-timezone Date/Time shift
+                var effectiveTimestamp = timestamp ?? timeUtil.GetTimeStamp();
 
-            // State write-back: refill replaced the reference in legacy, everything else mutated in
-            // place - both preserved
-            if (response.Refilled)
-            {
-                presetWeights = new Dictionary<WeatherPreset, double>();
+                // The seconds-as-ticks quirk preserved at legacy's exact expression - and the live
+                // WeatherHelper call keeps a patch there firing on this arm
+                var isNight = weatherHelper.IsHourAtNightTime(new DateTime(effectiveTimestamp).Hour);
+
+                var request = _requestBuilder!.BuildGenerateWeatherRequest(
+                    presetWeights,
+                    previousPreset,
+                    refillWeights,
+                    isNight,
+                    NativeTestSeed
+                );
+                var response = _requestBuilder.SendGenerateWeather(request);
+
+                var result = new Models.Eft.Weather.Weather
+                {
+                    Pressure = response.Pressure,
+                    Temperature = response.Temperature,
+                    Fog = response.Fog,
+                    RainIntensity = response.RainIntensity,
+                    Rain = response.Rain,
+                    WindGustiness = response.WindGustiness,
+                    WindDirection = (WindDirection)response.WindDirection,
+                    WindSpeed = response.WindSpeed,
+                    Cloud = response.Cloud,
+                    Time = string.Empty,
+                    Date = string.Empty,
+                    Timestamp = 0,
+                    SptInRaidTimestamp = 0,
+                };
+
+                SetCurrentDateTime(result, timestamp); // the ORIGINAL nullable argument - see above
+                result.SptChosenPreset = (WeatherPreset)response.ChosenPreset;
+
+                // State write-back: refill replaced the reference in legacy, everything else mutated
+                // in place - both preserved
+                if (response.Refilled)
+                {
+                    presetWeights = new Dictionary<WeatherPreset, double>();
+                }
+                else
+                {
+                    presetWeights.Clear();
+                }
+
+                foreach (var entry in response.UpdatedPresetWeights)
+                {
+                    presetWeights[(WeatherPreset)entry.Preset] = entry.Weight;
+                }
+
+                return result;
             }
-            else
-            {
-                presetWeights.Clear();
-            }
-
-            foreach (var entry in response.UpdatedPresetWeights)
-            {
-                presetWeights[(WeatherPreset)entry.Preset] = entry.Weight;
-            }
-
-            return result;
         }
 
         LastPathTaken = LootGenerationPath.Legacy;

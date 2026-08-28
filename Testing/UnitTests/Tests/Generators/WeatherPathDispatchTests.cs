@@ -18,7 +18,8 @@ namespace UnitTests.Tests.Generators;
 /// Pins the dual-path dispatch for weather generation: native by default, the retained C# bodies
 /// when <see cref="WeatherConfig.ForceLegacyWeatherGeneration"/> is set, when the frozen constructor
 /// built the instance, when a mod substituted the generator, when the injected
-/// <see cref="IWeatherPreset"/> set is not exactly the three built-ins (spec D8), or when any of the
+/// <see cref="IWeatherPreset"/> set is not exactly the three built-ins (spec D8), when a crossing
+/// weight table carries a <see cref="WeatherPreset"/> key outside the enum, or when any of the
 /// seventeen frozen members carries a live Harmony patch (spec D7).
 ///
 /// The seventeen span five classes, because the native arm reimplements all five bodies: the five
@@ -34,6 +35,18 @@ namespace UnitTests.Tests.Generators;
 [NonParallelizable]
 public class WeatherPathDispatchTests
 {
+    /// <summary>
+    /// The season every case generates for. Not a shipped <c>weatherPresetWeight</c> key, so the
+    /// refill case adds and removes its entry rather than replacing one.
+    /// </summary>
+    private const Season FixtureSeason = Season.SUMMER;
+
+    /// <summary>
+    /// A <see cref="WeatherPreset"/> key outside the enum, which <c>EftEnumConverter</c> will parse
+    /// out of an undefined numeric key in a config-edited <c>weather.json</c>.
+    /// </summary>
+    private const WeatherPreset OutOfEnumPreset = (WeatherPreset)4;
+
     private static bool _prefixFired;
     private static bool _postfixFired;
     private static bool _patchFired;
@@ -153,6 +166,60 @@ public class WeatherPathDispatchTests
     }
 
     /// <summary>
+    /// The out-of-enum hole, caller-state half: <c>EftEnumConverter</c> parses an undefined numeric
+    /// key in a config-edited <c>weather.json</c> into a <see cref="WeatherPreset"/> the enum does
+    /// not define, and the native arm mints one preset block per <em>defined</em> member - so a
+    /// draw landing on such a key would find no block and error, where legacy warns and falls back
+    /// to the sunny generator. The state carrying one therefore has to run legacy.
+    /// </summary>
+    [Test]
+    public void AnOutOfEnumPresetInTheCallerStateRoutesToTheLegacyPath()
+    {
+        // SUNNY first and holding the whole weight: its cumulative weight already covers the entire
+        // [0, sum] draw, so the out-of-enum entry can never be picked whichever arm runs - which
+        // matters because legacy's fallback would then throw looking for its (absent) preset block
+        var state = new Dictionary<WeatherPreset, double> { { WeatherPreset.SUNNY, 5 }, { OutOfEnumPreset, 0 } };
+
+        AssertPath(_generator, LootGenerationPath.Legacy, "an out-of-enum preset in the caller state", state);
+    }
+
+    /// <summary>
+    /// The same hole on the other table the request carries unfiltered: the season's refill
+    /// weights, which an empty caller state makes the generator draw from.
+    /// </summary>
+    [Test]
+    public void AnOutOfEnumPresetInTheSeasonRefillTableRoutesToTheLegacyPath()
+    {
+        var weights = _weatherConfig.Weather.WeatherPresetWeight;
+        var seasonKey = FixtureSeason.ToString();
+        var seasonPresent = weights.TryGetValue(seasonKey, out var originalSeason);
+
+        // SUNNY first and holding the whole weight, for the reason the caller-state case gives
+        weights[seasonKey] = new Dictionary<WeatherPreset, double> { { WeatherPreset.SUNNY, 5 }, { OutOfEnumPreset, 0 } };
+
+        try
+        {
+            AssertPath(
+                _generator,
+                LootGenerationPath.Legacy,
+                "an out-of-enum preset in the season refill table",
+                new Dictionary<WeatherPreset, double>()
+            );
+        }
+        finally
+        {
+            if (seasonPresent)
+            {
+                weights[seasonKey] = originalSeason!;
+            }
+            else
+            {
+                weights.Remove(seasonKey);
+            }
+        }
+    }
+
+    /// <summary>
     /// Spec D7: a live patch on any of the seventeen members the native arm reimplements routes the
     /// generator back to C#, because those bodies are the only thing the patch can hook.
     /// </summary>
@@ -254,13 +321,18 @@ public class WeatherPathDispatchTests
         }
     }
 
-    private void AssertPath(WeatherGenerator generator, LootGenerationPath expected, string what)
+    private void AssertPath(
+        WeatherGenerator generator,
+        LootGenerationPath expected,
+        string what,
+        Dictionary<WeatherPreset, double>? state = null
+    )
     {
         // One entry, so the pick is forced without a draw and every preset set this fixture builds
         // has something that handles it
-        var presetWeights = new Dictionary<WeatherPreset, double> { { WeatherPreset.SUNNY, 5 } };
+        var presetWeights = state ?? new Dictionary<WeatherPreset, double> { { WeatherPreset.SUNNY, 5 } };
 
-        generator.GenerateWeather(Season.SUMMER, ref presetWeights);
+        generator.GenerateWeather(FixtureSeason, ref presetWeights);
 
         Assert.That(generator.LastPathTaken, Is.EqualTo(expected), $"{what}: GenerateWeather took the wrong path");
     }
