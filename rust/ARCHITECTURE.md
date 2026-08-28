@@ -67,8 +67,9 @@ Windows is deliberately unchanged: an `.exe` has no export table without `/EXPOR
 the publish exclusion is gated on the Linux target and a Windows launcher still resolves through the cdylib.
 
 The C# side of the `spt-native` boundary is `Libraries/SPTarkov.Server.Core/Native/` — `NativeMethods.cs`,
-`SptNative.cs` and the per-family payload projections under `BaseClass/`, `Bot/`, `Db/`, `Loot/`, `Ragfair/`,
-`RepeatableQuests/`, `ScavCase/` — **except the log pipeline and the console**, whose P/Invoke lives in a
+`SptNative.cs` and the per-family payload projections under `Achievements/`, `BaseClass/`, `Bot/`, `Db/`,
+`Loot/`, `Ragfair/`, `Raid/`, `RepeatableQuests/`, `ScavCase/`, `Weather/` — **except the log pipeline and
+the console**, whose P/Invoke lives in a
 different assembly: `Libraries/SPTarkov.Common/Native/NativeMethods.cs`, with
 `Common/Logger/SPTLoggerDispatcher.cs` and `Common/Native/SptConsole.cs` over it.
 

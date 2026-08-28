@@ -43,7 +43,7 @@ HttpServer.HandleRequestAsync
 | `Routers/` | 50 | URL → callback dispatch via declarative route records (`Static/` 23, `ItemEvents/` 11, `Dynamic/` 7, `SaveLoad/` 4, `Serializers/` 2, root 3) |
 | `Utils/` | 43 | JSON layer (23), RNG, cloning, collections, IO, importers. Plus gitignored `ProgramStatics.Generated.cs` |
 | `Callbacks/` | 34 | HTTP entry point per domain: deserialize in, serialize out via `HttpResponseUtil` |
-| `Generators/` | 34 | Build game data from scratch; nine forward to Rust by default |
+| `Generators/` | 34 | Build game data from scratch; eleven forward to Rust by default |
 | `Controllers/` | 30 | Orchestration. Optional — four callback families skip it entirely |
 | `Extensions/` | 23 | Domain extension methods. The file name is usually the extended type, but not always — `ProfileExtensions` extends `PmcData`, `FullProfileExtensions` extends `SptProfile` |
 | `Migration/` | 21 | `IProfileMigration` / `AbstractProfileMigration`, versioned sets (`3.11`, `4.0`, `4.1`) plus unversioned `Migrations/Fixes/` (7 corruption repairs) |
@@ -181,13 +181,18 @@ its own generator diagnostics against that startup snapshot.
 
 ### Dual-path (Rust) sites
 
-**Thirteen** classes forward to Rust by default and keep their 4.1.2 implementation as a legacy
-fallback — nine generators (`LocationLootGenerator`, `LootGenerator`, `BotInventoryGenerator`,
-`RagfairOfferGenerator`, `ScavCaseRewardGenerator` and the four `RepeatableQuests/` quest-type
-generators) and four services (`ItemBaseClassService`, `RagfairLinkedItemService`,
-`RaidTimeAdjustmentService` and `LocationLifecycleService` — the last two share one frozen set, so a
-patch on any of its seven members declines both). Each holds a frozen list of 4.1.2 members and uses
-HarmonyX to detect a live patch before dispatching, as does `BotWaveBatcher`.
+**Sixteen** classes forward to Rust by default and keep their 4.1.2 implementation as a legacy
+fallback — eleven generators (`LocationLootGenerator`, `LootGenerator`, `BotInventoryGenerator`,
+`RagfairOfferGenerator`, `ScavCaseRewardGenerator`, `PmcWaveGenerator`, `WeatherGenerator` and the
+four `RepeatableQuests/` quest-type generators), four services (`ItemBaseClassService`,
+`RagfairLinkedItemService`, `RaidTimeAdjustmentService` and `LocationLifecycleService`) and
+`AchievementController`, which fits neither bucket. The raid family spans three of them — the two
+in-raid services plus `PmcWaveGenerator` — sharing one frozen set, so a patch on any of its seven
+members declines all five raid exports at once. Most consult a frozen list of 4.1.2 members and use
+HarmonyX to detect a live patch before dispatching, as does `BotWaveBatcher`; the set usually lives on
+the family's `Native/` request builder rather than the dispatcher. `AchievementController` is the one
+exception with **no** frozen set and no scan — nothing hookable is bypassed on its native arm, so the
+flag, a null builder and the subclass check are its whole decline rule.
 
 Two families fold collaborators into the native call, so those collaborators run legacy-only while
 still participating in the dispatch decision:
