@@ -552,6 +552,64 @@ public class RaidAdjustmentParityTests
     }
 
     /// <summary>
+    /// The flag-off half of the null-<c>Id</c> quadrant. Legacy tests the flag <em>before</em> it
+    /// resolves the config entry, so a mod-added <c>base.json</c> that omitted its <c>Id</c> never
+    /// dereferences it. The native arm's projection is the same lookup run one step earlier, so it
+    /// has to carry the same flag test - a native side that no-ops on the response cannot save a
+    /// request that already threw building itself.
+    /// </summary>
+    [Test]
+    public void ANullMapIdIsANoOpOnBothPathsWhenTheFlagIsOff()
+    {
+        var waves = new List<BossLocationSpawn> { NewSpawn("pmcUSEC", 500) };
+
+        var legacySpawns = PmcWaveSpawns();
+        var nativeSpawns = PmcWaveSpawns();
+
+        LocationBase legacy = null!;
+        LocationBase native = null!;
+
+        Assert.DoesNotThrow(
+            () => legacy = ApplyPmcWaves(forceLegacy: true, removeExistingPmcWaves: false, waves, legacySpawns, NoMapId),
+            "legacy dereferenced an id its own flag gate told it not to look at"
+        );
+        Assert.DoesNotThrow(
+            () => native = ApplyPmcWaves(forceLegacy: false, removeExistingPmcWaves: false, waves, nativeSpawns, NoMapId),
+            "the request builder resolved the waves entry without short-circuiting on the flag first"
+        );
+
+        AssertMapParity(legacy, native, "pmc-waves-null-id-flag-off");
+
+        Assert.That(native.BossLocationSpawn, Is.SameAs(nativeSpawns), "the native arm touched the list the flag told it to leave alone");
+        Assert.That(legacy.BossLocationSpawn, Is.SameAs(legacySpawns));
+    }
+
+    /// <summary>
+    /// The flag-on half: with the gate open both arms resolve the entry with
+    /// <c>Id.ToLowerInvariant()</c>, so both dereference the null and throw the same thing - legacy
+    /// at its own lookup, the native arm one step earlier in the request builder's projection.
+    /// </summary>
+    [Test]
+    public void ANullMapIdThrowsOnBothArmsWhenTheFlagIsOn()
+    {
+        var waves = new List<BossLocationSpawn> { NewSpawn("pmcUSEC", 500) };
+
+        Assert.Throws<NullReferenceException>(() =>
+            ApplyPmcWaves(forceLegacy: true, removeExistingPmcWaves: true, waves, PmcWaveSpawns(), NoMapId)
+        );
+
+        // The throw precedes the helper's own path assertion, so this stands in for it: each arm
+        // records which path it committed to before it reaches the lookup that throws
+        Assert.That(_pmcWaveGenerator.LastPathTaken, Is.EqualTo(LootGenerationPath.Legacy), "the legacy arm did not take the legacy path");
+
+        Assert.Throws<NullReferenceException>(() =>
+            ApplyPmcWaves(forceLegacy: false, removeExistingPmcWaves: true, waves, PmcWaveSpawns(), NoMapId)
+        );
+
+        Assert.That(_pmcWaveGenerator.LastPathTaken, Is.EqualTo(LootGenerationPath.Native), "the native arm did not take the native path");
+    }
+
+    /// <summary>
     /// The one booked divergence reachable on shipped data without a mod: <c>labyrinth</c> is in the
     /// location table and absent from <c>scavRaidTimeSettings.maps</c>, so the settings resolve
     /// throws - a <c>KeyNotFoundException</c> on the legacy arm, and the native arm's
@@ -851,19 +909,24 @@ public class RaidAdjustmentParityTests
     ///     The map's boss spawns for the call, handed in so the caller owns the list instance the
     ///     reference-replacement assertions compare against
     /// </param>
+    /// <param name="prepare">Runs on the clone before the pass, as a mod's own base.json would have</param>
     private LocationBase ApplyPmcWaves(
         bool forceLegacy,
         bool removeExistingPmcWaves,
         List<BossLocationSpawn> customWaves,
-        List<BossLocationSpawn> spawns
+        List<BossLocationSpawn> spawns,
+        Action<LocationBase>? prepare = null
     )
     {
         var expected = forceLegacy ? LootGenerationPath.Legacy : LootGenerationPath.Native;
         var map = _cloner.Clone(_locationTable.GetLocation(RaidStartMap)!.Base)!;
         map.BossLocationSpawn = spawns;
 
-        // The key the pass itself resolves with, which is the map's own lowercased id
+        // The key the pass itself resolves with, which is the map's own lowercased id - read before
+        // prepare runs, so a case that takes the id away still has an entry to put back
         var wavesKey = map.Id.ToLowerInvariant();
+        prepare?.Invoke(map);
+
         var originalRemove = _pmcConfig.RemoveExistingPmcWaves;
         var wavesPresent = _pmcConfig.CustomPmcWaves.TryGetValue(wavesKey, out var originalWaves);
         var originalForce = _locationConfig.ForceLegacyRaidAdjustments;
@@ -905,6 +968,15 @@ public class RaidAdjustmentParityTests
     private static List<BossLocationSpawn> PmcWaveSpawns()
     {
         return [NewSpawn("bossBully", 10), NewSpawn("pmcUSEC", 20), NewSpawn(null, 30), NewSpawn("pmcBEAR", 40)];
+    }
+
+    /// <summary>
+    /// A map whose <c>base.json</c> omitted its <c>Id</c> - mod-shaped, and the one input on which
+    /// the wave pass's flag gate is all that stands between it and a dereference.
+    /// </summary>
+    private static void NoMapId(LocationBase map)
+    {
+        map.Id = null!;
     }
 
     /// <summary>
