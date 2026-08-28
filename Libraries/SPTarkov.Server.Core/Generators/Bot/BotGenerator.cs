@@ -555,6 +555,17 @@ public class BotGenerator(
     }
 
     /// <summary>
+    ///     <see cref="RemoveBlacklistedLootFromBotTemplate"/> for callers outside the class - the
+    ///     native player-scav path applies the strip to its crossing template itself. A Harmony
+    ///     patch on the protected member still fires: Harmony rewrites the method body, so every
+    ///     call site hits the patch.
+    /// </summary>
+    internal void RemoveBlacklistedLootFromBotTemplateInternal(BotTypeInventory botInventory)
+    {
+        RemoveBlacklistedLootFromBotTemplate(botInventory);
+    }
+
+    /// <summary>
     ///     Remove items from item.json/lootableItemBlacklist from bots inventory
     /// </summary>
     /// <param name="botInventory">Bot to filter</param>
