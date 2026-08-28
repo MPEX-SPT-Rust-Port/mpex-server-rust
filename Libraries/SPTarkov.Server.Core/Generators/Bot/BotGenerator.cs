@@ -83,6 +83,16 @@ public class BotGenerator(
         // Sets the name after scav name shown in parentheses
         bot.Info.MainProfileNickname = profile.Info.Nickname;
 
+        return ToPmcData(bot);
+    }
+
+    /// <summary>
+    ///     Project a generated player-scav BotBase onto the PmcData shape the client is sent
+    /// </summary>
+    /// <param name="bot">Generated player scav bot</param>
+    /// <returns>PmcData</returns>
+    private static PmcData ToPmcData(BotBase bot)
+    {
         return new PmcData
         {
             Id = bot.Id,
@@ -116,6 +126,56 @@ public class BotGenerator(
             IsPmc = bot.IsPmc,
             Prestige = [],
         };
+    }
+
+    /// <summary>
+    ///     GeneratePlayerScav's orchestration with the inventory produced by the caller instead of
+    ///     BotInventoryGenerator, and the template strips skipped (the native player-scav path
+    ///     applies them to the crossing template before the call). Internal, batcher-style: patches
+    ///     on GeneratePlayerScav/GenerateBot do not fire here, which is why both are in
+    ///     PlayerScavGenerator's frozen set.
+    /// </summary>
+    internal PmcData GeneratePlayerScavNative(
+        MongoId sessionId,
+        string role,
+        string difficulty,
+        BotType assaultTemplate,
+        PmcData profile,
+        Func<BotBase, BotGenerationDetails, BotBaseInventory> generateInventory
+    )
+    {
+        var bot = GetBotBaseClone();
+        bot.Info.Settings.BotDifficulty = difficulty;
+        bot.Info.Settings.Role = role;
+        bot.Info.Side = Sides.Savage;
+
+        var botGenDetails = new BotGenerationDetails
+        {
+            IsPmc = false,
+            Side = Sides.Savage,
+            Role = role,
+            BotRelativeLevelDeltaMax = 0,
+            BotRelativeLevelDeltaMin = 0,
+            BotCountToGenerate = 1,
+            BotDifficulty = difficulty,
+            IsPlayerScav = true,
+            ClearBotContainerCacheAfterGeneration = false,
+        };
+
+        GenerateBotPrelude(sessionId, bot, assaultTemplate, botGenDetails, skipTemplateStrips: true);
+        bot.Inventory = generateInventory(bot, botGenDetails);
+        GenerateBotFinish(bot, botGenDetails);
+
+        // Pscavs in live have same limb hp as their pmc character
+        if (profile?.Health?.BodyParts is not null)
+        {
+            CopyLimbHpValuesToBot(bot, profile.Health.BodyParts);
+        }
+
+        // Sets the name after scav name shown in parentheses
+        bot.Info.MainProfileNickname = profile.Info.Nickname;
+
+        return ToPmcData(bot);
     }
 
     protected void CopyLimbHpValuesToBot(BotBase bot, Dictionary<string, BodyPartHealth> bodyParts)
@@ -219,13 +279,17 @@ public class BotGenerator(
     ///     elsewhere - the level draw natively, the template mutations once per level band, the
     ///     level-dependent draws after the call. Default false, which is the unchanged per-bot
     ///     prelude.
+    ///     skipTemplateStrips skips only the seasonal/blacklist strips, for callers that pass a
+    ///     template the strips have already been applied to (the native player-scav path). Default
+    ///     false, which is the unchanged per-bot prelude.
     /// </summary>
     internal void GenerateBotPrelude(
         MongoId sessionId,
         BotBase bot,
         BotType botJsonTemplate,
         BotGenerationDetails botGenerationDetails,
-        bool nativeLevelAndFilter = false
+        bool nativeLevelAndFilter = false,
+        bool skipTemplateStrips = false
     )
     {
         botGenerationDetails.RoleLowercase = botGenerationDetails.Role.ToLowerInvariant();
@@ -267,7 +331,8 @@ public class BotGenerator(
         }
 
         // Batch: both strips run once per level-band variant instead (ApplyBatchTemplateMutations)
-        if (!nativeLevelAndFilter)
+        // Native pscav: both strips already applied to the crossing template before the call
+        if (!nativeLevelAndFilter && !skipTemplateStrips)
         {
             if (!seasonalEventService.ChristmasEventEnabled())
             // Process all bots EXCEPT gifter, he needs christmas items
