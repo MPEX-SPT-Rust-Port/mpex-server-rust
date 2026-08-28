@@ -8,7 +8,11 @@
 //! with nothing; the whole protocol lives in one `#[test]` fn, sequential, to keep it that way.
 //!
 //! The fixture is `flip6_bots_resident.rs`'s, copied rather than shared: there is no `tests/common/`
-//! and each integration file is its own binary. Only the keycard tpl and the karma block are new.
+//! and each integration file is its own binary. It has drifted where the player scav differs: the
+//! keycard tpl the extra-loot pass places (`raw_items`, `view_items` and `handbookPrices`, last key
+//! in all three so both arms keep one key order), the karma block itself, a single non-PMC template
+//! instead of flip6's two level-band variants, and no level/exp assertions — the single-bot path
+//! keeps its levelling C#-side.
 
 // The two big `json!` fixture maps out-recurse the default limit of 128.
 #![recursion_limit = "256"]
@@ -357,8 +361,9 @@ fn zero_loot_counts() -> Value {
     })
 }
 
-/// The scav's template, pre-karma: `Headwear` and `mod_mount` at 100% and both vests in the
-/// `TacticalVest` pool, so all three karma modifiers below have something to take away.
+/// The scav's template, pre-karma: `Headwear`, `FaceCover` and `mod_mount` all at 100% with a
+/// non-empty pool, so each of the three karma modifiers below has something to take away — and the
+/// `TacticalVest` the extra-loot pass fills first.
 fn template() -> Value {
     json!({
         "inventory": {
@@ -402,19 +407,22 @@ fn shared() -> Value {
     })
 }
 
-/// One `KarmaLevel`, every wire member non-empty and every one of them observable in the response:
-/// the equipment modifier zeroes `Headwear`, the mod modifier zeroes `mod_mount` (taking its two
-/// children with it), the blacklist strips the armored vest out of the `TacticalVest` pool, and the
-/// certain extra-loot chance places the keycard.
+/// One `KarmaLevel`, every wire member non-empty and every one of them the *only* reason for what
+/// the response then shows: the equipment modifier zeroes `Headwear`, the mod modifier zeroes
+/// `mod_mount` (taking its two children with it), the blacklist empties the `FaceCover` pool, and
+/// the certain extra-loot chance places the keycard.
 ///
-/// The blacklist deliberately names the *armored* rig: the bot wears an `ArmorVest`, and the rig
-/// pool is filtered to unarmored rigs when it does, so blacklisting the plain one would leave an
-/// empty pool and no `TacticalVest` at all — a hole in the extra-loot pass's first container.
+/// The blacklist deliberately names a `FaceCover` tpl rather than a rig: a `TacticalVest` entry
+/// would be a *vacuous* assertion either way, because the bot wears an `ArmorVest` and
+/// `filter_rigs_to_those_without_protection` then drops the armored rig from the pool
+/// unconditionally — with the plain one blacklisted instead, the pool is empty and no vest
+/// generates at all. `FaceCover` has one pooled tpl at a 100% chance and no filter of its own
+/// touches it, so its absence below is `apply_equipment_blacklist` and nothing else.
 fn karma() -> Value {
     json!({
         "equipmentModifiers": {"Headwear": -100.0},
         "modModifiers": {"mod_mount": -100.0},
-        "equipmentBlacklist": {"TacticalVest": [VEST_ARMORED_TPL]},
+        "equipmentBlacklist": {"FaceCover": [FACE_COVER_TPL]},
         "lootItemsToAddChancePercent": {EXTRA_KEYCARD_TPL: 100.0},
     })
 }
@@ -451,7 +459,7 @@ fn request(epoch: u64, views_override: Option<Value>) -> Vec<u8> {
 ///
 /// To regenerate after a deliberate generation change: put any wrong value here, run
 /// `cargo test --test player_scav_resident`, and paste the `left:` value from the failure.
-const RESIDENT_GOLDEN: &str = "E22060098A642C0EDFFF75CD81328958";
+const RESIDENT_GOLDEN: &str = "E720558398B607ECB97BF86443EE10E1";
 
 #[test]
 fn a_resident_send_matches_the_override_send_and_a_wrong_epoch_is_stale() {
@@ -523,13 +531,14 @@ fn a_resident_send_matches_the_override_send_and_a_wrong_epoch_is_stale() {
     assert!(
         !resident.contains(MOUNT_TPL)
             && !resident.contains(LIGHT_TPL)
-            && !resident.contains("grip_"),
+            && !resident.contains(GRIP_STUBBY_TPL)
+            && !resident.contains(GRIP_LONG_TPL),
         "the mount chain survived karma"
     );
-    // equipmentBlacklist: the armored vest left the TacticalVest pool, so the plain one is certain.
+    // equipmentBlacklist: FaceCover's only pooled tpl is gone, so the 100% slot generates nothing.
     assert!(
-        !resident.contains(VEST_ARMORED_TPL),
-        "armored vest survived karma"
+        !resident.contains(FACE_COVER_TPL),
+        "the face cover survived karma"
     );
     // lootItemsToAddChancePercent: nothing else in this fixture can draw the keycard.
     assert!(
