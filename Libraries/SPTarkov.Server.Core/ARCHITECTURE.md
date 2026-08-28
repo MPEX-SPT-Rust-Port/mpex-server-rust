@@ -190,7 +190,9 @@ four `RepeatableQuests/` quest-type generators), four services (`ItemBaseClassSe
 in-raid services plus `PmcWaveGenerator` — sharing one frozen set, so a patch on any of its seven
 members declines all five raid exports at once. Most consult a frozen list of 4.1.2 members and use
 HarmonyX to detect a live patch before dispatching, as does `BotWaveBatcher`; the set usually lives on
-the family's `Native/` request builder rather than the dispatcher. `AchievementController` is the one
+the dispatcher class itself as a `private static readonly List<MethodBase> _hookableMembers` (eleven
+of them do). The raid and weather families are the exception, parking theirs on the `Native/` request
+builder instead — which is what lets four classes share two sets. `AchievementController` is the one
 exception with **no** frozen set and no scan — nothing hookable is bypassed on its native arm, so the
 flag, a null builder and the subclass check are its whole decline rule.
 
