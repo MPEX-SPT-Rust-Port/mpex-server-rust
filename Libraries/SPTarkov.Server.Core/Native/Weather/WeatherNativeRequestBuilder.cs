@@ -185,7 +185,7 @@ public class WeatherNativeRequestBuilder(WeatherConfig weatherConfig)
     /// <summary>
     ///     One frozen member, by name. A rename that the predicate did not follow would leave it
     ///     blind to patches on that member, so a miss fails loudly the first time the set is built.
-    ///     <see cref="BindingFlags.Public"/> is in the mask because five of the seventeen are public.
+    ///     <see cref="BindingFlags.Public"/> is in the mask because seven of the seventeen are public.
     /// </summary>
     private static MethodBase FrozenMember(Type declaringType, string name)
     {

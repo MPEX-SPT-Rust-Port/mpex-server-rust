@@ -1204,8 +1204,8 @@ in `NativeMethods.cs` and `SptNative.cs`. The two services keep their full 4.1.2
   for other reasons; it is owned by no phase today. Consequence: the four exports carry no `epoch` and
   no `viewsOverride`, `TrustNativeRequestCacheWithMods`/`DisableNativeRequestCache` do not apply, and
   `FfiFailure` has a single arm — raid never returns `STATUS_STALE_EPOCH`.
-- **The ABI number has five sites, not three.** `lib.rs:19`, `SptNative.ExpectedAbiVersion`
-  (`SptNative.cs:124`) and the `ffi.rs` tripwire assert are the lockstep three; prose adds two more:
+- **The ABI number has five sites, not three.** `lib.rs:21`, `SptNative.ExpectedAbiVersion`
+  (`SptNative.cs:129`) and the `ffi.rs` tripwire assert are the lockstep three; prose adds two more:
   `rust/ARCHITECTURE.md`'s module map ("currently N") and this file's own "Current ABI N" sentence at
   the top. Any renumber — the parallel-branch collision rule, whichever of two same-number bumps
   lands second, which is exactly how this family landed at 35 behind the equipment split's 34 — is
@@ -1298,16 +1298,21 @@ its fifth export; `src/achievements.rs` (170) and `src/weather.rs` (826) are cra
   `RaidNativeRequestBuilder`, `LocationConfig.ForceLegacyRaidAdjustments` and the seven-member frozen
   set unchanged — a patch on any of those seven declines all five. Booked divergences, all
   projection-shaped and all on the raid family's existing null-tolerant-projection precedent:
-  a null `BossLocationSpawn` with every gate passing projects `[]` and no-ops into the append where
-  legacy NREs (unreachable on shipped data); `waveCount` projects `wavesToAdd?.Count ?? 0`, so a mod
-  config carrying a null list *value* (`"customPmcWaves": {"bigmap": null}`) no-ops natively where
-  legacy NREs on the unguarded `.Count` — mod-only, the model declares the dictionary `required` and
-  non-null-valued. The `location.Id.ToLowerInvariant()` lookup stays C#-side and is **gated behind
+  a null `BossLocationSpawn` with every gate passing projects an empty `bossNames`, and the applier
+  then assigns a fresh list and *does* append into it (`PmcWaveGenerator.cs:121-135`), where legacy
+  NREs on its removal filter — unreachable on shipped data, and pinned by
+  `ANullBossLocationSpawnProjectsAnEmptyListAndAppendsNatively`; `waveCount` projects
+  `wavesToAdd?.Count ?? 0`, so a mod config carrying a null list *value*
+  (`"customPmcWaves": {"bigmap": null}`) no-ops natively where legacy NREs on the unguarded `.Count` —
+  mod-only, the model declares the dictionary `required` and non-null-valued. The
+  `location.Id.ToLowerInvariant()` lookup stays C#-side and is **gated behind
   `RemoveExistingPmcWaves` exactly as legacy gates it**, which closes the null-`Id` quadrant rather
   than booking it: with the flag false the builder sends `wavesFound=false, waveCount=0, bossNames=[]`
   without touching `Id` or `BossLocationSpawn`, so both arms no-op; with it set, both arms NRE
-  identically. A null `BossName` survives the removal filter on both arms — `HashSet.Contains(null)`
-  is false, and the native side is an exact string match on the two PMC names.
+  identically — both halves pinned in `RaidAdjustmentParityTests` by
+  `ANullMapIdIsANoOpOnBothPathsWhenTheFlagIsOff` and `ANullMapIdThrowsOnBothArmsWhenTheFlagIsOn`.
+  A null `BossName` survives the removal filter on both arms — `HashSet.Contains(null)` is false, and
+  the native side is an exact string match on the two PMC names.
 - **Achievement statistics contribute zero frozen members.** `ProfileHelper.GetProfiles`, the
   `CoreConfig.Features.AchievementProfileIdBlacklist` filter and the whole profile projection stay
   C#-side, so patches and blacklist mutations are live on **both** arms; the only other member of the
@@ -1321,9 +1326,14 @@ its fifth export; `src/achievements.rs` (170) and `src/weather.rs` (826) are cra
   `InvalidOperationException`. Unreachable on shipped data; the changed exception type is the
   established pattern for mod-reachable malformed data.
 - **Weather froze seventeen members across five classes and added a type check on top.** The set
-  spans every body the native arm reimplements (listed under *What flips to legacy*); on top of it,
-  native runs only when the injected `IEnumerable<IWeatherPreset>`'s concrete types are exactly the
-  three built-ins — the bots' `InventoryMagGenComponents` precedent. The two catch different attacks:
+  spans every body the native arm reimplements *except the shared draw primitives* (listed under
+  *What flips to legacy*): `WeightedRandomHelper.GetWeightedValue`/`WeightedRandom` and
+  `RandomUtil.GetDouble`/`GetInt` are reimplemented natively yet appear in no frozen set anywhere in
+  the repo — the project-wide convention, not an oversight here. A Harmony patch on those steers
+  legacy generation only, and weather is the first port whose *whole* draw path is
+  `WeightedRandomHelper`. On top of the set, native runs only when the injected
+  `IEnumerable<IWeatherPreset>`'s concrete types are exactly the three built-ins — the bots'
+  `InventoryMagGenComponents` precedent. The two catch different attacks:
   the type check catches *substitution*, the frozen members catch a Harmony patch on a built-in
   preset, which never changes the type set.
 - **Weather pre-resolves three things C#-side, and each is argued rather than assumed.**
@@ -1342,33 +1352,62 @@ its fifth export; `src/achievements.rs` (170) and `src/weather.rs` (826) are cra
   later; there is no field-level skew, since `Date`/`Time`/`Timestamp` all come from
   `SetCurrentDateTime` running legacy's exact branch, and the seconds-as-ticks quirk lands every epoch
   value in hour 0 regardless. The rest are error-message-instead-of-exception cases, every one
-  mod-only: an absent chosen preset block (legacy `KeyNotFoundException` at the `["default"]` indexer),
-  which is also the route an **out-of-range preset** takes — a mod-shipped state key outside 1–3 has no
-  `presetBlocks` entry by construction, so native errors where legacy warns, falls back to the Sunny
-  *generator*, and then throws `KeyNotFoundException` on the same missing block anyway; an unparsable
-  picked weight value (legacy `FormatException`); a drawn-but-absent block member (legacy NRE — every
-  `PresetWeights` member but `Clouds` is nullable and legacy dereferences lazily, so the wire projects
-  member-wise null-tolerantly and native errors at the same place legacy NREs); the empty preset state
-  (legacy `ArgumentOutOfRangeException` out of `WeightedRandomHelper`'s uniform shortcut); and the
-  empty season table (`GetValueOrDefault("default")` returns null rather than throwing, so a config
-  missing both the season key and `"default"` projects empty and native errors on the next refill
-  where legacy NREs). That last one has a sibling that is not an exception-type change at all: a
+  modded-config-only (a hand-edited `weather.json` reaches each, no mod DLL needed): an absent chosen preset block (legacy `KeyNotFoundException` at the `["default"]` indexer —
+  though a null `presetWeights` *table* reaches that same native error by a different legacy route, an
+  NRE inside `GetWeatherWeightsByPreset` itself (`WeatherGenerator.cs:281-286`), because `Resolve`
+  tolerates the null and crosses every block as absent); an unparsable picked weight value (legacy
+  `FormatException`); a drawn-but-absent block member (legacy NRE — every `PresetWeights` member but
+  `Clouds` is nullable and legacy dereferences lazily, so the wire projects member-wise
+  null-tolerantly and native errors at the same place legacy NREs); a drawn-but-*empty*
+  member table (`"fog": {}`), which crosses as an empty list rather than as absence — the builder's
+  `ToWeighted` maps the dictionary, only a null one nulls out — so native errors out of
+  `get_weighted_value` where legacy throws `ArgumentOutOfRangeException` indexing the empty item list
+  behind its uniform shortcut, and neither arm consumes a draw doing it, so the stream stays aligned;
+  the empty preset state (legacy `ArgumentOutOfRangeException` out of `WeightedRandomHelper`'s
+  uniform shortcut); and the empty season table (`GetValueOrDefault("default")` returns null rather
+  than throwing, so a config missing both the season key and `"default"` projects empty and native
+  errors on the next refill where legacy NREs). That last one has a sibling that is not an
+  exception-type change at all: a
   `"weatherPresetWeight": null` config NREs inside `GetWeatherPresetWeightsBySeason` itself, which
   the native arm calls unconditionally at dispatch where legacy calls it only on refill — the same
   NRE, surfaced earlier and on every call rather than on the first refill. Mod-only, since the
-  shipped config carries the table, and `forceLegacyWeatherGeneration` is the escape hatch. One case
-  diverges in *ordering* rather than type: with an empty state **and** an
-  empty refill table, legacy replaces the caller's `ref` dict with the clone *before* the pick throws,
-  where native errors before the applier touches the dict — observable only to a caller that catches,
-  and no caller does.
+  shipped config carries the table, and `forceLegacyWeatherGeneration` is the escape hatch. The whole
+  enumeration also diverges in *mutation ordering*, not only in type, because legacy mutates the
+  caller's `ref` dict on its way to every one of these throws: with an empty state **and** an empty
+  refill table it replaces the dict with the clone (`WeatherGenerator.cs:208`) before the pick throws,
+  and on any state it writes the previous-preset decay into it (`:217`) before the pick, the block
+  lookup, the member deref or the parse can throw — where native mutates nothing until the applier
+  runs on a successful return. Observable only to a caller that catches, and no caller does.
+- **An out-of-enum `WeatherPreset` key declines to legacy rather than diverging.** `EftEnumConverter`
+  parses any numeric config key, so a `"4"` crosses as `(WeatherPreset)4`, which `Enum.GetValues`
+  mints no `presetBlocks` entry for — the native arm would error where legacy generates fine off a
+  `"default"` block. `HasOutOfEnumPresetKey`, inside the native branch, sends both carriers of such a
+  key — the caller's preset-weight state and the season refill table — to legacy first
+  (`UseLegacyPath()` itself is unchanged, and the arm's `GetWeatherPresetWeightsBySeason` fetch is
+  hoisted above the guard so it stays one unconditional call). Legacy then handles the key at
+  `GenerateWeatherByPreset` (`WeatherGenerator.cs:251-273`): a warning, a fall back to the Sunny
+  *generator*, and a `KeyNotFoundException` only when neither the key's own block nor `"default"`
+  resolves — which is what the shipped config, carrying no `"default"` block, does.
 - **Weighted values parse at draw time, only the picked one, and the two parsers disagree at the
   edges — in both directions.** A non-numeric entry that is never picked never throws on either arm,
   matching legacy. When one *is* picked, Rust's `str::parse::<f64>` accepts `inf`/`+inf`/`-inf`, which
   `double.Parse(s, CultureInfo.InvariantCulture)` rejects as a `FormatException` (invariant culture's
   symbol is `Infinity`, not `inf`); conversely C# accepts thousands separators — `double.Parse`'s
   two-argument overload carries `NumberStyles.AllowThousands`, so `"1,234.5"` parses there and errors
-  natively. `Infinity` and `NaN` parse on both, case-insensitively. Mod-only either way: shipped
-  weather configs carry plain decimal strings.
+  natively — and, the third direction, leading or trailing whitespace, which that overload's
+  `NumberStyles.Float` allows (`AbstractWeatherPreset.cs:22-37`) and `str::parse::<f64>` rejects
+  outright (`weather.rs:365-367`). `Infinity` and `NaN` parse on both, case-insensitively, and there
+  the divergence moves to the *response*: serde_json writes a non-finite `f64` as JSON `null`, and
+  `GenerateWeatherResponse.Cloud` is `required double` (`WeatherPayloads.cs:190`) like every other
+  drawn field, so a non-finite draw makes the native arm throw `JsonException` out of `DecodeResult` —
+  not the `InvalidOperationException` the export's docs name, though the response buffer is still
+  freed in the `finally` — where legacy assigns `double.PositiveInfinity` and fails much later,
+  client-side. Mod-only either way: shipped weather configs carry plain decimal strings.
+- **Legacy's `WeightedRandomHelper` diagnostics have no native counterpart.** The per-negative-weight
+  warning (`WeightedRandomHelper.cs:80`, already booked as dropped by the raid family) and the three
+  localized error logs for empty or mismatched item/weight lists (`:55`/`:60`/`:65`) simply do not
+  fire on the native arm; the draw semantics they narrate are matched bug-for-bug, but the table they
+  fire on is hand-edited config, so silent-native-versus-warning-legacy is user-visible.
 - **The `ICloner` on the refill path is never called natively** — the standing documented collaborator
   hole, recorded here rather than fixed. Legacy clones the season table into the caller's state
   through `cloner.Clone`; native rebuilds it from the wire with clone semantics but without the call,

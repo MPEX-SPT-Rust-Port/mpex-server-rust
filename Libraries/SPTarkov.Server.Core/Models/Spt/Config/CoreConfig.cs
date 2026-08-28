@@ -65,7 +65,10 @@ public record CoreConfig : BaseConfig
     /// <summary>
     ///     Count the achievement completion percentages through the retained C# loop instead of the
     ///     native pass. The two agree on everything the shipped data can produce; flip this on if a
-    ///     mod's achievement table makes the native pass disagree.
+    ///     mod's achievement table makes the native pass disagree. The one booked difference is the
+    ///     exception type on a duplicate achievement id: legacy throws <c>ArgumentException</c> out of
+    ///     its dictionary <c>Add</c>, the native pass reports it in the error envelope and it arrives
+    ///     as <c>InvalidOperationException</c>.
     /// </summary>
     [JsonPropertyName("forceLegacyAchievementStatistics")]
     public bool ForceLegacyAchievementStatistics { get; set; }
