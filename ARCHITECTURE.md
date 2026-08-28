@@ -188,11 +188,10 @@ which `DatabaseImporter` verifies at startup outside DEBUG. The format is a cont
 `Libraries/SPTarkov.Common/Native/NativeMethods.cs`, because `SPTarkov.Common` cannot reference
 Server.Core. It owns database hash verification, the ported generation paths (location loot, reward
 loot, whole-bot inventory, player scav generation, dynamic ragfair offers, repeatable quests, scav
-case rewards, map/raid setup, achievement statistics, weather), the item base-class cache build,
-the ragfair linked-item
-table, the resident DB every ported family but raid, achievements and weather reads from,
-`user/profiles/`' live disk I/O, the whole log pipeline, and the terminal
-itself. Forty-three exports, JSON in / JSON out —
+case rewards, map/raid setup, achievement statistics, weather), the item base-class cache build, the
+ragfair linked-item table, the resident DB every ported family but raid, achievements and weather
+reads from, `user/profiles/`' live disk I/O, the whole log pipeline, and the terminal itself.
+Forty-three exports, JSON in / JSON out —
 except the ragfair response, a framed MessagePack envelope; the fused database load, whose response
 is a 4-byte little-endian header length, a JSON header, then the returned file bodies concatenated
 in header order; the profile load, framed the same way but with a `{"found":bool}` header and a

@@ -11,13 +11,13 @@ with every edit and go stale silently.
 
 ## Status
 
-Ported and native by default: the loot family, the bot family (player scav generation included),
-dynamic ragfair offer generation, the repeatable-quest family, scav case rewards, the item
-base-class cache, the ragfair linked-item
-table, map/raid setup (PMC wave splice included), achievement statistics and weather generation.
-Each keeps its full 4.1.2 C# body as a **legacy path**, selected automatically when a mod hooks it
-or manually via a config flag. The log pipeline and profile persistence are ported with **no**
-legacy path; the crate owns the terminal outright (raw `Console.Write*`, prompts, title, clear).
+Ported and native by default: the loot family, the bot family and player scav generation, dynamic
+ragfair offer generation, the repeatable-quest family, scav case rewards, the item base-class cache,
+the ragfair linked-item table, map/raid setup (PMC wave splice included), achievement statistics and
+weather generation. Each keeps its full 4.1.2 C# body as a **legacy path**, selected automatically
+when a mod hooks it or manually via a config flag. The log pipeline and profile persistence are
+ported with **no** legacy path; the crate owns the terminal outright (raw `Console.Write*`, prompts,
+title, clear).
 
 Forty-three C-ABI exports (`src/ffi.rs`) carry all of it, JSON in and JSON out — except the ragfair
 response (framed MessagePack), `spt_db_load` and `spt_profile_load` (JSON header frame + file
@@ -94,12 +94,16 @@ entry cited.
   member-scoped by the wave batcher; `BotEquipmentModPoolService` is detected whole-type since
   ABI 32. Invisible in principle: constructor patches, and plain runtime calls into the public
   surface. `forceLegacy` is the standing escape hatch. Player scav generation adds
-  `RandomUtil.GetChance100`, `BotGeneratorHelper.GenerateExtraPropertiesForItem` /
-  `AddItemWithChildrenToEquipmentSlot` and `ItemFilterService.IsLootableItemBlacklisted` to the
-  bypassed set. Related asymmetry, not a bypass: `AdjustItemWeights` runs C#-side on **both** arms,
-  but natively against a clone of the loot template's `BotGeneration` rather than the merged base
-  template, so a postfix reading its arguments sees a different receiver per arm without anything
-  flipping.
+  `RandomUtil.GetChance100` and `BotGeneratorHelper.GenerateExtraPropertiesForItem` /
+  `AddItemWithChildrenToEquipmentSlot` to the bypassed set — all three live only in the legacy
+  additional-loot pass the native arm replaces. Two qualifications, neither a new bypass:
+  `ItemFilterService.IsLootableItemBlacklisted` is still called for real on the native arm, through
+  `BotGenerator.RemoveBlacklistedLootFromBotTemplateInternal` (its only caller on this path, run
+  C#-side on both arms so patches fire), leaving only the pre-existing family-wide hole for per-item
+  predicate patches on native generation draws; and `AdjustItemWeights` likewise runs C#-side on
+  both arms, but natively against a clone of the loot template's `BotGeneration` rather than the
+  merged base template, so a postfix reading its arguments sees a different receiver per arm without
+  anything flipping.
 - **The native and legacy bot paths draw mod slots in different orders at randomised levels**
   (since ABI 32) — different, not wrong, bots for one seed; only the native order is
   machine-independent. No cross-arm case can ever cover it (different draw order = different RNG
