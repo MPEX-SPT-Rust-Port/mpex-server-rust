@@ -10,6 +10,7 @@ pub(crate) mod inventory_mag_gen;
 pub mod level_generator;
 pub(crate) mod mod_pool_service;
 pub mod models;
+pub mod player_scav;
 pub(crate) mod repair_service;
 pub mod views;
 
