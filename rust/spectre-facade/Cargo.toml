@@ -2,6 +2,7 @@
 name = "spectre-facade"
 version = "0.1.0"
 edition = "2024"
+publish = false
 
 [dependencies]
-dotnetdll = "0.3.0"
+dotnetdll = "0.3"

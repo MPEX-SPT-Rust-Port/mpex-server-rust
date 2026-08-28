@@ -66,10 +66,17 @@ persistence, websockets, admin panel, mods, build-time codegen. The rules that k
 ## Style
 
 **Rust Porting** - Follow the nomenclature and naming scheme of the C# you are replacing.
-[RUST-ROADMAP.md](RUST-ROADMAP.md) is the status/guidelines reference, [rust/ARCHITECTURE.md](rust/ARCHITECTURE.md) the
+[RUST-ROADMAP.md](RUST-ROADMAP.md) is the status/guidelines reference, [RUST-LEDGER.md](RUST-LEDGER.md) the
+append-only decision history (flip/phase ledgers, PR ledger), [rust/ARCHITECTURE.md](rust/ARCHITECTURE.md) the
 FFI/wire-format one. Adding or changing an export means bumping `ABI_VERSION` in `rust/spt-native/src/lib.rs` *and*
 `SptNative.ExpectedAbiVersion` in `Libraries/SPTarkov.Server.Core/Native/SptNative.cs` — they are asserted equal at
 startup and in `ffi.rs` tests.
+
+**No line numbers in docs and trackers.** Cite symbols (`Type.Member`, `module::fn`), never
+`Example.cs:123` — line numbers churn unpredictably with every edit and rot silently. Line-level
+granularity is reserved for cases where a symbol genuinely cannot locate the thing: a bug pinned
+inside one large body, or short-lived notes/plans/specs for *active* work. Historical documents
+(RUST-LEDGER.md entries, closed specs) keep their as-of-writing line refs unmaintained.
 
 CSharpier plus `.editorconfig` handle formatting. The rules a formatter can't catch:
 

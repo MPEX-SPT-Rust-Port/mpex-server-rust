@@ -224,7 +224,7 @@ caller releases with `spt_buf_free`; so do `spt_console_read_line` and `spt_log_
   does not hold returns `STATUS_STALE_EPOCH`, and the C# caller force-publishes and retries once; an
   ineligible caller (mods loaded without trust, or the kill switch) instead sends the views inline with
   `epoch: 0`, a wire contract that is documented, not runtime-enforced. Which views each family borrows, and
-  why loose loot and `staticAmmoDist` deliberately stayed per-call, is in RUST-ROADMAP.md's flip ledgers.
+  why loose loot and `staticAmmoDist` deliberately stayed per-call, is in RUST-LEDGER.md's flip ledgers.
 - **The `configs` root is keyed by kind string, and no view derives from it.** All 28 loaded configs arrive
   under their own `Kind` (`"spt-item"`, `"spt-bot"`, …) rather than a type or file name, and families read
   them per call the way scav case reads its recipes. Only the stems some family actually reads are lifted
@@ -242,7 +242,7 @@ caller releases with `spt_buf_free`; so do `spt_console_read_line` and `spt_log_
   `PmcConfigWire` (its doc has the trade). The soft members' wire names are pinned by the hand-run
   `phase4_configs_root.rs`, since a drifted name on a soft member parses fine and silently reads empty. Which config members deliberately stayed per-call
   — the ones a C# writer mutates in place through an indexer, where no write barrier fires, or that the
-  caller itself selects — is in RUST-ROADMAP.md's Phase 4 ledger. Phase 4 added **no** export.
+  caller itself selects — is in RUST-LEDGER.md's Phase 4 ledger. Phase 4 added **no** export.
 - **A buffer is written on failure too** — the parse error, the `LootError` message, or the panic text.
   Ownership is decided by the out-pointer being non-null, never by the status code. `spt_verify_database`'s
   free-on-success-only shape must not be copied into the generators.
@@ -543,5 +543,6 @@ over the server-assembly probe, `spectre-facade`'s two.
 | [`Libraries/SPTarkov.Server.Core/ARCHITECTURE.md`](../Libraries/SPTarkov.Server.Core/ARCHITECTURE.md) | `Native/`, the sixteen dual-path classes, the `ForceLegacy*` config flags |
 | [`Libraries/ARCHITECTURE.md`](../Libraries/ARCHITECTURE.md) | `SPTarkov.Common`'s logging front end and the Spectre facade reference chain |
 | [`CLAUDE.md`](../CLAUDE.md) | Build coupling, cross-RID rules, the ABI-bump requirement |
-| [`RUST-ROADMAP.md`](../RUST-ROADMAP.md) | Port status, exceptions in force, known divergences, the flip ledgers cited above |
+| [`RUST-ROADMAP.md`](../RUST-ROADMAP.md) | Port status, exceptions in force, known divergences |
+| [`RUST-LEDGER.md`](../RUST-LEDGER.md) | The flip and phase ledgers cited above, plus the PR ledger |
 | [`BENCHMARK.md`](../BENCHMARK.md) | Native vs legacy timings — every measurement lives there |

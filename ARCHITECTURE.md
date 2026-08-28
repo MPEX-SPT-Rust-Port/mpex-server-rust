@@ -273,5 +273,6 @@ Linux-only `PropertyGroup`, so from a Windows host nothing maps and the guard in
 | [`Libraries/SPTarkov.Server.Core/ARCHITECTURE.md`](Libraries/SPTarkov.Server.Core/ARCHITECTURE.md) | Everything inside Core (~91% of the `.cs` files under `Libraries/`): folder map, dispatch mechanics, item events, configs, models. |
 | [`rust/ARCHITECTURE.md`](rust/ARCHITECTURE.md) | Inside the Cargo workspace: `spt-native`'s modules, FFI boundary, porting conventions and tests, plus the `mpex-server` launcher and its no-`spt-native` rule. |
 | [`RUST-ROADMAP.md`](RUST-ROADMAP.md) | Rust port status: what works, what flips to legacy, known divergences, roadmap. |
+| [`RUST-LEDGER.md`](RUST-LEDGER.md) | Append-only history: per-flip/phase decision ledgers and the PR ledger. |
 | [`BENCHMARK.md`](BENCHMARK.md) | Native vs legacy timings. Every measurement lives there; none are repeated elsewhere. |
 | [`CLAUDE.md`](CLAUDE.md) | Build/run commands, style rules, cross-RID and toolchain requirements. |
