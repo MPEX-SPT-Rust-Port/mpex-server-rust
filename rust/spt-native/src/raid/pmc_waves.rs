@@ -61,7 +61,7 @@ mod tests {
 
     #[test]
     fn any_failed_gate_means_no_apply_and_no_indices() {
-        for (remove, found, count) in [(false, true, 2), (true, false, 0), (true, true, 0)] {
+        for (remove, found, count) in [(false, true, 2), (true, false, 2), (true, true, 0)] {
             let response = apply_pmc_wave_changes(&ApplyPmcWavesRequest {
                 remove_existing_pmc_waves: remove,
                 waves_found: found,

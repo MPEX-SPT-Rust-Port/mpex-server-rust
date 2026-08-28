@@ -1352,7 +1352,12 @@ its fifth export; `src/achievements.rs` (170) and `src/weather.rs` (826) are cra
   (legacy `ArgumentOutOfRangeException` out of `WeightedRandomHelper`'s uniform shortcut); and the
   empty season table (`GetValueOrDefault("default")` returns null rather than throwing, so a config
   missing both the season key and `"default"` projects empty and native errors on the next refill
-  where legacy NREs). One case diverges in *ordering* rather than type: with an empty state **and** an
+  where legacy NREs). That last one has a sibling that is not an exception-type change at all: a
+  `"weatherPresetWeight": null` config NREs inside `GetWeatherPresetWeightsBySeason` itself, which
+  the native arm calls unconditionally at dispatch where legacy calls it only on refill — the same
+  NRE, surfaced earlier and on every call rather than on the first refill. Mod-only, since the
+  shipped config carries the table, and `forceLegacyWeatherGeneration` is the escape hatch. One case
+  diverges in *ordering* rather than type: with an empty state **and** an
   empty refill table, legacy replaces the caller's `ref` dict with the clone *before* the pick throws,
   where native errors before the applier touches the dict — observable only to a caller that catches,
   and no caller does.

@@ -1,5 +1,6 @@
-//! The raid-setup family: `Services/InRaid/RaidTimeAdjustmentService.cs` and the two raid-start
-//! halves of `Services/InRaid/LocationLifecycleService.cs`, ported bug-for-bug.
+//! The raid-setup family: `Services/InRaid/RaidTimeAdjustmentService.cs`, the two raid-start
+//! halves of `Services/InRaid/LocationLifecycleService.cs`, and `Generators/PmcWaveGenerator.cs`,
+//! ported bug-for-bug.
 //!
 //! Citation convention for this module: a bare `` `:N` `` is a line of
 //! `RaidTimeAdjustmentService.cs`; citations naming a file (`LocationConfig.cs:264`) are that

@@ -21,7 +21,7 @@ public class WeatherNativeRequestBuilder(WeatherConfig weatherConfig)
 {
     /// <summary>
     ///     The seventeen members a mod can Harmony-patch to take over part of weather generation -
-    ///     one entry for every body the native pass reimplements, across all four classes it
+    ///     one entry for every body the native pass reimplements, across all five classes it
     ///     collapsed into match arms.
     ///
     ///     On <c>WeatherGenerator</c>: the preset-weight lookups, the by-preset generation, the

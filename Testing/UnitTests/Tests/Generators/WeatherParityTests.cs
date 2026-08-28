@@ -113,16 +113,18 @@ public class WeatherParityTests
     }
 
     /// <summary>
-    /// Three calls threading one <c>ref</c> dictionary and one <c>previousPreset</c>, the way
+    /// Four calls threading one <c>ref</c> dictionary and one <c>previousPreset</c>, the way
     /// <c>RaidWeatherService</c>'s loop does. Over the two-entry season table this fixture installs
-    /// the sequence is deterministic and covers all three state transitions: call one refills an
-    /// empty dictionary, call two decays the previous pick to zero, and call three decays the second
-    /// pick to zero as well and then draws an exhausted preset, which clears the state.
+    /// the sequence is deterministic and covers all four state transitions: call one refills an
+    /// empty dictionary, call two decays the previous pick to zero, call three decays the second
+    /// pick to zero as well and then draws an exhausted preset, which clears the state - and call
+    /// four refills <em>and</em> decays a live <c>previousPreset</c> inside the same call, the
+    /// combination the loop hits whenever its dictionary exhausts mid-forecast.
     ///
     /// Both arms are re-seeded before every call with that call's own seed - see the fixture note.
     /// </summary>
     [Test]
-    public void AThreeCallSequenceCarriesTheStateIdentically()
+    public void AFourCallSequenceCarriesTheStateIdentically()
     {
         var weights = _weatherConfig.Weather.WeatherPresetWeight;
         var seasonKey = SequenceSeason.ToString();
@@ -157,12 +159,19 @@ public class WeatherParityTests
             Assert.That(native.Replaced, Is.EqualTo(legacy.Replaced), "the two arms disagree on which calls replaced the ref dict");
             Assert.That(
                 legacy.Replaced,
-                Is.EqualTo(new[] { true, false, false }),
-                "the sequence did not refill exactly once, on its first call"
+                Is.EqualTo(new[] { true, false, false, true }),
+                "the sequence did not refill on exactly its first and fourth calls"
             );
 
-            // Call three drew a preset whose weight the decay had taken to zero
-            Assert.That(legacy.FinalState, Is.Empty, "the exhausted pick did not clear the state");
+            // Call three drew a preset whose weight the decay had taken to zero, which is why call
+            // four found the dictionary empty and refilled - and then decayed its own previous pick
+            // out of the fresh table, inside that same call
+            Assert.That(legacy.FinalState.Count, Is.EqualTo(2), "the fourth call did not leave a refilled table");
+            Assert.That(
+                legacy.FinalState.Values,
+                Has.Exactly(1).EqualTo(0d),
+                "the refill did not decay the preset call three had just picked"
+            );
         }
         finally
         {
@@ -241,7 +250,7 @@ public class WeatherParityTests
     }
 
     /// <summary>
-    /// One three-call sequence on one arm, threading the dictionary and the previous preset exactly
+    /// One four-call sequence on one arm, threading the dictionary and the previous preset exactly
     /// as <c>RaidWeatherService.GenerateFutureWeatherAndCache</c> does, and recording which calls
     /// replaced the dictionary instance.
     /// </summary>
@@ -252,7 +261,7 @@ public class WeatherParityTests
         var replaced = new List<bool>();
         WeatherPreset? previousPreset = null;
 
-        foreach (var seed in new ulong[] { 101, 202, 303 })
+        foreach (var seed in new ulong[] { 101, 202, 303, 404 })
         {
             var before = state;
 

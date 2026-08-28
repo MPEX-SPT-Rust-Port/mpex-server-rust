@@ -21,7 +21,7 @@ namespace UnitTests.Tests.Generators;
 /// <see cref="IWeatherPreset"/> set is not exactly the three built-ins (spec D8), or when any of the
 /// seventeen frozen members carries a live Harmony patch (spec D7).
 ///
-/// The seventeen span four classes, because the native arm reimplements all four bodies: the five
+/// The seventeen span five classes, because the native arm reimplements all five bodies: the five
 /// <see cref="WeatherGenerator"/> members below the dispatcher, <c>Generate</c> and
 /// <c>CanHandle</c> on each concrete preset, and <see cref="AbstractWeatherPreset"/>'s six draw
 /// helpers. <c>GenerateWeather</c> itself is excluded - it is the dispatcher, and a patch there

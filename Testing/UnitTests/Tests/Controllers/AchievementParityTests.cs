@@ -52,7 +52,9 @@ public class AchievementParityTests
     private readonly MongoId _sessionId = new();
 
     /// <summary>
-    /// The achievement rows appended to the live table, removed by reference in the teardown.
+    /// The achievement rows appended to the live table, taken back out in the teardown. Removal is
+    /// by value - <c>Achievement</c> is a record - but every row here carries a distinct id, so
+    /// each <c>Remove</c> can only match the one it was given.
     /// </summary>
     private readonly List<Achievement> _injectedAchievements = [];
 
@@ -203,8 +205,7 @@ public class AchievementParityTests
     [Test]
     public void ADuplicateAchievementIdThrowsOnBothArms()
     {
-        var duplicate = TestAchievement(_sharedAchievement);
-        _templateTable.Achievements.Add(duplicate);
+        _templateTable.Achievements.Add(TestAchievement(_sharedAchievement));
 
         try
         {
@@ -224,7 +225,9 @@ public class AchievementParityTests
         }
         finally
         {
-            _templateTable.Achievements.Remove(duplicate);
+            // By index, not by value: the duplicate is record-equal to the row the setup injected,
+            // so Remove would take that one out at its lower index and leave this one behind
+            _templateTable.Achievements.RemoveAt(_templateTable.Achievements.Count - 1);
         }
     }
 
