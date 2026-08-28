@@ -6,6 +6,7 @@ using SPTarkov.Server.Core.Models.Common;
 using SPTarkov.Server.Core.Models.Eft.Ragfair;
 using SPTarkov.Server.Core.Models.Enums;
 using SPTarkov.Server.Core.Models.Spt.Config;
+using SPTarkov.Server.Core.Native.Achievements;
 using SPTarkov.Server.Core.Native.BaseClass;
 using SPTarkov.Server.Core.Native.Bot;
 using SPTarkov.Server.Core.Native.Db;
@@ -14,6 +15,7 @@ using SPTarkov.Server.Core.Native.Ragfair;
 using SPTarkov.Server.Core.Native.Raid;
 using SPTarkov.Server.Core.Native.RepeatableQuests;
 using SPTarkov.Server.Core.Native.ScavCase;
+using SPTarkov.Server.Core.Native.Weather;
 using SPTarkov.Server.Core.Utils;
 
 namespace SPTarkov.Server.Core.Native;
@@ -115,13 +117,16 @@ internal enum LootExport
     MakeAdjustmentsToMap,
     AdjustBotHostilitySettings,
     AdjustExtracts,
+    ApplyPmcWaveChanges,
     ItemBaseClass,
     RagfairLinkedItems,
+    AchievementStatistics,
+    Weather,
 }
 
 public static class SptNative
 {
-    private const uint ExpectedAbiVersion = 35;
+    private const uint ExpectedAbiVersion = 36;
 
     // ffi.rs
     private const int StatusOk = 0;
@@ -299,6 +304,48 @@ public static class SptNative
     public static AdjustExtractsResponse AdjustExtracts(AdjustExtractsRequest request)
     {
         return Generate<AdjustExtractsResponse>(LootExport.AdjustExtracts, JsonSerializer.SerializeToUtf8Bytes(request, LootJsonOptions));
+    }
+
+    /// <summary>
+    /// Works out which of a map's boss waves the custom-PMC splice drops: indices into the request's
+    /// own <c>bossNames</c> projection, plus the flag for whether the splice runs at all. The removal
+    /// and the append that follows stay C#-side - the append puts the live config's own wave objects
+    /// into the location by reference. Draws nothing and names no epoch.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">The pass failed, or the native side misbehaved.</exception>
+    public static ApplyPmcWavesResponse ApplyPmcWaveChanges(ApplyPmcWavesRequest request)
+    {
+        return Generate<ApplyPmcWavesResponse>(
+            LootExport.ApplyPmcWaveChanges,
+            JsonSerializer.SerializeToUtf8Bytes(request, LootJsonOptions)
+        );
+    }
+
+    /// <summary>
+    /// The percentage of profiles holding each achievement, in the achievement table's own order -
+    /// <c>AchievementController.GetAchievementStatics</c>'s counting loop. The profile fetch and
+    /// the blacklist filter stay C#-side; the whole projection crosses in the request. Draws
+    /// nothing and names no epoch.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">The pass failed, or the native side misbehaved.</exception>
+    public static AchievementStatisticsResponse GetAchievementStatistics(AchievementStatisticsRequest request)
+    {
+        return Generate<AchievementStatisticsResponse>(
+            LootExport.AchievementStatistics,
+            JsonSerializer.SerializeToUtf8Bytes(request, LootJsonOptions)
+        );
+    }
+
+    /// <summary>
+    /// Picks a weather preset out of the caller's state and draws the whole weather object for it -
+    /// <c>WeatherGenerator.GenerateWeather</c> plus the three <c>IWeatherPreset</c> strategies. The
+    /// season lookup, the day/night test and the date/time tail stay C#-side; what crosses is the
+    /// state, the resolved preset blocks and the night flag. Draws, and names no epoch.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">The pass failed, or the native side misbehaved.</exception>
+    public static GenerateWeatherResponse GenerateWeather(GenerateWeatherRequest request)
+    {
+        return Generate<GenerateWeatherResponse>(LootExport.Weather, JsonSerializer.SerializeToUtf8Bytes(request, LootJsonOptions));
     }
 
     /// <summary>
@@ -1050,6 +1097,12 @@ public static class SptNative
                     &outLen
                 ),
                 LootExport.AdjustExtracts => NativeMethods.AdjustExtracts(requestPtr, (nuint)requestUtf8.Length, &outPtr, &outLen),
+                LootExport.ApplyPmcWaveChanges => NativeMethods.ApplyPmcWaveChanges(
+                    requestPtr,
+                    (nuint)requestUtf8.Length,
+                    &outPtr,
+                    &outLen
+                ),
                 LootExport.ItemBaseClass => NativeMethods.BuildItemBaseClassCache(requestPtr, (nuint)requestUtf8.Length, &outPtr, &outLen),
                 LootExport.RagfairLinkedItems => NativeMethods.BuildRagfairLinkedItemTable(
                     requestPtr,
@@ -1057,6 +1110,13 @@ public static class SptNative
                     &outPtr,
                     &outLen
                 ),
+                LootExport.AchievementStatistics => NativeMethods.GetAchievementStatistics(
+                    requestPtr,
+                    (nuint)requestUtf8.Length,
+                    &outPtr,
+                    &outLen
+                ),
+                LootExport.Weather => NativeMethods.GenerateWeather(requestPtr, (nuint)requestUtf8.Length, &outPtr, &outLen),
                 _ => throw new ArgumentOutOfRangeException(nameof(export), export, null),
             };
         }

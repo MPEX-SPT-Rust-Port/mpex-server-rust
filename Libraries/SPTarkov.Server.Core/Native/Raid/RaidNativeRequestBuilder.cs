@@ -13,12 +13,12 @@ namespace SPTarkov.Server.Core.Native.Raid;
 
 /// <summary>
 /// Assembles the raid-setup requests out of the live database and config - everything
-/// <c>RaidTimeAdjustmentService</c> and <c>LocationLifecycleService</c> would have read for
-/// themselves - and sends them.
+/// <c>RaidTimeAdjustmentService</c>, <c>LocationLifecycleService</c> and
+/// <c>PmcWaveGenerator</c> would have read for themselves - and sends them.
 ///
 /// It also owns the family's frozen member set: <see cref="AnyFrozenMemberPatched"/> is consulted by
-/// the legacy-path predicates of <em>both</em> raid-setup services, so a Harmony patch on any one of
-/// the seven forces legacy at every one of their call sites.
+/// the legacy-path predicates of <em>all three</em> raid-setup classes, so a Harmony patch on any one
+/// of the seven forces legacy at every one of their call sites.
 /// </summary>
 [Injectable]
 public class RaidNativeRequestBuilder(
@@ -33,13 +33,15 @@ public class RaidNativeRequestBuilder(
     ///     <c>RaidTimeAdjustmentService</c> halves, the two <c>LocationLifecycleService</c> passes,
     ///     and <c>IsSide</c>, whose body the native extract pass reimplements: a patch on it must
     ///     route the side tests back to C#, or its other call sites would see the hook while the
-    ///     moved pass silently would not. One shared set on purpose: the two services' native paths
+    ///     moved pass silently would not. One shared set on purpose: the three classes' native paths
     ///     cover overlapping work, so a patch anywhere in it has to route <em>all</em> of it back to
     ///     C# for the hook to see genuine baseline semantics.
     ///
-    ///     Excluded are the two entry points, <c>MakeAdjustmentsToMap</c> and
-    ///     <c>GetRaidAdjustments</c> - they are the dispatchers, and a patch there wraps whichever
-    ///     path runs - and <c>AdjustLootMultipliers</c>, which stays on the C# side either way.
+    ///     Excluded are the three entry points, <c>MakeAdjustmentsToMap</c>,
+    ///     <c>GetRaidAdjustments</c> and <c>PmcWaveGenerator.ApplyWaveChangesToMap</c> - they are the
+    ///     dispatchers, and a patch there wraps whichever path runs - and
+    ///     <c>AdjustLootMultipliers</c>, which stays on the C# side either way. The wave generator
+    ///     contributes nothing else: its whole legacy body is inline in that one entry point.
     /// </summary>
     private static readonly List<MethodBase> _frozenMembers =
     [
@@ -238,6 +240,52 @@ public class RaidNativeRequestBuilder(
     public AdjustExtractsResponse SendAdjustExtracts(AdjustExtractsRequest request)
     {
         return SptNative.AdjustExtracts(request);
+    }
+
+    /// <summary>
+    ///     One PMC wave pass's inputs, plus the config's wave list they were resolved from.
+    ///
+    ///     The list is looked up exactly once here and handed back: the applier appends
+    ///     <em>these</em> instances into the location by reference, which is the aliasing channel the
+    ///     splice has always had - a second lookup, or a serde round trip, would hand it copies.
+    /// </summary>
+    /// <param name="location">The map to work out the wave splice for</param>
+    public (ApplyPmcWavesRequest Request, List<BossLocationSpawn>? WavesToAdd) BuildApplyPmcWavesRequest(LocationBase location)
+    {
+        // Legacy gates the lookup - and every dereference - behind the flag
+        // (PmcWaveGenerator.cs:54-56): with it off, a null Id or a null BossLocationSpawn must stay
+        // untouched on this arm too. The lowercasing is the same load-bearing one the legacy body
+        // does; a null Id NREs identically on both arms when the flag is set
+        List<BossLocationSpawn>? wavesToAdd = null;
+        var wavesFound =
+            pmcConfig.RemoveExistingPmcWaves && pmcConfig.CustomPmcWaves.TryGetValue(location.Id.ToLowerInvariant(), out wavesToAdd);
+
+        var request = new ApplyPmcWavesRequest
+        {
+            RemoveExistingPmcWaves = pmcConfig.RemoveExistingPmcWaves,
+            WavesFound = wavesFound,
+
+            // A null list value no-ops natively where legacy NREs on the unguarded .Count - booked,
+            // mod-only
+            WaveCount = wavesToAdd?.Count ?? 0,
+
+            // Legacy first touches BossLocationSpawn only once all three gates pass
+            BossNames =
+                wavesFound && wavesToAdd is { Count: > 0 }
+                    ? (location.BossLocationSpawn ?? []).Select(bossSpawn => bossSpawn.BossName).ToList()
+                    : [],
+        };
+
+        return (request, wavesToAdd);
+    }
+
+    /// <summary>
+    ///     Works out which of a map's boss waves the custom-PMC splice drops natively.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">The pass failed, or the native side misbehaved.</exception>
+    public ApplyPmcWavesResponse SendApplyPmcWaves(ApplyPmcWavesRequest request)
+    {
+        return SptNative.ApplyPmcWaveChanges(request);
     }
 
     /// <summary>

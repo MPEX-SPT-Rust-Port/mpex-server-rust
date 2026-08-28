@@ -9,6 +9,7 @@ use rayon::prelude::*;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
+use crate::achievements::{AchievementError, get_achievement_statistics};
 use crate::base_class::{self, BaseClassRequest, BaseClassResponse};
 use crate::bot::bot_inventory_generator::{generate_inventory, generate_inventory_batch};
 use crate::diag::DiagSink;
@@ -24,12 +25,13 @@ use crate::quest::{QuestError, generate_repeatable_quest};
 use crate::ragfair::models::{DynamicOffersHeader, DynamicOffersResult};
 use crate::ragfair::offer_generator::{RagfairError, generate_dynamic_offers};
 use crate::raid::{
-    RaidError, adjust_bot_hostility_settings, adjust_extracts, get_raid_adjustments,
-    make_adjustments_to_map,
+    RaidError, adjust_bot_hostility_settings, adjust_extracts, apply_pmc_wave_changes,
+    get_raid_adjustments, make_adjustments_to_map,
 };
 use crate::runtime::runtime;
 use crate::scav_case::{ScavCaseError, generate_scav_case_rewards};
 use crate::verify;
+use crate::weather::{WeatherError, generate_weather};
 
 pub const STATUS_OK: i32 = 0;
 pub const STATUS_BAD_ARGS: i32 = 1;
@@ -139,6 +141,38 @@ impl FfiFailure for RaidError {
     fn into_message(self) -> String {
         match self {
             RaidError::Failed(message) => message,
+        }
+    }
+}
+
+impl FfiFailure for AchievementError {
+    fn status(&self) -> i32 {
+        // No stale-epoch arm: the statistics pass rides no resident DB — the whole projection
+        // crosses in the request — so every failure is a generation failure.
+        match self {
+            AchievementError::Failed(_) => STATUS_ERROR,
+        }
+    }
+
+    fn into_message(self) -> String {
+        match self {
+            AchievementError::Failed(message) => message,
+        }
+    }
+}
+
+impl FfiFailure for WeatherError {
+    fn status(&self) -> i32 {
+        // No stale-epoch arm: the weather pass rides no resident DB — the season table and the
+        // preset blocks both cross in the request — so every failure is a generation failure.
+        match self {
+            WeatherError::Failed(_) => STATUS_ERROR,
+        }
+    }
+
+    fn into_message(self) -> String {
+        match self {
+            WeatherError::Failed(message) => message,
         }
     }
 }
@@ -730,6 +764,91 @@ pub unsafe extern "C" fn spt_adjust_extracts(
             adjust_extracts,
             |response| {
                 serde_json::to_vec(&response).expect("extracts response serialization cannot fail")
+            },
+        )
+    }
+}
+
+/// Which of a location's boss waves the PMC-wave pass removes: indices into the request's own
+/// `BossLocationSpawn` projection, plus the flag saying the removal guard opened at all. The append
+/// that follows stays C#-side — it puts the live config's own wave objects into the location by
+/// reference. Names no epoch, draws nothing.
+///
+/// # Safety
+/// See `spt_generate_static_containers`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn spt_apply_pmc_wave_changes(
+    req_ptr: *const u8,
+    req_len: usize,
+    out_ptr: *mut *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    unsafe {
+        run_generator_with(
+            req_ptr,
+            req_len,
+            out_ptr,
+            out_len,
+            apply_pmc_wave_changes,
+            |response| {
+                serde_json::to_vec(&response).expect("pmc wave response serialization cannot fail")
+            },
+        )
+    }
+}
+
+/// The percentage of profiles holding each achievement, in the achievement table's own order —
+/// `AchievementController.GetAchievementStatics`'s loop. The profile fetch and the
+/// `AchievementProfileIdBlacklist` filter stay C#-side; the whole projection crosses in the
+/// request. Names no epoch, draws nothing.
+///
+/// # Safety
+/// See `spt_generate_static_containers`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn spt_get_achievement_statistics(
+    req_ptr: *const u8,
+    req_len: usize,
+    out_ptr: *mut *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    unsafe {
+        run_generator_with(
+            req_ptr,
+            req_len,
+            out_ptr,
+            out_len,
+            get_achievement_statistics,
+            |response| {
+                serde_json::to_vec(&response)
+                    .expect("achievement statistics serialization cannot fail")
+            },
+        )
+    }
+}
+
+/// One `Weather` object's draws plus the preset-weight state transition —
+/// `WeatherGenerator.GenerateWeather` and the three `IWeatherPreset` strategies. The season's
+/// refill table, `isNight` and the date/time tail are all resolved C#-side and cross in the
+/// request. The only export of the three that draws, so the only one honouring `testSeed`.
+///
+/// # Safety
+/// See `spt_generate_static_containers`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn spt_generate_weather(
+    req_ptr: *const u8,
+    req_len: usize,
+    out_ptr: *mut *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    unsafe {
+        run_generator_with(
+            req_ptr,
+            req_len,
+            out_ptr,
+            out_len,
+            generate_weather,
+            |response| {
+                serde_json::to_vec(&response).expect("weather response serialization cannot fail")
             },
         )
     }
@@ -1696,7 +1815,7 @@ mod tests {
         assert_eq!(spt_native_abi_version(), crate::ABI_VERSION);
         assert_eq!(
             crate::ABI_VERSION,
-            35,
+            36,
             "bump SptNative.ExpectedAbiVersion too"
         );
     }
@@ -3124,6 +3243,38 @@ mod tests {
     }
 
     #[test]
+    fn apply_pmc_wave_changes_roundtrips_result_json() {
+        // The camelCase names here are the contract `Native/Raid/RaidPayloads.cs` mirrors.
+        let request = serde_json::to_vec(&serde_json::json!({
+            "removeExistingPmcWaves": true,
+            "wavesFound": true,
+            "waveCount": 2,
+            "bossNames": ["bossBully", "pmcUSEC", null, "pmcBEAR", "pmcusec"]
+        }))
+        .unwrap();
+
+        let (status, out) = call_generate(spt_apply_pmc_wave_changes, &request);
+        assert_eq!(status, STATUS_OK);
+
+        let response: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(response["apply"], true);
+        // Case-SENSITIVE on the two names, and a null `BossName` is kept.
+        assert_eq!(response["removeIndices"], serde_json::json!([1, 3]));
+    }
+
+    #[test]
+    fn an_unparseable_pmc_wave_request_returns_bad_args_with_the_parse_error() {
+        let (status, out) = call_generate(spt_apply_pmc_wave_changes, b"{\"wavesFound\":");
+
+        assert_eq!(status, STATUS_BAD_ARGS);
+        let message = String::from_utf8(out).unwrap();
+        assert!(
+            message.contains("EOF while parsing"),
+            "expected the serde error, got: {message}"
+        );
+    }
+
+    #[test]
     fn an_unparseable_extracts_request_returns_bad_args_with_the_parse_error() {
         let (status, out) = call_generate(spt_adjust_extracts, b"{\"playerSide\":");
 
@@ -3132,6 +3283,96 @@ mod tests {
         assert!(
             message.contains("EOF while parsing"),
             "expected the serde error, got: {message}"
+        );
+    }
+
+    /// The camelCase names here are the contract `Native/Achievements/` mirrors byte-for-byte.
+    const ACHIEVEMENT_REQUEST: &[u8] = br#"{
+        "achievementIds": ["b", "a", "", "c"],
+        "profileCount": 8,
+        "completedSets": [["a", "b"], ["b"], ["a"]]
+    }"#;
+
+    #[test]
+    fn achievement_statistics_roundtrips_result_json() {
+        let (status, out) = call_generate(spt_get_achievement_statistics, ACHIEVEMENT_REQUEST);
+        assert_eq!(status, STATUS_OK);
+
+        // Byte-exact: the empty id is skipped, and the map keeps achievement order — which is
+        // observable JSON, so the assertion pins the order as well as the names.
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            r#"{"elements":{"b":25,"a":25,"c":0}}"#
+        );
+    }
+
+    #[test]
+    fn a_duplicate_achievement_id_crosses_as_an_error_message() {
+        let (status, out) = call_generate(
+            spt_get_achievement_statistics,
+            br#"{"achievementIds":["a","a"],"profileCount":1,"completedSets":[]}"#,
+        );
+
+        assert_eq!(status, STATUS_ERROR);
+        let message = String::from_utf8(out).unwrap();
+        assert!(message.contains("duplicate achievement id: a"), "{message}");
+    }
+
+    /// Seeded, but every value is pinned *by construction* rather than by the seed: a
+    /// single-entry `refillWeights` picks RAINY with no draw at all, every weighted table has one
+    /// candidate, and every range is degenerate. The camelCase names here are the contract
+    /// `Native/Weather/` mirrors byte-for-byte.
+    const WEATHER_REQUEST: &[u8] = br#"{
+        "presetWeights": [],
+        "previousPreset": null,
+        "refillWeights": [{"preset": 2, "weight": 5.0}],
+        "presetBlocks": [{"preset": 2, "block": {
+            "clouds": [{"value": "0.5", "weight": 1.0}],
+            "windSpeed": [{"value": "1", "weight": 1.0}],
+            "windDirection": [{"direction": 3, "weight": 1.0}],
+            "windGustiness": {"min": 2.0, "max": 2.0},
+            "rain": [{"value": "2", "weight": 1.0}],
+            "rainIntensity": {"min": 3.0, "max": 3.0},
+            "fog": [{"value": "0.25", "weight": 1.0}],
+            "tempDay": {"min": 4.0, "max": 4.0},
+            "tempNight": {"min": 5.0, "max": 5.0},
+            "pressure": {"min": 1.0, "max": 1.0}
+        }}],
+        "isNight": false,
+        "testSeed": 42
+    }"#;
+
+    #[test]
+    fn generate_weather_roundtrips_result_json() {
+        let (status, out) = call_generate(spt_generate_weather, WEATHER_REQUEST);
+        assert_eq!(status, STATUS_OK);
+
+        // Byte-exact, so the assertion pins every response name Task 7's C# record must carry.
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            concat!(
+                r#"{"chosenPreset":2,"refilled":true,"#,
+                r#""updatedPresetWeights":[{"preset":2,"weight":5.0}],"#,
+                r#""cloud":0.5,"windSpeed":1.0,"windGustiness":2.0,"rain":2.0,"#,
+                r#""rainIntensity":3.0,"fog":0.25,"pressure":1.0,"temperature":4.0,"#,
+                r#""windDirection":3}"#
+            )
+        );
+    }
+
+    #[test]
+    fn an_absent_chosen_weather_block_crosses_as_an_error_message() {
+        let (status, out) = call_generate(
+            spt_generate_weather,
+            br#"{"presetWeights":[{"preset":1,"weight":5.0}],"refillWeights":[],
+                 "presetBlocks":[{"preset":1,"block":null}],"isNight":false}"#,
+        );
+
+        assert_eq!(status, STATUS_ERROR);
+        let message = String::from_utf8(out).unwrap();
+        assert!(
+            message.contains("no preset weights for chosen preset 1"),
+            "{message}"
         );
     }
 
@@ -3496,6 +3737,16 @@ mod tests {
 
         let status = unsafe {
             spt_adjust_extracts(
+                std::ptr::null(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(status, STATUS_BAD_ARGS);
+
+        let status = unsafe {
+            spt_apply_pmc_wave_changes(
                 std::ptr::null(),
                 0,
                 std::ptr::null_mut(),

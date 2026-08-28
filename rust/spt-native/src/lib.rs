@@ -1,3 +1,4 @@
+pub mod achievements;
 pub mod base_class;
 pub mod bot;
 pub mod console;
@@ -15,5 +16,6 @@ pub mod raid;
 pub mod runtime;
 pub mod scav_case;
 pub mod verify;
+pub mod weather;
 
-pub const ABI_VERSION: u32 = 35;
+pub const ABI_VERSION: u32 = 36;
