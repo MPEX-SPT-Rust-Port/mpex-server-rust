@@ -73,6 +73,9 @@ internal static unsafe partial class NativeMethods
     [LibraryImport(LibraryName, EntryPoint = "spt_generate_bot_inventory_batch")]
     internal static partial int GenerateBotInventoryBatch(byte* requestUtf8, nuint requestLen, byte** outPtr, nuint* outLen);
 
+    [LibraryImport(LibraryName, EntryPoint = "spt_generate_player_scav")]
+    internal static partial int GeneratePlayerScav(byte* requestUtf8, nuint requestLen, byte** outPtr, nuint* outLen);
+
     [LibraryImport(LibraryName, EntryPoint = "spt_generate_dynamic_offers")]
     internal static partial int GenerateDynamicOffers(byte* requestUtf8, nuint requestLen, byte** outPtr, nuint* outLen);
 
