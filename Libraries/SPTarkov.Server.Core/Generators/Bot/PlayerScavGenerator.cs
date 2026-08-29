@@ -37,8 +37,8 @@ namespace SPTarkov.Server.Core.Generators.Bot;
 /// C#-side loot pools stays here, everything else crosses. The full 4.1.2 C# implementation is
 /// retained below as the legacy path - it is the frozen mod contract (constructor and protected
 /// members are apicompat-gated against the 4.1.2 baseline) and runs instead of the native path when
-/// a Harmony patch on any frozen member is detected, when a mod substituted this generator or
-/// BotInventoryGenerator, when the frozen constructor built the instance or when
+/// a Harmony patch on any frozen member is detected, when a mod substituted this generator,
+/// BotInventoryGenerator or BotGenerator, when the frozen constructor built the instance or when
 /// PlayerScavConfig.ForceLegacyPlayerScavGeneration is set, so mod hooks fire with genuine baseline
 /// semantics.
 /// </summary>
@@ -190,9 +190,9 @@ public class PlayerScavGenerator(
     ///     The legacy path runs when the frozen 4.1.2 constructor built this instance (it has no
     ///     native seam to dispatch to), when forced by config, when the bot inventory family is
     ///     itself off its native path, when any of the frozen members carries a live Harmony patch,
-    ///     or when a mod has substituted this generator or BotInventoryGenerator - running the
-    ///     retained C# implementation is the only way those hooks and replacements can take effect
-    ///     with real baseline semantics.
+    ///     or when a mod has substituted this generator, BotInventoryGenerator or BotGenerator -
+    ///     running the retained C# implementation is the only way those hooks and replacements can
+    ///     take effect with real baseline semantics.
     /// </summary>
     private bool UseLegacyPath()
     {
@@ -208,9 +208,15 @@ public class PlayerScavGenerator(
 
         // The export runs the bot family's internals: anything that de-natives bot inventory
         // de-natives the player scav with it (BotWaveBatcher.CanBatch precedent). The subclass
-        // check is ours to make: a BotInventoryGenerator subclass overriding GenerateInventory is
-        // bypassed on this arm, and BotInventoryGenerator.UseLegacyPath has no self-type check.
-        if (_botInventoryGenerator.UseLegacyPath() || _botInventoryGenerator.GetType() != typeof(BotInventoryGenerator))
+        // checks are ours to make: a mod that registered its own BotInventoryGenerator or
+        // BotGenerator subclass at higher TypePriority handed us an implementation the native
+        // side does not have (three of the nine frozen members live on those two types), and
+        // BotInventoryGenerator.UseLegacyPath has no self-type check.
+        if (
+            _botInventoryGenerator.UseLegacyPath()
+            || _botInventoryGenerator.GetType() != typeof(BotInventoryGenerator)
+            || botGenerator.GetType() != typeof(BotGenerator)
+        )
         {
             return true;
         }

@@ -25,6 +25,7 @@ using SPTarkov.Server.Core.Servers;
 using SPTarkov.Server.Core.Services;
 using SPTarkov.Server.Core.Services.Bot;
 using SPTarkov.Server.Core.Services.Commerce;
+using SPTarkov.Server.Core.Services.Items;
 using SPTarkov.Server.Core.Services.Locales;
 using SPTarkov.Server.Core.Services.Profile;
 using SPTarkov.Server.Core.Services.Server;
@@ -39,10 +40,10 @@ namespace UnitTests.Tests.Generators;
 /// Pins the dual-path dispatch for player scav generation: native by default, the retained 4.1.2 C#
 /// implementation when <c>PlayerScavConfig.ForceLegacyPlayerScavGeneration</c> is set, when the
 /// frozen 4.1.2 constructor built the instance (no native seam to dispatch to), when a mod
-/// substituted this generator or the <see cref="BotInventoryGenerator"/> it rides, or when the bot
-/// family itself declined its native path. Harmony patches on the frozen members are
-/// <see cref="PlayerScavHookLivenessTests"/>' business; the one patch case here is the dispatcher
-/// rule, which belongs with the routing decisions.
+/// substituted this generator or the <see cref="BotInventoryGenerator"/> or
+/// <see cref="BotGenerator"/> it rides, or when the bot family itself declined its native path.
+/// Harmony patches on the frozen members are <see cref="PlayerScavHookLivenessTests"/>' business;
+/// the one patch case here is the dispatcher rule, which belongs with the routing decisions.
 ///
 /// Also pins the resident-DB epoch protocol on the native arm (<see cref="ScavCaseResidentDbTests"/>
 /// precedent): an eligible generator names an epoch and never sends the C#-built views override, the
@@ -353,6 +354,25 @@ public class PlayerScavPathDispatchTests
     }
 
     /// <summary>
+    /// Two of the nine frozen members live on <see cref="BotGenerator"/>, and the native arm inlines
+    /// their orchestration into its own shell - so a mod's subclass of it would be bypassed just as
+    /// silently, and the fall back is again the player scav side's to decide.
+    /// </summary>
+    [Test]
+    public void AReplacedBotGeneratorRoutesToTheLegacyPath()
+    {
+        var generator = (PlayerScavGenerator)Construct(typeof(PlayerScavGenerator), Construct(typeof(TestBotGeneratorSubclass)));
+
+        Generate(generator);
+
+        Assert.That(
+            generator.LastPathTaken,
+            Is.EqualTo(LootGenerationPath.Legacy),
+            "a replaced BotGenerator must route to the legacy path: two frozen members live on it"
+        );
+    }
+
+    /// <summary>
     /// Generation writes the new scav back into the profile, so every case starts from the same
     /// freshly seeded one.
     /// </summary>
@@ -517,6 +537,46 @@ public class PlayerScavPathDispatchTests
             pmcConfig,
             loadedMods,
             dbPublisher
+        ) { }
+
+    /// <summary>
+    /// Stands in for a mod-registered bot generator: identical behaviour, different type.
+    /// </summary>
+    private class TestBotGeneratorSubclass(
+        ISptLogger<BotGenerator> logger,
+        TemplateTable templateTable,
+        GlobalTable globalTable,
+        BotTable botTable,
+        RandomUtil randomUtil,
+        BotInventoryGenerator botInventoryGenerator,
+        BotLevelGenerator botLevelGenerator,
+        BotEquipmentFilterService botEquipmentFilterService,
+        WeightedRandomHelper weightedRandomHelper,
+        BotHelper botHelper,
+        SeasonalEventService seasonalEventService,
+        ItemFilterService itemFilterService,
+        BotNameService botNameService,
+        BotConfig botConfig,
+        PmcConfig pmcConfig,
+        ICloner cloner
+    )
+        : BotGenerator(
+            logger,
+            templateTable,
+            globalTable,
+            botTable,
+            randomUtil,
+            botInventoryGenerator,
+            botLevelGenerator,
+            botEquipmentFilterService,
+            weightedRandomHelper,
+            botHelper,
+            seasonalEventService,
+            itemFilterService,
+            botNameService,
+            botConfig,
+            pmcConfig,
+            cloner
         ) { }
 }
 
