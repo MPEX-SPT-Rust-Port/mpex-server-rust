@@ -508,8 +508,8 @@ keeps the renderer numbering the item below as 4. -->
 6. **A real Windows run.** The native console and launcher arm are structurally reviewed but have
    never executed on Windows (export-table and RID-triple gaps: Phase 6b ledger).
 
-<!-- Item 7, "player scav test-coverage follow-ups" (PR #23 final review), was delivered by the
-pscav follow-ups PR with no ABI bump. All four bullets landed: `PlayerScavGenerator.UseLegacyPath`
+<!-- Item 7, "player scav test-coverage follow-ups" (PR #23 final review), was delivered by
+PR #24 with no ABI bump. All four bullets landed: `PlayerScavGenerator.UseLegacyPath`
 now de-natives on a substituted `BotGenerator` too (two of the nine frozen members live there) and
 its subclass-check comment no longer describes virtual dispatch C# does not permit;
 `SptNativePlayerScavWireTests` pins `GeneratePlayerScavRequest`/`KarmaSettingsView` (the C# fixture
@@ -521,5 +521,5 @@ projection field-for-field; `PlayerScavHookLivenessTests` resolves its cross-typ
 `Modifiers.Mod` through `AdjustWeaponModWeights` cross-arm, a positive control beside the
 seed-fragile parity negatives, and per-arm pins on the shipped 3–27 additional-loot band that
 `GetChance100` had never seen. The pscav response no longer echoes `container_grids` back across
-FFI: it rides an existing wire-only flag, so `RESIDENT_GOLDEN` moved (548C92D6… → 78B74F37…) while
-the ABI did not. -->
+FFI: it rides the existing `clearBotContainerCacheAfterGeneration` wire flag, so `RESIDENT_GOLDEN`
+moved (548C92D6… → 78B74F37…) while the ABI did not. -->
