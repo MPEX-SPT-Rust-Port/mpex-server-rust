@@ -507,3 +507,29 @@ keeps the renderer numbering the item below as 4. -->
    builds. Do it per target before the first tagged release image.
 6. **A real Windows run.** The native console and launcher arm are structurally reviewed but have
    never executed on Windows (export-table and RID-triple gaps: Phase 6b ledger).
+7. **Player scav test-coverage follow-ups** (PR #23 final review; the pre-merge holes — the
+   resident-arm dispatch cells, the cross-arm additional-loot placement pin, the positional id
+   normalization in `player_scav_resident.rs`, the un-cloned hydration template — were fixed on the
+   branch; these are the booked remainder):
+   - **Wire-contract pins.** Nothing pins `GeneratePlayerScavRequest`/`KarmaSettingsWire` the way
+     `SptNativeBotWireTests` pins `spt_generate_bot_inventory` — and this PR's `GameVersion`
+     drive-by was itself a wire-shape bug. Relatedly, every non-PMC `BotGenerationDetails` fixture
+     hand-sets `GameVersion = "standard"`, so a recurrence of the null-`GameVersion` hole would be
+     re-masked; one fixture should drop it.
+   - **C#-side resident-vs-override equality.** The Rust resident test's override arm uses a
+     hand-written fixture, not the real `PlayerScavNativeRequestBuilder.BuildViewsOverride`
+     projection, so a bug there (e.g. the `lootPools` argument feeding `BuildHandbookPrices`) has no
+     test that could fail. `BotResidentDbTests.AResidentSendAndAnOverrideSendProduceIdenticalBotsFieldForField`
+     is the pattern; `DisableNativeRequestCache` + `NativeTestSeed` already exist.
+   - **Meta-test cross-type derivation.** `PlayerScavHookLivenessTests`' surface meta-test derives
+     `PlayerScavGenerator`'s own six members but the three cross-type members
+     (`BotGenerator.GeneratePlayerScav`/`GenerateBot`, `BotInventoryGenerator.GenerateInventory`)
+     are literals in both the production list and the test; `_bothArmsMembers` is a hand-written
+     name list, so moving a named member native keeps the meta-test green.
+   - Smaller: `PlayerScavGenerator.UseLegacyPath`'s subclass-check comment describes dispatch C#
+     doesn't permit (none of the guarded methods are virtual) and `botGenerator` is missing from
+     the subclass check its twin gets; `AdjustWeaponModWeights` is never exercised cross-arm at
+     non-zero values (shipped `Modifiers.Mod` is all-zeros); the parity negative controls are
+     seed-fragile without a positive control at the same seed; `GetChance100` only tested at
+     100/0 (shipped karma uses 3–27); the pscav request serializes `container_grids` back across
+     FFI only for `ClearCache` to no-op on it.
