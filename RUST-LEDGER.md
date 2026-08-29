@@ -994,7 +994,7 @@ comment); this list records where, plus the deferred items recorded nowhere else
   pass. The profile boundary stayed C#-side on both arms — karma-value reads, the fence/limit
   hydration onto the crossing template, and every profile write. Follow-ups from the final review
   were booked as roadmap item 7, retired by PR #24.
-- **PR #24 — pscav follow-ups** (2026-08-29, `5a8f906`, no bump). Retires roadmap item 7. Carryovers,
+- **PR #24 — pscav follow-ups** (2026-08-29, `4db6fc7`, no bump). Retires roadmap item 7. Carryovers,
   all review-triaged as ride-able: `PlayerScavResidentDbTests`' per-test `finally` hard-codes the
   kill switch to `false` instead of the captured original (wrong the moment a second `[Test]` is
   added); three of the four karma-map wire pins are key-presence-only; the hook-liveness
