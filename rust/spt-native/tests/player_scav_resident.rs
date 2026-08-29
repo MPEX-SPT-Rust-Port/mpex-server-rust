@@ -445,7 +445,7 @@ fn request(epoch: u64, views_override: Option<Value>) -> Vec<u8> {
             "details": {"role": "assault", "roleLowercase": "assault", "side": "Savage",
                 "botLevel": 1, "isPmc": false, "isPlayerScav": true, "gameVersion": "standard",
                 "location": "bigmap", "botDifficulty": "normal",
-                "clearBotContainerCacheAfterGeneration": false},
+                "clearBotContainerCacheAfterGeneration": true},
         },
         "template": template(),
         "lootPools": {},
@@ -466,7 +466,7 @@ fn request(epoch: u64, views_override: Option<Value>) -> Vec<u8> {
 ///
 /// To regenerate after a deliberate generation change: put any wrong value here, run
 /// `cargo test --test player_scav_resident`, and paste the `left:` value from the failure.
-const RESIDENT_GOLDEN: &str = "548C92D608935063C508FD911B389709";
+const RESIDENT_GOLDEN: &str = "78B74F37A38AEA0D85A10AF79B763A26";
 
 #[test]
 fn a_resident_send_matches_the_override_send_and_a_wrong_epoch_is_stale() {

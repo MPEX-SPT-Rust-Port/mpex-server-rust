@@ -64,6 +64,13 @@ public class PlayerScavNativeRequestBuilder(
             pmcConfig
         );
 
+        // The pscav arm never restores container grids C#-side (ClearCache runs against an
+        // always-empty cache), so suppress the response echo. Wire-only: BuildBotSlice mints a
+        // fresh view per call, so this cannot leak into the caller's BotGenerationDetails - which
+        // must keep false, as the legacy arm's additional-loot pass needs the C# container service
+        // to survive the generate call.
+        botRequest.Bot.Details.ClearBotContainerCacheAfterGeneration = true;
+
         return new GeneratePlayerScavRequest
         {
             Epoch = 0,

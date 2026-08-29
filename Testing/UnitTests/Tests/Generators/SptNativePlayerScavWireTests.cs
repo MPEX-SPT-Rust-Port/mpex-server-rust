@@ -97,6 +97,18 @@ public class SptNativePlayerScavWireTests
         {
             Assert.That(new MongoId(item.Id.ToString()).ToString(), Is.EqualTo(item.Id.ToString()));
         }
+
+        Assert.That(result.ContainerGrids, Is.Empty, "nothing reads the pscav response grids; the wire flag empties them");
+    }
+
+    [Test]
+    public void TheRequestSkipsTheContainerGridEcho()
+    {
+        Assert.That(
+            _request.Bot.Details.ClearBotContainerCacheAfterGeneration,
+            Is.True,
+            "the pscav arm never restores container grids, so the wire flag must suppress the echo"
+        );
     }
 
     /// <summary>
