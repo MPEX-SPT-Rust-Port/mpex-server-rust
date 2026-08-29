@@ -6,7 +6,10 @@ namespace UnitTests.Tests.Generators;
 /// The two sanctioned masks every player scav comparison applies to a serialized scav: SavageLockTime
 /// is derived from the wall clock at the moment the generation ran, and every fresh MongoId becomes a
 /// positional placeholder. Shared by <see cref="PlayerScavParityTests"/> (legacy vs native) and
-/// <see cref="PlayerScavResidentDbTests"/> (resident vs override).
+/// <see cref="PlayerScavResidentDbTests"/> (resident vs override). The wall-clock mask counter-asserts
+/// presence: SavageLockTime is nullable and serialized WhenWritingNull, and SetScavCooldownTimer runs
+/// on both arms - so if it ever stopped running, the key would vanish from both sides of every
+/// comparison and no diff would notice without this throw.
 /// </summary>
 internal static class PlayerScavJson
 {
@@ -19,13 +22,17 @@ internal static class PlayerScavJson
     {
         var root = JsonNode.Parse(json) ?? throw new InvalidOperationException("player scav output parsed to null");
 
-        Remove(root);
+        if (Remove(root) == 0)
+        {
+            throw new InvalidOperationException("no SavageLockTime to mask - did SetScavCooldownTimer stop running?");
+        }
 
         return root.ToJsonString();
     }
 
-    private static void Remove(JsonNode node)
+    private static int Remove(JsonNode node)
     {
+        var removed = 0;
         switch (node)
         {
             case JsonObject obj:
@@ -35,12 +42,13 @@ internal static class PlayerScavJson
                     if (string.Equals(key, "SavageLockTime", StringComparison.OrdinalIgnoreCase))
                     {
                         obj.Remove(key);
+                        removed++;
                         continue;
                     }
 
                     if (obj[key] is { } child)
                     {
-                        Remove(child);
+                        removed += Remove(child);
                     }
                 }
                 break;
@@ -49,10 +57,12 @@ internal static class PlayerScavJson
                 {
                     if (child is not null)
                     {
-                        Remove(child);
+                        removed += Remove(child);
                     }
                 }
                 break;
         }
+
+        return removed;
     }
 }

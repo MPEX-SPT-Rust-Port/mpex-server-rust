@@ -19,8 +19,8 @@ namespace UnitTests.Tests.Generators;
 ///
 /// The additional-loot draws are the one deliberate cross-arm stream divergence - legacy rolls them
 /// C#-side after the bot is built, native rolls them inside the export - so the field-for-field case
-/// suppresses them and per-arm cases cover them separately, at a certainty and at a mid-range
-/// chance from the band the shipped config actually uses.
+/// suppresses them and per-arm cases cover them separately, at a certainty and at a chance from
+/// inside the band the shipped config actually uses.
 ///
 /// Mutates the shared PlayerScavConfig singleton, the RandomUtil seam and the ProbabilityRandomSource
 /// static, so it restores all of them and never runs in parallel with other fixtures.
@@ -53,11 +53,11 @@ public class PlayerScavParityTests
     private const string ForcedModSlotId = "mod_mount_000";
 
     /// <summary>
-    /// A chance from the middle of the 3-27 band every shipped <c>lootItemsToAddChancePercent</c>
-    /// value sits in - the band no other case reaches, 100 and 0 both short-circuiting
+    /// A chance from inside the 3-27 band every shipped <c>lootItemsToAddChancePercent</c> value
+    /// sits in (its top value) - the band no other case reaches, 100 and 0 both short-circuiting
     /// <c>GetChance100</c>.
     /// </summary>
-    private const double MidRangeChancePercent = 27.0;
+    private const double InBandChancePercent = 27.0;
 
     /// <summary>
     /// A one-slot item the shipped config already hands out at higher karma levels, so it is known
@@ -113,13 +113,16 @@ public class PlayerScavParityTests
     }
 
     /// <summary>
-    /// The same comparison with the karma level given real work to do. The shipped level the
-    /// fixture profile selects has all-zero <c>modifiers</c> and an empty <c>equipmentBlacklist</c>,
-    /// so the case above only ever reaches the zero-skip branches and never compares a
-    /// karma-adjusted legacy template against a karma-adjusted native one. Here the legacy arm
-    /// folds both into the template C#-side and the native arm folds them in inside the export,
-    /// which is precisely the seam the port moved. Karma application draws no randomness on either
-    /// arm, so the two streams stay aligned under the dual-seam seeding.
+    /// The same comparison with the equipment-modifier half of the karma level given real work to
+    /// do. The shipped level the fixture profile selects has all-zero <c>modifiers</c>, so the case
+    /// above only ever reaches the zero-skip branches and never compares a karma-adjusted legacy
+    /// template against a karma-adjusted native one. Here the legacy arm folds the modifier into
+    /// the template C#-side and the native arm folds it in inside the export, which is precisely
+    /// the seam the port moved. Karma application draws no randomness on either arm, so the two
+    /// streams stay aligned under the dual-seam seeding. The blacklist half lives in its own case:
+    /// the -100 skips every draw headwear would have consumed, so every later slot lands at a
+    /// different stream position and no absence asserted under this mutation could be attributed
+    /// to a co-applied blacklist.
     /// </summary>
     [Test]
     public void TheArmsAgreeFieldForFieldUnderNonZeroKarma()
@@ -127,14 +130,9 @@ public class PlayerScavParityTests
         var karmaSettings = _playerScavConfig.KarmaLevel[KarmaLevelKey];
         var originalChances = karmaSettings.LootItemsToAddChancePercent;
         var originalEquipmentModifiers = karmaSettings.Modifiers.Equipment;
-        var originalBlacklist = karmaSettings.EquipmentBlacklist;
 
         karmaSettings.LootItemsToAddChancePercent = [];
         karmaSettings.Modifiers.Equipment = new Dictionary<string, double> { { "Headwear", -100.0 } };
-        karmaSettings.EquipmentBlacklist = new Dictionary<EquipmentSlots, List<MongoId>>
-        {
-            { EquipmentSlots.Scabbard, [_blacklistedScabbardTpl] },
-        };
         try
         {
             var scav = AssertTheArmsAgree($"karma={KarmaLevelKey}+modifiers");
@@ -146,6 +144,39 @@ public class PlayerScavParityTests
                 Is.False,
                 "the -100 headwear modifier did not take: the slot still generated"
             );
+        }
+        finally
+        {
+            karmaSettings.Modifiers.Equipment = originalEquipmentModifiers;
+            karmaSettings.LootItemsToAddChancePercent = originalChances;
+        }
+    }
+
+    /// <summary>
+    /// The blacklist half of the karma seam, applied alone. Alone matters: removing pool entries
+    /// draws nothing and no draw before the Scabbard pick is touched, so every draw up to that
+    /// pick sits at exactly the stream position of the unmodified control run - the control's
+    /// proof that this seed draws the blacklisted scabbard makes its absence here attributable to
+    /// the blacklist and nothing else. A deleted blacklist implementation reproduces the control
+    /// run and fails the assert every time; co-applied with the -100 it would only fail on the
+    /// roughly half of stream positions that happen to land on the same heaviest entry.
+    /// </summary>
+    [Test]
+    public void TheArmsAgreeFieldForFieldUnderAnEquipmentBlacklist()
+    {
+        var karmaSettings = _playerScavConfig.KarmaLevel[KarmaLevelKey];
+        var originalChances = karmaSettings.LootItemsToAddChancePercent;
+        var originalBlacklist = karmaSettings.EquipmentBlacklist;
+
+        karmaSettings.LootItemsToAddChancePercent = [];
+        karmaSettings.EquipmentBlacklist = new Dictionary<EquipmentSlots, List<MongoId>>
+        {
+            { EquipmentSlots.Scabbard, [_blacklistedScabbardTpl] },
+        };
+        try
+        {
+            var scav = AssertTheArmsAgree($"karma={KarmaLevelKey}+blacklist");
+
             Assert.That(
                 scav.Inventory!.Items!.Any(item => item.Template == _blacklistedScabbardTpl),
                 Is.False,
@@ -155,7 +186,6 @@ public class PlayerScavParityTests
         finally
         {
             karmaSettings.EquipmentBlacklist = originalBlacklist;
-            karmaSettings.Modifiers.Equipment = originalEquipmentModifiers;
             karmaSettings.LootItemsToAddChancePercent = originalChances;
         }
     }
@@ -296,10 +326,10 @@ public class PlayerScavParityTests
     /// means that arm's stream moved.
     /// </summary>
     [Test]
-    public void TheNativeArmRollsAMidRangeAdditionalLootChanceDeterministically()
+    public void TheNativeArmRollsAnInBandAdditionalLootChanceDeterministically()
     {
         // Observed at the parity seed: the native arm's roll misses.
-        AssertMidRangeAdditionalLootRollIsPinned(forceLegacy: false, expectedAdded: false);
+        AssertInBandAdditionalLootRollIsPinned(forceLegacy: false, expectedAdded: false);
     }
 
     /// <summary>
@@ -308,10 +338,10 @@ public class PlayerScavParityTests
     /// and nothing here compares them.
     /// </summary>
     [Test]
-    public void TheLegacyArmRollsAMidRangeAdditionalLootChanceDeterministically()
+    public void TheLegacyArmRollsAnInBandAdditionalLootChanceDeterministically()
     {
         // Observed at the parity seed: the legacy arm's roll hits.
-        AssertMidRangeAdditionalLootRollIsPinned(forceLegacy: true, expectedAdded: true);
+        AssertInBandAdditionalLootRollIsPinned(forceLegacy: true, expectedAdded: true);
     }
 
     /// <summary>
@@ -365,18 +395,18 @@ public class PlayerScavParityTests
     }
 
     /// <summary>
-    /// The mid-range twin of <see cref="AssertCertainAdditionalLootIsAdded"/>. Every shipped
+    /// The in-band twin of <see cref="AssertCertainAdditionalLootIsAdded"/>. Every shipped
     /// <c>lootItemsToAddChancePercent</c> value is 3-27, but <c>GetChance100</c> rolls
     /// <c>GetInt(1, 99)</c> - so the 100/0 the cases above use short-circuit and leave the band the
     /// shipped data actually occupies untested. The outcome at a given seed is not predictable, so
     /// it is observed once and hard-coded: a flip means the arm's stream moved.
     /// </summary>
-    private void AssertMidRangeAdditionalLootRollIsPinned(bool forceLegacy, bool expectedAdded)
+    private void AssertInBandAdditionalLootRollIsPinned(bool forceLegacy, bool expectedAdded)
     {
         var karmaSettings = _playerScavConfig.KarmaLevel[KarmaLevelKey];
         var originalChances = karmaSettings.LootItemsToAddChancePercent;
 
-        karmaSettings.LootItemsToAddChancePercent = new Dictionary<MongoId, double> { { _knownLootTpl, MidRangeChancePercent } };
+        karmaSettings.LootItemsToAddChancePercent = new Dictionary<MongoId, double> { { _knownLootTpl, InBandChancePercent } };
         try
         {
             var scav = GenerateArm(forceLegacy, Seed);
@@ -384,7 +414,7 @@ public class PlayerScavParityTests
             Assert.That(
                 scav.Inventory!.Items!.Any(item => item.Template == _knownLootTpl),
                 Is.EqualTo(expectedAdded),
-                $"the {(forceLegacy ? "legacy" : "native")} arm's {MidRangeChancePercent}% roll flipped at this seed: the stream moved"
+                $"the {(forceLegacy ? "legacy" : "native")} arm's {InBandChancePercent}% roll flipped at this seed: the stream moved"
             );
         }
         finally
