@@ -43,6 +43,15 @@ public class PlayerScavParityTests
     private const string HeadwearSlotId = "Headwear";
 
     /// <summary>
+    /// The mod slot the non-zero mod-modifier case forces. The weapon the parity seed draws marks
+    /// every mod slot it fills <c>_required</c>, and a required slot survives a -100 as a default
+    /// mod - so on this weapon the mod map is only observable in the other direction. This is its
+    /// one optional slot with a pool on the assault template, at a 26% chance the seed misses, so
+    /// +100 turns a slot that was empty into one that always fills.
+    /// </summary>
+    private const string ForcedModSlotId = "mod_mount_000";
+
+    /// <summary>
     /// A one-slot item the shipped config already hands out at higher karma levels, so it is known
     /// to fit the containers the additional-loot pass writes into.
     /// </summary>
@@ -139,6 +148,73 @@ public class PlayerScavParityTests
         {
             karmaSettings.EquipmentBlacklist = originalBlacklist;
             karmaSettings.Modifiers.Equipment = originalEquipmentModifiers;
+            karmaSettings.LootItemsToAddChancePercent = originalChances;
+        }
+    }
+
+    /// <summary>
+    /// The effect controls the two karma cases carry only mean something against the unmodified run
+    /// at the same seed: absence under a -100 modifier or a blacklist is evidence only if the seed
+    /// produces presence without them, and presence under a +100 mod modifier only if the seed
+    /// produces absence without it.
+    /// </summary>
+    [Test]
+    public void TheKarmaControlsAreNonVacuousAtTheParitySeed()
+    {
+        var scav = GenerateArm(forceLegacy: false, Seed); // karma NOT mutated - shipped level "0"
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(
+                scav.Inventory!.Items!.Any(item => item.SlotId == HeadwearSlotId),
+                Is.True,
+                "the parity seed must generate headwear unmodified, or the -100 negative control is vacuous"
+            );
+            Assert.That(
+                scav.Inventory!.Items!.Any(item => item.Template == _blacklistedScabbardTpl),
+                Is.True,
+                "the parity seed must draw the heaviest scabbard unmodified, or the blacklist negative control is vacuous"
+            );
+            Assert.That(
+                scav.Inventory!.Items!.Any(item => item.SlotId == ForcedModSlotId),
+                Is.False,
+                $"the parity seed must leave {ForcedModSlotId} empty unmodified, or the +100 mod-modifier control is vacuous"
+            );
+        });
+    }
+
+    /// <summary>
+    /// The mod-map twin of <see cref="TheArmsAgreeFieldForFieldUnderNonZeroKarma"/>. The shipped
+    /// karma level's <c>modifiers.mod</c> is all-zeros, so <c>AdjustWeaponModWeights</c> runs on both
+    /// arms and every entry hits the zero-skip - the C# <c>WeaponModsChances</c> mutation and the
+    /// Rust <c>chances.weapon_mods</c> one have never been compared at a real value. Karma
+    /// application draws no randomness on either arm, so the streams stay aligned as above.
+    /// </summary>
+    [Test]
+    public void TheArmsAgreeFieldForFieldUnderNonZeroModModifiers()
+    {
+        var karmaSettings = _playerScavConfig.KarmaLevel[KarmaLevelKey];
+        var originalChances = karmaSettings.LootItemsToAddChancePercent;
+        var originalModModifiers = karmaSettings.Modifiers.Mod;
+
+        karmaSettings.LootItemsToAddChancePercent = [];
+        karmaSettings.Modifiers.Mod = new Dictionary<string, double> { { ForcedModSlotId, 100.0 } };
+        try
+        {
+            var scav = AssertTheArmsAgree($"karma={KarmaLevelKey}+modModifiers");
+
+            // Same anti-vacuity rule as the sibling, in the opposite direction: pin that the
+            // modifier bit, with the unmodified absence proven by
+            // TheKarmaControlsAreNonVacuousAtTheParitySeed.
+            Assert.That(
+                scav.Inventory!.Items!.Any(item => item.SlotId == ForcedModSlotId),
+                Is.True,
+                $"the +100 {ForcedModSlotId} modifier did not take: the slot still did not generate"
+            );
+        }
+        finally
+        {
+            karmaSettings.Modifiers.Mod = originalModModifiers;
             karmaSettings.LootItemsToAddChancePercent = originalChances;
         }
     }
