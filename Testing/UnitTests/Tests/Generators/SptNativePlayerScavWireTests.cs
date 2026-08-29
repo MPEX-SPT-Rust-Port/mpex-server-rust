@@ -73,8 +73,11 @@ public class SptNativePlayerScavWireTests
                 // GameVersion deliberately left unset: the pin below exercises BuildBotSlice's
                 // `?? string.Empty` defaulting rather than a hand-set value that masks it
                 //
-                // The player scav shape: the caller adds more loot into the same containers
-                // afterwards, so it keeps the cache. The model's initializer defaults this to true
+                // Mirrors what production's native literal sends
+                // (BotGenerator.GeneratePlayerScavNative); the model's initializer defaults this to
+                // true, so the explicit false is the tripwire that keeps
+                // TheRequestSkipsTheContainerGridEcho honest - the builder must be the thing that
+                // flips the wire flag to true
                 ClearBotContainerCacheAfterGeneration = false,
             },
             karma,
@@ -154,8 +157,10 @@ public class SptNativePlayerScavWireTests
     }
 
     /// <summary>
-    /// <c>BuildViewsOverride</c> passes the request's own pools on to <c>BuildHandbookPrices</c>; an
-    /// empty enumerable there would price every override-arm loot draw at 0 without failing anything.
+    /// <c>BuildViewsOverride</c> passes the request's own pools on to <c>BuildHandbookPrices</c>; the
+    /// pin is on the wire shape that produces - the prices cover the request's own pools. No pscav
+    /// runtime consequence is claimed: the native side reads handbook prices only when
+    /// <c>total_value_limit_rub</c> is above 0, which is a PMC-only path.
     /// </summary>
     [Test]
     public void TheViewsOverridePricesEveryLootPool()

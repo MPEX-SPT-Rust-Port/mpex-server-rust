@@ -195,6 +195,10 @@ mod tests {
     use super::*;
     use serde_json::{Value, json};
 
+    // `base_request`'s `"clearBotContainerCacheAfterGeneration": false` is the bot-arm value.
+    // Production pscav requests now send `true` (PlayerScavNativeRequestBuilder overrides the wire
+    // flag); these fixtures keep `false` deliberately, as their grids-present assertions gate the
+    // bot-arm behaviour.
     use crate::bot::bot_inventory_generator::tests::base_request;
     use crate::bot::durability_limits_helper::BotDurability;
     use crate::bot::models::{EquipmentFilters, RandomisedResourceDetails};
