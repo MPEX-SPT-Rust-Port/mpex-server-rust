@@ -161,6 +161,51 @@ public class PlayerScavParityTests
     }
 
     /// <summary>
+    /// The two per-arm cases above only pin that the item arrived, which a reversed container
+    /// preference or a different grid slot would still satisfy. The Upd draws diverge cross-arm so
+    /// the field-for-field cases have to suppress this item entirely - but where it lands does not:
+    /// container preference and grid fit are deterministic given the same occupancy, so the
+    /// placement tuple is comparable across the arms and pins the try-order the field-for-field
+    /// cases cannot see.
+    /// </summary>
+    [Test]
+    public void TheArmsAgreeWhereTheCertainAdditionalLootLands()
+    {
+        var karmaSettings = _playerScavConfig.KarmaLevel[KarmaLevelKey];
+        var originalChances = karmaSettings.LootItemsToAddChancePercent;
+
+        karmaSettings.LootItemsToAddChancePercent = new Dictionary<MongoId, double> { { _knownLootTpl, 100.0 } };
+        try
+        {
+            var legacy = Placement(GenerateArm(forceLegacy: true, Seed), "legacy");
+            var native = Placement(GenerateArm(forceLegacy: false, Seed), "native");
+
+            Assert.That(native.Container, Is.EqualTo(legacy.Container), "the arms disagree on which worn container took the item");
+            Assert.That(native.Grid, Is.EqualTo(legacy.Grid), "the arms disagree on which grid of that container took the item");
+            Assert.That(native.Location, Is.EqualTo(legacy.Location), "the arms disagree on where in the grid the item sits");
+        }
+        finally
+        {
+            karmaSettings.LootItemsToAddChancePercent = originalChances;
+        }
+    }
+
+    /// <summary>
+    /// Where the certain additional-loot item landed: the worn container's own slot id, the grid
+    /// inside it the item was written to and the item's position in that grid. Deliberately not the
+    /// parent id - MongoIds are freshly minted per run and never match across arms.
+    /// </summary>
+    private (string? Container, string? Grid, string? Location) Placement(PmcData scav, string arm)
+    {
+        var item = scav.Inventory!.Items!.Single(candidate => candidate.Template == _knownLootTpl);
+        var parent = scav.Inventory!.Items!.Single(candidate => candidate.Id.ToString() == item.ParentId);
+
+        Assert.That(parent.SlotId, Is.Not.Null, $"the {arm} arm's additional loot hangs off a slotless parent");
+
+        return (parent.SlotId, item.SlotId, _jsonUtil.Serialize(item.Location));
+    }
+
+    /// <summary>
     /// The unseeded smoke: nothing pins the output, so this earns its keep by failing on a throw or
     /// a silent fallback on the path every real request takes.
     /// </summary>
