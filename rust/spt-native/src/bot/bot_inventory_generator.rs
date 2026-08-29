@@ -1899,9 +1899,53 @@ pub(crate) mod tests {
             VEST_PLAIN_TPL
         );
 
-        let mut cleared = base_request();
-        cleared["bot"]["details"]["clearBotContainerCacheAfterGeneration"] = json!(true);
-        assert!(generate(cleared).unwrap().container_grids.is_empty());
+        let mut request = base_request();
+        request["bot"]["details"]["clearBotContainerCacheAfterGeneration"] = json!(true);
+        let cleared = generate(request).unwrap();
+        assert!(cleared.container_grids.is_empty());
+
+        // The flag must stay echo-only: same seed, same inventory, whichever way it is sent. This
+        // is the assert PlayerScavNativeRequestBuilder's wire override and every RESIDENT_GOLDEN
+        // repin lean on - without it, "the flag does not move generation" is argued from source
+        // instead of tested.
+        assert_eq!(
+            strip_ids(&serde_json::to_string(&kept.inventory).unwrap()),
+            strip_ids(&serde_json::to_string(&cleared.inventory).unwrap()),
+        );
+    }
+
+    /// Positional placeholders for the 24-hex item ids (`player_scav_resident.rs`'s
+    /// `strip_mongo_ids`): ids are minted from the process-wide MongoId counter, not the seed, so
+    /// their raw values legitimately differ between two seeded runs while everything else must
+    /// not. Each distinct id becomes `<id-N>` in first-appearance order, keeping the parent→child
+    /// linkage visible to the comparison.
+    fn strip_ids(json: &str) -> String {
+        let mut out = String::with_capacity(json.len());
+        let mut seen: Vec<String> = Vec::new();
+        let mut run = String::new();
+        let mut flush = |out: &mut String, run: &str| {
+            if run.len() != 24 {
+                out.push_str(run);
+                return;
+            }
+            let n = seen.iter().position(|id| id == run).unwrap_or_else(|| {
+                seen.push(run.to_owned());
+                seen.len() - 1
+            });
+            out.push_str(&format!("<id-{n}>"));
+        };
+        for c in json.chars() {
+            if c.is_ascii_hexdigit() {
+                run.push(c);
+                continue;
+            }
+            flush(&mut out, &run);
+            run.clear();
+            out.push(c);
+        }
+        flush(&mut out, &run);
+
+        out
     }
 
     #[test]

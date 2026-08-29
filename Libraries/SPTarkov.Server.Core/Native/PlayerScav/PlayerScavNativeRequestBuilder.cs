@@ -64,6 +64,15 @@ public class PlayerScavNativeRequestBuilder(
             pmcConfig
         );
 
+        // The pscav arm never restores container grids C#-side (ClearCache runs against an
+        // always-empty cache), so suppress the response echo. Wire-only: BuildBotSlice mints a
+        // fresh view per call, so this cannot leak into the caller's BotGenerationDetails. The
+        // literal that genuinely must stay false is BotGenerator.GeneratePlayerScav's, on the
+        // legacy arm - its additional-loot pass reads the C# container-service cache. The native
+        // caller (BotGenerator.GeneratePlayerScavNative) carries its own false purely for parity;
+        // it is inert C#-side, which is why overriding only the wire view is safe.
+        botRequest.Bot.Details.ClearBotContainerCacheAfterGeneration = true;
+
         return new GeneratePlayerScavRequest
         {
             Epoch = 0,
@@ -77,8 +86,7 @@ public class PlayerScavNativeRequestBuilder(
 
     /// <summary>
     /// The database half, for the ineligible arm. The request's own pools are the ninth argument -
-    /// they feed <c>BuildHandbookPrices</c>, and an empty enumerable would price every override-arm
-    /// loot draw at 0.
+    /// they feed <c>BuildHandbookPrices</c>, so the prices cover the pools this request draws from.
     /// </summary>
     internal BotViewsOverride BuildViewsOverride(BotLootCache lootPools)
     {

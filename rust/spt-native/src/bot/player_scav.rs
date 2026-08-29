@@ -195,6 +195,10 @@ mod tests {
     use super::*;
     use serde_json::{Value, json};
 
+    // `base_request`'s `"clearBotContainerCacheAfterGeneration": false` is the bot-arm value.
+    // Production pscav requests now send `true` (PlayerScavNativeRequestBuilder overrides the wire
+    // flag); these fixtures keep `false` deliberately, as their grids-present assertions gate the
+    // bot-arm behaviour.
     use crate::bot::bot_inventory_generator::tests::base_request;
     use crate::bot::durability_limits_helper::BotDurability;
     use crate::bot::models::{EquipmentFilters, RandomisedResourceDetails};
@@ -386,6 +390,107 @@ mod tests {
             .collect();
         assert!(tpls.contains(&EXTRA_KEYCARD_TPL));
         assert!(!tpls.contains(&NEVER_TPL));
+    }
+
+    /// A second bare 1x1 template, registered only by the in-band case below. Registration is
+    /// what makes the pin mean anything: `add_additional_loot` rolls *before* it looks the tpl up,
+    /// so an unregistered tpl still consumes its draw - but it can then only reach the
+    /// warn-and-skip arm, which would make the absence assert pass on a hit as readily as on a
+    /// miss. 1x1 with no durability/HP/stack additionally keeps a *firing* entry from drawing again
+    /// inside `generate_extra_properties_for_item`, which would move the stream.
+    const IN_BAND_MISS_TPL: &str = "in_band_trinket";
+
+    /// Empirical (see the case below): a seed at which the 27.0 entry fires and the 3.0 one does
+    /// not. It overrides `base_request`'s own `testSeed`, at which the 27.0 entry misses - so the
+    /// case would pin two absences and never observe a placement.
+    const IN_BAND_SEED: u64 = 2;
+
+    /// Where an additional-loot item landed: the worn container's own slot id, the grid inside it
+    /// the item was written to, and the item's position in that grid. Deliberately not the parent
+    /// id - `MongoId`s are freshly minted per run.
+    fn placement(
+        result: &BotInventoryResult,
+        tpl: &str,
+    ) -> (Option<String>, Option<String>, Value) {
+        let item = result
+            .inventory
+            .items
+            .iter()
+            .find(|item| item.template == tpl)
+            .expect("the additional-loot item is missing");
+        let parent = result
+            .inventory
+            .items
+            .iter()
+            .find(|candidate| Some(&candidate.id) == item.parent_id.as_ref())
+            .expect("the additional-loot item hangs off an unknown parent");
+
+        (
+            parent.slot_id.clone(),
+            item.slot_id.clone(),
+            serde_json::to_value(&item.location).unwrap(),
+        )
+    }
+
+    #[test]
+    fn in_band_additional_loot_chances_are_deterministic_at_a_seed() {
+        // Every shipped lootItemsToAddChancePercent value is 3-27, but get_chance_100 rolls
+        // get_int(1, 99): >= 99 always fires and < 1 never does, so the 100/0 entries the sibling
+        // case uses short-circuit and leave the whole shipped band untested. One draw is consumed
+        // per entry whatever the outcome, so a two-entry map pins the outcomes *and* the stream
+        // position. Pinned at IN_BAND_SEED:
+        //   EXTRA_KEYCARD_TPL @ 27.0 -> added
+        //   IN_BAND_MISS_TPL @ 3.0 -> not added
+        let request = || {
+            let mut request = player_scav_request(json!({
+                "equipmentModifiers": {},
+                "modModifiers": {},
+                "equipmentBlacklist": {},
+                "lootItemsToAddChancePercent": {
+                    EXTRA_KEYCARD_TPL: 27.0,
+                    IN_BAND_MISS_TPL: 3.0,
+                },
+            }));
+            request["viewsOverride"]["items"][IN_BAND_MISS_TPL] =
+                json!({"name": "trinket", "width": 1, "height": 1});
+            request["bot"]["testSeed"] = json!(IN_BAND_SEED);
+
+            request
+        };
+
+        let first = generate(request()).unwrap();
+
+        let tpls: Vec<&str> = first
+            .inventory
+            .items
+            .iter()
+            .map(|item| item.template.as_str())
+            .collect();
+        assert!(
+            tpls.contains(&EXTRA_KEYCARD_TPL),
+            "the 27.0 entry's outcome flipped at this seed: the stream moved"
+        );
+        assert!(
+            !tpls.contains(&IN_BAND_MISS_TPL),
+            "the 3.0 entry's outcome flipped at this seed: the stream moved"
+        );
+
+        // Each generate re-seeds from `testSeed`, so the same request must repeat both outcomes and
+        // place the hit identically.
+        let second = generate(request()).unwrap();
+        assert!(
+            !second
+                .inventory
+                .items
+                .iter()
+                .any(|item| item.template == IN_BAND_MISS_TPL),
+            "the 3.0 entry fired on the re-run: the seed is not reproducing"
+        );
+        assert_eq!(
+            placement(&first, EXTRA_KEYCARD_TPL),
+            placement(&second, EXTRA_KEYCARD_TPL),
+            "the same seed placed the additional loot somewhere else"
+        );
     }
 
     /// Owned fixtures a bare [`BotContext`] can borrow from: `generate_prepared` hard-codes

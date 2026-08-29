@@ -212,7 +212,8 @@ public class BotPathDispatchTests
             RoleLowercase = "assault",
             Side = "Savage",
             BotDifficulty = "normal",
-            GameVersion = "standard",
+            // GameVersion deliberately unset: a non-PMC bot never reads it, so this fixture keeps
+            // BotPayloadProjection.BuildBotSlice's `?? string.Empty` defaulting exercised
             BotLevel = 1,
         };
     }

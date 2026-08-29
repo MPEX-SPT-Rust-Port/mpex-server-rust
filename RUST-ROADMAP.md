@@ -394,7 +394,7 @@ whichever path runs. A container-substituted subclass also flips, **except loot*
 |---|---|
 | Loot | `LootGenerator` + `LocationLootGenerator`, **protected members only**; no subclass check |
 | Bots | the four generator classes; also flips when the `InventoryMagGenComponents` set ≠ the four built-ins |
-| Player scav | **nine members, member-scoped, across three classes** — `PlayerScavGenerator`'s `AddAdditionalLootToPlayerScavContainers`, `ConstructBotBaseTemplate`, `AdjustBotTemplateWithKarmaSpecificSettings`, `AdjustEquipmentWeights`, `AdjustWeaponModWeights`, `BlacklistEquipment`; `BotGenerator.GeneratePlayerScav` + `GenerateBot` (the native arm inlines their orchestration into the internal shell `GeneratePlayerScavNative`); and `BotInventoryGenerator.GenerateInventory`, which the bot family deliberately leaves out of its own set but the native pscav arm bypasses entirely. Chains `BotInventoryGenerator.UseLegacyPath()`, so anything de-nativing bot inventory de-natives the player scav with it, and checks **two** subclasses (`PlayerScavGenerator` and `BotInventoryGenerator`). Outside the set, C#-side on both arms: `Generate` (the dispatcher), `AdjustItemWeights` and `GetKarmaLimitValuesByKey` (their output feeds C#-side loot-pool hydration), `GetScavStats`, `GetScavLevel`, `GetScavExperience`, `SetScavCooldownTimer` |
+| Player scav | **nine members, member-scoped, across three classes** — `PlayerScavGenerator`'s `AddAdditionalLootToPlayerScavContainers`, `ConstructBotBaseTemplate`, `AdjustBotTemplateWithKarmaSpecificSettings`, `AdjustEquipmentWeights`, `AdjustWeaponModWeights`, `BlacklistEquipment`; `BotGenerator.GeneratePlayerScav` + `GenerateBot` (the native arm inlines their orchestration into the internal shell `GeneratePlayerScavNative`); and `BotInventoryGenerator.GenerateInventory`, which the bot family deliberately leaves out of its own set but the native pscav arm bypasses entirely. Chains `BotInventoryGenerator.UseLegacyPath()`, so anything de-nativing bot inventory de-natives the player scav with it, and checks **three** subclasses (`PlayerScavGenerator`, `BotInventoryGenerator` and `BotGenerator`). Outside the set, C#-side on both arms: `Generate` (the dispatcher), `AdjustItemWeights` and `GetKarmaLimitValuesByKey` (their output feeds C#-side loot-pool hydration), `GetScavStats`, `GetScavLevel`, `GetScavExperience`, `SetScavCooldownTimer` |
 | Ragfair | `RagfairOfferGenerator`, `RagfairPriceService`, `RagfairServerHelper`, `RagfairAssortGenerator` |
 | Quests | the four `*QuestGenerator`s + `RepeatableQuestRewardGenerator` + `RepeatableQuestHelper`; `PickupQuestGenerator` contributes zero members (its legacy body is inline in `Generate`) |
 | Scav case, base class, linked items | own class only |
@@ -507,29 +507,19 @@ keeps the renderer numbering the item below as 4. -->
    builds. Do it per target before the first tagged release image.
 6. **A real Windows run.** The native console and launcher arm are structurally reviewed but have
    never executed on Windows (export-table and RID-triple gaps: Phase 6b ledger).
-7. **Player scav test-coverage follow-ups** (PR #23 final review; the pre-merge holes — the
-   resident-arm dispatch cells, the cross-arm additional-loot placement pin, the positional id
-   normalization in `player_scav_resident.rs`, the un-cloned hydration template — were fixed on the
-   branch; these are the booked remainder):
-   - **Wire-contract pins.** Nothing pins `GeneratePlayerScavRequest`/`KarmaSettingsWire` the way
-     `SptNativeBotWireTests` pins `spt_generate_bot_inventory` — and this PR's `GameVersion`
-     drive-by was itself a wire-shape bug. Relatedly, every non-PMC `BotGenerationDetails` fixture
-     hand-sets `GameVersion = "standard"`, so a recurrence of the null-`GameVersion` hole would be
-     re-masked; one fixture should drop it.
-   - **C#-side resident-vs-override equality.** The Rust resident test's override arm uses a
-     hand-written fixture, not the real `PlayerScavNativeRequestBuilder.BuildViewsOverride`
-     projection, so a bug there (e.g. the `lootPools` argument feeding `BuildHandbookPrices`) has no
-     test that could fail. `BotResidentDbTests.AResidentSendAndAnOverrideSendProduceIdenticalBotsFieldForField`
-     is the pattern; `DisableNativeRequestCache` + `NativeTestSeed` already exist.
-   - **Meta-test cross-type derivation.** `PlayerScavHookLivenessTests`' surface meta-test derives
-     `PlayerScavGenerator`'s own six members but the three cross-type members
-     (`BotGenerator.GeneratePlayerScav`/`GenerateBot`, `BotInventoryGenerator.GenerateInventory`)
-     are literals in both the production list and the test; `_bothArmsMembers` is a hand-written
-     name list, so moving a named member native keeps the meta-test green.
-   - Smaller: `PlayerScavGenerator.UseLegacyPath`'s subclass-check comment describes dispatch C#
-     doesn't permit (none of the guarded methods are virtual) and `botGenerator` is missing from
-     the subclass check its twin gets; `AdjustWeaponModWeights` is never exercised cross-arm at
-     non-zero values (shipped `Modifiers.Mod` is all-zeros); the parity negative controls are
-     seed-fragile without a positive control at the same seed; `GetChance100` only tested at
-     100/0 (shipped karma uses 3–27); the pscav request serializes `container_grids` back across
-     FFI only for `ClearCache` to no-op on it.
+
+<!-- Item 7, "player scav test-coverage follow-ups" (PR #23 final review), was delivered by
+PR #24 with no ABI bump. All four bullets landed: `PlayerScavGenerator.UseLegacyPath`
+now de-natives on a substituted `BotGenerator` too (two of the nine frozen members live there) and
+its subclass-check comment no longer describes virtual dispatch C# does not permit;
+`SptNativePlayerScavWireTests` pins `GeneratePlayerScavRequest`/`KarmaSettingsView` (the C# fixture
+for Rust's `KarmaSettingsWire`) and
+`BotPathDispatchTests` drops the masking `GameVersion = "standard"`; `PlayerScavResidentDbTests`
+compares a resident send against the real `PlayerScavNativeRequestBuilder.BuildViewsOverride`
+projection field-for-field; `PlayerScavHookLivenessTests` resolves its cross-type members as
+`MethodBase` identities that throw on a stale name; and the smaller items are covered — non-zero
+`Modifiers.Mod` through `AdjustWeaponModWeights` cross-arm, a positive control beside the
+seed-fragile parity negatives, and per-arm pins on the shipped 3–27 additional-loot band that
+`GetChance100` had never seen. The pscav response no longer echoes `container_grids` back across
+FFI: it rides the existing `clearBotContainerCacheAfterGeneration` wire flag, so `RESIDENT_GOLDEN`
+moved (548C92D6… → 78B74F37…) while the ABI did not. -->

@@ -989,3 +989,18 @@ comment); this list records where, plus the deferred items recorded nowhere else
   tests, the ASCII-vs-Ordinal case-fold convention notes, stale line refs).
 - **PR #22 — tier 1 tail** (2026-08-28, `1f05a86`, ABI 36). Carryovers on the PR's disposition
   comment.
+- **PR #23 — player scav port** (2026-08-29, `c633991`, ABI 37). Natives the pscav generation body:
+  karma equipment/mod chances, the equipment blacklist, the inventory build and the additional-loot
+  pass. The profile boundary stayed C#-side on both arms — karma-value reads, the fence/limit
+  hydration onto the crossing template, and every profile write. Follow-ups from the final review
+  were booked as roadmap item 7, retired by PR #24.
+- **PR #24 — pscav follow-ups** (2026-08-29, `5a8f906`, no bump). Retires roadmap item 7. Carryovers,
+  all review-triaged as ride-able: `PlayerScavResidentDbTests`' per-test `finally` hard-codes the
+  kill switch to `false` instead of the captured original (wrong the moment a second `[Test]` is
+  added); three of the four karma-map wire pins are key-presence-only; the hook-liveness
+  both-arms filter closes the overload hole (identity, not name) but a member *moving* native while
+  keeping its line still subtracts silently (documented on the field); the downward direction of
+  `Modifiers.Mod` is unexercisable cross-arm at the parity seed (every filled MP-133 slot is
+  `_required`). One
+  unreproduced single-test failure in one of six full-suite runs (name lost to an output pipe;
+  three logged re-runs green, fixture teardown audit clean).
