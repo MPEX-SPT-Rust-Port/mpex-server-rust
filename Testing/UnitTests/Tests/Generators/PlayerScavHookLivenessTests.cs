@@ -28,17 +28,19 @@ public class PlayerScavHookLivenessTests
 {
     /// <summary>
     /// The members that run C#-side on both arms, so no patch on them can be a reason to decline
-    /// the native path.
+    /// the native path. Resolved, not strings: a rename of any of them now throws here instead of
+    /// silently shrinking the subtraction filter. (A member <i>moving</i> native still needs a human
+    /// to delete its line - that hole is documented, not closed.)
     /// </summary>
-    private static readonly string[] _bothArmsMembers =
+    private static readonly MethodBase[] _bothArmsMembers =
     [
-        nameof(PlayerScavGenerator.Generate),
-        "AdjustItemWeights",
-        "GetKarmaLimitValuesByKey",
-        "GetScavStats",
-        "GetScavLevel",
-        "GetScavExperience",
-        "SetScavCooldownTimer",
+        Member(typeof(PlayerScavGenerator), nameof(PlayerScavGenerator.Generate)),
+        Member(typeof(PlayerScavGenerator), "AdjustItemWeights"),
+        Member(typeof(PlayerScavGenerator), "GetKarmaLimitValuesByKey"),
+        Member(typeof(PlayerScavGenerator), "GetScavStats"),
+        Member(typeof(PlayerScavGenerator), "GetScavLevel"),
+        Member(typeof(PlayerScavGenerator), "GetScavExperience"),
+        Member(typeof(PlayerScavGenerator), "SetScavCooldownTimer"),
     ];
 
     private PlayerScavGenerator _playerScavGenerator = default!;
@@ -105,6 +107,41 @@ public class PlayerScavHookLivenessTests
         Assert.That(members, Has.Count.EqualTo(9), "the frozen set is nine members");
     }
 
+    /// <summary>
+    /// The production comment claims <c>GenerateInventory</c> is excluded from the bot family's own
+    /// frozen set but frozen here; both sides are literals, so check the claim instead of trusting
+    /// the two to agree. The <see cref="BotGenerator"/> count pins the other literal half of the
+    /// cross-type trio.
+    /// </summary>
+    [Test]
+    public void GenerateInventoryIsTheBotFamilysDeliberateExclusionAndOurInclusion()
+    {
+        var generateInventory = typeof(BotInventoryGenerator).GetMethod(nameof(BotInventoryGenerator.GenerateInventory))!;
+
+        var botFamilySet =
+            (List<MethodBase>)
+                typeof(BotInventoryGenerator).GetField("_hookableMembers", BindingFlags.Static | BindingFlags.NonPublic)!.GetValue(null)!;
+        var pscavSet =
+            (List<MethodBase>)
+                typeof(PlayerScavGenerator).GetField("_hookableMembers", BindingFlags.Static | BindingFlags.NonPublic)!.GetValue(null)!;
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(
+                botFamilySet,
+                Does.Not.Contain(generateInventory),
+                "if the bot family starts freezing GenerateInventory itself, the pscav's copy is redundant - re-derive"
+            );
+            Assert.That(pscavSet, Does.Contain(generateInventory));
+            Assert.That(
+                pscavSet.Count(member => member.DeclaringType == typeof(BotGenerator)),
+                Is.EqualTo(2),
+                "exactly GeneratePlayerScav and GenerateBot - the native arm inlines their orchestration; "
+                    + "a third BotGenerator member in the frozen set means the inlining changed, re-derive this pin"
+            );
+        });
+    }
+
     private static IEnumerable<TestCaseData> FrozenMembers()
     {
         return FrozenSurface().Select(member => new TestCaseData(member).SetArgDisplayNames($"{member.DeclaringType!.Name}.{member.Name}"));
@@ -127,7 +164,7 @@ public class PlayerScavHookLivenessTests
                 )
                 .Where(method => !method.IsSpecialName && !method.IsAbstract)
                 .Where(method => method.IsPublic || method.IsFamily || method.IsFamilyOrAssembly)
-                .Where(method => !_bothArmsMembers.Contains(method.Name)),
+                .Where(method => !_bothArmsMembers.Contains(method)),
             Member(typeof(BotGenerator), nameof(BotGenerator.GeneratePlayerScav)),
             Member(typeof(BotGenerator), "GenerateBot"),
             Member(typeof(BotInventoryGenerator), nameof(BotInventoryGenerator.GenerateInventory)),
