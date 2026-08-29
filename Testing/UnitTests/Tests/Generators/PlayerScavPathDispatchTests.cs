@@ -1,4 +1,5 @@
 using System.Reflection;
+using System.Text;
 using HarmonyLib;
 using NUnit.Framework;
 using SPTarkov.Common.Models.Logging;
@@ -17,6 +18,7 @@ using SPTarkov.Server.Core.Models.Enums;
 using SPTarkov.Server.Core.Models.Spt.Config;
 using SPTarkov.Server.Core.Models.Spt.Mod;
 using SPTarkov.Server.Core.Models.Spt.Tables;
+using SPTarkov.Server.Core.Native;
 using SPTarkov.Server.Core.Native.Db;
 using SPTarkov.Server.Core.Native.PlayerScav;
 using SPTarkov.Server.Core.Servers;
@@ -42,6 +44,11 @@ namespace UnitTests.Tests.Generators;
 /// <see cref="PlayerScavHookLivenessTests"/>' business; the one patch case here is the dispatcher
 /// rule, which belongs with the routing decisions.
 ///
+/// Also pins the resident-DB epoch protocol on the native arm (<see cref="ScavCaseResidentDbTests"/>
+/// precedent): an eligible generator names an epoch and never sends the C#-built views override, the
+/// kill switch and untrusted mods fall back to the override, and a native-side epoch desync
+/// self-heals through one republish plus retry.
+///
 /// Mutates the shared <see cref="PlayerScavConfig"/> and <see cref="BotConfig"/> singletons and
 /// patches process-wide, so both are restored per case and the fixture never runs in parallel.
 /// </summary>
@@ -57,6 +64,8 @@ public class PlayerScavPathDispatchTests
     private PlayerScavGenerator _playerScavGenerator = default!;
     private PlayerScavConfig _playerScavConfig = default!;
     private BotConfig _botConfig = default!;
+    private DatabaseMutationStamp _stamp = default!;
+    private DbPublisher _publisher = default!;
 
     private MongoId _sessionId;
 
@@ -68,6 +77,8 @@ public class PlayerScavPathDispatchTests
         _playerScavGenerator = di.GetService<PlayerScavGenerator>();
         _playerScavConfig = di.GetService<PlayerScavConfig>();
         _botConfig = di.GetService<BotConfig>();
+        _stamp = di.GetService<DatabaseMutationStamp>();
+        _publisher = di.GetService<DbPublisher>();
 
         _sessionId = PlayerScavProfileFixture.Create();
         _playerScavGenerator.NativeTestSeed = NativeSeed;
@@ -77,6 +88,10 @@ public class PlayerScavPathDispatchTests
     public void OneTimeTearDown()
     {
         _playerScavGenerator.NativeTestSeed = null;
+        _playerScavConfig.DisableNativeRequestCache = false;
+        _playerScavConfig.TrustNativeRequestCacheWithMods = true;
+        // leave the shared container fresher than we found it for whatever fixture runs next
+        _stamp.Bump();
     }
 
     /// <summary>
@@ -239,6 +254,87 @@ public class PlayerScavPathDispatchTests
         {
             _playerScavConfig.DisableNativeRequestCache = false;
         }
+    }
+
+    /// <summary>
+    /// The positive control for the override cases: a stock container names an epoch and never
+    /// assembles the C#-built views override at all.
+    /// </summary>
+    [Test]
+    public void EligibleGenerationBuildsOffTheResidentDb()
+    {
+        Generate(_playerScavGenerator);
+
+        Assert.That(_playerScavGenerator.LastPathTaken, Is.EqualTo(LootGenerationPath.Native));
+        Assert.That(_playerScavGenerator.LastSendIncludedViewsOverride, Is.False, "an eligible generator must not send the override");
+    }
+
+    [Test]
+    public void ModsLoadedWithoutTheTrustFlagForceTheViewsOverride()
+    {
+        // The gate only reads Count, so a placeholder element stands in for a real mod
+        var modded = (PlayerScavGenerator)Construct(typeof(PlayerScavGenerator), new List<SptMod> { null! });
+
+        _playerScavConfig.TrustNativeRequestCacheWithMods = false;
+        try
+        {
+            Generate(modded);
+
+            Assert.That(modded.LastPathTaken, Is.EqualTo(LootGenerationPath.Native));
+            Assert.That(modded.LastSendIncludedViewsOverride, Is.True, "a loaded mod without the trust flag disables residency");
+        }
+        finally
+        {
+            _playerScavConfig.TrustNativeRequestCacheWithMods = true;
+        }
+    }
+
+    [Test]
+    public void TheTrustFlagKeepsTheResidentPathLiveWithModsLoaded()
+    {
+        if (!WriteBarrier.Installed)
+        {
+            Assert.Ignore("write barriers are Ceciler-injected in Release builds only");
+        }
+
+        var modded = (PlayerScavGenerator)Construct(typeof(PlayerScavGenerator), new List<SptMod> { null! });
+
+        _playerScavConfig.TrustNativeRequestCacheWithMods = true;
+        try
+        {
+            Generate(modded);
+
+            Assert.That(modded.LastPathTaken, Is.EqualTo(LootGenerationPath.Native));
+            Assert.That(
+                modded.LastSendIncludedViewsOverride,
+                Is.False,
+                "the trust flag should keep the resident path live despite the mod"
+            );
+        }
+        finally
+        {
+            _playerScavConfig.TrustNativeRequestCacheWithMods = true;
+        }
+    }
+
+    [Test]
+    public void ANativeSideEpochDesyncSelfHealsThroughOneRetry()
+    {
+        // Settle the publisher's remembered epoch first, so the desync below is the only miss
+        _publisher.EnsureCurrent();
+
+        // Desync: a direct native publish the publisher never sees moves the resident epoch out
+        // from under the epoch it remembers
+        SptNative.DbPublish(Encoding.UTF8.GetBytes("{\"schema\":1,\"roots\":{}}"));
+
+        Generate(_playerScavGenerator);
+
+        Assert.That(_playerScavGenerator.LastPathTaken, Is.EqualTo(LootGenerationPath.Native));
+        Assert.That(
+            _playerScavGenerator.LastSendIncludedViewsOverride,
+            Is.False,
+            "the stale-epoch miss should have republished and retried"
+        );
     }
 
     /// <summary>
