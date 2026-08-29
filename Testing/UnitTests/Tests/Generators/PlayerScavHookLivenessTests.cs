@@ -28,9 +28,10 @@ public class PlayerScavHookLivenessTests
 {
     /// <summary>
     /// The members that run C#-side on both arms, so no patch on them can be a reason to decline
-    /// the native path. Resolved, not strings: a rename of any of them now throws here instead of
-    /// silently shrinking the subtraction filter. (A member <i>moving</i> native still needs a human
-    /// to delete its line - that hole is documented, not closed.)
+    /// the native path. Resolved, not strings: a name-based filter would silently subtract every
+    /// overload of a both-arms member, identity subtracts only the exact method - and a stale name
+    /// throws at resolution instead of lingering as a dead string. (A member <i>moving</i> native
+    /// still needs a human to delete its line - that hole is documented, not closed.)
     /// </summary>
     private static readonly MethodBase[] _bothArmsMembers =
     [

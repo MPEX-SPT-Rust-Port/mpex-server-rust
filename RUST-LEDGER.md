@@ -998,8 +998,9 @@ comment); this list records where, plus the deferred items recorded nowhere else
   all review-triaged as ride-able: `PlayerScavResidentDbTests`' per-test `finally` hard-codes the
   kill switch to `false` instead of the captured original (wrong the moment a second `[Test]` is
   added); three of the four karma-map wire pins are key-presence-only; the hook-liveness
-  both-arms filter closes the rename hole but a member *moving* native while keeping its name still
-  subtracts silently (documented on the field); the downward direction of `Modifiers.Mod` is
-  unexercisable cross-arm at the parity seed (every filled MP-133 slot is `_required`). One
+  both-arms filter closes the overload hole (identity, not name) but a member *moving* native while
+  keeping its line still subtracts silently (documented on the field); the downward direction of
+  `Modifiers.Mod` is unexercisable cross-arm at the parity seed (every filled MP-133 slot is
+  `_required`). One
   unreproduced single-test failure in one of six full-suite runs (name lost to an output pipe;
   three logged re-runs green, fixture teardown audit clean).

@@ -208,9 +208,10 @@ public class PlayerScavGenerator(
 
         // The export runs the bot family's internals: anything that de-natives bot inventory
         // de-natives the player scav with it (BotWaveBatcher.CanBatch precedent). The subclass
-        // checks are ours to make: a mod that registered its own BotInventoryGenerator or
-        // BotGenerator subclass at higher TypePriority handed us an implementation the native
-        // side does not have (three of the nine frozen members live on those two types), and
+        // checks are ours to make: none of the frozen members is virtual, so a mod's
+        // BotInventoryGenerator or BotGenerator subclass registered at higher TypePriority cannot
+        // override them - but a substituted type is a contract this dispatch cannot reason about
+        // (three of the nine frozen members live on those two types), so decline defensively; and
         // BotInventoryGenerator.UseLegacyPath has no self-type check.
         if (
             _botInventoryGenerator.UseLegacyPath()
