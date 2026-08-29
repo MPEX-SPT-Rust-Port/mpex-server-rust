@@ -1,5 +1,4 @@
 using System.Reflection;
-using System.Text.Json.Nodes;
 using NUnit.Framework;
 using SPTarkov.Server.Core.Generators.Bot;
 using SPTarkov.Server.Core.Generators.Loot;
@@ -340,47 +339,6 @@ public class PlayerScavParityTests
     /// </summary>
     private string Normalize(PmcData scav)
     {
-        return LootIdNormalizer.Normalize(RemoveWallClock(_jsonUtil.Serialize(scav)!));
-    }
-
-    private static string RemoveWallClock(string json)
-    {
-        var root = JsonNode.Parse(json) ?? throw new InvalidOperationException("player scav output parsed to null");
-
-        Remove(root);
-
-        return root.ToJsonString();
-    }
-
-    private static void Remove(JsonNode node)
-    {
-        switch (node)
-        {
-            case JsonObject obj:
-                // Materialize the keys first: mutating obj while enumerating throws.
-                foreach (var key in obj.Select(pair => pair.Key).ToList())
-                {
-                    if (string.Equals(key, "SavageLockTime", StringComparison.OrdinalIgnoreCase))
-                    {
-                        obj.Remove(key);
-                        continue;
-                    }
-
-                    if (obj[key] is { } child)
-                    {
-                        Remove(child);
-                    }
-                }
-                break;
-            case JsonArray array:
-                foreach (var child in array)
-                {
-                    if (child is not null)
-                    {
-                        Remove(child);
-                    }
-                }
-                break;
-        }
+        return PlayerScavJson.Normalize(_jsonUtil.Serialize(scav)!);
     }
 }
