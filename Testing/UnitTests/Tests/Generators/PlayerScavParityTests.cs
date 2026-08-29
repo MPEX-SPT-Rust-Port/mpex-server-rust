@@ -19,7 +19,8 @@ namespace UnitTests.Tests.Generators;
 ///
 /// The additional-loot draws are the one deliberate cross-arm stream divergence - legacy rolls them
 /// C#-side after the bot is built, native rolls them inside the export - so the field-for-field case
-/// suppresses them and two per-arm cases cover them separately at a certainty.
+/// suppresses them and per-arm cases cover them separately, at a certainty and at a mid-range
+/// chance from the band the shipped config actually uses.
 ///
 /// Mutates the shared PlayerScavConfig singleton, the RandomUtil seam and the ProbabilityRandomSource
 /// static, so it restores all of them and never runs in parallel with other fixtures.
@@ -50,6 +51,13 @@ public class PlayerScavParityTests
     /// +100 turns a slot that was empty into one that always fills.
     /// </summary>
     private const string ForcedModSlotId = "mod_mount_000";
+
+    /// <summary>
+    /// A chance from the middle of the 3-27 band every shipped <c>lootItemsToAddChancePercent</c>
+    /// value sits in - the band no other case reaches, 100 and 0 both short-circuiting
+    /// <c>GetChance100</c>.
+    /// </summary>
+    private const double MidRangeChancePercent = 27.0;
 
     /// <summary>
     /// A one-slot item the shipped config already hands out at higher karma levels, so it is known
@@ -281,6 +289,32 @@ public class PlayerScavParityTests
     }
 
     /// <summary>
+    /// One arm's pin on a chance from the band the shipped config actually uses. The outcome cannot
+    /// be predicted from the chance alone and cannot be compared to the other arm - legacy rolls
+    /// this pass C#-side after the bot is built, native rolls it inside the export, so the two draw
+    /// from different streams - so each arm observes its own outcome once and hard-codes it. A flip
+    /// means that arm's stream moved.
+    /// </summary>
+    [Test]
+    public void TheNativeArmRollsAMidRangeAdditionalLootChanceDeterministically()
+    {
+        // Observed at the parity seed: the native arm's roll misses.
+        AssertMidRangeAdditionalLootRollIsPinned(forceLegacy: false, expectedAdded: false);
+    }
+
+    /// <summary>
+    /// The other arm's pin, by the reasoning above. The two arms do in fact land on opposite
+    /// outcomes at this seed - that is the divergence the streams make inevitable, not a failure,
+    /// and nothing here compares them.
+    /// </summary>
+    [Test]
+    public void TheLegacyArmRollsAMidRangeAdditionalLootChanceDeterministically()
+    {
+        // Observed at the parity seed: the legacy arm's roll hits.
+        AssertMidRangeAdditionalLootRollIsPinned(forceLegacy: true, expectedAdded: true);
+    }
+
+    /// <summary>
     /// The unseeded smoke: nothing pins the output, so this earns its keep by failing on a throw or
     /// a silent fallback on the path every real request takes.
     /// </summary>
@@ -322,6 +356,35 @@ public class PlayerScavParityTests
                 scav.Inventory!.Items!.Any(item => item.Template == _knownLootTpl),
                 Is.True,
                 $"the {(forceLegacy ? "legacy" : "native")} arm did not add the certain additional loot item"
+            );
+        }
+        finally
+        {
+            karmaSettings.LootItemsToAddChancePercent = originalChances;
+        }
+    }
+
+    /// <summary>
+    /// The mid-range twin of <see cref="AssertCertainAdditionalLootIsAdded"/>. Every shipped
+    /// <c>lootItemsToAddChancePercent</c> value is 3-27, but <c>GetChance100</c> rolls
+    /// <c>GetInt(1, 99)</c> - so the 100/0 the cases above use short-circuit and leave the band the
+    /// shipped data actually occupies untested. The outcome at a given seed is not predictable, so
+    /// it is observed once and hard-coded: a flip means the arm's stream moved.
+    /// </summary>
+    private void AssertMidRangeAdditionalLootRollIsPinned(bool forceLegacy, bool expectedAdded)
+    {
+        var karmaSettings = _playerScavConfig.KarmaLevel[KarmaLevelKey];
+        var originalChances = karmaSettings.LootItemsToAddChancePercent;
+
+        karmaSettings.LootItemsToAddChancePercent = new Dictionary<MongoId, double> { { _knownLootTpl, MidRangeChancePercent } };
+        try
+        {
+            var scav = GenerateArm(forceLegacy, Seed);
+
+            Assert.That(
+                scav.Inventory!.Items!.Any(item => item.Template == _knownLootTpl),
+                Is.EqualTo(expectedAdded),
+                $"the {(forceLegacy ? "legacy" : "native")} arm's {MidRangeChancePercent}% roll flipped at this seed: the stream moved"
             );
         }
         finally
