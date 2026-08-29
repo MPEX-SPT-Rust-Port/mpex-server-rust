@@ -12,6 +12,7 @@ use serde::de::DeserializeOwned;
 use crate::achievements::{AchievementError, get_achievement_statistics};
 use crate::base_class::{self, BaseClassRequest, BaseClassResponse};
 use crate::bot::bot_inventory_generator::{generate_inventory, generate_inventory_batch};
+use crate::bot::player_scav::generate_player_scav;
 use crate::diag::DiagSink;
 use crate::linked_items::{self, LinkedItemsRequest, LinkedItemsResponse};
 use crate::logger::{ConsoleMessage, LogLevel, LogRecord, Logger, compile_format, render};
@@ -545,6 +546,21 @@ pub unsafe extern "C" fn spt_generate_bot_inventory_batch(
     out_len: *mut usize,
 ) -> i32 {
     unsafe { run_generator(req_ptr, req_len, out_ptr, out_len, generate_inventory_batch) }
+}
+
+/// The player scav: a single bot generation with the karma slice applied to its template and an
+/// extra-loot pass after it.
+///
+/// # Safety
+/// See `spt_generate_static_containers`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn spt_generate_player_scav(
+    req_ptr: *const u8,
+    req_len: usize,
+    out_ptr: *mut *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    unsafe { run_generator(req_ptr, req_len, out_ptr, out_len, generate_player_scav) }
 }
 
 /// The framed ragfair response: encoding tag, length-prefixed header, then one length-prefixed
@@ -1815,7 +1831,7 @@ mod tests {
         assert_eq!(spt_native_abi_version(), crate::ABI_VERSION);
         assert_eq!(
             crate::ABI_VERSION,
-            36,
+            37,
             "bump SptNative.ExpectedAbiVersion too"
         );
     }

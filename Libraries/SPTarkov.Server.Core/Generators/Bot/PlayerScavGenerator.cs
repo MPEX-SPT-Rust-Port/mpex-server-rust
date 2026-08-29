@@ -1,8 +1,11 @@
 using System.Globalization;
+using System.Reflection;
+using HarmonyLib;
 using Microsoft.Extensions.Logging;
 using SPTarkov.Common.Models.Logging;
 using SPTarkov.DI.Annotations;
 using SPTarkov.Server.Core.Extensions;
+using SPTarkov.Server.Core.Generators.Loot;
 using SPTarkov.Server.Core.Helpers;
 using SPTarkov.Server.Core.Helpers.Bot;
 using SPTarkov.Server.Core.Helpers.Items;
@@ -12,17 +15,33 @@ using SPTarkov.Server.Core.Models.Eft.Common;
 using SPTarkov.Server.Core.Models.Eft.Common.Tables;
 using SPTarkov.Server.Core.Models.Enums;
 using SPTarkov.Server.Core.Models.Spt.Config;
+using SPTarkov.Server.Core.Models.Spt.Mod;
 using SPTarkov.Server.Core.Models.Spt.Tables;
+using SPTarkov.Server.Core.Native;
+using SPTarkov.Server.Core.Native.Bot;
+using SPTarkov.Server.Core.Native.Db;
+using SPTarkov.Server.Core.Native.PlayerScav;
 using SPTarkov.Server.Core.Servers;
 using SPTarkov.Server.Core.Services;
 using SPTarkov.Server.Core.Services.Bot;
 using SPTarkov.Server.Core.Services.Commerce;
 using SPTarkov.Server.Core.Services.Locales;
+using SPTarkov.Server.Core.Services.Server;
 using SPTarkov.Server.Core.Utils;
 using SPTarkov.Server.Core.Utils.Cloners;
 
 namespace SPTarkov.Server.Core.Generators.Bot;
 
+/// <summary>
+/// Player scav generation runs in <c>rust/spt-native</c> by default; the karma work that feeds the
+/// C#-side loot pools stays here, everything else crosses. The full 4.1.2 C# implementation is
+/// retained below as the legacy path - it is the frozen mod contract (constructor and protected
+/// members are apicompat-gated against the 4.1.2 baseline) and runs instead of the native path when
+/// a Harmony patch on any frozen member is detected, when a mod substituted this generator or
+/// BotInventoryGenerator, when the frozen constructor built the instance or when
+/// PlayerScavConfig.ForceLegacyPlayerScavGeneration is set, so mod hooks fire with genuine baseline
+/// semantics.
+/// </summary>
 [Injectable]
 public class PlayerScavGenerator(
     ISptLogger<PlayerScavGenerator> logger,
@@ -43,6 +62,179 @@ public class PlayerScavGenerator(
     TimeUtil timeUtil
 )
 {
+    private readonly PlayerScavNativeRequestBuilder? _requestBuilder;
+    private readonly BotInventoryGenerator? _botInventoryGenerator;
+    private readonly SeasonalEventService? _seasonalEventService;
+    private readonly IReadOnlyList<SptMod>? _loadedMods;
+    private readonly DbPublisher? _dbPublisher;
+
+    /// <summary>
+    ///     The constructor the container uses: the frozen 4.1.2 constructor plus the native seams.
+    ///     Additive and apicompat-verified. The seasonal service is not a frozen parameter - the
+    ///     native arm's christmas strip needs it.
+    /// </summary>
+    public PlayerScavGenerator(
+        ISptLogger<PlayerScavGenerator> logger,
+        GlobalTable globalTable,
+        RandomUtil randomUtil,
+        ItemHelper itemHelper,
+        BotGeneratorHelper botGeneratorHelper,
+        SaveServer saveServer,
+        ProfileHelper profileHelper,
+        BotHelper botHelper,
+        FenceService fenceService,
+        BotLootCacheService botLootCacheService,
+        ServerLocalisationService serverLocalisationService,
+        BotInventoryContainerService botInventoryContainerService,
+        BotGenerator botGenerator,
+        PlayerScavConfig playerScavConfig,
+        ICloner cloner,
+        TimeUtil timeUtil,
+        PlayerScavNativeRequestBuilder requestBuilder,
+        BotInventoryGenerator botInventoryGenerator,
+        SeasonalEventService seasonalEventService,
+        IReadOnlyList<SptMod> loadedMods,
+        DbPublisher dbPublisher
+    )
+        : this(
+            logger,
+            globalTable,
+            randomUtil,
+            itemHelper,
+            botGeneratorHelper,
+            saveServer,
+            profileHelper,
+            botHelper,
+            fenceService,
+            botLootCacheService,
+            serverLocalisationService,
+            botInventoryContainerService,
+            botGenerator,
+            playerScavConfig,
+            cloner,
+            timeUtil
+        )
+    {
+        _requestBuilder = requestBuilder;
+        _botInventoryGenerator = botInventoryGenerator;
+        _seasonalEventService = seasonalEventService;
+        _loadedMods = loadedMods;
+        _dbPublisher = dbPublisher;
+    }
+
+    /// <summary>
+    ///     Which implementation the most recent generation call ran - the spt-native path or the
+    ///     retained 4.1.2 C# path. Test seam; also handy in a debugger.
+    /// </summary>
+    internal LootGenerationPath LastPathTaken { get; private set; }
+
+    /// <summary>
+    ///     Test-only seed forwarded onto every native request.
+    /// </summary>
+    internal ulong? NativeTestSeed { get; set; }
+
+    /// <summary>
+    ///     Whether the most recent native send carried the C#-built views override rather than
+    ///     naming a resident-DB epoch. Test seam.
+    /// </summary>
+    internal bool LastSendIncludedViewsOverride { get; private set; }
+
+    /// <summary>
+    ///     Whether an override-less send off the resident DB is ever allowed: the services exist,
+    ///     the kill switch is off, and either no mods are loaded or the user vouched their mods
+    ///     don't write tables directly. A generator built without the epoch-protocol services has
+    ///     neither and always sends the override.
+    /// </summary>
+    private bool ResidentDbEligible()
+    {
+        return ResidentDbDispatch.Eligible(
+            _dbPublisher,
+            _loadedMods?.Count,
+            playerScavConfig.DisableNativeRequestCache,
+            playerScavConfig.TrustNativeRequestCacheWithMods
+        );
+    }
+
+    /// <summary>
+    ///     The explicit frozen set (spec § Override contract) - NOT a whole-type sweep:
+    ///     AdjustItemWeights, GetKarmaLimitValuesByKey, GetScavStats, GetScavLevel,
+    ///     GetScavExperience and SetScavCooldownTimer run C#-side on both arms, and Generate is the
+    ///     dispatcher. Read via reflection by PlayerScavHookLivenessTests (Weather precedent).
+    /// </summary>
+    private static readonly List<MethodBase> _hookableMembers =
+    [
+        .. new[]
+        {
+            typeof(PlayerScavGenerator).GetMethod(
+                nameof(AddAdditionalLootToPlayerScavContainers),
+                BindingFlags.Instance | BindingFlags.NonPublic
+            ),
+            typeof(PlayerScavGenerator).GetMethod(nameof(ConstructBotBaseTemplate), BindingFlags.Instance | BindingFlags.NonPublic),
+            typeof(PlayerScavGenerator).GetMethod(
+                nameof(AdjustBotTemplateWithKarmaSpecificSettings),
+                BindingFlags.Instance | BindingFlags.NonPublic
+            ),
+            typeof(PlayerScavGenerator).GetMethod(nameof(AdjustEquipmentWeights), BindingFlags.Static | BindingFlags.NonPublic),
+            typeof(PlayerScavGenerator).GetMethod(nameof(AdjustWeaponModWeights), BindingFlags.Static | BindingFlags.NonPublic),
+            typeof(PlayerScavGenerator).GetMethod(nameof(BlacklistEquipment), BindingFlags.Static | BindingFlags.NonPublic),
+            typeof(BotGenerator).GetMethod(nameof(BotGenerator.GeneratePlayerScav)),
+            typeof(BotGenerator).GetMethod("GenerateBot", BindingFlags.Instance | BindingFlags.NonPublic),
+            // Excluded from BotInventoryGenerator's own frozen set (on the bot path a patch on it
+            // wraps whichever arm runs) - but the pscav native arm never calls it at all, so a
+            // patch on it must flip here.
+            typeof(BotInventoryGenerator).GetMethod(nameof(BotInventoryGenerator.GenerateInventory)),
+        }.OfType<MethodBase>(),
+    ];
+
+    /// <summary>
+    ///     The legacy path runs when the frozen 4.1.2 constructor built this instance (it has no
+    ///     native seam to dispatch to), when forced by config, when the bot inventory family is
+    ///     itself off its native path, when any of the frozen members carries a live Harmony patch,
+    ///     or when a mod has substituted this generator or BotInventoryGenerator - running the
+    ///     retained C# implementation is the only way those hooks and replacements can take effect
+    ///     with real baseline semantics.
+    /// </summary>
+    private bool UseLegacyPath()
+    {
+        if (
+            _requestBuilder is null
+            || _botInventoryGenerator is null
+            || _seasonalEventService is null
+            || playerScavConfig.ForceLegacyPlayerScavGeneration
+        )
+        {
+            return true;
+        }
+
+        // The export runs the bot family's internals: anything that de-natives bot inventory
+        // de-natives the player scav with it (BotWaveBatcher.CanBatch precedent). The subclass
+        // check is ours to make: a BotInventoryGenerator subclass overriding GenerateInventory is
+        // bypassed on this arm, and BotInventoryGenerator.UseLegacyPath has no self-type check.
+        if (_botInventoryGenerator.UseLegacyPath() || _botInventoryGenerator.GetType() != typeof(BotInventoryGenerator))
+        {
+            return true;
+        }
+
+        if (
+            _hookableMembers.Any(member =>
+                Harmony.GetPatchInfo(member) is { } patches
+                && (
+                    patches.Prefixes.Count > 0
+                    || patches.Postfixes.Count > 0
+                    || patches.Transpilers.Count > 0
+                    || patches.Finalizers.Count > 0
+                )
+            )
+        )
+        {
+            return true;
+        }
+
+        // A mod registered its own subclass with a higher TypePriority, so the container handed us
+        // an implementation the native side does not have
+        return GetType() != typeof(PlayerScavGenerator);
+    }
+
     /// <summary>
     ///     Update a player profile to include a new player scav profile
     /// </summary>
@@ -71,28 +263,20 @@ public class PlayerScavGenerator(
             logger.Debug($"Generated player scav load out with karma level: {scavKarmaLevel}");
         }
 
-        // Edit baseBotNode values
-        var baseBotNode = ConstructBotBaseTemplate(playerScavKarmaSettings.BotTypeForLoot);
+        PmcData scavData;
+        if (UseLegacyPath())
+        {
+            LastPathTaken = LootGenerationPath.Legacy;
+            scavData = GenerateScavLegacy(sessionID, playerScavKarmaSettings, pmcDataClone);
+        }
+        else
+        {
+            LastPathTaken = LootGenerationPath.Native;
+            scavData = GenerateScavNative(sessionID, playerScavKarmaSettings, pmcDataClone);
+        }
 
-        AdjustBotTemplateWithKarmaSpecificSettings(playerScavKarmaSettings, baseBotNode);
-
-        var scavData = botGenerator.GeneratePlayerScav(
-            sessionID,
-            playerScavKarmaSettings.BotTypeForLoot.ToLowerInvariant(),
-            "easy",
-            baseBotNode,
-            pmcDataClone
-        );
-
-        // Add additional items to player scav as loot
-        AddAdditionalLootToPlayerScavContainers(
-            scavData.Id.Value,
-            playerScavKarmaSettings.LootItemsToAddChancePercent,
-            scavData,
-            [EquipmentSlots.TacticalVest, EquipmentSlots.Pockets, EquipmentSlots.Backpack]
-        );
-
-        // No need for cache data, clear up
+        // No need for cache data, clear up - scavData.Id is still the generated bot id here; the
+        // metadata block below overwrites it, so the order is load-bearing
         botInventoryContainerService.ClearCache(scavData.Id.Value);
 
         // Remove cached bot loot cache now scav is generated
@@ -136,6 +320,118 @@ public class PlayerScavGenerator(
         saveServer.GetProfile(sessionID).CharacterData.ScavData = scavData;
 
         return scavData;
+    }
+
+    /// <summary>
+    ///     The retained 4.1.2 generation body: karma applied to a merged base template, the whole
+    ///     bot built C#-side, additional loot added afterwards.
+    /// </summary>
+    private PmcData GenerateScavLegacy(MongoId sessionID, KarmaLevel playerScavKarmaSettings, PmcData pmcDataClone)
+    {
+        // Edit baseBotNode values
+        var baseBotNode = ConstructBotBaseTemplate(playerScavKarmaSettings.BotTypeForLoot);
+
+        AdjustBotTemplateWithKarmaSpecificSettings(playerScavKarmaSettings, baseBotNode);
+
+        var scavData = botGenerator.GeneratePlayerScav(
+            sessionID,
+            playerScavKarmaSettings.BotTypeForLoot.ToLowerInvariant(),
+            "easy",
+            baseBotNode,
+            pmcDataClone
+        );
+
+        // Add additional items to player scav as loot
+        AddAdditionalLootToPlayerScavContainers(
+            scavData.Id.Value,
+            playerScavKarmaSettings.LootItemsToAddChancePercent,
+            scavData,
+            [EquipmentSlots.TacticalVest, EquipmentSlots.Pockets, EquipmentSlots.Backpack]
+        );
+
+        return scavData;
+    }
+
+    /// <summary>
+    ///     The native arm: the karma pieces that feed the C#-side loot pool hydration run here,
+    ///     against clones, and everything else - the karma modifiers, the equipment blacklist, the
+    ///     inventory and the additional loot - crosses to spt-native in one call.
+    /// </summary>
+    private PmcData GenerateScavNative(MongoId sessionID, KarmaLevel playerScavKarmaSettings, PmcData pmcDataClone)
+    {
+        // GetBotTemplate returns the live db table entry - every caller in the repo clones it. The
+        // shell's prelude must never hold a live reference (a future prelude write would silently
+        // corrupt the in-memory DB for the process lifetime); one cold-path clone buys that off.
+        // The loot template is cloned for the same reason: the `with` expression below is a shallow
+        // record copy, so an un-cloned source would leave BotChances and friends aliasing the DB.
+        var lootTemplate = cloner.Clone(botHelper.GetBotTemplate(playerScavKarmaSettings.BotTypeForLoot));
+        var assaultTemplate = cloner.Clone(botHelper.GetBotTemplate("assault"));
+
+        // The two karma pieces whose output feeds C#-side loot-pool hydration run here, against
+        // clones, through the real methods so patches fire (spec § Seam): item limits on a cloned
+        // generation, the strips on a cloned inventory. Everything else karma does moves native.
+        var karmaGeneration = cloner.Clone(lootTemplate.BotGeneration);
+        AdjustItemWeights(playerScavKarmaSettings.ItemLimits, karmaGeneration.Items);
+
+        var strippedInventory = cloner.Clone(lootTemplate.BotInventory);
+        // Mirrors the legacy prelude's guard shape exactly: unconditional christmas check outside,
+        // gifter-role check nested inside
+        if (!_seasonalEventService!.ChristmasEventEnabled())
+        {
+            if (playerScavKarmaSettings.BotTypeForLoot.ToLowerInvariant() != "gifter")
+            {
+                _seasonalEventService.RemoveChristmasItemsFromBotInventory(
+                    strippedInventory,
+                    playerScavKarmaSettings.BotTypeForLoot.ToLowerInvariant()
+                );
+            }
+        }
+
+        botGenerator.RemoveBlacklistedLootFromBotTemplateInternal(strippedInventory);
+
+        var hydrationTemplate = lootTemplate with { BotGeneration = karmaGeneration, BotInventory = strippedInventory };
+
+        return botGenerator.GeneratePlayerScavNative(
+            sessionID,
+            playerScavKarmaSettings.BotTypeForLoot.ToLowerInvariant(),
+            "easy",
+            assaultTemplate,
+            pmcDataClone,
+            (bot, details) =>
+            {
+                var request = _requestBuilder!.Build(
+                    bot.Id.Value,
+                    sessionID,
+                    hydrationTemplate,
+                    details,
+                    playerScavKarmaSettings,
+                    NativeTestSeed
+                );
+                BotInventoryResult result;
+                if (ResidentDbEligible())
+                {
+                    LastSendIncludedViewsOverride = false;
+                    result = ResidentDbDispatch.Send(
+                        _dbPublisher!,
+                        epoch =>
+                        {
+                            request.Epoch = epoch;
+                            request.ViewsOverride = null;
+                            return SptNative.GeneratePlayerScav(request);
+                        }
+                    );
+                }
+                else
+                {
+                    LastSendIncludedViewsOverride = true;
+                    request.ViewsOverride = _requestBuilder.BuildViewsOverride(request.LootPools);
+                    result = SptNative.GeneratePlayerScav(request);
+                }
+
+                _botInventoryGenerator!.ReplayRandomisationClamps(details, result.RandomisationClamps);
+                return result.Inventory;
+            }
+        );
     }
 
     /// <summary>

@@ -343,10 +343,10 @@ fn add_additional_pocket_loot_weights_for_unheard_bot(template: &mut BotTemplate
 
 /// The per-bot inputs after the batch preamble (level draw, variant pick) or, on the single path,
 /// straight off the request.
-struct PreparedBot {
-    details: BotGenerationDetailsWire,
-    template: BotTemplateWire,
-    loot_pools: BotLootCacheWire,
+pub(crate) struct PreparedBot {
+    pub(crate) details: BotGenerationDetailsWire,
+    pub(crate) template: BotTemplateWire,
+    pub(crate) loot_pools: BotLootCacheWire,
 }
 
 /// `BotInventoryGenerator.GenerateInventory` (`:80-120`) proper - one bot against views the caller
@@ -355,11 +355,28 @@ struct PreparedBot {
 ///
 /// `equipment` is merged by the caller too, for the same reason: this runs once per *bot* and the
 /// merge is once per call.
-fn generate_prepared(
+pub(crate) fn generate_prepared(
     shared: &SharedBotVaryingWire,
     views: &BotViews,
     equipment: &IndexMap<String, EquipmentFilters>,
     prepared: PreparedBot,
+) -> Result<BotInventoryResult, LootError> {
+    generate_prepared_with(shared, views, equipment, prepared, |_, _, _| Ok(()))
+}
+
+/// [`generate_prepared`] with the caller's own post-generation pass spliced in.
+///
+/// `post` runs where `GenerateInventory` hands the finished bot back to its caller — after
+/// `GenerateLoot` and before the container cache is cleared, which is exactly where
+/// `PlayerScavGenerator.Generate` (`:88-96`) does its extra-loot pass and *then* calls
+/// `ClearCache`. It gets the live bot context, the live container grids and the response
+/// inventory's item list, i.e. everything the C# pscav path reaches for.
+pub(crate) fn generate_prepared_with(
+    shared: &SharedBotVaryingWire,
+    views: &BotViews,
+    equipment: &IndexMap<String, EquipmentFilters>,
+    prepared: PreparedBot,
+    post: impl FnOnce(&mut BotContext, &mut ContainerGrids, &mut Vec<Item>) -> Result<(), LootError>,
 ) -> Result<BotInventoryResult, LootError> {
     let PreparedBot {
         details,
@@ -456,6 +473,9 @@ fn generate_prepared(
         &loot_config,
         &mut worn_item_chances.weapon_mods,
     )?;
+
+    // The caller's own post-generation pass, against the still-live grids and inventory.
+    post(&mut ctx, &mut grids, &mut bot_inventory.items)?;
 
     // Inventory cache isn't needed, clear to save memory
     let container_grids = if details.clear_bot_container_cache_after_generation {
@@ -1234,7 +1254,7 @@ fn localised(level: &str, locale_key: &str, args: serde_json::Value) -> Diagnost
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use serde_json::{Value, json};
 
     use super::*;
@@ -1308,7 +1328,9 @@ mod tests {
         })
     }
 
-    fn base_request() -> Value {
+    /// The canonical override-arm request. Also the base of the player-scav fixture
+    /// ([`crate::bot::player_scav`]), which is the same bot generated through the karma entry.
+    pub(crate) fn base_request() -> Value {
         json!({
             "epoch": 0,
             "viewsOverride": {

@@ -187,11 +187,11 @@ which `DatabaseImporter` verifies at startup outside DEBUG. The format is a cont
 (`NativeMethods.cs`, `SptNative.cs`) — and, for the log and console exports, from the twin
 `Libraries/SPTarkov.Common/Native/NativeMethods.cs`, because `SPTarkov.Common` cannot reference
 Server.Core. It owns database hash verification, the ported generation paths (location loot, reward
-loot, whole-bot inventory, dynamic ragfair offers, repeatable quests, scav case rewards, map/raid
-setup, achievement statistics, weather), the item base-class cache build, the ragfair linked-item
-table, the resident DB every ported family but raid, achievements and weather reads from,
-`user/profiles/`' live disk I/O, the whole log pipeline, and the terminal
-itself. Forty-two exports, JSON in / JSON out —
+loot, whole-bot inventory, player scav generation, dynamic ragfair offers, repeatable quests, scav
+case rewards, map/raid setup, achievement statistics, weather), the item base-class cache build, the
+ragfair linked-item table, the resident DB every ported family but raid, achievements and weather
+reads from, `user/profiles/`' live disk I/O, the whole log pipeline, and the terminal itself.
+Forty-three exports, JSON in / JSON out —
 except the ragfair response, a framed MessagePack envelope; the fused database load, whose response
 is a 4-byte little-endian header length, a JSON header, then the returned file bodies concatenated
 in header order; the profile load, framed the same way but with a `{"found":bool}` header and a
@@ -210,7 +210,7 @@ per-symbol and by name, so the `DllNotFoundException` / `EntryPointNotFoundExcep
 logging and console paths degrade on is unchanged.
 
 One non-obvious consequence, because it is invisible from the C# side: the launcher must reference
-`spt_native` in its own source or the linker discards the unreferenced rlib and *all* 42 exports with
+`spt_native` in its own source or the linker discards the unreferenced rlib and *all* 43 exports with
 it. `rust/mpex-server/src/main.rs` carries a deliberate anchor call, and
 `scripts/smoke-mpex-server.sh` checks the published launcher still exports them.
 
@@ -255,7 +255,7 @@ Linux-only `PropertyGroup`, so from a Windows host nothing maps and the guard in
 | External System | Integration Type | Notes |
 |-------------------|-------------------|-------|
 | Escape from Tarkov game client | Sync HTTP + async WebSocket | Every `/client/*` route; zlib both ways, responses wrapped in the `data`/`err`/`errmsg` envelope. `Models/Eft/` mirrors its wire contracts |
-| `rust/spt-native` (rlib in the shipped exe; cdylib in dev/test/Windows) | Sync FFI, C ABI | Forty-two exports; JSON in/out except the MessagePack ragfair response, the fused database load's framed byte response (length-prefixed JSON header, then the file bodies), the profile load's (same framing, a `{"found":bool}` header and one file body), and the log and console exports. `spt_native_abi_version` handshakes `SptNative.ExpectedAbiVersion`. The resolver picks the source: main program handle first, cdylib second — one per process |
+| `rust/spt-native` (rlib in the shipped exe; cdylib in dev/test/Windows) | Sync FFI, C ABI | Forty-three exports; JSON in/out except the MessagePack ragfair response, the fused database load's framed byte response (length-prefixed JSON header, then the file bodies), the profile load's (same framing, a `{"found":bool}` header and one file body), and the log and console exports. `spt_native_abi_version` handshakes `SptNative.ExpectedAbiVersion`. The resolver picks the source: main program handle first, cdylib second — one per process |
 | `SPT_Data/` on disk | Batch read at startup | `configs/` via `ConfigLoader`, `database/` via `DatabaseImporter`, hash-verified against `checks.dat` outside DEBUG |
 | `user/profiles/` | Blocking read/write on a threadpool thread | `SaveServer` owns the JSON profiles; interval saves plus `BackupService` timers. Since Phase 5 the disk itself is `spt_profile_*` — the serialization, the MD5 dirty-check and `BackupService` stay C# |
 | `user/mods/`, `user/patchers/` | Reflective assembly load | Third-party DLLs: `[Injectable]` registrations, `IOnDIConstruct` hooks, HarmonyX patches, enum prepatchers |

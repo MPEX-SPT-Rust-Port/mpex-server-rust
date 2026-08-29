@@ -11,6 +11,7 @@ using SPTarkov.Server.Core.Native.BaseClass;
 using SPTarkov.Server.Core.Native.Bot;
 using SPTarkov.Server.Core.Native.Db;
 using SPTarkov.Server.Core.Native.Loot;
+using SPTarkov.Server.Core.Native.PlayerScav;
 using SPTarkov.Server.Core.Native.Ragfair;
 using SPTarkov.Server.Core.Native.Raid;
 using SPTarkov.Server.Core.Native.RepeatableQuests;
@@ -111,6 +112,7 @@ internal enum LootExport
     RandomLootContainer,
     BotInventory,
     BotInventoryBatch,
+    PlayerScav,
     RepeatableQuest,
     ScavCaseRewards,
     RaidAdjustments,
@@ -126,7 +128,7 @@ internal enum LootExport
 
 public static class SptNative
 {
-    private const uint ExpectedAbiVersion = 36;
+    private const uint ExpectedAbiVersion = 37;
 
     // ffi.rs
     private const int StatusOk = 0;
@@ -418,6 +420,18 @@ public static class SptNative
             LootExport.BotInventoryBatch,
             JsonSerializer.SerializeToUtf8Bytes(request, LootJsonOptions)
         );
+    }
+
+    /// <summary>
+    /// Generates the player scav's inventory: the bot pass with the profile's karma level applied -
+    /// equipment and mod chance modifiers, the per-slot equipment blacklist and the extra loot the
+    /// karma level adds.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">Generation failed, or the native side misbehaved.</exception>
+    /// <exception cref="NativeStaleEpochException">An override-less request named an epoch the resident DB does not hold.</exception>
+    internal static BotInventoryResult GeneratePlayerScav(GeneratePlayerScavRequest request)
+    {
+        return Generate<BotInventoryResult>(LootExport.PlayerScav, JsonSerializer.SerializeToUtf8Bytes(request, LootJsonOptions));
     }
 
     /// <summary>
@@ -1071,6 +1085,7 @@ public static class SptNative
                     &outPtr,
                     &outLen
                 ),
+                LootExport.PlayerScav => NativeMethods.GeneratePlayerScav(requestPtr, (nuint)requestUtf8.Length, &outPtr, &outLen),
                 LootExport.RepeatableQuest => NativeMethods.GenerateRepeatableQuest(
                     requestPtr,
                     (nuint)requestUtf8.Length,

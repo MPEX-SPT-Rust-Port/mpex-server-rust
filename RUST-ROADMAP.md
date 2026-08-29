@@ -11,16 +11,17 @@ with every edit and go stale silently.
 
 ## Status
 
-Ported and native by default: the loot family, the bot family, dynamic ragfair offer generation, the
-repeatable-quest family, scav case rewards, the item base-class cache, the ragfair linked-item
-table, map/raid setup (PMC wave splice included), achievement statistics and weather generation.
-Each keeps its full 4.1.2 C# body as a **legacy path**, selected automatically when a mod hooks it
-or manually via a config flag. The log pipeline and profile persistence are ported with **no**
-legacy path; the crate owns the terminal outright (raw `Console.Write*`, prompts, title, clear).
+Ported and native by default: the loot family, the bot family and player scav generation, dynamic
+ragfair offer generation, the repeatable-quest family, scav case rewards, the item base-class cache,
+the ragfair linked-item table, map/raid setup (PMC wave splice included), achievement statistics and
+weather generation. Each keeps its full 4.1.2 C# body as a **legacy path**, selected automatically
+when a mod hooks it or manually via a config flag. The log pipeline and profile persistence are
+ported with **no** legacy path; the crate owns the terminal outright (raw `Console.Write*`, prompts,
+title, clear).
 
-Forty-two C-ABI exports (`src/ffi.rs`) carry all of it, JSON in and JSON out — except the ragfair
+Forty-three C-ABI exports (`src/ffi.rs`) carry all of it, JSON in and JSON out — except the ragfair
 response (framed MessagePack), `spt_db_load` and `spt_profile_load` (JSON header frame + file
-bytes), and the log/console exports (raw fields or bytes). Current ABI 36. Since Phase 6b the
+bytes), and the log/console exports (raw fields or bytes). Current ABI 37. Since Phase 6b the
 exports resolve from the `mpex-server` executable (rlib linkage; shipped Linux builds) or the
 `spt_native` cdylib (dev builds, tests, Windows) — identical `[LibraryImport]` shape either way.
 
@@ -43,6 +44,7 @@ state-ownership work is spent.
 | Reward containers | `LootGenerator.GetRandomLootContainerLoot` | `spt_get_random_loot_container_loot` |
 | Whole bot inventory | `BotInventoryGenerator.GenerateInventory` | `spt_generate_bot_inventory` |
 | A whole bot wave in one call | `BotWaveBatcher.TryGenerateWave` | `spt_generate_bot_inventory_batch` |
+| Player scav generation (karma chances/blacklist, inventory, additional loot) | `PlayerScavGenerator.Generate` | `spt_generate_player_scav` |
 | Dynamic flea offers (assort walk, pricing, barters) | `RagfairOfferGenerator.GenerateDynamicOffers` | `spt_generate_dynamic_offers` |
 | Repeatable quests (all four types + rewards) | `*QuestGenerator.Generate` | `spt_generate_repeatable_quest` |
 | Scav case rewards | `ScavCaseRewardGenerator.Generate` | `spt_generate_scav_case_rewards` |
@@ -91,13 +93,31 @@ entry cited.
   `SeasonalEventService.ChristmasEventEnabled`/`RemoveChristmasItemsFromBotInventory` are detected
   member-scoped by the wave batcher; `BotEquipmentModPoolService` is detected whole-type since
   ABI 32. Invisible in principle: constructor patches, and plain runtime calls into the public
-  surface. `forceLegacy` is the standing escape hatch.
+  surface. `forceLegacy` is the standing escape hatch. Player scav generation adds
+  `RandomUtil.GetChance100` and `BotGeneratorHelper.GenerateExtraPropertiesForItem` /
+  `AddItemWithChildrenToEquipmentSlot` to the bypassed set — all three live only in the legacy
+  additional-loot pass the native arm replaces. Two qualifications, neither a new bypass:
+  `ItemFilterService.IsLootableItemBlacklisted` is still called for real on the native arm, through
+  `BotGenerator.RemoveBlacklistedLootFromBotTemplateInternal` (its only caller on this path, run
+  C#-side on both arms so patches fire), leaving only the pre-existing family-wide hole for per-item
+  predicate patches on native generation draws; and `AdjustItemWeights` likewise runs C#-side on
+  both arms, but natively against a clone of the loot template's `BotGeneration` rather than the
+  merged base template, so a postfix reading its arguments sees a different receiver per arm without
+  anything flipping.
 - **The native and legacy bot paths draw mod slots in different orders at randomised levels**
   (since ABI 32) — different, not wrong, bots for one seed; only the native order is
   machine-independent. No cross-arm case can ever cover it (different draw order = different RNG
   consumption). Exact-output coverage at randomised levels is gone on both arms; the replacement is
   a smoke case (`BotParityTests.TheNativePathGeneratesAtRandomisedLevels`) plus the Rust-side
   golden below. → ledger: mod-pool ownership.
+- **The player scav's additional-loot pass draws from a different stream on each arm** — legacy
+  rolls `LootItemsToAddChancePercent` C#-side after the bot is built; natively the roll continues the
+  Rust stream inside the same call. Same seed, different items; cross-arm field-for-field parity
+  holds only with that dictionary empty (`PlayerScavParityTests` empties it and covers the loot with
+  per-arm cases). The pass also moves *earlier* in `Inventory.Items`: additional loot now lands
+  before anything `GenerateBotFinish` appends, inert on shipped data (`botRolesWithDogTags` carries
+  no scav role) but a real order divergence for a mod that adds one. Escape hatch:
+  `ForceLegacyPlayerScavGeneration`.
 - **Native bot output is not reproducible across processes** — `MongoId.GetHashCode` is
   per-process-seeded, so every `Dictionary<MongoId, …>` the projection serialises enumerates
   process-randomly. No C#-side golden can pin bot output; the Rust-side
@@ -307,6 +327,16 @@ Each learned at review or debugging cost.
   legacy before the native arm runs (weather's `HasOutOfEnumPresetKey` is the precedent).
 - **Write port specs from as-built code, not prior specs' prose.** Prior specs describe intent that
   implementation silently corrected; read the merged precedent files before pinning a convention.
+- **A C# property declared non-nullable is not one, and every fixture hand-setting it hides that.**
+  `BotGenerationDetails.GameVersion` is only assigned on PMC paths, so non-PMC native bot sends
+  crossed a null into a non-defaulted Rust `String` and were rejected outright — invisible because
+  every bot fixture in the suite set the field by hand. Projection code defaults it at the seam now
+  (`BotPayloadProjection.BuildBotSlice`). When a projection reads a member, check what writes it in
+  production, not what the fixtures write.
+- **`[Injectable]` registers transient, so a test seam set on a resolved instance may be set on the
+  wrong object.** Seeding `NativeTestSeed` on a generator the container just handed you does not
+  reach the nested collaborator the object under test actually holds — resolve the nested instance
+  off the object graph instead (`PlayerScavParityTests.NestedBotInventoryGenerator`).
 - **Never link `spt-native` as both rlib and cdylib in one build** — two resident DBs and
   split-brain epochs. Publish layout, not structure, enforces single linkage today (Phase 6b
   ledger).
@@ -330,6 +360,7 @@ override arm unconditionally.
 | `AchievementController` | `AchievementNativeRequestBuilder` |
 | `WeatherGenerator` | `WeatherNativeRequestBuilder` |
 | `BotInventoryGenerator` | loaded-mod list + `DbPublisher`, chaining the frozen primary |
+| `PlayerScavGenerator` | `PlayerScavNativeRequestBuilder` + `BotInventoryGenerator` + `SeasonalEventService` + loaded-mod list + `DbPublisher`, chaining the frozen primary (the seasonal service is not a frozen parameter — the native arm's christmas strip needs it) |
 
 `BotWaveBatcher` post-dates the baseline (primary constructor took the pair directly). Ragfair
 offer generation, `RepeatableQuestRewardGenerator` and `RepeatableQuestHelper` needed no change.
@@ -342,6 +373,7 @@ offer generation, `RepeatableQuestRewardGenerator` and `RepeatableQuestHelper` n
 |---|---|---|
 | `ForceLegacyLootGeneration` | `LocationConfig` | both loot generators (no per-generator flag) |
 | `ForceLegacyBotGeneration`, `ForcePerBotGeneration` | `BotConfig` | bot family; batch opt-out |
+| `ForceLegacyPlayerScavGeneration` | `PlayerScavConfig` | player scav |
 | `ForceLegacyRagfairGeneration` | `RagfairConfig` | offer generation |
 | `ForceLegacyRagfairLinkedItemBuild` | `RagfairConfig` | linked-item table |
 | `ForceLegacyRepeatableQuestGeneration` | `QuestConfig` | quest family |
@@ -351,7 +383,7 @@ offer generation, `RepeatableQuestRewardGenerator` and `RepeatableQuestHelper` n
 | `ForceLegacyAchievementStatistics` | `CoreConfig` | achievement statistics |
 | `ForceLegacyWeatherGeneration` | `WeatherConfig` | weather |
 | `ForceLegacyDatabaseImport` | `CoreConfig` | database load (not a generation path) |
-| `TrustNativeRequestCacheWithMods` / `DisableNativeRequestCache` | `RagfairConfig`, `QuestConfig`, `ItemConfig`, `LocationConfig`, `ScavCaseConfig`, `BotConfig` | resident-DB eligibility (linked-item table reads `RagfairConfig`'s pair) |
+| `TrustNativeRequestCacheWithMods` / `DisableNativeRequestCache` | `RagfairConfig`, `QuestConfig`, `ItemConfig`, `LocationConfig`, `ScavCaseConfig`, `BotConfig`, `PlayerScavConfig` | resident-DB eligibility (linked-item table reads `RagfairConfig`'s pair) |
 
 **What flips to legacy.** General rule: a patch on any public/protected/protected-internal member
 of the family's frozen set flips it — except the dispatcher entry point itself, which wraps
@@ -362,6 +394,7 @@ whichever path runs. A container-substituted subclass also flips, **except loot*
 |---|---|
 | Loot | `LootGenerator` + `LocationLootGenerator`, **protected members only**; no subclass check |
 | Bots | the four generator classes; also flips when the `InventoryMagGenComponents` set ≠ the four built-ins |
+| Player scav | **nine members, member-scoped, across three classes** — `PlayerScavGenerator`'s `AddAdditionalLootToPlayerScavContainers`, `ConstructBotBaseTemplate`, `AdjustBotTemplateWithKarmaSpecificSettings`, `AdjustEquipmentWeights`, `AdjustWeaponModWeights`, `BlacklistEquipment`; `BotGenerator.GeneratePlayerScav` + `GenerateBot` (the native arm inlines their orchestration into the internal shell `GeneratePlayerScavNative`); and `BotInventoryGenerator.GenerateInventory`, which the bot family deliberately leaves out of its own set but the native pscav arm bypasses entirely. Chains `BotInventoryGenerator.UseLegacyPath()`, so anything de-nativing bot inventory de-natives the player scav with it, and checks **two** subclasses (`PlayerScavGenerator` and `BotInventoryGenerator`). Outside the set, C#-side on both arms: `Generate` (the dispatcher), `AdjustItemWeights` and `GetKarmaLimitValuesByKey` (their output feeds C#-side loot-pool hydration), `GetScavStats`, `GetScavLevel`, `GetScavExperience`, `SetScavCooldownTimer` |
 | Ragfair | `RagfairOfferGenerator`, `RagfairPriceService`, `RagfairServerHelper`, `RagfairAssortGenerator` |
 | Quests | the four `*QuestGenerator`s + `RepeatableQuestRewardGenerator` + `RepeatableQuestHelper`; `PickupQuestGenerator` contributes zero members (its legacy body is inline in `Generate`) |
 | Scav case, base class, linked items | own class only |
@@ -420,8 +453,9 @@ barriers over 33 roots + eight hand-written bump sites: `SeasonalEventService.Up
 `CustomQuestService.CreateQuest`, `RagfairPriceService.ReplaceFleaBasePrices`, a guarded replay bump
 on `CanSellOnRagfair` true→false). Requests are `{epoch, viewsOverride?, varying}`; an unknown
 epoch returns `STATUS_STALE_EPOCH`, surfacing as `NativeStaleEpochException` and self-healing with
-one `ForcePublish` + retry. Thirteen of the twenty generation exports ride the epoch (flips #1–#6);
-the raid five, achievement statistics and weather carry no epoch at all. Ineligible callers send a
+one `ForcePublish` + retry. Fourteen of the twenty-one generation exports ride the epoch (flips
+#1–#6, plus player scav on the bot views); the raid five, achievement statistics and weather carry no
+epoch at all. Ineligible callers send a
 per-call `viewsOverride` with `epoch: 0` (documented wire contract, not runtime-enforced). Per
 flip:
 
@@ -473,3 +507,29 @@ keeps the renderer numbering the item below as 4. -->
    builds. Do it per target before the first tagged release image.
 6. **A real Windows run.** The native console and launcher arm are structurally reviewed but have
    never executed on Windows (export-table and RID-triple gaps: Phase 6b ledger).
+7. **Player scav test-coverage follow-ups** (PR #23 final review; the pre-merge holes — the
+   resident-arm dispatch cells, the cross-arm additional-loot placement pin, the positional id
+   normalization in `player_scav_resident.rs`, the un-cloned hydration template — were fixed on the
+   branch; these are the booked remainder):
+   - **Wire-contract pins.** Nothing pins `GeneratePlayerScavRequest`/`KarmaSettingsWire` the way
+     `SptNativeBotWireTests` pins `spt_generate_bot_inventory` — and this PR's `GameVersion`
+     drive-by was itself a wire-shape bug. Relatedly, every non-PMC `BotGenerationDetails` fixture
+     hand-sets `GameVersion = "standard"`, so a recurrence of the null-`GameVersion` hole would be
+     re-masked; one fixture should drop it.
+   - **C#-side resident-vs-override equality.** The Rust resident test's override arm uses a
+     hand-written fixture, not the real `PlayerScavNativeRequestBuilder.BuildViewsOverride`
+     projection, so a bug there (e.g. the `lootPools` argument feeding `BuildHandbookPrices`) has no
+     test that could fail. `BotResidentDbTests.AResidentSendAndAnOverrideSendProduceIdenticalBotsFieldForField`
+     is the pattern; `DisableNativeRequestCache` + `NativeTestSeed` already exist.
+   - **Meta-test cross-type derivation.** `PlayerScavHookLivenessTests`' surface meta-test derives
+     `PlayerScavGenerator`'s own six members but the three cross-type members
+     (`BotGenerator.GeneratePlayerScav`/`GenerateBot`, `BotInventoryGenerator.GenerateInventory`)
+     are literals in both the production list and the test; `_bothArmsMembers` is a hand-written
+     name list, so moving a named member native keeps the meta-test green.
+   - Smaller: `PlayerScavGenerator.UseLegacyPath`'s subclass-check comment describes dispatch C#
+     doesn't permit (none of the guarded methods are virtual) and `botGenerator` is missing from
+     the subclass check its twin gets; `AdjustWeaponModWeights` is never exercised cross-arm at
+     non-zero values (shipped `Modifiers.Mod` is all-zeros); the parity negative controls are
+     seed-fragile without a positive control at the same seed; `GetChance100` only tested at
+     100/0 (shipped karma uses 3–27); the pscav request serializes `container_grids` back across
+     FFI only for `ClearCache` to no-op on it.

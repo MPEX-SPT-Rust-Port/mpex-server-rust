@@ -37,7 +37,7 @@ frozen 4.1.2 mod surface has `Spectre.Console.Color` baked into `ISptLogger<T>`,
 that name. Built on every build, but incrementally. Its own header covers the fidelity gaps.
 
 **The split-brain rule, post-6b:** exactly one linkage path may be live *per process*. `mpex-server` links
-`spt-native` as an rlib and, via `-Wl,--export-dynamic` in `.cargo/config.toml`, carries all 42
+`spt-native` as an rlib and, via `-Wl,--export-dynamic` in `.cargo/config.toml`, carries all 43
 `#[unsafe(no_mangle)]` exports in its own `.dynsym`; the resident DB's statics therefore live in the executable.
 The published Linux tree ships **no cdylib** (`ExcludeSptNativeFromPublish` in `SPTarkov.Server.csproj`), so
 there is nothing for a second copy to come from. The cdylib is still built and still lives in `bin/`, which is
@@ -54,7 +54,7 @@ tree only.
 Two things that follow, and that a reader will otherwise trip over:
 
 - **The launcher must reference `spt_native` in its own source.** An rlib nothing references is discarded whole
-  by the linker, taking all 42 exports with it, silently, at link time. `src/main.rs` carries a deliberate
+  by the linker, taking all 43 exports with it, silently, at link time. `src/main.rs` carries a deliberate
   anchor call and `scripts/smoke-mpex-server.sh` checks the launcher still exports them — retention is
   all-or-nothing, so a nonzero count is the whole check and no export count needs maintaining. Any path
   reference suffices; the anchor is a call behind `black_box` only so that deleting it looks like a behaviour
@@ -77,7 +77,7 @@ the console**, whose P/Invoke lives in a different assembly:
 
 | Path | Role |
 |---|---|
-| `src/lib.rs` | Module roots and `ABI_VERSION` (currently 36; must equal `SptNative.ExpectedAbiVersion`) |
+| `src/lib.rs` | Module roots and `ABI_VERSION` (currently 37; must equal `SptNative.ExpectedAbiVersion`) |
 | `src/ffi.rs` | The C-ABI surface. The **only** module containing `unsafe` |
 | `src/runtime.rs` | Process-wide multi-thread tokio runtime, `OnceLock`-built. Used only by `verify` and the fused load |
 | `src/verify.rs` | Hashes `SPT_Data` with XXH3-128 and diffs it against `checks.dat`. `verify_collecting` is the same walk with a `want` predicate that whole-reads and returns matching files' bytes, so the fused load reads each file once |
@@ -126,10 +126,11 @@ trades that for build time — `opt-level = 1`, sixteen codegen units, line-tabl
 
 ### FFI boundary (`ffi.rs`)
 
-Forty-two `extern "C"` exports: two trivial (`spt_native_abi_version`, `spt_buf_free`), twenty taking a
-UTF-8 JSON generation request (the newest are the raid-setup family's five, described after this list,
-plus `spt_get_achievement_statistics` and `spt_generate_weather`, which ride the same
-no-epoch/no-`viewsOverride` pattern),
+Forty-three `extern "C"` exports: two trivial (`spt_native_abi_version`, `spt_buf_free`), twenty-one taking a
+UTF-8 JSON generation request (the newest is `spt_generate_player_scav`, which borrows the bot
+family's views off the same epoch — see *`src/bot/`*; before it, the raid-setup family's five,
+described after this list, plus `spt_get_achievement_statistics` and `spt_generate_weather`, which
+ride the same no-epoch/no-`viewsOverride` pattern),
 four taking a profile-persistence request (`{schema, dir}`, plus `id`
 on all but `spt_profile_list` and the profile text on `spt_profile_save` — see *`src/profile.rs`*;
 `spt_profile_load` returns a framed byte response, `[u32-LE header length][{"found":bool}][file
@@ -179,7 +180,7 @@ projection order, nullable, because a null `BossName` survives legacy's `HashSet
 and answers `{apply, removeIndices}`. **Only the removal half crosses.** The custom-wave append stays
 C#-side so the config's own `BossLocationSpawn` instances land in the cloned location *by reference*,
 which is the same live-object aliasing channel the rest of the family preserves. The
-twenty-eight generation/verify/publish/load/digest/profile exports hand back a heap buffer on success, which the
+twenty-nine generation/verify/publish/load/digest/profile exports hand back a heap buffer on success, which the
 caller releases with `spt_buf_free`; so do `spt_console_read_line` and `spt_log_format`.
 
 - `spt_db_load`'s optional `handbookPriceOverride` member carries `ItemConfig.HandbookPriceOverride` —
@@ -211,7 +212,7 @@ caller releases with `spt_buf_free`; so do `spt_console_read_line` and `spt_log_
   `RaidError`, `AchievementError` and `WeatherError` each have a single-armed `FfiFailure`.
 - **Every family but raid, achievements and weather rides the resident DB (Phase 1 complete at flip #6, ABI 27): ragfair, the repeatable
   quest, the two startup one-shots (base-class cache, linked-item table), the loot pair — location loot and
-  reward loot — the scav case, and the bot family's two exports.** `spt_db_publish` (called by C#'s
+  reward loot — the scav case, and the bot family's three exports.** `spt_db_publish` (called by C#'s
   `DbPublisher` whenever `DatabaseMutationStamp` has moved) makes six roots resident in `db.rs` — templates,
   traders, globals, locations, hideout and (since Phase 4) configs — and derives the ragfair, quest and bot
   views off the five tables, in that
@@ -333,11 +334,12 @@ ride each request as before.
 
 `mod.rs` defines `BotContext<'a>` — the read-only views one generation run borrows, plus its `DiagSink`. The
 bot family's analog of `LootContext`. It also owns `BotViews`, the two-arm enum every DB-derived read goes
-through, and `resolve_bot_views`, shared by both exports — see *FFI boundary*.
+through, and `resolve_bot_views`, shared by all three exports — see *FFI boundary*.
 
 | Module | Stands in for | What it does |
 |---|---|---|
 | `bot_inventory_generator.rs` | `Generators/Bot/BotInventoryGenerator.cs` | `generate_inventory` — the orchestrator and the crate's bot entry point — plus `generate_inventory_batch`, one wave in one call over a rayon loop |
+| `player_scav.rs` | `Generators/Bot/PlayerScavGenerator.cs` | `generate_player_scav` — karma chances and the equipment blacklist onto the template, the bot through `generate_prepared_with`, then the additional-loot pass against the still-live container grids. `AdjustItemWeights` and both template strips stay C#-side on both arms (their output feeds `BotLootCacheService` hydration) |
 | `level_generator.rs` | `Generators/Bot/BotLevelGenerator.cs` | `generate_bot_level` — the batch path's level/exp draw. Only `GenerateBotLevel` + `ChooseBotLevel`; `GetRelativePmcBotLevelRange` stays C#-side as hoisted wave state |
 | `bot_equipment_mod_generator.rs` | `Generators/Bot/BotEquipmentModGenerator.cs` | Both mod halves (equipment, weapon), plus the one `BotWeaponModLimitService` method they call |
 | `bot_generator_helper.rs` | `Helpers/Bot/BotGeneratorHelper.cs`, `BotInventoryContainerService.cs` | Per-item `Upd` blocks, compatibility probes, and the `ContainerGrids` occupancy state |
@@ -524,7 +526,7 @@ over the server-assembly probe, `spectre-facade`'s two.
 
 | External System | Integration Type | Notes |
 |-------------------|-------------------|-------|
-| `SPTarkov.Server.Core` | Sync FFI, C ABI | `Native/NativeMethods.cs` + `SptNative.cs` and the per-family projections. Forty-two exports; `ABI_VERSION` must equal `SptNative.ExpectedAbiVersion` |
+| `SPTarkov.Server.Core` | Sync FFI, C ABI | `Native/NativeMethods.cs` + `SptNative.cs` and the per-family projections. Forty-three exports; `ABI_VERSION` must equal `SptNative.ExpectedAbiVersion` |
 | `SPTarkov.Common` | Sync FFI, C ABI | The eleven log and console exports plus `spt_buf_free`, from a second `Native/NativeMethods.cs` — Common cannot reference Core |
 | `SPT_Data/` on disk | Batch, async over tokio | `spt_verify_database` hashes `configs/` + `database/` with XXH3-128; `spt_db_load` (since ABI 29) does that walk *and* reads `database/` in one pass, installing the five database roots — never the configs root, which only `spt_db_publish` builds — and handing the eager bytes back to `DatabaseImporter`; `gen_checks` writes `checks.dat` on Release builds |
 | `user/profiles/` on disk | Blocking read/write per call | `spt_profile_*` (since Phase 5) own every live listing, read, write and delete; the directory arrives in each request. `BackupService` (C#) still copies and restores beside them |
