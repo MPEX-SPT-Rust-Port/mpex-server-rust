@@ -512,7 +512,8 @@ keeps the renderer numbering the item below as 4. -->
 pscav follow-ups PR with no ABI bump. All four bullets landed: `PlayerScavGenerator.UseLegacyPath`
 now de-natives on a substituted `BotGenerator` too (two of the nine frozen members live there) and
 its subclass-check comment no longer describes virtual dispatch C# does not permit;
-`SptNativePlayerScavWireTests` pins `GeneratePlayerScavRequest`/`KarmaSettingsWire` and
+`SptNativePlayerScavWireTests` pins `GeneratePlayerScavRequest`/`KarmaSettingsView` (the C# fixture
+for Rust's `KarmaSettingsWire`) and
 `BotPathDispatchTests` drops the masking `GameVersion = "standard"`; `PlayerScavResidentDbTests`
 compares a resident send against the real `PlayerScavNativeRequestBuilder.BuildViewsOverride`
 projection field-for-field; `PlayerScavHookLivenessTests` resolves its cross-type members as

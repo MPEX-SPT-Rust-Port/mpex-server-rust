@@ -989,3 +989,8 @@ comment); this list records where, plus the deferred items recorded nowhere else
   tests, the ASCII-vs-Ordinal case-fold convention notes, stale line refs).
 - **PR #22 — tier 1 tail** (2026-08-28, `1f05a86`, ABI 36). Carryovers on the PR's disposition
   comment.
+- **PR #23 — player scav port** (2026-08-29, `c633991`, ABI 37). Natives the pscav generation body:
+  karma equipment/mod chances, the equipment blacklist, the inventory build and the additional-loot
+  pass. The profile boundary stayed C#-side on both arms — karma-value reads, the fence/limit
+  hydration onto the crossing template, and every profile write. Follow-ups from the final review
+  were booked as roadmap item 7, retired by the pscav follow-ups PR.
