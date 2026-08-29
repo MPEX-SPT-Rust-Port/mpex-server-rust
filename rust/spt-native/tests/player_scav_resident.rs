@@ -77,29 +77,36 @@ fn call(export: Export, request: &[u8]) -> (i32, Vec<u8>) {
     (status, out)
 }
 
-/// Strips MongoIds (24 hex chars) — item ids are minted from the process-wide MongoId counter,
-/// not the seeded RNG, so they legitimately differ between two seeded runs.
+/// Replaces MongoIds (24 hex chars) with positional placeholders — item ids are minted from the
+/// process-wide MongoId counter, not the seeded RNG, so their raw values legitimately differ
+/// between two seeded runs. Each *distinct* id becomes `<id-N>` for its first-appearance order in
+/// the scanned string, so a `parentId` still names the item it points at: the parent→child linkage
+/// stays visible to the comparison instead of collapsing to one indistinguishable placeholder.
 fn strip_mongo_ids(json: &str) -> String {
     let mut out = String::with_capacity(json.len());
+    let mut seen: Vec<String> = Vec::new();
     let mut run = String::new();
+    let mut flush = |out: &mut String, run: &str| {
+        if run.len() != 24 {
+            out.push_str(run);
+            return;
+        }
+        let n = seen.iter().position(|id| id == run).unwrap_or_else(|| {
+            seen.push(run.to_owned());
+            seen.len() - 1
+        });
+        out.push_str(&format!("<id-{n}>"));
+    };
     for c in json.chars() {
         if c.is_ascii_hexdigit() {
             run.push(c);
             continue;
         }
-        if run.len() == 24 {
-            out.push_str("<id>");
-        } else {
-            out.push_str(&run);
-        }
+        flush(&mut out, &run);
         run.clear();
         out.push(c);
     }
-    if run.len() == 24 {
-        out.push_str("<id>");
-    } else {
-        out.push_str(&run);
-    }
+    flush(&mut out, &run);
 
     out
 }
@@ -459,7 +466,7 @@ fn request(epoch: u64, views_override: Option<Value>) -> Vec<u8> {
 ///
 /// To regenerate after a deliberate generation change: put any wrong value here, run
 /// `cargo test --test player_scav_resident`, and paste the `left:` value from the failure.
-const RESIDENT_GOLDEN: &str = "E720558398B607ECB97BF86443EE10E1";
+const RESIDENT_GOLDEN: &str = "548C92D608935063C508FD911B389709";
 
 #[test]
 fn a_resident_send_matches_the_override_send_and_a_wrong_epoch_is_stale() {
