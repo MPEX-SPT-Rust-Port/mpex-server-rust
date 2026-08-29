@@ -359,10 +359,12 @@ public class PlayerScavGenerator(
     /// </summary>
     private PmcData GenerateScavNative(MongoId sessionID, KarmaLevel playerScavKarmaSettings, PmcData pmcDataClone)
     {
-        var lootTemplate = botHelper.GetBotTemplate(playerScavKarmaSettings.BotTypeForLoot);
         // GetBotTemplate returns the live db table entry - every caller in the repo clones it. The
         // shell's prelude must never hold a live reference (a future prelude write would silently
         // corrupt the in-memory DB for the process lifetime); one cold-path clone buys that off.
+        // The loot template is cloned for the same reason: the `with` expression below is a shallow
+        // record copy, so an un-cloned source would leave BotChances and friends aliasing the DB.
+        var lootTemplate = cloner.Clone(botHelper.GetBotTemplate(playerScavKarmaSettings.BotTypeForLoot));
         var assaultTemplate = cloner.Clone(botHelper.GetBotTemplate("assault"));
 
         // The two karma pieces whose output feeds C#-side loot-pool hydration run here, against
