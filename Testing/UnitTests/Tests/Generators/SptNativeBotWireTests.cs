@@ -8,6 +8,7 @@ using SPTarkov.Server.Core.Helpers.Items;
 using SPTarkov.Server.Core.Helpers.Profile;
 using SPTarkov.Server.Core.Models.Common;
 using SPTarkov.Server.Core.Models.Eft.Profile;
+using SPTarkov.Server.Core.Models.Enums;
 using SPTarkov.Server.Core.Models.Spt.Bots;
 using SPTarkov.Server.Core.Models.Spt.Config;
 using SPTarkov.Server.Core.Models.Spt.Tables;
@@ -18,6 +19,7 @@ using SPTarkov.Server.Core.Services.Bot;
 using SPTarkov.Server.Core.Services.Items;
 using SPTarkov.Server.Core.Services.Profile;
 using SPTarkov.Server.Core.Utils;
+using BotType = SPTarkov.Server.Core.Models.Eft.Common.Tables.BotType;
 
 namespace UnitTests.Tests.Generators;
 
@@ -34,6 +36,8 @@ public class SptNativeBotWireTests
 
     private GenerateBotInventoryRequest _request = default!;
 
+    private BotType _template = default!;
+
     [OneTimeSetUp]
     public void Initialize()
     {
@@ -45,10 +49,12 @@ public class SptNativeBotWireTests
         var sessionId = new MongoId();
         di.GetService<SaveServer>().CreateProfile(new Info { ProfileId = sessionId });
 
+        _template = di.GetService<BotTable>().Types["assault"]!;
+
         _request = BotPayloadProjection.BuildRequest(
             new MongoId(),
             sessionId,
-            di.GetService<BotTable>().Types["assault"],
+            _template,
             new BotGenerationDetails
             {
                 Role = "assault",
@@ -155,6 +161,8 @@ public class SptNativeBotWireTests
         Assert.That(_request.Shared.LiveEquipmentMods["pmc"], Is.Not.Empty);
         Assert.That(_request.Shared.LiveEquipmentMods["pmc"][0].EquipmentMods, Is.Not.Empty);
         Assert.That(_request.ViewsOverride!.Bosses, Is.Not.Empty);
+        Assert.That(_request.ViewsOverride!.BotRolesWithDogTags, Is.Not.Empty);
+        Assert.That(_request.ViewsOverride.BodyToFixedHands, Is.Not.Empty);
         Assert.That(_request.ViewsOverride.ItemPresets, Is.Not.Empty);
         Assert.That(_request.ViewsOverride.DefaultPresetsByTpl, Is.Not.Empty);
         // The defaults ride as ids, so every one has to resolve against the only preset map sent
@@ -163,5 +171,57 @@ public class SptNativeBotWireTests
         Assert.That(_request.LootPools.BackpackLoot, Is.Not.Empty);
         // Every pool tpl has to be priceable, or the running rouble total silently reads 0
         Assert.That(_request.ViewsOverride.HandbookPrices.Keys, Is.SupersetOf(_request.LootPools.BackpackLoot.Keys));
+    }
+
+    /// <summary>
+    /// The Rust variant wire (<c>TemplateVariantWire</c>) hardcodes these member names - appearance
+    /// lowercase via the model's <c>JsonPropertyName</c>s, health/skills PascalCase because
+    /// <c>JsonUtil</c> applies no naming policy. A failure here means the serde renames in
+    /// <c>rust/spt-native/src/bot/models.rs</c> are wrong, not this test.
+    /// </summary>
+    [Test]
+    public void TemplateVariantBlocksSerialiseWithTheNamesTheNativeSideExpects()
+    {
+        var json = JsonNode.Parse(JsonSerializer.Serialize(BuildTemplateVariantView(), JsonUtil.JsonSerializerOptionsNoIndent))!;
+
+        Assert.That(json["appearance"]!["voice"], Is.Not.Null);
+        Assert.That(json["appearance"]!["head"], Is.Not.Null);
+        Assert.That(json["health"]!["Hydration"], Is.Not.Null);
+        Assert.That(json["health"]!["BodyParts"]!.AsArray(), Is.Not.Empty);
+        Assert.That(json["health"]!["BodyParts"]![0]!["LeftArm"]!["min"], Is.Not.Null);
+        Assert.That(json["skills"]!["Common"], Is.Not.Null);
+        Assert.That(json["experienceReward"]!["normal"]!["min"], Is.Not.Null);
+    }
+
+    /// <summary>
+    /// <c>bot_generator.rs</c> hardcodes these numeric values (<c>MEMBER_CATEGORY_*</c>) - the enum
+    /// is not shared across the boundary.
+    /// </summary>
+    [Test]
+    public void MemberCategoryNumericValuesMatchTheNativeConstants()
+    {
+        Assert.That((int)MemberCategory.Developer, Is.EqualTo(1));
+        Assert.That((int)MemberCategory.UniqueId, Is.EqualTo(2));
+        Assert.That((int)MemberCategory.Unheard, Is.EqualTo(1024));
+    }
+
+    /// <summary>
+    /// The fixture request is a single-bot one, which carries no variants, so the variant view the
+    /// name pin needs is assembled off the same template exactly as
+    /// <c>BotWaveBatcher.BuildBatchRequest</c> does.
+    /// </summary>
+    private BotTemplateVariantView BuildTemplateVariantView()
+    {
+        return new BotTemplateVariantView
+        {
+            LevelMin = 1,
+            LevelMax = 1,
+            Template = BotPayloadProjection.BuildTemplateView(_template),
+            LootPools = _request.LootPools,
+            Appearance = _template.BotAppearance,
+            Health = _template.BotHealth,
+            Skills = _template.BotSkills,
+            ExperienceReward = _template.BotExperience.Reward,
+        };
     }
 }

@@ -136,6 +136,8 @@ internal static class BotPayloadProjection
             HandbookPrices = BuildHandbookPrices(lootPools, handbookHelper),
             ExpTable = [.. globalTable.Configuration.Exp.Level.ExperienceTable.Select(entry => entry.Experience)],
             Bosses = botConfig.Bosses,
+            BotRolesWithDogTags = botConfig.BotRolesWithDogTags,
+            BodyToFixedHands = BuildBodyToFixedHands(globalTable, itemHelper.TemplateTable),
             Durability = botConfig.Durability,
             ItemSpawnLimits = botConfig.ItemSpawnLimits,
             WalletLoot = botConfig.WalletLoot,
@@ -154,14 +156,38 @@ internal static class BotPayloadProjection
     }
 
     /// <summary>
-    /// The three request members that do vary per bot.
+    /// bodyTpl -> fixed hands tpl for every customization item whose <c>SavageBody</c> entry is
+    /// <c>IsNotRandom</c> - <c>SetBotAppearance</c>'s hands rule collapsed to one map. The Rust
+    /// derive (<c>bot::views::derive</c>) is the resident twin; keep them identical. Same linear
+    /// scan and exact string equality as <c>SetBotAppearance</c>; a null <c>_name</c> is skipped
+    /// (the draw path would NRE on it - unreachable on shipped data).
     /// </summary>
-    internal static BotSlice BuildBotSlice(MongoId botId, BotGenerationDetails botGenerationDetails, ulong? testSeed)
+    internal static Dictionary<MongoId, MongoId> BuildBodyToFixedHands(GlobalTable globalTable, TemplateTable templateTable)
+    {
+        var bodies = globalTable.Configuration.Customization.Body;
+        var result = new Dictionary<MongoId, MongoId>();
+        foreach (var (tpl, item) in templateTable.Customization)
+        {
+            var entry = bodies.FirstOrDefault(body => body.Key == item.Name?.Trim());
+            if (entry.Value?.IsNotRandom ?? false)
+            {
+                result[tpl] = entry.Value.Hands;
+            }
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// The request members that do vary per bot.
+    /// </summary>
+    internal static BotSlice BuildBotSlice(MongoId botId, BotGenerationDetails botGenerationDetails, ulong? testSeed, bool isNikita = false)
     {
         return new BotSlice
         {
             BotId = botId,
             TestSeed = testSeed,
+            IsNikita = isNikita,
             Details = new BotGenerationDetailsView
             {
                 Role = botGenerationDetails.Role,

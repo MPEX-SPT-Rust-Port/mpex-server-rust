@@ -299,6 +299,10 @@ public class BotBatchTests
                         LevelMax = 1,
                         Template = BotPayloadProjection.BuildTemplateView(waveCase.Template),
                         LootPools = lootPools,
+                        Appearance = waveCase.Template.BotAppearance,
+                        Health = waveCase.Template.BotHealth,
+                        Skills = waveCase.Template.BotSkills,
+                        ExperienceReward = waveCase.Template.BotExperience.Reward,
                     },
                 ]
             ),

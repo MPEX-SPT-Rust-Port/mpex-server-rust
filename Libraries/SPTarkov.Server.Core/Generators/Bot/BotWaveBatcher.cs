@@ -471,13 +471,22 @@ public class BotWaveBatcher(
                         LevelMax = variant.LevelMax,
                         Template = BotPayloadProjection.BuildTemplateView(variant.Template),
                         LootPools = variant.LootPools,
+                        Appearance = variant.Template.BotAppearance,
+                        Health = variant.Template.BotHealth,
+                        Skills = variant.Template.BotSkills,
+                        ExperienceReward = variant.Template.BotExperience.Reward,
                     }),
                 ]
             ),
             Bots =
             [
                 .. bots.Select(entry =>
-                    BotPayloadProjection.BuildBotSlice(entry.Bot.Id.Value, entry.Details, botInventoryGenerator.NativeTestSeed)
+                    BotPayloadProjection.BuildBotSlice(
+                        entry.Bot.Id.Value,
+                        entry.Details,
+                        botInventoryGenerator.NativeTestSeed,
+                        isNikita: string.Equals(entry.Bot.Info.Nickname, "nikita", StringComparison.OrdinalIgnoreCase)
+                    )
                 ),
             ],
         };
