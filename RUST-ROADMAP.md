@@ -110,6 +110,29 @@ entry cited.
   consumption). Exact-output coverage at randomised levels is gone on both arms; the replacement is
   a smoke case (`BotParityTests.TheNativePathGeneratesAtRandomisedLevels`) plus the Rust-side
   golden below. → ledger: mod-pool ownership.
+- **A null `Appearance.Head`/`Hands`/`Voice` map fails the whole batch request** where legacy NRE'd
+  one bot. Those members carry `ArrayToObjectFactoryConverter`, so a null map serialises as `[]`,
+  which the Rust request deserialise rejects — one bad template kills the wave instead of one bot.
+  Mod-data-only: all 57 shipped bot type files were scanned and none has such a member. Escape
+  hatches: `ForcePerBotGeneration` or `ForceLegacyBotGeneration`. → ledger: item-20 port.
+- **A drawn body tpl absent from `templates.customization` throws on the legacy path and draws
+  hands natively** — the `bodyTpl → handsTpl` derive view simply has no entry, so the batch arm
+  falls through to the ordinary weighted hands draw where `SetBotAppearance`'s C# dictionary
+  indexer raises `KeyNotFoundException`. Mod-reachable only (shipped bodies all resolve).
+  → ledger: item-20 port.
+- **An unknown dogtag side, or a side with no `default` band, errors the bot natively where legacy
+  NREs** — `GetDogtagTplByGameVersionAndSide` ignores both `TryGetValue` results, so an unknown
+  side dereferences a null `gameVersionWeights` and a missing `default` hands
+  `GetWeightedValue(null)` a null list; Rust returns a per-bot error envelope instead (the bot is
+  skipped with a Critical log, the wave survives). The **game-version** key itself is *not* a
+  divergence: both arms fall back to `default` on a miss, identically. Reachable only by a mod
+  editing `pmcConfig.DogtagSettings` or adding a non-PMC role to `BotConfig.BotRolesWithDogTags`.
+  Note shipped `pmc.json` has no `standard` band at all, so `default` is already the live path for
+  most PMCs on **both** arms. → ledger: item-20 port.
+- **The exp-reward difficulty fallback logs nothing on the batch arm** — legacy writes a Debug line
+  when a bot's difficulty is missing from `experience.reward` and it falls back to `normal`; the
+  native arm takes the same band silently. Diagnostics only, no behaviour change.
+  → ledger: item-20 port.
 - **The player scav's additional-loot pass draws from a different stream on each arm** — legacy
   rolls `LootItemsToAddChancePercent` C#-side after the bot is built; natively the roll continues the
   Rust stream inside the same call. Same seed, different items; cross-arm field-for-field parity
@@ -417,14 +440,20 @@ each bot's rayon task, and the drawn `level`/`exp` ride back for the caller to w
 non-PMC takes constant level 1 and draws nothing, keeping non-PMC seeded pins byte-identical).
 Every level-dependent pre-call step is a pure band lookup, so the batcher splits the range at band
 edges and runs the unchanged C# filter/strip/hydration once per band, shipping one
-`templateVariants` entry per band (1-3 typical; always one `[1..1]` for non-PMC). Voice and
-appearance draws move after the call, onto the drawn band. Pool and price hydration
+`templateVariants` entry per band (1-3 typical; always one `[1..1]` for non-PMC). Since ABI 38 the
+prelude draws — exp-reward-for-kill, voice, health, skills, the PMC game-version/member-category
+block, appearance — and `GenerateBotFinish`'s dogtag run natively inside the batch call too, in the
+C# prelude's order between the level draw and the inventory, off the drawn band. Naming
+(`BotNameService`, blocked on the cross-wave `UsedNameCache`) and the sim-pscav cluster stay C# on
+every arm. Pool and price hydration
 (`BotLootCacheService.GetLootFromCache`, `HandbookHelper.GetTemplatePrice`) run once per band and
 are deliberately **not** in the decline set — economy mods patch them constantly and declining
 would de-batch most modded servers. One fidelity note: `AddAdditionalPocketLootWeightsForUnheardBot`
 applies with an `if let` where C# dereferences unguarded, so a template with no `pocketLoot` block
-NREs per-bot and no-ops batched. A PMC batch bot gains 1-2 draws at the head of its stream by
-construction — a PMC seeded-pin repin is expected; a changed **non-PMC** pin is a bug.
+NREs per-bot and no-ops batched. Since ABI 38 **every** batch bot gains the prelude draws ahead of
+its inventory, so the level/exp literals are the only cross-ABI-stable pins on this path — nothing
+precedes the level draw, and a moved `(level, exp)` literal is a bug. Inventory pins repin at
+ABI 38 for every role, PMC and non-PMC alike (ledger: item-20 port).
 
 **State replayed after a native call** (Rust keeps it to itself): bot container grid occupancy
 (`RestoreContainerGrids`) and nighttime clamps (`ReplayRandomisationClamps`); ragfair's

@@ -943,6 +943,116 @@ site because the quirk lives on the C# side or on no code at all. The behaviour 
 deliberate; reverting one silently diverges from C#. The bare `:N` line numbers in those comments are
 the 4.1.2 body the port was written against, not the current file.
 
+**`BotGenerator`'s prelude draws — roadmap item 20 (ABI 38, landed 2026-08-30).** The last of
+`Generators/Bot/BotGenerator.cs`'s per-bot draw work moves inside the batch call: health
+(`GenerateHealth`/`GetLowestHpBodyPart`), skills (`GenerateSkills` and its two randomisers),
+`GetExperienceRewardForKillByDifficulty`, the voice draw, `SetBotAppearance`, the PMC branch of
+`SetRandomisedGameVersionAndCategory`, and `GenerateBotFinish`'s `AddDogtagToBot`. **No new export
+and no new root** — the item-20 rule was that it moves inside `spt_generate_bot_inventory_batch` or
+it does not move, so the export count stays 43 and the wire grows only sibling fields:
+`appearance`/`health`/`skills`/`experience.reward` on the template *variant* (per band, because
+`BotEquipmentFilterService` mutates appearance per band), `isNikita` per bot, and
+`skip_serializing_if` response members (`customization`, `health`, `skills`, `settingsExperience`,
+`gameVersion`, `memberCategory`, `selectedMemberCategory`). The single-bot and player-scav wires are
+byte-identical to ABI 37 by construction. New module `rust/spt-native/src/bot/bot_generator.rs`
+(853 lines); `PmcConfigWire` lifts `gameVersionWeight`/`accountTypeWeight`/`dogtags`, `BotConfigLift`
+lifts `botRolesWithDogTags`, and a `bodyTpl → handsTpl` derive view (`body_to_fixed_hands`, on the
+`default_preset_ids_by_tpl` pattern) collapses `globals.config.Customization.Body` plus
+`templates.customization` name resolution into one map.
+
+- **Batch arm only, deliberately.** `spt_generate_bot_inventory` (the per-bot fallback) and
+  `spt_generate_player_scav` keep their C# prelude untouched, so their streams and their goldens do
+  not move — `player_scav_resident.rs`'s `RESIDENT_GOLDEN` (`78B74F37A38AEA0D85A10AF79B763A26`) is
+  unchanged, and `PlayerScavParityTests`' identical-prelude invariant survives intact. Extending
+  either arm is a queue follow-up, not this slice.
+- **The "a changed non-PMC pin is a bug" invariant is retired on purpose.** Every batch bot — not
+  just PMCs — now consumes prelude draws before its inventory draws, so the inventory stream shifts
+  for every role. `RESIDENT_BATCH_GOLDEN` (`flip6_bots_resident.rs`) re-blessed **once**:
+  `87A743ED988C6A8F7ADEE225F0E28062` → `8B40FC9288B1C75A329BB9D140040A15`. What must *not* move,
+  and did not: the per-bot `(level, exp)` literals `(1,0)`, `(1,226)`, `(2,300)`, because nothing
+  precedes the level draw in a bot's rayon task. A moved literal means a draw landed ahead of the
+  level draw and is a bug, not a repin. The replacement invariant is in RUST-ROADMAP.md's batch
+  section: the level/exp literals are the only cross-ABI-stable pins on this path.
+- **Both arms' twins of the retired invariant were re-targeted, not deleted.** C#'s
+  `BotBatchTests.BatchGeneratesTheSameBotsAsThePerBotPath` compared the serialized per-bot
+  `.Inventory` across arms; its premise dies with this slice, so it becomes
+  `BatchCarriesTheNativePreludeDrawsThePerBotPathOmits` — a contract test asserting the batch
+  response carries all four native blocks and the single-bot response carries none of them (the
+  `Is.Null` arm is what stops the single-bot wire growing a batch-only field by accident). Rust's
+  `bot_inventory_generator.rs::a_non_pmc_bot_reports_level_one_and_no_exp` asserted the batch stream
+  equalled the single-bot stream; it now pins the literals plus native-field presence, and
+  `an_unheard_pmc_batch_bot_gets_the_extra_pocket_weights` is re-driven through `gameVersionWeight`
+  because the native draw overwrites the `details.gameVersion` it used to be driven by. The
+  single-bot `an_unheard_pmc_gets_the_tue_pockets` keeps its `details`-driven form — that arm still
+  reads the wire value. Exact-output coverage did not shrink; it moved from cross-arm equality to
+  per-arm seeded pins, the PR #24 pattern.
+- **Naming is the documented carve-out and stays C# on every arm.** `BotNameService`'s
+  `UsedNameCache` is a cross-wave, cross-arm singleton `HashSet<string>` that
+  `LocationLifecycleService` clears per raid. Shipping it both ways per wave is unbounded wire
+  growth that collides with `BotPayloadSizeTests.RequestStaysUnderTheWireBudget`, so the whole
+  nickname path — `GenerateUniqueBotNickname`, `BotHelper.GetPmcNicknameOfMaxLength`, the locale
+  prefix — stays where it is. Because naming stays, so does the sim-pscav cluster
+  (`ShouldSimulatePlayerScav`, `AddRandomPmcNameToBotMainProfileNicknameProperty`, the sim-path
+  `SetRandomisedGameVersionAndCategory`): it is naming-coupled, and it runs only for `assault`,
+  which never reaches the PMC branch, so no double game-version draw arises. Native naming is a
+  follow-up blocked on a `UsedNameCache` design, not a forgotten member.
+- **Four booked divergences**, all in RUST-ROADMAP.md § *Broken*. The one that is not
+  merely mod-data trivia: a null `Appearance.Head`/`Hands`/`Voice` map serialises as `[]` through
+  `ArrayToObjectFactoryConverter` and fails the **whole batch request** deserialise, where legacy
+  NRE'd one bot. Mod-data-only — all 57 shipped bot type files were scanned and none carries such a
+  member — and `ForcePerBotGeneration`/`ForceLegacyBotGeneration` are the escape hatches, but it is
+  a blast-radius change (wave, not bot) and was accepted on the strength of being written down
+  here. The other three: a drawn body tpl absent from `templates.customization` raises
+  `KeyNotFoundException` out of `SetBotAppearance`'s dictionary indexer on the legacy path and
+  falls through to the ordinary weighted hands draw natively; an **unknown dogtag side, or a side
+  with no `default` band**, NREs on the legacy path — `GetDogtagTplByGameVersionAndSide` discards
+  both `TryGetValue` results, so an unknown side dereferences a null `gameVersionWeights` and a
+  missing `default` hands `GetWeightedValue(null)` a null list — where the native arm returns a
+  per-bot error envelope and the wave survives (the *game-version* key is **not** a divergence:
+  both arms fall back to `default` on a miss, identically, and shipped `pmc.json` has no `standard`
+  band at all, so `default` is already the live path for most PMCs on both arms); and the Debug log
+  line
+  `GetExperienceRewardForKillByDifficulty` writes on its `normal` fallback has no native
+  counterpart.
+- **No decline-set change and no new flag.** Every ported member is `protected` on `BotGenerator`
+  and already swept by `BotWaveBatcher._hookableWaveMembers`' type-wide scan, so a patch on any of
+  them already declined the batch — which stays exactly correct, since the patched body runs on the
+  per-bot path. Dispatch rides the existing `nativeLevelAndFilter` flag on `GenerateBotPrelude`
+  (the batcher is its only `true` caller and always wants both halves); `GenerateBotFinish` took a
+  new `internal bool nativeDogtag = false`. Both are `internal`, so apicompat sees nothing —
+  no public or protected signature changed in this slice.
+- **`BotPayloadSizeTests`' budgets were not raised.** The four new per-band blocks were added to
+  the fixture and the wire still fits under the existing budget; a raised budget would have needed
+  its own argument, and did not arise.
+- **Carryover: `BotWaveBatcher`'s `weightedRandomHelper` constructor parameter is now unread.**
+  Deleting the post-call voice draw orphaned it, and it emits `CS9113: Parameter
+  'weightedRandomHelper' is unread`. It was left in place deliberately: `BotWaveBatcher` is public,
+  so removing a primary-constructor parameter is an apicompat surface change, and nine sibling
+  CS9113s already sit in `SPTarkov.Server.Core`, spread over six classes — `ClientLogCallbacks`
+  (three), `TraderController` (two), and one each on `ProfileController`,
+  `RepeatableQuestNativeRequestBuilder`, `AbstractLocalisationService` and `PostDbLoadService` —
+  with no `TreatWarningsAsErrors` anywhere in the tree. Removable at the next
+  deliberate public-surface break.
+- **`rust/spt-native/tests/phase4_configs_root.rs` stays `#[ignore]`d**, so the three `spt-pmc`
+  wire-name pins this slice added (`gameVersionWeight`, `accountTypeWeight`, `dogtags`) do not run
+  in `cargo test`. They were exercised by hand once at landing —
+  `DbPublishFixtureTests.WriteConfigsRootFixture` regenerated the dump and the ignored test passed
+  against it, which also confirms the shipped `spt-bot` stem carries `botRolesWithDogTags` (a
+  strict member, so `configs.bot.is_some()` already gates its wire name; it needs no soft-member
+  pin). The live in-suite guards on the same surface are
+  `SptNativeBotWireTests.TemplateVariantBlocksSerialiseWithTheNamesTheNativeSideExpects` and
+  `BotResidentDbTests.AResidentSendAndAnOverrideSendProduceIdenticalBotsFieldForField`.
+- **Pre-existing flake, not caused by this slice.**
+  `BotHookLivenessTests.AssertPatchForcesLegacyPath` runs a bounded
+  `for (i < MaxBots && !_patchFired)` loop over randomly generated bots and asserts `_patchFired`;
+  it failed once in three `~Bot` filtered runs during review and passed on every run since. It
+  drives the **legacy single-bot** path, which this branch cannot reach at all. Recorded so a
+  future full-suite run seeing it red does not misread it as an item-20 regression.
+- **Three follow-ups deferred** (also queued in todo/TODO.md's *Removed from this file*): extend
+  the prelude draws to `spt_generate_bot_inventory` (the per-bot arm); extend them to
+  `spt_generate_player_scav` (arm C — reworks `PlayerScavParityTests`' identical-prelude
+  invariant); and native naming, blocked on a `UsedNameCache` design.
+
 ## Pull-request ledger
 
 Everything integrates on `dev`; `origin/main` is a stale snapshot, so a PR based there diffs the
