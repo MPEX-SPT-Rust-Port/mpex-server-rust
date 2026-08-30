@@ -111,6 +111,7 @@ public class BotBatchTests
             Assert.That(perBot[index].Customization, Is.Null, "the single-bot wire grew a batch-only field");
             Assert.That(perBot[index].Health, Is.Null, "the single-bot wire grew a batch-only field");
             Assert.That(perBot[index].Skills, Is.Null, "the single-bot wire grew a batch-only field");
+            Assert.That(perBot[index].SettingsExperience, Is.Null, "the single-bot wire grew a batch-only field");
         }
     }
 

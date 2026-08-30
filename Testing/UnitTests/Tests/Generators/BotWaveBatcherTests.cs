@@ -68,7 +68,7 @@ public class BotWaveBatcherTests
     [Test]
     public void ABatchedWaveProducesCompleteBots()
     {
-        // Every bot starts as a clone of this, and the post-call draws are what overwrite it
+        // Every bot starts as a clone of this, and the native call's draws are what overwrite it
         var untouched = DI.GetInstance().GetService<BotTable>().Base.Customization!;
 
         var wave = _batcher.TryGenerateWave(_sessionId, BuildWaveDetails());
@@ -107,7 +107,7 @@ public class BotWaveBatcherTests
                 || bot.Customization.Hands != untouched.Hands
             ),
             Is.True,
-            "the post-call appearance draw never ran - the whole wave still wears the bots/base.json default"
+            "the native appearance draw never ran - the whole wave still wears the bots/base.json default"
         );
 
         // GenerateInventoryId reroots every bot onto a fresh equipment id - all distinct
