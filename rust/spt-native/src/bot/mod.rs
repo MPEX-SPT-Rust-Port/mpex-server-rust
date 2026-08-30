@@ -129,10 +129,6 @@ impl BotViews {
     }
 
     /// `BotConfig.BotRolesWithDogTags`.
-    #[expect(
-        dead_code,
-        reason = "the dogtag draw (BotGenerator.GenerateBotFinish's AddDogtagToBot gate) is the only caller and lands with the post-call finish step; that step deletes this attribute"
-    )]
     pub(crate) fn bot_roles_with_dog_tags(&self) -> &HashSet<String> {
         match self {
             Self::Override(wire) => &wire.bot_roles_with_dog_tags,

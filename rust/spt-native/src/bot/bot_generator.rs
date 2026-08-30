@@ -2,15 +2,6 @@
 //! (spec docs/superpowers/specs/2026-08-29-botgen-finish-design.md). Batch arm only: the
 //! per-bot and player-scav arms keep the C# prelude, so these bodies exist twice by design.
 
-// Nothing outside the tests below reaches this module yet: the batch call that runs these draws is
-// wired in the following step, which deletes this attribute. Module-scoped rather than per-item
-// because the whole module is dead until that wiring lands, and because the items the tests *do*
-// exercise are live in the test build — a per-item `expect` would go unfulfilled there.
-#![expect(
-    dead_code,
-    reason = "the batch-call wiring step is the only caller; that step deletes this attribute"
-)]
-
 use indexmap::IndexMap;
 
 use crate::bot::BotViews;
