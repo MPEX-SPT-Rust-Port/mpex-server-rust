@@ -127,6 +127,30 @@ impl BotViews {
         }
     }
 
+    /// `BotConfig.BotRolesWithDogTags`.
+    #[expect(
+        dead_code,
+        reason = "the dogtag draw (BotGenerator.GenerateBotFinish's AddDogtagToBot gate) is the only caller and lands with the post-call finish step; that step deletes this attribute"
+    )]
+    pub(crate) fn bot_roles_with_dog_tags(&self) -> &HashSet<String> {
+        match self {
+            Self::Override(wire) => &wire.bot_roles_with_dog_tags,
+            Self::Resident { configs, .. } => &bot_config(configs).bot_roles_with_dog_tags,
+        }
+    }
+
+    /// bodyTpl → fixed hands (`SetBotAppearance`'s `IsNotRandom` rule, derived at publish).
+    #[expect(
+        dead_code,
+        reason = "the appearance draw (the SetBotAppearance port) is the only caller and lands with the prelude draw functions; that step deletes this attribute"
+    )]
+    pub(crate) fn body_to_fixed_hands(&self) -> &IndexMap<String, String> {
+        match self {
+            Self::Override(wire) => &wire.body_to_fixed_hands,
+            Self::Resident { views, .. } => &views.body_to_fixed_hands,
+        }
+    }
+
     /// `BotConfig.Durability`.
     pub(crate) fn durability(&self) -> &BotDurability {
         match self {
@@ -475,7 +499,8 @@ mod tests {
         Box::new(
             serde_json::from_value(json!({
                 "items": {}, "itemPresets": {}, "defaultPresetsByTpl": {},
-                "bosses": [], "durability": durability(),
+                "bosses": [], "botRolesWithDogTags": ["pmcbear", "pmcusec"],
+                "bodyToFixedHands": {}, "durability": durability(),
                 "itemSpawnLimits": {}, "walletLoot": {}, "currencyStackSize": {},
                 "secureContainerAmmoStackCount": 0, "disableLootOnBotTypes": [],
                 "lowProfileGasBlockTpls": [], "lootItemResourceRandomization": {},
@@ -526,6 +551,7 @@ mod tests {
             "spt-bot": {
                 "kind": "spt-bot",
                 "bosses": ["bossknight"],
+                "botRolesWithDogTags": ["pmcbear", "pmcusec"],
                 "durability": durability(),
                 "itemSpawnLimits": {"assault": {"limited_tpl": 3}},
                 "walletLoot": {"chancePercent": 11},

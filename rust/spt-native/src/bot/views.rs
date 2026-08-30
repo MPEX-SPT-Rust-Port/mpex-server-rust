@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use indexmap::IndexMap;
 
-use crate::db::models::GlobalsRoot;
+use crate::db::models::{GlobalsRoot, TemplatesRoot};
 use crate::ragfair::views::RagfairDbViews;
 
 /// The bot-family database views derived at publish — only what the resident roots determine
@@ -29,16 +29,25 @@ pub struct BotDbViews {
     pub default_preset_ids_by_tpl: IndexMap<String, String>,
     /// `globals.config.exp.level.exp_table[].exp` (`BotWaveBatcher.cs:179-186`).
     pub exp_table: Vec<i32>,
+    /// bodyTpl → fixed hands tpl for every customization item whose `SavageBody` entry is
+    /// `IsNotRandom` — `SetBotAppearance`'s hands rule collapsed to one map;
+    /// `BotPayloadProjection.BuildBodyToFixedHands` is the override twin, keep them identical.
+    pub body_to_fixed_hands: IndexMap<String, String>,
 }
 
 /// Derived at publish once globals + ragfair views are resident.
 /// - default_preset_ids_by_tpl: re-key of ragfair.default_presets_by_tpl to each
 ///   view's preset id (C# ToDefaultPresetIds, BotPayloadProjection.cs:392-395).
 /// - exp_table: globals.config.exp.level.exp_table[].exp (BotWaveBatcher.cs:179-186).
+/// - body_to_fixed_hands: SetBotAppearance's IsNotRandom hands rule (BotGenerator.cs:616-624).
 ///
 /// Total over empty roots; kept `Result`-shaped so a future hard failure aborts the publish the
 /// way ragfair's does.
-pub fn derive(globals: &GlobalsRoot, ragfair: &Arc<RagfairDbViews>) -> Result<BotDbViews, String> {
+pub fn derive(
+    globals: &GlobalsRoot,
+    templates: &TemplatesRoot,
+    ragfair: &Arc<RagfairDbViews>,
+) -> Result<BotDbViews, String> {
     // ToDefaultPresetIds (BotPayloadProjection.cs:392-395) over GetDefaultPresetByTpl — whose
     // port ragfair.default_presets_by_tpl is. `Preset.Id` is a non-nullable MongoId in C#, so
     // the view's `id` is always present (ragfair::views::to_preset_view).
@@ -58,10 +67,25 @@ pub fn derive(globals: &GlobalsRoot, ragfair: &Arc<RagfairDbViews>) -> Result<Bo
         .map(|entry| entry.exp)
         .collect();
 
+    let body_to_fixed_hands = templates
+        .customization
+        .iter()
+        .filter_map(|(tpl, item)| {
+            // SetBotAppearance: FirstOrDefault(c => c.Key == chosenBodyTemplate?.Name.Trim()) —
+            // exact string equality, so a map lookup on the trimmed name is equivalent.
+            let name = item.name.as_deref()?.trim();
+            let entry = globals.config.customization.body.get(name)?;
+            entry
+                .is_not_random
+                .then(|| (tpl.clone(), entry.hands.clone()))
+        })
+        .collect();
+
     Ok(BotDbViews {
         ragfair: Arc::clone(ragfair),
         default_preset_ids_by_tpl,
         exp_table,
+        body_to_fixed_hands,
     })
 }
 
@@ -123,7 +147,7 @@ mod tests {
                 .expect("ragfair views derive"),
         );
 
-        let views = derive(&globals, &ragfair).expect("bot views derive");
+        let views = derive(&globals, &templates, &ragfair).expect("bot views derive");
 
         // ToDefaultPresetIds: the tpl keeps its key, the value becomes the preset's own id.
         let expected_ids: IndexMap<String, String> =
@@ -143,9 +167,58 @@ mod tests {
                 .expect("ragfair views derive"),
         );
 
-        let views = derive(&globals, &ragfair).expect("bot views derive");
+        let views = derive(&globals, &templates, &ragfair).expect("bot views derive");
 
         assert!(views.default_preset_ids_by_tpl.is_empty());
         assert!(views.exp_table.is_empty());
+        assert!(views.body_to_fixed_hands.is_empty());
+    }
+
+    const FIXED_BODY_TPL: &str = "222222222222222222222222";
+    const RANDOM_BODY_TPL: &str = "333333333333333333333333";
+    const UNKNOWN_BODY_TPL: &str = "444444444444444444444444";
+    const NAMELESS_BODY_TPL: &str = "555555555555555555555555";
+    const PADDED_BODY_TPL: &str = "666666666666666666666666";
+    const FIXED_HANDS_TPL: &str = "777777777777777777777777";
+    const PADDED_HANDS_TPL: &str = "888888888888888888888888";
+
+    /// The five `SetBotAppearance` hands cases: an `IsNotRandom` match, a random match, a name with
+    /// no `SavageBody` entry, an entry with no `_name` at all, and a name only the `.trim()` makes
+    /// match.
+    #[test]
+    fn derive_maps_only_the_is_not_random_bodies_to_their_fixed_hands() {
+        let templates: TemplatesRoot = serde_json::from_value(json!({
+            "customization": {
+                FIXED_BODY_TPL: {"_name": "FixedBody"},
+                RANDOM_BODY_TPL: {"_name": "RandomBody"},
+                UNKNOWN_BODY_TPL: {"_name": "NoSavageBodyEntry"},
+                NAMELESS_BODY_TPL: {"_id": NAMELESS_BODY_TPL},
+                PADDED_BODY_TPL: {"_name": "  PaddedBody  "}
+            }
+        }))
+        .expect("fixture parses");
+        let globals: GlobalsRoot = serde_json::from_value(json!({
+            "config": {"Customization": {"SavageBody": {
+                "FixedBody": {"hands": FIXED_HANDS_TPL, "isNotRandom": true},
+                "RandomBody": {"hands": "999999999999999999999999", "isNotRandom": false},
+                "PaddedBody": {"hands": PADDED_HANDS_TPL, "isNotRandom": true}
+            }}}
+        }))
+        .expect("fixture parses");
+        let ragfair = Arc::new(
+            crate::ragfair::views::derive(&templates, &TradersRoot::default(), &globals)
+                .expect("ragfair views derive"),
+        );
+
+        let views = derive(&globals, &templates, &ragfair).expect("bot views derive");
+
+        // Keyed by the customization *tpl*, valued by that body's fixed hands tpl. The random
+        // body, the unmatched name and the nameless entry are all absent — each one takes
+        // SetBotAppearance's weighted-draw branch instead.
+        let expected: IndexMap<String, String> = IndexMap::from([
+            (FIXED_BODY_TPL.to_owned(), FIXED_HANDS_TPL.to_owned()),
+            (PADDED_BODY_TPL.to_owned(), PADDED_HANDS_TPL.to_owned()),
+        ]);
+        assert_eq!(views.body_to_fixed_hands, expected);
     }
 }

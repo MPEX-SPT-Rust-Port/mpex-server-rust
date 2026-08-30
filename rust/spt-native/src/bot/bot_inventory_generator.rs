@@ -1347,6 +1347,8 @@ pub(crate) mod tests {
                 "itemPresets": {},
                 "defaultPresetsByTpl": {},
                 "bosses": [],
+                "botRolesWithDogTags": ["pmcbear", "pmcusec"],
+                "bodyToFixedHands": {},
                 "durability": {
                     "default": {"armor": {"maxDelta": 10, "minDelta": 0, "minLimitPercent": 15},
                         "weapon": {"lowestMax": 60, "highestMax": 100, "maxDelta": 10, "minDelta": 0,

@@ -317,6 +317,10 @@ fn views_override() -> Value {
         },
         "expTable": [100, 200, 400],
         "bosses": [],
+        "botRolesWithDogTags": ["pmcbear", "pmcusec"],
+        // Empty on purpose: flip #6's published templates carry no `customization`, so the resident
+        // derive is empty too. A populated map here would make the arm-equality assert lie.
+        "bodyToFixedHands": {},
         "durability": durability(),
         "itemSpawnLimits": {"assault": {}, "pmc": {}},
         "walletLoot": {"chancePercent": 0, "itemCount": {"min": 0, "max": 0},
@@ -341,6 +345,7 @@ fn configs_root() -> Value {
         "spt-bot": {
             "kind": "spt-bot",
             "bosses": [],
+            "botRolesWithDogTags": ["pmcbear", "pmcusec"],
             "durability": durability(),
             "itemSpawnLimits": {"assault": {}, "pmc": {}},
             "walletLoot": {"chancePercent": 0, "itemCount": {"min": 0, "max": 0},

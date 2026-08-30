@@ -312,6 +312,9 @@ fn views_override() -> Value {
         },
         "expTable": [100, 200, 400],
         "bosses": [],
+        "botRolesWithDogTags": ["pmcbear", "pmcusec"],
+        // The published templates carry no `customization`, so the resident derive is empty too.
+        "bodyToFixedHands": {},
         "durability": durability(),
         "itemSpawnLimits": {"assault": {}, "pmc": {}},
         "walletLoot": {"chancePercent": 0, "itemCount": {"min": 0, "max": 0},
@@ -335,6 +338,7 @@ fn configs_root() -> Value {
         "spt-bot": {
             "kind": "spt-bot",
             "bosses": [],
+            "botRolesWithDogTags": ["pmcbear", "pmcusec"],
             "durability": durability(),
             "itemSpawnLimits": {"assault": {}, "pmc": {}},
             "walletLoot": {"chancePercent": 0, "itemCount": {"min": 0, "max": 0},

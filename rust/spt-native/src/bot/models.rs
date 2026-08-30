@@ -727,6 +727,10 @@ pub struct BotViewsWire {
 
     // -- The `spt-bot` config slice (`BotConfigLift`).
     pub bosses: Vec<String>,
+    pub bot_roles_with_dog_tags: std::collections::HashSet<String>,
+    /// bodyTpl → fixed hands tpl, the resident [`crate::bot::views::BotDbViews::body_to_fixed_hands`]
+    /// derive's twin on the wire (`BotPayloadProjection.BuildBodyToFixedHands`).
+    pub body_to_fixed_hands: IndexMap<String, String>,
     pub durability: crate::bot::durability_limits_helper::BotDurability,
     pub item_spawn_limits: IndexMap<String, IndexMap<String, f64>>,
     pub wallet_loot: WalletLootSettingsWire,
@@ -1105,6 +1109,8 @@ mod tests {
             "handbookPrices":{"aaaaaaaaaaaaaaaaaaaaaab4":12500.5},
             "expTable":[10],
             "bosses":["bossknight"],
+            "botRolesWithDogTags":["pmcbear","pmcusec"],
+            "bodyToFixedHands":{"aaaaaaaaaaaaaaaaaaaaaab7":"aaaaaaaaaaaaaaaaaaaaaab8"},
             "durability":{"default":{"armor":{"maxDelta":10,"minDelta":0,"minLimitPercent":15},
                     "weapon":{"lowestMax":60,"highestMax":100,"maxDelta":10,"minDelta":0,
                               "minLimitPercent":15}},
