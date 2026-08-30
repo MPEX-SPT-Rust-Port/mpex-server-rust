@@ -276,9 +276,9 @@ public class BotGenerator(
     ///     names, seasonal/blacklist strips, stats, health, skills, PMC game version, appearance.
     ///     Internal so the batched wave path can run it per bot ahead of the single native call.
     ///     nativeLevelAndFilter is that path's batch mode: it skips the steps the batch runs
-    ///     elsewhere - the level draw natively, the template mutations once per level band, the
-    ///     level-dependent draws after the call. Default false, which is the unchanged per-bot
-    ///     prelude.
+    ///     elsewhere - the level draw natively, the template mutations once per level band, and the
+    ///     draws that moved into the batch call at ABI 38: exp reward, voice, health, skills, PMC
+    ///     game version, appearance. Default false, which is the unchanged per-bot prelude.
     ///     skipTemplateStrips skips only the seasonal/blacklist strips, for callers that pass a
     ///     template the strips have already been applied to (the native player-scav path). Default
     ///     false, which is the unchanged per-bot prelude.
@@ -359,11 +359,16 @@ public class BotGenerator(
             bot.Info.Level = botLevelDetails.Level;
         }
 
-        bot.Info.Settings.Experience = GetExperienceRewardForKillByDifficulty(
-            botJsonTemplate.BotExperience.Reward,
-            botGenerationDetails.BotDifficulty,
-            botGenerationDetails.Role
-        );
+        // Batch: drawn natively (spec 2026-08-29), written back from the response
+        if (!nativeLevelAndFilter)
+        {
+            bot.Info.Settings.Experience = GetExperienceRewardForKillByDifficulty(
+                botJsonTemplate.BotExperience.Reward,
+                botGenerationDetails.BotDifficulty,
+                botGenerationDetails.Role
+            );
+        }
+
         bot.Info.Settings.StandingForKill = GetStandingChangeForKillByDifficulty(
             botJsonTemplate.BotExperience.StandingForKill,
             botGenerationDetails.BotDifficulty,
@@ -375,14 +380,18 @@ public class BotGenerator(
             botGenerationDetails.Role
         );
         bot.Info.Settings.UseSimpleAnimator = botJsonTemplate.BotExperience.UseSimpleAnimator;
-        // Batch: drawn after the call, from the variant the drawn level lands in
+        // Batch: drawn natively (spec 2026-08-29), written back from the response
         if (!nativeLevelAndFilter)
         {
             bot.Customization.Voice = weightedRandomHelper.GetWeightedValue(botJsonTemplate.BotAppearance.Voice);
         }
 
-        bot.Health = GenerateHealth(botJsonTemplate.BotHealth, botGenerationDetails.IsPlayerScav);
-        bot.Skills = GenerateSkills(botJsonTemplate.BotSkills);
+        // Batch: drawn natively (spec 2026-08-29), written back from the response
+        if (!nativeLevelAndFilter)
+        {
+            bot.Health = GenerateHealth(botJsonTemplate.BotHealth, botGenerationDetails.IsPlayerScav);
+            bot.Skills = GenerateSkills(botJsonTemplate.BotSkills);
+        }
 
         //Todo: Might need changed to randomize bots spawning with lower or higher prestige
         if (bot.Info.PrestigeLevel is null)
@@ -393,18 +402,22 @@ public class BotGenerator(
         if (botGenerationDetails.IsPmc)
         {
             bot.Info.IsStreamerModeAvailable = true; // Set to true so client patches can pick it up later - client sometimes alters botrole to assaultGroup
-            SetRandomisedGameVersionAndCategory(bot.Info);
-            // Batch: applied natively, off the game version the wire carries
-            if (!nativeLevelAndFilter && bot.Info.GameVersion == GameEditions.UNHEARD)
+            // Batch: game version, member category and the unheard pocket tweak are native
+            // (spec 2026-08-29); the response write-back also updates details.GameVersion
+            if (!nativeLevelAndFilter)
             {
-                AddAdditionalPocketLootWeightsForUnheardBot(botJsonTemplate);
-            }
+                SetRandomisedGameVersionAndCategory(bot.Info);
+                if (bot.Info.GameVersion == GameEditions.UNHEARD)
+                {
+                    AddAdditionalPocketLootWeightsForUnheardBot(botJsonTemplate);
+                }
 
-            botGenerationDetails.GameVersion = bot.Info.GameVersion;
+                botGenerationDetails.GameVersion = bot.Info.GameVersion;
+            }
         }
 
         // Add drip
-        // Batch: set after the call, from the variant the drawn level lands in
+        // Batch: drawn natively (spec 2026-08-29), written back from the response
         if (!nativeLevelAndFilter)
         {
             SetBotAppearance(bot, botJsonTemplate.BotAppearance, botGenerationDetails);
@@ -436,21 +449,13 @@ public class BotGenerator(
     }
 
     /// <summary>
-    ///     SetBotAppearance for the batch path's post-call step. Internal wrapper for the same
-    ///     decline-set reason as ApplyBatchTemplateMutations.
-    /// </summary>
-    internal void ApplyBatchBotAppearance(BotBase bot, Appearance appearance, BotGenerationDetails botGenerationDetails)
-    {
-        SetBotAppearance(bot, appearance, botGenerationDetails);
-    }
-
-    /// <summary>
     ///     Everything GenerateBot does after the inventory call: dogtag, inventory id rewrite,
     ///     event-role restore. Internal for the same reason as the prelude.
     /// </summary>
-    internal void GenerateBotFinish(BotBase bot, BotGenerationDetails botGenerationDetails)
+    internal void GenerateBotFinish(BotBase bot, BotGenerationDetails botGenerationDetails, bool nativeDogtag = false)
     {
-        if (botConfig.BotRolesWithDogTags.Contains(botGenerationDetails.RoleLowercase))
+        // Batch: the dogtag is already in the native inventory (spec 2026-08-29)
+        if (!nativeDogtag && botConfig.BotRolesWithDogTags.Contains(botGenerationDetails.RoleLowercase))
         {
             AddDogtagToBot(bot);
         }

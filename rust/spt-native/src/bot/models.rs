@@ -887,7 +887,8 @@ pub struct BotSliceWire {
     pub test_seed: Option<u64>,
     pub details: BotGenerationDetailsWire,
     /// True when the C# prelude drew the nickname "nikita" (case-insensitive) — the game-version
-    /// draw's special case. The single-bot request never sends it; default false.
+    /// draw's special case. The single-bot request sends `false` (the C# member is a non-nullable
+    /// bool and `JsonUtil` only omits nulls); default false for anything that omits it.
     #[serde(default)]
     pub is_nikita: bool,
 }
