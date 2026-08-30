@@ -115,7 +115,7 @@ const POCKETS_1X4_TUE: &str = "65e080be269cbd5c5005e529";
 const POCKETS_LARGE: &str = "5af99e9186f7747c447120b8";
 
 /// `GameEditions.UNHEARD` (`Models/Enums/GameEditions.cs:9`).
-const UNHEARD: &str = "unheard_edition";
+pub(crate) const UNHEARD: &str = "unheard_edition";
 
 /// `EquipmentSlots` member names, as strings (see [`crate::bot::bot_weapon_generator`]).
 const POCKETS: &str = "Pockets";

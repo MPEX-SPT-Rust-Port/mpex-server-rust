@@ -1,4 +1,5 @@
 pub(crate) mod bot_equipment_mod_generator;
+pub(crate) mod bot_generator;
 pub(crate) mod bot_generator_helper;
 pub(crate) mod bot_inventory_generator;
 pub(crate) mod bot_loot_generator;
@@ -140,10 +141,6 @@ impl BotViews {
     }
 
     /// bodyTpl → fixed hands (`SetBotAppearance`'s `IsNotRandom` rule, derived at publish).
-    #[expect(
-        dead_code,
-        reason = "the appearance draw (the SetBotAppearance port) is the only caller and lands with the prelude draw functions; that step deletes this attribute"
-    )]
     pub(crate) fn body_to_fixed_hands(&self) -> &IndexMap<String, String> {
         match self {
             Self::Override(wire) => &wire.body_to_fixed_hands,
