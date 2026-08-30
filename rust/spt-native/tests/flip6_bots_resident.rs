@@ -435,6 +435,47 @@ fn shared() -> Value {
     })
 }
 
+/// The four prelude blocks every `templateVariants` entry carries. Every weight map is multi-entry
+/// on purpose: a single-entry map takes the `len() == 1` shortcut instead of the weighted draw, and
+/// an empty one errors the bot.
+fn prelude_blocks() -> serde_json::Map<String, Value> {
+    let Value::Object(blocks) = json!({
+        "appearance": {
+            "body": {"body_a": 1, "body_b": 3},
+            "feet": {"feet_a": 1, "feet_b": 3},
+            "hands": {"hands_a": 1, "hands_b": 3},
+            "head": {"head_a": 1, "head_b": 3},
+            "voice": {"voice_a": 1, "voice_b": 3},
+        },
+        "health": {
+            "BodyParts": [
+                {"Chest": {"min": 80, "max": 85}, "Head": {"min": 35, "max": 35},
+                 "LeftArm": {"min": 60, "max": 60}, "LeftLeg": {"min": 65, "max": 65},
+                 "RightArm": {"min": 60, "max": 60}, "RightLeg": {"min": 65, "max": 65},
+                 "Stomach": {"min": 70, "max": 75}},
+                {"Chest": {"min": 70, "max": 75}, "Head": {"min": 30, "max": 30},
+                 "LeftArm": {"min": 50, "max": 50}, "LeftLeg": {"min": 55, "max": 55},
+                 "RightArm": {"min": 50, "max": 50}, "RightLeg": {"min": 55, "max": 55},
+                 "Stomach": {"min": 60, "max": 65}},
+            ],
+            "Energy": {"min": 80, "max": 100},
+            "Hydration": {"min": 80, "max": 100},
+            "Temperature": {"min": 36, "max": 40},
+        },
+        "skills": {
+            "Common": {"BotReload": {"min": 100, "max": 200},
+                "BotSound": {"min": 100, "max": 200}},
+            "Mastering": {},
+        },
+        "experienceReward": {"standard": {"min": 20, "max": 40},
+            "unheard_edition": {"min": 20, "max": 40}},
+    }) else {
+        unreachable!("the literal is an object")
+    };
+
+    blocks
+}
+
 fn slice(bot_id: &str, role: &str, role_lowercase: &str, is_pmc: bool, seed: u64) -> Value {
     json!({
         "botId": bot_id,
@@ -454,10 +495,14 @@ fn slice(bot_id: &str, role: &str, role_lowercase: &str, is_pmc: bool, seed: u64
 fn batch_request(epoch: u64, views_override: Option<Value>) -> Vec<u8> {
     let mut shared = shared();
     shared["levelGeneration"] = json!({"levelMin": 1, "levelMax": 3});
-    shared["templateVariants"] = json!([
+    let mut variants = json!([
         {"levelMin": 1, "levelMax": 1, "template": template(true), "lootPools": {}},
         {"levelMin": 2, "levelMax": 99, "template": template(false), "lootPools": {}},
     ]);
+    for variant in variants.as_array_mut().unwrap() {
+        variant.as_object_mut().unwrap().extend(prelude_blocks());
+    }
+    shared["templateVariants"] = variants;
 
     let mut request = json!({
         "epoch": epoch,

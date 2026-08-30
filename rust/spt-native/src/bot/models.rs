@@ -79,6 +79,64 @@ pub struct ItemPoolsWire {
     pub extra: Extra,
 }
 
+/// `BotType.BotAppearance` weight maps (`Models/Eft/Common/Tables/BotType.cs` `Appearance`) —
+/// wire names are the C# `JsonPropertyName`s, all lowercase.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AppearanceWire {
+    #[serde(rename = "body")]
+    pub body: IndexMap<String, f64>,
+    #[serde(rename = "feet")]
+    pub feet: IndexMap<String, f64>,
+    #[serde(rename = "hands")]
+    pub hands: IndexMap<String, f64>,
+    #[serde(rename = "head")]
+    pub head: IndexMap<String, f64>,
+    #[serde(rename = "voice")]
+    pub voice: IndexMap<String, f64>,
+}
+
+/// `BotTypeHealth` — unattributed C# properties serialize PascalCase (no global naming policy).
+#[derive(Debug, Clone, Deserialize)]
+pub struct BotTypeHealthWire {
+    #[serde(rename = "BodyParts")]
+    pub body_parts: Vec<BodyPartTemplateWire>,
+    #[serde(rename = "Energy")]
+    pub energy: MinMax<f64>,
+    #[serde(rename = "Hydration")]
+    pub hydration: MinMax<f64>,
+    #[serde(rename = "Temperature")]
+    pub temperature: MinMax<f64>,
+}
+
+/// One `BodyPart` band of the health template.
+#[derive(Debug, Clone, Deserialize)]
+pub struct BodyPartTemplateWire {
+    #[serde(rename = "Chest")]
+    pub chest: MinMax<f64>,
+    #[serde(rename = "Head")]
+    pub head: MinMax<f64>,
+    #[serde(rename = "LeftArm")]
+    pub left_arm: MinMax<f64>,
+    #[serde(rename = "LeftLeg")]
+    pub left_leg: MinMax<f64>,
+    #[serde(rename = "RightArm")]
+    pub right_arm: MinMax<f64>,
+    #[serde(rename = "RightLeg")]
+    pub right_leg: MinMax<f64>,
+    #[serde(rename = "Stomach")]
+    pub stomach: MinMax<f64>,
+}
+
+/// `BotDbSkills`. Values are `Option` because the C# dictionaries carry nulls, which
+/// `GetCommonSkillsWithRandomisedProgressValue` skips without drawing.
+#[derive(Debug, Clone, Deserialize)]
+pub struct BotDbSkillsWire {
+    #[serde(rename = "Common")]
+    pub common: IndexMap<String, Option<MinMax<f64>>>,
+    #[serde(rename = "Mastering", default)]
+    pub mastering: Option<IndexMap<String, Option<MinMax<f64>>>>,
+}
+
 /// `Models/Spt/Config/BotConfig.cs:465-472` — `BotConfig.LootItemResourceRandomization[botRole]`.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct RandomisedResourceDetails {
@@ -508,9 +566,9 @@ pub struct WalletLootSettingsWire {
 /// [`DynamicConfigWire`] precedent), and the bot suite's override fixtures publish it partially
 /// throughout, so the struct-level `#[serde(default)]` stays. The consequence is
 /// [`ItemConfigLift`](crate::db::models::ItemConfigLift)'s: the shipped projection always carries
-/// all eight members, but a hand-built or mod-rewritten stem that omits one silently reads
+/// all eleven members, but a hand-built or mod-rewritten stem that omits one silently reads
 /// defaults instead of failing the publish. A strict twin struct for the stem would have to
-/// mirror this one field for field and would drift; `phase4_configs_root.rs` pins the eight wire
+/// mirror this one field for field and would drift; `phase4_configs_root.rs` pins the eleven wire
 /// names against the projected dump instead.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -526,6 +584,15 @@ pub struct PmcConfigWire {
     /// `PmcConfig.WeaponHasEnhancementChancePercent`, hoisted into
     /// [`crate::bot::BotContext::weapon_has_enhancement_chance_percent`].
     pub weapon_has_enhancement_chance_percent: f64,
+    /// `PmcConfig.GameVersionWeight`.
+    pub game_version_weight: IndexMap<String, f64>,
+    /// `PmcConfig.AccountTypeWeight` — C#-side a `Dictionary<MemberCategory, double>`;
+    /// `EftEnumConverter.WriteAsPropertyName` encodes the enum keys as numeric strings on the
+    /// wire ("0", "1", "256", "512" shipped).
+    pub account_type_weight: IndexMap<String, f64>,
+    /// `PmcConfig.DogtagSettings` (wire name `dogtags`): side → gameVersion → tpl → weight.
+    #[serde(rename = "dogtags")]
+    pub dogtag_settings: IndexMap<String, IndexMap<String, IndexMap<String, f64>>>,
 }
 
 /// `Models/Spt/Config/PmcConfig.cs:152-162` (`ForceArmbandSettings`).
@@ -729,6 +796,15 @@ pub struct TemplateVariantWire {
     pub level_max: i32,
     pub template: BotTemplateWire,
     pub loot_pools: BotLootCacheWire,
+    /// The four `BotType` blocks the per-bot prelude draws from. They sit beside
+    /// [`Self::template`] rather than inside [`BotTemplateWire`], which the single-bot and
+    /// player-scav requests share and whose bytes stay unchanged. Required, not `Option`: the C#
+    /// batcher always sends them, and a silent default would skip draws and shift the RNG stream
+    /// invisibly.
+    pub appearance: AppearanceWire,
+    pub health: BotTypeHealthWire,
+    pub skills: BotDbSkillsWire,
+    pub experience_reward: IndexMap<String, MinMax<i32>>,
 }
 
 /// The request members that do not vary between the bots of one wave and are not database views:
@@ -806,6 +882,10 @@ pub struct BotSliceWire {
     #[serde(default)]
     pub test_seed: Option<u64>,
     pub details: BotGenerationDetailsWire,
+    /// True when the C# prelude drew the nickname "nikita" (case-insensitive) — the game-version
+    /// draw's special case. The single-bot request never sends it; default false.
+    #[serde(default)]
+    pub is_nikita: bool,
 }
 
 /// One wave: the `{epoch, viewsOverride?, …}` envelope around the shared varying block once, then
@@ -884,6 +964,54 @@ pub struct BotBaseInventoryWire {
     pub hideout_customization_stash_id: String,
 }
 
+/// The customization the batch drew (`SetBotAppearance` + the voice line) — batch-only, like
+/// [`BotInventoryResult::level`].
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BotCustomizationResult {
+    pub head: String,
+    pub body: String,
+    pub feet: String,
+    pub hands: String,
+    pub voice: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CurrentMaxWire {
+    pub current: f64,
+    pub maximum: f64,
+}
+
+/// `GenerateHealth`'s output. `updateTime: 0` / `immortal: false` are constants the C# side
+/// writes; only the drawn values cross.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BotHealthResult {
+    pub hydration: CurrentMaxWire,
+    pub energy: CurrentMaxWire,
+    pub temperature: CurrentMaxWire,
+    /// Insertion order is the C# initializer order: Head, Chest, Stomach, LeftArm, RightArm,
+    /// LeftLeg, RightLeg.
+    pub body_parts: IndexMap<String, CurrentMaxWire>,
+}
+
+/// One randomised skill. The id is the raw template key — C# parses it into `SkillTypes` on
+/// hydration, throwing per bot exactly where the legacy prelude threw.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillResult {
+    pub id: String,
+    pub progress: f64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BotSkillsResult {
+    pub common: Vec<SkillResult>,
+    pub mastering: Vec<SkillResult>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BotInventoryResult {
@@ -903,6 +1031,23 @@ pub struct BotInventoryResult {
     /// `Info.Experience`. `None` alongside it, for the same reason.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exp: Option<i32>,
+    /// The prelude draws the batch arm owns. `None` on the single-bot and player-scav paths, for
+    /// [`Self::level`]'s reason.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub customization: Option<BotCustomizationResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub health: Option<BotHealthResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skills: Option<BotSkillsResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub settings_experience: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub game_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub member_category: Option<i32>,
+    /// Absent on the nikita branch — C# leaves `SelectedMemberCategory` untouched there (quirk).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected_member_category: Option<i32>,
 }
 
 /// The native slice of one `KarmaLevel` entry from `PlayerScavConfig`. Ships per call —
@@ -1201,6 +1346,47 @@ mod tests {
         assert_eq!(parsed.bot.test_seed, None);
     }
 
+    /// The four prelude blocks every `templateVariants` entry carries. Every weight map is
+    /// multi-entry on purpose: a single-entry map takes the `len() == 1` shortcut instead of the
+    /// weighted draw, and an empty one errors the bot.
+    fn prelude_blocks() -> serde_json::Map<String, serde_json::Value> {
+        let serde_json::Value::Object(blocks) = serde_json::json!({
+            "appearance": {
+                "body": {"body_a": 1, "body_b": 3},
+                "feet": {"feet_a": 1, "feet_b": 3},
+                "hands": {"hands_a": 1, "hands_b": 3},
+                "head": {"head_a": 1, "head_b": 3},
+                "voice": {"voice_a": 1, "voice_b": 3},
+            },
+            "health": {
+                "BodyParts": [
+                    {"Chest": {"min": 80, "max": 85}, "Head": {"min": 35, "max": 35},
+                     "LeftArm": {"min": 60, "max": 60}, "LeftLeg": {"min": 65, "max": 65},
+                     "RightArm": {"min": 60, "max": 60}, "RightLeg": {"min": 65, "max": 65},
+                     "Stomach": {"min": 70, "max": 75}},
+                    {"Chest": {"min": 70, "max": 75}, "Head": {"min": 30, "max": 30},
+                     "LeftArm": {"min": 50, "max": 50}, "LeftLeg": {"min": 55, "max": 55},
+                     "RightArm": {"min": 50, "max": 50}, "RightLeg": {"min": 55, "max": 55},
+                     "Stomach": {"min": 60, "max": 65}},
+                ],
+                "Energy": {"min": 80, "max": 100},
+                "Hydration": {"min": 80, "max": 100},
+                "Temperature": {"min": 36, "max": 40},
+            },
+            "skills": {
+                "Common": {"BotReload": {"min": 100, "max": 200},
+                    "BotSound": {"min": 100, "max": 200}},
+                "Mastering": {},
+            },
+            "experienceReward": {"standard": {"min": 20, "max": 40},
+                "unheard_edition": {"min": 20, "max": 40}},
+        }) else {
+            unreachable!("the literal is an object")
+        };
+
+        blocks
+    }
+
     /// The single-bot fixture reshaped into a batch request: the slice rides in `bots`, and the
     /// template and loot pools move into one full-coverage variant on the shared block.
     fn batch_request_json(level_generation: Option<serde_json::Value>) -> serde_json::Value {
@@ -1208,12 +1394,13 @@ mod tests {
         let object = request.as_object_mut().unwrap();
 
         let slice = object.remove("bot").unwrap();
-        let variant = serde_json::json!({
+        let mut variant = serde_json::json!({
             "levelMin": 1,
             "levelMax": 99,
             "template": object.remove("template").unwrap(),
             "lootPools": object.remove("lootPools").unwrap(),
         });
+        variant.as_object_mut().unwrap().extend(prelude_blocks());
         let shared = object.get_mut("shared").unwrap().as_object_mut().unwrap();
         shared.insert("templateVariants".to_owned(), serde_json::json!([variant]));
         if let Some(level_generation) = level_generation {
@@ -1363,6 +1550,13 @@ mod tests {
             randomisation_clamps: IndexMap::from([("Headwear".to_owned(), 62.5)]),
             level: None,
             exp: None,
+            customization: None,
+            health: None,
+            skills: None,
+            settings_experience: None,
+            game_version: None,
+            member_category: None,
+            selected_member_category: None,
         })
         .unwrap();
 
@@ -1407,6 +1601,13 @@ mod tests {
             randomisation_clamps: IndexMap::new(),
             level: Some(23),
             exp: Some(45_600),
+            customization: None,
+            health: None,
+            skills: None,
+            settings_experience: None,
+            game_version: None,
+            member_category: None,
+            selected_member_category: None,
         })
         .unwrap();
         assert_eq!(out["level"], 23);

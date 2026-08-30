@@ -189,6 +189,8 @@ pub fn generate_inventory(
         bot_id: _,
         test_seed,
         details,
+        // The single-bot request never sends it, and this path draws no game version.
+        is_nikita: _,
     } = bot;
     let _seed_guard = test_seed.map(TestSeedGuard::install);
 
@@ -488,9 +490,16 @@ pub(crate) fn generate_prepared_with(
         inventory: bot_inventory,
         container_grids,
         randomisation_clamps,
-        // Set by the batch caller, which owns the draw; absent on the single-bot path.
+        // Set by the batch caller, which owns the draws; absent on the single-bot path.
         level: None,
         exp: None,
+        customization: None,
+        health: None,
+        skills: None,
+        settings_experience: None,
+        game_version: None,
+        member_category: None,
+        selected_member_category: None,
     })
 }
 
@@ -1606,6 +1615,47 @@ pub(crate) mod tests {
         );
     }
 
+    /// The four prelude blocks every `templateVariants` entry carries. Every weight map is
+    /// multi-entry on purpose: a single-entry map takes the `len() == 1` shortcut instead of the
+    /// weighted draw, and an empty one errors the bot.
+    fn prelude_blocks() -> serde_json::Map<String, Value> {
+        let Value::Object(blocks) = json!({
+            "appearance": {
+                "body": {"body_a": 1, "body_b": 3},
+                "feet": {"feet_a": 1, "feet_b": 3},
+                "hands": {"hands_a": 1, "hands_b": 3},
+                "head": {"head_a": 1, "head_b": 3},
+                "voice": {"voice_a": 1, "voice_b": 3},
+            },
+            "health": {
+                "BodyParts": [
+                    {"Chest": {"min": 80, "max": 85}, "Head": {"min": 35, "max": 35},
+                     "LeftArm": {"min": 60, "max": 60}, "LeftLeg": {"min": 65, "max": 65},
+                     "RightArm": {"min": 60, "max": 60}, "RightLeg": {"min": 65, "max": 65},
+                     "Stomach": {"min": 70, "max": 75}},
+                    {"Chest": {"min": 70, "max": 75}, "Head": {"min": 30, "max": 30},
+                     "LeftArm": {"min": 50, "max": 50}, "LeftLeg": {"min": 55, "max": 55},
+                     "RightArm": {"min": 50, "max": 50}, "RightLeg": {"min": 55, "max": 55},
+                     "Stomach": {"min": 60, "max": 65}},
+                ],
+                "Energy": {"min": 80, "max": 100},
+                "Hydration": {"min": 80, "max": 100},
+                "Temperature": {"min": 36, "max": 40},
+            },
+            "skills": {
+                "Common": {"BotReload": {"min": 100, "max": 200},
+                    "BotSound": {"min": 100, "max": 200}},
+                "Mastering": {},
+            },
+            "experienceReward": {"standard": {"min": 20, "max": 40},
+                "unheard_edition": {"min": 20, "max": 40}},
+        }) else {
+            unreachable!("the literal is an object")
+        };
+
+        blocks
+    }
+
     /// The single-bot request reshaped into a batch envelope with one slice pulled out. The two
     /// level-banded members become one variant covering every level a fixture can draw, which is
     /// the shape a non-PMC wave sends (`[1..1]`, widened here so PMC fixtures can reuse it).
@@ -1614,12 +1664,13 @@ pub(crate) mod tests {
         let object = envelope.as_object_mut().unwrap();
         let slice = object.remove("bot").unwrap();
 
-        let variant = json!({
+        let mut variant = json!({
             "levelMin": 1,
             "levelMax": 99,
             "template": object.remove("template").unwrap(),
             "lootPools": object.remove("lootPools").unwrap(),
         });
+        variant.as_object_mut().unwrap().extend(prelude_blocks());
         object.get_mut("shared").unwrap()["templateVariants"] = json!([variant]);
 
         (envelope, slice)

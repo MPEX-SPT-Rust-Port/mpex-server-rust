@@ -21,7 +21,7 @@ title, clear).
 
 Forty-three C-ABI exports (`src/ffi.rs`) carry all of it, JSON in and JSON out — except the ragfair
 response (framed MessagePack), `spt_db_load` and `spt_profile_load` (JSON header frame + file
-bytes), and the log/console exports (raw fields or bytes). Current ABI 37. Since Phase 6b the
+bytes), and the log/console exports (raw fields or bytes). Current ABI 38. Since Phase 6b the
 exports resolve from the `mpex-server` executable (rlib linkage; shipped Linux builds) or the
 `spt_native` cdylib (dev builds, tests, Windows) — identical `[LibraryImport]` shape either way.
 
