@@ -31,9 +31,9 @@ namespace UnitTests.Tests.Generators;
 /// views included, rides the shared block - so batching a wave of N divides essentially the whole
 /// request by N. See BENCHMARK.md's *Batched wave* for the measurement.
 ///
-/// <see cref="BatchGeneratesTheSameBotsAsThePerBotPath"/> is the correctness gate - the whole
-/// exercise is worthless if the batched path draws differently - and
-/// <see cref="WaveCostPerBot"/> is the measurement it makes trustworthy.
+/// <see cref="BatchCarriesTheNativePreludeDrawsThePerBotPathOmits"/> is the contract gate - the
+/// arms no longer draw identically, so what it pins is that each arm carries exactly the fields its
+/// wire promises - and <see cref="WaveCostPerBot"/> is the measurement it makes trustworthy.
 /// </summary>
 [TestFixture]
 [NonParallelizable]
@@ -79,17 +79,17 @@ public class BotBatchTests
     }
 
     /// <summary>
-    /// Seeded, so both paths draw the same numbers in the same order. A batched bot that differs
-    /// from its per-bot twin means the refactor moved state across a bot boundary.
+    /// Until ABI 38 both arms produced identical inventories at one seed; the prelude-draw port
+    /// (spec 2026-08-29) put exp/voice/health/skills/game-version/appearance draws ahead of the
+    /// batch inventory, so exact cross-arm equality is structurally gone - the Rust-side
+    /// RESIDENT_BATCH_GOLDEN (flip6_bots_resident.rs) is the exact-output pin now (ledger:
+    /// item-20 port). What must still hold: both arms generate complete bots, the batch carries
+    /// the native prelude fields, and the single-bot response omits them (its wire is unchanged).
     /// </summary>
     [Test]
-    public void BatchGeneratesTheSameBotsAsThePerBotPath()
+    public void BatchCarriesTheNativePreludeDrawsThePerBotPathOmits()
     {
         const int botCount = 4;
-        // One case for the whole wave, shared by both paths. FilterBotEquipment randomises the
-        // template it returns, so building one per path would compare two different waves - and the
-        // batch now carries one filtered template per level band, which for a non-PMC wave (every
-        // bot level 1) is the single [1, 1] band, so the per-bot arm has to run the same template
         var waveCase = BuildCase();
         var seeds = Enumerable.Range(0, botCount).Select(index => (ulong?)(1000 + index)).ToList();
 
@@ -99,11 +99,18 @@ public class BotBatchTests
         Assert.That(batched.Bots, Has.Count.EqualTo(botCount));
         for (var index = 0; index < botCount; index++)
         {
-            Assert.That(
-                Serialize(batched.Bots[index].Result!.Inventory),
-                Is.EqualTo(Serialize(perBot[index].Inventory)),
-                $"bot {index} diverged between the batched and per-bot paths"
-            );
+            var batchResult = batched.Bots[index].Result!;
+            Assert.That(batchResult.Inventory.Items, Is.Not.Empty, $"batched bot {index} came back without an inventory");
+            Assert.That(perBot[index].Inventory.Items, Is.Not.Empty, $"per-bot {index} came back without an inventory");
+
+            Assert.That(batchResult.Customization, Is.Not.Null, $"batched bot {index} is missing the native customization");
+            Assert.That(batchResult.Health, Is.Not.Null, $"batched bot {index} is missing the native health");
+            Assert.That(batchResult.Skills, Is.Not.Null, $"batched bot {index} is missing the native skills");
+            Assert.That(batchResult.SettingsExperience, Is.Not.Null, $"batched bot {index} is missing the native exp reward");
+
+            Assert.That(perBot[index].Customization, Is.Null, "the single-bot wire grew a batch-only field");
+            Assert.That(perBot[index].Health, Is.Null, "the single-bot wire grew a batch-only field");
+            Assert.That(perBot[index].Skills, Is.Null, "the single-bot wire grew a batch-only field");
         }
     }
 
@@ -326,16 +333,6 @@ public class BotBatchTests
         _botEquipmentFilterService.FilterBotEquipment(_sessionId, template, details);
 
         return (template, details);
-    }
-
-    /// <summary>
-    /// Every generated item carries a fresh <c>MongoId</c>, whose counter half is process-global and
-    /// so never repeats between two calls. <c>LootIdNormalizer</c> rewrites them to positional
-    /// placeholders, which is what <c>BotParityTests</c> compares the two paths on too.
-    /// </summary>
-    private static string Serialize(object value)
-    {
-        return LootIdNormalizer.Normalize(JsonSerializer.Serialize(value, JsonUtil.JsonSerializerOptionsNoIndent!));
     }
 
     private static double Median(List<double> timings)

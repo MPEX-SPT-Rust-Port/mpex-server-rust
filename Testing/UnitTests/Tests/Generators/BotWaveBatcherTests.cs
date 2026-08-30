@@ -80,17 +80,25 @@ public class BotWaveBatcherTests
             Assert.That(bot!.Inventory?.Items, Is.Not.Empty, "bot came back without an inventory");
             Assert.That(bot.Id, Is.Not.EqualTo(default(MongoId)));
 
-            // Voice and appearance are drawn after the native call, from the band the drawn level
-            // landed in. assault.json's voice pool does not contain base.json's default, so a
-            // missing voice draw is caught per bot.
+            // Voice and appearance are drawn inside the native call since ABI 38 (spec 2026-08-29),
+            // from the band the drawn level landed in. assault.json's voice pool does not contain
+            // base.json's default, so a missing voice draw is caught per bot.
             Assert.That(bot.Customization!.Voice, Is.Not.Null.And.Not.EqualTo(default(MongoId)), "a bot came back without a voice");
-            Assert.That(bot.Customization.Voice, Is.Not.EqualTo(untouched.Voice), "the post-call voice draw never ran");
+            Assert.That(bot.Customization.Voice, Is.Not.EqualTo(untouched.Voice), "the native voice draw never ran");
             Assert.That(bot.Customization.Head, Is.Not.Null.And.Not.EqualTo(default(MongoId)), "a bot came back without a head");
+
+            // bots/base.json carries no BodyParts at all, so the clone cannot supply these - seven
+            // of them means the native health block landed on the envelope.
+            Assert.That(bot.Health?.BodyParts, Has.Count.EqualTo(7), "a bot came back without native health");
+            // No skills assertion here: base.json ships `Skills.Common: []` and assault/pmcusec both
+            // ship an empty `skills.Common`, so a bot with no native skills draw is indistinguishable
+            // from one with it on this wave. The non-vacuous skills pin is Rust-side, in
+            // flip6_bots_resident.rs beside RESIDENT_BATCH_GOLDEN.
         }
 
         // The appearance pools do contain base.json's defaults, so per bot a default is a legal
-        // draw and only the wave is decidable: with the appearance draw gone every bot keeps every
-        // default, which is what this rejects.
+        // draw and only the wave is decidable: with the native appearance draw gone every bot keeps
+        // every default, which is what this rejects.
         Assert.That(
             wave!.Any(bot =>
                 bot!.Customization!.Head != untouched.Head
@@ -108,8 +116,10 @@ public class BotWaveBatcherTests
 
     /// <summary>
     /// The two behaviours an assault wave never reaches: the PMC side rewrite to <c>Savage</c> the
-    /// batcher copies from <c>BotController.TryGenerateSingleBot</c>, and <c>GenerateBotFinish</c>'s
-    /// dogtag branch, which only fires for the roles in <c>BotConfig.BotRolesWithDogTags</c>.
+    /// batcher copies from <c>BotController.TryGenerateSingleBot</c>, and the dogtag, which only
+    /// lands for the roles in <c>BotConfig.BotRolesWithDogTags</c>. The dogtag is drawn inside the
+    /// native call since ABI 38 (spec 2026-08-29) - <c>GenerateBotFinish</c>'s branch is skipped on
+    /// this arm - so what this pins is that the batch arm still produces it.
     ///
     /// Also the only place the level the native side drew is observable end to end: a PMC draws a
     /// real level, and the one member that constrains where the batcher assigns it is
@@ -130,6 +140,9 @@ public class BotWaveBatcherTests
         {
             Assert.That(bot!.Info!.Side, Is.EqualTo(Sides.Savage));
             Assert.That(bot.Inventory!.Items!.Any(item => item.SlotId == Slots.Dogtag), Is.True, "a PMC came back without a dogtag");
+
+            Assert.That(bot.Info.GameVersion, Is.Not.Null.And.Not.Empty, "a batched PMC came back without a native game-version draw");
+            Assert.That(bot.Info.MemberCategory, Is.Not.Null, "a batched PMC came back without a member category");
 
             Assert.That(bot.Info.Level, Is.GreaterThan(0), "a batched PMC came back without the level the native side drew");
             Assert.That(bot.Info.Experience, Is.Not.Null, "a batched PMC came back without its experience total");

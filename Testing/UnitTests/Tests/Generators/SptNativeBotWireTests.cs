@@ -178,18 +178,36 @@ public class SptNativeBotWireTests
     /// lowercase via the model's <c>JsonPropertyName</c>s, health/skills PascalCase because
     /// <c>JsonUtil</c> applies no naming policy. A failure here means the serde renames in
     /// <c>rust/spt-native/src/bot/models.rs</c> are wrong, not this test.
+    ///
+    /// The appearance members are asserted by JSON *kind*, not merely non-null:
+    /// <c>Hands</c>/<c>Head</c>/<c>Voice</c> carry <c>ArrayToObjectFactoryConverter</c>, whose
+    /// <c>Write</c> emits <c>[]</c> for a null dictionary, and <c>AppearanceWire</c> types those
+    /// members with no serde default - so an array there fails the *whole-request* deserialize and
+    /// kills a wave rather than one bot. Shipped data never hits it (no bot type file has a null
+    /// appearance member), so this guards a regression in our own serialisation.
     /// </summary>
     [Test]
     public void TemplateVariantBlocksSerialiseWithTheNamesTheNativeSideExpects()
     {
         var json = JsonNode.Parse(JsonSerializer.Serialize(BuildTemplateVariantView(), JsonUtil.JsonSerializerOptionsNoIndent))!;
 
-        Assert.That(json["appearance"]!["voice"], Is.Not.Null);
-        Assert.That(json["appearance"]!["head"], Is.Not.Null);
-        Assert.That(json["health"]!["Hydration"], Is.Not.Null);
+        foreach (var member in new[] { "body", "feet", "hands", "head", "voice" })
+        {
+            Assert.That(json["appearance"]![member], Is.InstanceOf<JsonObject>(), $"appearance.{member} is not a weighted object");
+            Assert.That(json["appearance"]![member]!.AsObject(), Is.Not.Empty, $"appearance.{member} came out empty");
+        }
+
+        Assert.That(json["health"]!["Hydration"]!["min"], Is.Not.Null);
+        Assert.That(json["health"]!["Energy"]!["min"], Is.Not.Null);
+        Assert.That(json["health"]!["Temperature"]!["min"], Is.Not.Null);
         Assert.That(json["health"]!["BodyParts"]!.AsArray(), Is.Not.Empty);
         Assert.That(json["health"]!["BodyParts"]![0]!["LeftArm"]!["min"], Is.Not.Null);
-        Assert.That(json["skills"]!["Common"], Is.Not.Null);
+
+        Assert.That(json["skills"]!["Common"], Is.InstanceOf<JsonObject>());
+        // `assault` ships no Mastering, so it cannot be asserted present - but a rename of either
+        // member would surface as a key the native BotDbSkillsWire does not name.
+        Assert.That(json["skills"]!.AsObject().Select(member => member.Key), Is.SubsetOf(new[] { "Common", "Mastering" }));
+
         Assert.That(json["experienceReward"]!["normal"]!["min"], Is.Not.Null);
     }
 

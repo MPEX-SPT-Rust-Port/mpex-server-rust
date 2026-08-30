@@ -705,12 +705,23 @@ fn a_resident_send_matches_the_override_send_and_a_wrong_epoch_is_stale() {
     // earns through `botRolesWithDogTags` — its tpl comes from [`pmc_config`]'s `bear`/`default`
     // band, so both arms have to draw the same one.
     assert!(bots[0]["result"]["gameVersion"].is_null());
+    assert!(bots[0]["result"]["memberCategory"].is_null());
     assert!(!serde_json::to_string(&bots[0]).unwrap().contains("dogtag_"));
     for bot in &bots[1..] {
         assert!(bot["result"]["gameVersion"].is_string(), "{bot}");
         assert!(bot["result"]["memberCategory"].is_i64(), "{bot}");
-        let items = serde_json::to_string(&bot["result"]["inventory"]["items"]).unwrap();
-        assert!(items.contains("dogtag_bear_"), "no dogtag: {items}");
+        // Slot-keyed, not just tpl-keyed: a dogtag tpl parked in the wrong slot is not a dogtag.
+        let items = bot["result"]["inventory"]["items"].as_array().unwrap();
+        let dogtag = items
+            .iter()
+            .find(|item| item["slotId"] == json!("Dogtag"))
+            .unwrap_or_else(|| panic!("no Dogtag slot: {bot}"));
+        assert!(
+            dogtag["_tpl"]
+                .as_str()
+                .is_some_and(|tpl| tpl.starts_with("dogtag_bear_")),
+            "{dogtag}"
+        );
     }
     let resident = String::from_utf8(resident).unwrap();
     assert!(resident.contains(RIFLE_TPL) && resident.contains(MAG_TPL));
