@@ -190,7 +190,7 @@ pub fn generate_inventory(
         bot_id: _,
         test_seed,
         details,
-        // The single-bot request never sends it, and this path draws no game version.
+        // The single-bot request does send it (always `false`), but this path draws no game version.
         is_nikita: _,
     } = bot;
     let _seed_guard = test_seed.map(TestSeedGuard::install);

@@ -1383,10 +1383,16 @@ mod tests {
             "skills": {
                 "Common": {"BotReload": {"min": 100, "max": 200},
                     "BotSound": {"min": 100, "max": 200}},
-                "Mastering": {},
+                // Two entries, one explicitly null: the mastering loop and its `Option<MinMax>`
+                // skip (which must not consume a draw) both run.
+                "Mastering": {"Assault": {"min": 300, "max": 400}, "Pistol": null},
             },
-            "experienceReward": {"standard": {"min": 20, "max": 40},
-                "unheard_edition": {"min": 20, "max": 40}},
+            // Keyed by *difficulty*, which is what `GetExperienceRewardForKillByDifficulty` looks
+            // the bot's `botDifficulty` up under. The three bands are ranges apart, so a lookup on
+            // the wrong key lands outside the band the fixture's `normal` bots must draw from.
+            "experienceReward": {"easy": {"min": 10, "max": 20},
+                "normal": {"min": 100, "max": 200},
+                "hard": {"min": 1000, "max": 2000}},
         }) else {
             unreachable!("the literal is an object")
         };

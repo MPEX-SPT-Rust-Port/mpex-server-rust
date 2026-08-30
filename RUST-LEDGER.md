@@ -953,8 +953,19 @@ it does not move, so the export count stays 43 and the wire grows only sibling f
 `appearance`/`health`/`skills`/`experience.reward` on the template *variant* (per band, because
 `BotEquipmentFilterService` mutates appearance per band), `isNikita` per bot, and
 `skip_serializing_if` response members (`customization`, `health`, `skills`, `settingsExperience`,
-`gameVersion`, `memberCategory`, `selectedMemberCategory`). The single-bot and player-scav wires are
-byte-identical to ABI 37 by construction. New module `rust/spt-native/src/bot/bot_generator.rs`
+`gameVersion`, `memberCategory`, `selectedMemberCategory`). The single-bot and player-scav *response*
+wires are byte-identical to ABI 37 by construction — every new member is `skip_serializing_if` and
+neither export sets one. Their *request* wires are not: three members are always serialized on the
+override arm. `BotViewsOverride.BotRolesWithDogTags` and `BotViewsOverride.BodyToFixedHands` are
+`required`, and `BotPayloadProjection.BuildViewsOverride` is shared by all three arms (wave batcher,
+single-bot generator, player-scav request builder), so both ride every override-arm per-bot request —
+`bodyToFixedHands` is ~77 entries ≈ 4 KB on shipped data. `BotSlice.IsNikita` likewise emits
+`"isNikita":false` on the single-bot request (non-nullable `bool`, and `JsonUtil` only omits nulls).
+All three are inert: `spt_generate_bot_inventory` and `spt_generate_player_scav` read neither
+`BotViewsWire` member, and `BotSliceWire::is_nikita` carries `#[serde(default)]`. This is consistent
+with how every other `BotViewsWire` member already behaves and is *not* a defect — but a slice that
+grows the per-bot override request must re-verify it against
+`BotPayloadSizeTests.RequestStaysUnderTheWireBudget`. New module `rust/spt-native/src/bot/bot_generator.rs`
 (853 lines); `PmcConfigWire` lifts `gameVersionWeight`/`accountTypeWeight`/`dogtags`, `BotConfigLift`
 lifts `botRolesWithDogTags`, and a `bodyTpl → handsTpl` derive view (`body_to_fixed_hands`, on the
 `default_preset_ids_by_tpl` pattern) collapses `globals.config.Customization.Body` plus
