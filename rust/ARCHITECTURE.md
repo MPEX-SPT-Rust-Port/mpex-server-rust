@@ -77,7 +77,7 @@ the console**, whose P/Invoke lives in a different assembly:
 
 | Path | Role |
 |---|---|
-| `src/lib.rs` | Module roots and `ABI_VERSION` (currently 37; must equal `SptNative.ExpectedAbiVersion`) |
+| `src/lib.rs` | Module roots and `ABI_VERSION` (currently 38; must equal `SptNative.ExpectedAbiVersion`) |
 | `src/ffi.rs` | The C-ABI surface. The **only** module containing `unsafe` |
 | `src/runtime.rs` | Process-wide multi-thread tokio runtime, `OnceLock`-built. Used only by `verify` and the fused load |
 | `src/verify.rs` | Hashes `SPT_Data` with XXH3-128 and diffs it against `checks.dat`. `verify_collecting` is the same walk with a `want` predicate that whole-reads and returns matching files' bytes, so the fused load reads each file once |
@@ -341,6 +341,7 @@ through, and `resolve_bot_views`, shared by all three exports — see *FFI bound
 | `bot_inventory_generator.rs` | `Generators/Bot/BotInventoryGenerator.cs` | `generate_inventory` — the orchestrator and the crate's bot entry point — plus `generate_inventory_batch`, one wave in one call over a rayon loop |
 | `player_scav.rs` | `Generators/Bot/PlayerScavGenerator.cs` | `generate_player_scav` — karma chances and the equipment blacklist onto the template, the bot through `generate_prepared_with`, then the additional-loot pass against the still-live container grids. `AdjustItemWeights` and both template strips stay C#-side on both arms (their output feeds `BotLootCacheService` hydration) |
 | `level_generator.rs` | `Generators/Bot/BotLevelGenerator.cs` | `generate_bot_level` — the batch path's level/exp draw. Only `GenerateBotLevel` + `ChooseBotLevel`; `GetRelativePmcBotLevelRange` stays C#-side as hoisted wave state |
+| `bot_generator.rs` | `Generators/Bot/BotGenerator.cs` | The batch path's prelude draws, since ABI 38, in `GenerateBotPrelude`'s statement order: exp-reward-for-kill, voice, health, skills, the PMC game-version/member-category block, appearance (incl. the fixed-hands lookup) — then `GenerateBotFinish`'s dogtag after the inventory. Run per bot between the level draw and the inventory. Naming and the sim-pscav cluster stay C#-side on every arm; the per-bot and player-scav exports keep their C# prelude |
 | `bot_equipment_mod_generator.rs` | `Generators/Bot/BotEquipmentModGenerator.cs` | Both mod halves (equipment, weapon), plus the one `BotWeaponModLimitService` method they call |
 | `bot_generator_helper.rs` | `Helpers/Bot/BotGeneratorHelper.cs`, `BotInventoryContainerService.cs` | Per-item `Upd` blocks, compatibility probes, and the `ContainerGrids` occupancy state |
 | `bot_loot_generator.rs` | `Generators/Loot/BotLootGenerator.cs` | Fills pockets/vest/backpack/secure from pools the C# caller resolved |

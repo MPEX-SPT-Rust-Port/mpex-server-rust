@@ -291,6 +291,26 @@ fn equipment() -> Value {
     json!({"assault": filters, "pmc": filters})
 }
 
+/// `PmcConfig`, shared verbatim by the override bundle and the published `spt-pmc` stem — one
+/// function so the two arms cannot drift, which they must not: since ABI 38 the prelude's
+/// game-version, account-type and dogtag draws all read this, and a value that differed between the
+/// arms would fail the byte comparison.
+///
+/// Every weight map is multi-entry, so each of those is a real weighted pick rather than
+/// `get_weighted_value`'s single-entry shortcut. Neither edition is `unheard_edition`, so the
+/// account-type draw is always reached and the unheard pocket swap never fires. The dogtag tpls are
+/// deliberately non-hex, like every other tpl here, so a drifted draw survives `strip_mongo_ids`.
+fn pmc_config() -> Value {
+    json!({
+        "gameVersionWeight": {"standard": 1, "left_behind": 3},
+        "accountTypeWeight": {"0": 1, "256": 3},
+        "dogtags": {
+            "bear": {"default": {"dogtag_bear_a": 1, "dogtag_bear_b": 3}},
+            "usec": {"default": {"dogtag_usec": 1}},
+        },
+    })
+}
+
 /// The override's views, value-identical to what the publish below derives or lifts: the items
 /// view, the presets map (globals key domain, map order), the default re-keyed to the preset's own
 /// id, a handbook price per items-table key (0.0 for a handbook miss), the three exp bands, and the
@@ -317,6 +337,10 @@ fn views_override() -> Value {
         },
         "expTable": [100, 200, 400],
         "bosses": [],
+        "botRolesWithDogTags": ["pmcbear", "pmcusec"],
+        // Empty on purpose: flip #6's published templates carry no `customization`, so the resident
+        // derive is empty too. A populated map here would make the arm-equality assert lie.
+        "bodyToFixedHands": {},
         "durability": durability(),
         "itemSpawnLimits": {"assault": {}, "pmc": {}},
         "walletLoot": {"chancePercent": 0, "itemCount": {"min": 0, "max": 0},
@@ -327,7 +351,7 @@ fn views_override() -> Value {
         "lowProfileGasBlockTpls": [],
         "lootItemResourceRandomization": {},
         "equipment": equipment(),
-        "pmcConfig": {},
+        "pmcConfig": pmc_config(),
         "repairKitWeapon": {"rarityWeight": {}, "bonusTypeWeight": {}, "Common": {}, "Rare": {}},
         "configBlacklist": [],
     })
@@ -337,10 +361,15 @@ fn views_override() -> Value {
 /// value. `spt-bot`'s members are all strict, so this is also the shape a real `bot.json` publish
 /// has to satisfy.
 fn configs_root() -> Value {
+    // The very same object the override arm sends, plus the stem discriminator.
+    let mut pmc = pmc_config();
+    pmc["kind"] = json!("spt-pmc");
+
     json!({
         "spt-bot": {
             "kind": "spt-bot",
             "bosses": [],
+            "botRolesWithDogTags": ["pmcbear", "pmcusec"],
             "durability": durability(),
             "itemSpawnLimits": {"assault": {}, "pmc": {}},
             "walletLoot": {"chancePercent": 0, "itemCount": {"min": 0, "max": 0},
@@ -352,7 +381,7 @@ fn configs_root() -> Value {
             "lootItemResourceRandomization": {},
             "equipment": equipment(),
         },
-        "spt-pmc": {"kind": "spt-pmc"},
+        "spt-pmc": pmc,
         "spt-repair": {"kind": "spt-repair", "repairKit": {
             "weapon": {"rarityWeight": {}, "bonusTypeWeight": {}, "Common": {}, "Rare": {}},
         }},
@@ -435,6 +464,54 @@ fn shared() -> Value {
     })
 }
 
+/// The four prelude blocks every `templateVariants` entry carries. Every weight map is multi-entry
+/// on purpose: a single-entry map takes the `len() == 1` shortcut instead of the weighted draw, and
+/// an empty one errors the bot.
+fn prelude_blocks() -> serde_json::Map<String, Value> {
+    let Value::Object(blocks) = json!({
+        "appearance": {
+            "body": {"body_a": 1, "body_b": 3},
+            "feet": {"feet_a": 1, "feet_b": 3},
+            "hands": {"hands_a": 1, "hands_b": 3},
+            "head": {"head_a": 1, "head_b": 3},
+            "voice": {"voice_a": 1, "voice_b": 3},
+        },
+        "health": {
+            "BodyParts": [
+                {"Chest": {"min": 80, "max": 85}, "Head": {"min": 35, "max": 35},
+                 "LeftArm": {"min": 60, "max": 60}, "LeftLeg": {"min": 65, "max": 65},
+                 "RightArm": {"min": 60, "max": 60}, "RightLeg": {"min": 65, "max": 65},
+                 "Stomach": {"min": 70, "max": 75}},
+                {"Chest": {"min": 70, "max": 75}, "Head": {"min": 30, "max": 30},
+                 "LeftArm": {"min": 50, "max": 50}, "LeftLeg": {"min": 55, "max": 55},
+                 "RightArm": {"min": 50, "max": 50}, "RightLeg": {"min": 55, "max": 55},
+                 "Stomach": {"min": 60, "max": 65}},
+            ],
+            "Energy": {"min": 80, "max": 100},
+            "Hydration": {"min": 80, "max": 100},
+            "Temperature": {"min": 36, "max": 40},
+        },
+        "skills": {
+            "Common": {"BotReload": {"min": 100, "max": 200},
+                "BotSound": {"min": 100, "max": 200}},
+            // Two entries, one explicitly null: the mastering loop and its `Option<MinMax>` skip
+            // (which must not consume a draw) both run on every bot in the wave.
+            "Mastering": {"Assault": {"min": 300, "max": 400}, "Pistol": null},
+        },
+        // Keyed by *difficulty*, which is what `GetExperienceRewardForKillByDifficulty` looks the
+        // bot's `botDifficulty` up under. The three bands are ranges apart, so a lookup on the
+        // wrong key would land outside the band these `normal` bots must draw from — and move the
+        // golden below.
+        "experienceReward": {"easy": {"min": 10, "max": 20},
+            "normal": {"min": 100, "max": 200},
+            "hard": {"min": 1000, "max": 2000}},
+    }) else {
+        unreachable!("the literal is an object")
+    };
+
+    blocks
+}
+
 fn slice(bot_id: &str, role: &str, role_lowercase: &str, is_pmc: bool, seed: u64) -> Value {
     json!({
         "botId": bot_id,
@@ -454,10 +531,14 @@ fn slice(bot_id: &str, role: &str, role_lowercase: &str, is_pmc: bool, seed: u64
 fn batch_request(epoch: u64, views_override: Option<Value>) -> Vec<u8> {
     let mut shared = shared();
     shared["levelGeneration"] = json!({"levelMin": 1, "levelMax": 3});
-    shared["templateVariants"] = json!([
+    let mut variants = json!([
         {"levelMin": 1, "levelMax": 1, "template": template(true), "lootPools": {}},
         {"levelMin": 2, "levelMax": 99, "template": template(false), "lootPools": {}},
     ]);
+    for variant in variants.as_array_mut().unwrap() {
+        variant.as_object_mut().unwrap().extend(prelude_blocks());
+    }
+    shared["templateVariants"] = variants;
 
     let mut request = json!({
         "epoch": epoch,
@@ -507,6 +588,10 @@ fn single_request(epoch: u64, views_override: Option<Value>) -> Vec<u8> {
 /// items in iteration order — and `mod_foregrip`'s two candidates make the *inner set order*
 /// observable through the seeded pick, so either order regressing moves the hash.
 ///
+/// Since ABI 38 it also pins the per-bot prelude the batch call draws natively — exp-reward, voice,
+/// health, skills, game-version (PMC only) and appearance, between the level draw and the inventory,
+/// then the dogtag after it — so any of those moving, reordering or dropping a draw moves the hash.
+///
 /// It is a *Rust-side* golden because a C#-side one is impossible: `MongoId.GetHashCode()`
 /// (`MongoId.cs:325`) is `HashCode.Combine(...)`, which .NET seeds per process, so every
 /// `Dictionary<MongoId, …>` the C# projection serialises enumerates in a process-random order that
@@ -518,7 +603,7 @@ fn single_request(epoch: u64, views_override: Option<Value>) -> Vec<u8> {
 ///
 /// To regenerate after a deliberate generation change: put any wrong value here, run
 /// `cargo test --test flip6_bots_resident`, and paste the `left:` value from the failure.
-const RESIDENT_BATCH_GOLDEN: &str = "87A743ED988C6A8F7ADEE225F0E28062";
+const RESIDENT_BATCH_GOLDEN: &str = "8B40FC9288B1C75A329BB9D140040A15";
 
 #[test]
 fn a_resident_send_matches_the_override_send_and_a_wrong_epoch_is_stale() {
@@ -603,6 +688,41 @@ fn a_resident_send_matches_the_override_send_and_a_wrong_epoch_is_stale() {
     assert_eq!(bots[2]["result"]["exp"], json!(300));
     let high = serde_json::to_string(&bots[2]).unwrap();
     assert!(high.contains("root_p1"), "no preset fallback: {high}");
+    // The ABI 38 prelude, pinned before the golden for the same reason: every one of these blocks
+    // is `skip_serializing_if`, so a draw that silently stopped happening would still hash.
+    for bot in bots {
+        let result = &bot["result"];
+        assert!(result["settingsExperience"].is_i64(), "{result}");
+        assert!(result["customization"]["voice"].is_string(), "{result}");
+        assert!(
+            result["health"]["bodyParts"]["Head"].is_object(),
+            "{result}"
+        );
+        // `Mastering`'s null-valued entry is skipped, the other one drawn.
+        assert_eq!(result["skills"]["mastering"].as_array().unwrap().len(), 1);
+    }
+    // PMC only: the drawn game version and its member category, and the dogtag the `pmcbear` role
+    // earns through `botRolesWithDogTags` — its tpl comes from [`pmc_config`]'s `bear`/`default`
+    // band, so both arms have to draw the same one.
+    assert!(bots[0]["result"]["gameVersion"].is_null());
+    assert!(bots[0]["result"]["memberCategory"].is_null());
+    assert!(!serde_json::to_string(&bots[0]).unwrap().contains("dogtag_"));
+    for bot in &bots[1..] {
+        assert!(bot["result"]["gameVersion"].is_string(), "{bot}");
+        assert!(bot["result"]["memberCategory"].is_i64(), "{bot}");
+        // Slot-keyed, not just tpl-keyed: a dogtag tpl parked in the wrong slot is not a dogtag.
+        let items = bot["result"]["inventory"]["items"].as_array().unwrap();
+        let dogtag = items
+            .iter()
+            .find(|item| item["slotId"] == json!("Dogtag"))
+            .unwrap_or_else(|| panic!("no Dogtag slot: {bot}"));
+        assert!(
+            dogtag["_tpl"]
+                .as_str()
+                .is_some_and(|tpl| tpl.starts_with("dogtag_bear_")),
+            "{dogtag}"
+        );
+    }
     let resident = String::from_utf8(resident).unwrap();
     assert!(resident.contains(RIFLE_TPL) && resident.contains(MAG_TPL));
     // The randomised-slot chain: the mount only reaches the weapon through the dynamic pool, and

@@ -164,6 +164,9 @@ fn projected_configs_parse_with_every_kind_present() {
                 "lootItemLimitsRub",
                 "forceArmband",
                 "weaponHasEnhancementChancePercent",
+                "gameVersionWeight",
+                "accountTypeWeight",
+                "dogtags",
             ],
         ),
     ];

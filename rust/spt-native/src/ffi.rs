@@ -1831,7 +1831,7 @@ mod tests {
         assert_eq!(spt_native_abi_version(), crate::ABI_VERSION);
         assert_eq!(
             crate::ABI_VERSION,
-            37,
+            38,
             "bump SptNative.ExpectedAbiVersion too"
         );
     }
@@ -2194,6 +2194,8 @@ mod tests {
             "epoch":0,
             "viewsOverride":{{"items":{{}},"itemPresets":{{}},"defaultPresetsByTpl":{{}},
             "bosses":[],
+            "botRolesWithDogTags":["pmcbear","pmcusec"],
+            "bodyToFixedHands":{{}},
             "durability":{{
                 "default":{{"armor":{{"maxDelta":10,"minDelta":0,"minLimitPercent":15}},
                     "weapon":{{"lowestMax":60,"highestMax":100,"maxDelta":10,"minDelta":0,

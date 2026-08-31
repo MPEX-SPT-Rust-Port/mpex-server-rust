@@ -107,8 +107,8 @@ public class BotWaveBatcher(
 
     /// <summary>
     ///     One level band's filtered template and the loot pools hydrated from it. The C#-side
-    ///     BotType is kept alongside the wire members because the post-call voice and appearance
-    ///     draws read the band's filtered BotAppearance.
+    ///     BotType is kept alongside the wire members because BuildBatchRequest projects the band's
+    ///     filtered appearance, health, skills and experience blocks onto the wire.
     /// </summary>
     private sealed record TemplateVariant(int LevelMin, int LevelMax, BotType Template, BotLootCache LootPools);
 
@@ -179,12 +179,10 @@ public class BotWaveBatcher(
             return [];
         }
 
-        // Read by the post-call loop, so it outlives the try the wave prep runs in
-        var variants = new List<TemplateVariant>();
-
         BotInventoryBatchResult batchResult;
         try
         {
+            var variants = new List<TemplateVariant>();
             var waveDetails = cloner.Clone(botGenerationDetails)!;
             waveDetails.RoleLowercase = waveDetails.Role.ToLowerInvariant();
             // Batch preludes no longer mutate templates, so any survivor's clone is the pristine
@@ -279,26 +277,58 @@ public class BotWaveBatcher(
 
                 // Before everything else: CacheBot reads Info.Level
                 // (MatchBotDetailsCacheService.cs:54)
-                entry.Details.BotLevel = envelope.Result.Level!.Value;
-                entry.Bot.Info.Experience = envelope.Result.Exp;
-                entry.Bot.Info.Level = envelope.Result.Level;
+                var native = envelope.Result;
+                entry.Details.BotLevel = native.Level!.Value;
+                entry.Bot.Info.Experience = native.Exp;
+                entry.Bot.Info.Level = native.Level;
 
-                // The prelude's level-dependent draws (BotGenerator.cs:316,345), post-call because
-                // the level and the filter-adjusted appearance pools are only known per variant now
-                var variant = variants.First(candidate =>
-                    envelope.Result.Level >= candidate.LevelMin && envelope.Result.Level <= candidate.LevelMax
-                );
-                entry.Bot.Customization.Voice = weightedRandomHelper.GetWeightedValue(variant.Template.BotAppearance.Voice);
-                botGenerator.ApplyBatchBotAppearance(entry.Bot, variant.Template.BotAppearance, entry.Details);
-
-                entry.Bot.Inventory = envelope.Result.Inventory;
-                if (!entry.Details.ClearBotContainerCacheAfterGeneration)
+                // The prelude draws that moved native at ABI 38 (spec 2026-08-29), written back
+                // instead of drawn. Enum.Parse (case-sensitive) throws on an unknown skill key
+                // inside this per-bot try, so the bot is skipped and the wave survives - same
+                // outcome as the legacy prelude's throw. CommonSkill.Progress has a clamping
+                // setter (MaxSkillProgress), so a >5100 native value clamps here exactly as it
+                // did legacy; the Rust golden pins the unclamped wire value.
+                entry.Bot.Customization.Head = new MongoId(native.Customization!.Head);
+                entry.Bot.Customization.Body = new MongoId(native.Customization.Body);
+                entry.Bot.Customization.Feet = new MongoId(native.Customization.Feet);
+                entry.Bot.Customization.Hands = new MongoId(native.Customization.Hands);
+                entry.Bot.Customization.Voice = new MongoId(native.Customization.Voice);
+                entry.Bot.Health = ToBotBaseHealth(native.Health!);
+                entry.Bot.Skills = new Skills
                 {
-                    botInventoryGenerator.RestoreContainerGrids(entry.Bot.Id.Value, envelope.Result.ContainerGrids);
+                    Common = native
+                        .Skills!.Common.Select(skill => new CommonSkill
+                        {
+                            Id = Enum.Parse<SkillTypes>(skill.Id),
+                            Progress = skill.Progress,
+                            PointsEarnedDuringSession = 0,
+                            LastAccess = 0,
+                        })
+                        .ToList(),
+                    Mastering = native
+                        .Skills.Mastering.Select(skill => new MasterySkill { Id = skill.Id, Progress = skill.Progress })
+                        .ToList(),
+                    Points = 0,
+                };
+                entry.Bot.Info.Settings.Experience = native.SettingsExperience!.Value;
+                if (native.GameVersion is not null)
+                {
+                    entry.Bot.Info.GameVersion = native.GameVersion;
+                    entry.Bot.Info.MemberCategory = (MemberCategory)native.MemberCategory!.Value;
+                    if (native.SelectedMemberCategory is not null)
+                    {
+                        entry.Bot.Info.SelectedMemberCategory = (MemberCategory)native.SelectedMemberCategory.Value;
+                    }
                 }
 
-                botInventoryGenerator.ReplayRandomisationClamps(entry.Details, envelope.Result.RandomisationClamps);
-                botGenerator.GenerateBotFinish(entry.Bot, entry.Details);
+                entry.Bot.Inventory = native.Inventory;
+                if (!entry.Details.ClearBotContainerCacheAfterGeneration)
+                {
+                    botInventoryGenerator.RestoreContainerGrids(entry.Bot.Id.Value, native.ContainerGrids);
+                }
+
+                botInventoryGenerator.ReplayRandomisationClamps(entry.Details, native.RandomisationClamps);
+                botGenerator.GenerateBotFinish(entry.Bot, entry.Details, nativeDogtag: true);
 
                 // Client expects Side for PMCs to be `Savage`, must be altered here before it's cached
                 if (entry.Bot.Info?.Side is Sides.Bear or Sides.Usec)
@@ -316,6 +346,25 @@ public class BotWaveBatcher(
         }
 
         return bots;
+    }
+
+    private static BotBaseHealth ToBotBaseHealth(BotHealthResultView view)
+    {
+        return new BotBaseHealth
+        {
+            Hydration = new CurrentMinMax { Current = view.Hydration.Current, Maximum = view.Hydration.Maximum },
+            Energy = new CurrentMinMax { Current = view.Energy.Current, Maximum = view.Energy.Maximum },
+            Temperature = new CurrentMinMax { Current = view.Temperature.Current, Maximum = view.Temperature.Maximum },
+            BodyParts = view.BodyParts.ToDictionary(
+                part => part.Key,
+                part => new BodyPartHealth
+                {
+                    Health = new CurrentMinMax { Current = part.Value.Current, Maximum = part.Value.Maximum },
+                }
+            ),
+            UpdateTime = 0,
+            Immortal = false,
+        };
     }
 
     private bool CanBatch(MongoId sessionId, BotGenerationDetails details)
@@ -471,13 +520,22 @@ public class BotWaveBatcher(
                         LevelMax = variant.LevelMax,
                         Template = BotPayloadProjection.BuildTemplateView(variant.Template),
                         LootPools = variant.LootPools,
+                        Appearance = variant.Template.BotAppearance,
+                        Health = variant.Template.BotHealth,
+                        Skills = variant.Template.BotSkills,
+                        ExperienceReward = variant.Template.BotExperience.Reward,
                     }),
                 ]
             ),
             Bots =
             [
                 .. bots.Select(entry =>
-                    BotPayloadProjection.BuildBotSlice(entry.Bot.Id.Value, entry.Details, botInventoryGenerator.NativeTestSeed)
+                    BotPayloadProjection.BuildBotSlice(
+                        entry.Bot.Id.Value,
+                        entry.Details,
+                        botInventoryGenerator.NativeTestSeed,
+                        isNikita: string.Equals(entry.Bot.Info.Nickname, "nikita", StringComparison.OrdinalIgnoreCase)
+                    )
                 ),
             ],
         };

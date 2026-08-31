@@ -84,14 +84,15 @@ use crate::bot::bot_weapon_generator::{add_extra_magazines_to_inventory, generat
 use crate::bot::level_generator;
 use crate::bot::mod_pool_service::get_mods_for_gear_slot;
 use crate::bot::models::{
-    BotBaseInventoryWire, BotGenerationDetailsWire, BotInventoryBatchResult, BotInventoryResult,
-    BotLootCacheWire, BotResultEnvelope, BotSliceWire, BotTemplateWire, BotTypeInventoryWire,
-    ChancesWire, EquipmentFilterDetails, EquipmentFilters, GenerateBotInventoryBatchRequest,
-    GenerateBotInventoryRequest, GenerateEquipmentPropertiesWire, GenerationWire, PmcConfigWire,
-    RandomisationDetails, SharedBotVaryingWire,
+    BotBaseInventoryWire, BotCustomizationResult, BotGenerationDetailsWire,
+    BotInventoryBatchResult, BotInventoryResult, BotLootCacheWire, BotResultEnvelope, BotSliceWire,
+    BotTemplateWire, BotTypeInventoryWire, ChancesWire, EquipmentFilterDetails, EquipmentFilters,
+    GenerateBotInventoryBatchRequest, GenerateBotInventoryRequest, GenerateEquipmentPropertiesWire,
+    GenerationWire, PmcConfigWire, RandomisationDetails, SharedBotVaryingWire,
 };
 use crate::bot::{
-    BotContext, BotViews, resolve_bot_views, resolve_equipment, select_equipment_blacklists,
+    BotContext, BotViews, bot_generator, resolve_bot_views, resolve_equipment,
+    select_equipment_blacklists,
 };
 use crate::diag::DiagSink;
 use crate::loot::item_helper::{LootEpochError, LootError, get_item};
@@ -115,7 +116,7 @@ const POCKETS_1X4_TUE: &str = "65e080be269cbd5c5005e529";
 const POCKETS_LARGE: &str = "5af99e9186f7747c447120b8";
 
 /// `GameEditions.UNHEARD` (`Models/Enums/GameEditions.cs:9`).
-const UNHEARD: &str = "unheard_edition";
+pub(crate) const UNHEARD: &str = "unheard_edition";
 
 /// `EquipmentSlots` member names, as strings (see [`crate::bot::bot_weapon_generator`]).
 const POCKETS: &str = "Pockets";
@@ -189,6 +190,8 @@ pub fn generate_inventory(
         bot_id: _,
         test_seed,
         details,
+        // The single-bot request does send it (always `false`), but this path draws no game version.
+        is_nikita: _,
     } = bot;
     let _seed_guard = test_seed.map(TestSeedGuard::install);
 
@@ -219,8 +222,11 @@ pub fn generate_inventory(
 /// `randomisation_clamps` comes back empty. That guarantee is what makes the parallel loop safe.
 ///
 /// Each bot's own preamble runs here rather than in [`generate_prepared`]: seed guard, then the
-/// level draw (`BotGenerator.cs:222-225`), then the variant pick. The draw has to be the first
-/// thing on the bot's seeded stream, because that is where the C# prelude does it.
+/// level draw (`BotGenerator.cs:222-225`), then the variant pick, then the prelude draws that moved
+/// at ABI 38 (exp-reward → voice → health → skills → game-version → appearance, see
+/// [`bot_generator::draw_prelude_extras`]), then the inventory, then the dogtag
+/// (`GenerateBotFinish`). The level draw has to be the first thing on the bot's seeded stream,
+/// because that is where the C# prelude does it.
 ///
 /// Thread-safety inventory: the shared views are borrowed immutably; every `&mut` in
 /// `generate_prepared` is bot-local; `MongoId`'s counter is atomic; the RNG is `thread_local!` and
@@ -254,6 +260,7 @@ pub fn generate_inventory_batch(
         .map(|slice| {
             let BotSliceWire {
                 test_seed,
+                is_nikita,
                 mut details,
                 ..
             } = slice;
@@ -293,13 +300,39 @@ pub fn generate_inventory_batch(
                 };
             };
 
+            // The prelude draws that moved native at ABI 38 (spec 2026-08-29): exp-reward, voice,
+            // health, skills, game-version, appearance — in the C# prelude's statement order,
+            // between the level draw and the inventory.
+            let extras =
+                match bot_generator::draw_prelude_extras(&details, variant, &views, is_nikita) {
+                    Ok(extras) => extras,
+                    Err(error) => {
+                        return BotResultEnvelope {
+                            result: None,
+                            error: Some(error.message),
+                        };
+                    }
+                };
+            // GenerateBotPrelude's PMC branch writes the drawn version into the details before
+            // the unheard pocket tweak reads it — same here, replacing the wire value.
+            if let Some(draw) = &extras.game_version {
+                details.game_version = draw.game_version.clone();
+            }
+
             let mut template = variant.template.clone();
-            // `BotGenerator.cs:297-304` — rolled per bot C#-side (the game version rides in on the
-            // details), and applied after the filter's `AdjustGenerationChances`, which the variant
-            // already carries; cloning then setting keeps that order.
+            // `BotGenerator.cs:297-304` — rolled per bot, natively since ABI 38 (the version the
+            // draw above just wrote into the details), and applied after the filter's
+            // `AdjustGenerationChances`, which the variant already carries; cloning then setting
+            // keeps that order.
             if details.is_pmc && details.game_version == UNHEARD {
                 add_additional_pocket_loot_weights_for_unheard_bot(&mut template);
             }
+
+            // `GenerateBotFinish`'s dogtag gate, captured before `details` moves into `PreparedBot`.
+            let dogtag = views
+                .bot_roles_with_dog_tags()
+                .contains(&details.role_lowercase)
+                .then(|| (details.side.clone(), details.game_version.clone()));
 
             let prepared = PreparedBot {
                 details,
@@ -311,6 +344,38 @@ pub fn generate_inventory_batch(
                 Ok(mut result) => {
                     result.level = Some(level);
                     result.exp = Some(exp);
+
+                    // GenerateBotFinish's dogtag, after the inventory — the same stream position.
+                    if let Some((side, game_version)) = dogtag
+                        && let Err(error) = bot_generator::add_dogtag_to_bot(
+                            &mut result.inventory.items,
+                            &result.inventory.equipment,
+                            &side,
+                            &game_version,
+                            &views.pmc_config().dogtag_settings,
+                        )
+                    {
+                        return BotResultEnvelope {
+                            result: None,
+                            error: Some(error.message),
+                        };
+                    }
+
+                    result.customization = Some(BotCustomizationResult {
+                        head: extras.appearance.head,
+                        body: extras.appearance.body,
+                        feet: extras.appearance.feet,
+                        hands: extras.appearance.hands,
+                        voice: extras.voice,
+                    });
+                    result.health = Some(extras.health);
+                    result.skills = Some(extras.skills);
+                    result.settings_experience = Some(extras.settings_experience);
+                    if let Some(draw) = extras.game_version {
+                        result.game_version = Some(draw.game_version);
+                        result.member_category = Some(draw.member_category);
+                        result.selected_member_category = draw.selected_member_category;
+                    }
 
                     BotResultEnvelope {
                         result: Some(result),
@@ -488,9 +553,16 @@ pub(crate) fn generate_prepared_with(
         inventory: bot_inventory,
         container_grids,
         randomisation_clamps,
-        // Set by the batch caller, which owns the draw; absent on the single-bot path.
+        // Set by the batch caller, which owns the draws; absent on the single-bot path.
         level: None,
         exp: None,
+        customization: None,
+        health: None,
+        skills: None,
+        settings_experience: None,
+        game_version: None,
+        member_category: None,
+        selected_member_category: None,
     })
 }
 
@@ -1338,6 +1410,8 @@ pub(crate) mod tests {
                 "itemPresets": {},
                 "defaultPresetsByTpl": {},
                 "bosses": [],
+                "botRolesWithDogTags": ["pmcbear", "pmcusec"],
+                "bodyToFixedHands": {},
                 "durability": {
                     "default": {"armor": {"maxDelta": 10, "minDelta": 0, "minLimitPercent": 15},
                         "weapon": {"lowestMax": 60, "highestMax": 100, "maxDelta": 10, "minDelta": 0,
@@ -1356,7 +1430,14 @@ pub(crate) mod tests {
                 "lowProfileGasBlockTpls": [],
                 "lootItemResourceRandomization": {},
                 "equipment": {"assault": {}},
-                "pmcConfig": {},
+                // Both weight maps are multi-entry, so a PMC slice really draws its game version
+                // and account type instead of taking `get_weighted_value`'s single-entry shortcut.
+                // Neither edition is UNHEARD, so the account-type draw is always reached and the
+                // unheard pocket swap never fires unless a test asks for it.
+                "pmcConfig": {
+                    "gameVersionWeight": {"standard": 1, "left_behind": 3},
+                    "accountTypeWeight": {"0": 1, "256": 3},
+                },
                 "repairKitWeapon": {"rarityWeight": {}, "bonusTypeWeight": {}, "Common": {},
                     "Rare": {}},
                 "configBlacklist": [],
@@ -1606,6 +1687,53 @@ pub(crate) mod tests {
         );
     }
 
+    /// The four prelude blocks every `templateVariants` entry carries. Every weight map is
+    /// multi-entry on purpose: a single-entry map takes the `len() == 1` shortcut instead of the
+    /// weighted draw, and an empty one errors the bot.
+    fn prelude_blocks() -> serde_json::Map<String, Value> {
+        let Value::Object(blocks) = json!({
+            "appearance": {
+                "body": {"body_a": 1, "body_b": 3},
+                "feet": {"feet_a": 1, "feet_b": 3},
+                "hands": {"hands_a": 1, "hands_b": 3},
+                "head": {"head_a": 1, "head_b": 3},
+                "voice": {"voice_a": 1, "voice_b": 3},
+            },
+            "health": {
+                "BodyParts": [
+                    {"Chest": {"min": 80, "max": 85}, "Head": {"min": 35, "max": 35},
+                     "LeftArm": {"min": 60, "max": 60}, "LeftLeg": {"min": 65, "max": 65},
+                     "RightArm": {"min": 60, "max": 60}, "RightLeg": {"min": 65, "max": 65},
+                     "Stomach": {"min": 70, "max": 75}},
+                    {"Chest": {"min": 70, "max": 75}, "Head": {"min": 30, "max": 30},
+                     "LeftArm": {"min": 50, "max": 50}, "LeftLeg": {"min": 55, "max": 55},
+                     "RightArm": {"min": 50, "max": 50}, "RightLeg": {"min": 55, "max": 55},
+                     "Stomach": {"min": 60, "max": 65}},
+                ],
+                "Energy": {"min": 80, "max": 100},
+                "Hydration": {"min": 80, "max": 100},
+                "Temperature": {"min": 36, "max": 40},
+            },
+            "skills": {
+                "Common": {"BotReload": {"min": 100, "max": 200},
+                    "BotSound": {"min": 100, "max": 200}},
+                // Two entries, one explicitly null: the mastering loop and its `Option<MinMax>`
+                // skip (which must not consume a draw) both run.
+                "Mastering": {"Assault": {"min": 300, "max": 400}, "Pistol": null},
+            },
+            // Keyed by *difficulty*, which is what `GetExperienceRewardForKillByDifficulty` looks
+            // the bot's `botDifficulty` up under. The three bands are ranges apart, so a lookup on
+            // the wrong key lands outside the band the fixture's `normal` bots must draw from.
+            "experienceReward": {"easy": {"min": 10, "max": 20},
+                "normal": {"min": 100, "max": 200},
+                "hard": {"min": 1000, "max": 2000}},
+        }) else {
+            unreachable!("the literal is an object")
+        };
+
+        blocks
+    }
+
     /// The single-bot request reshaped into a batch envelope with one slice pulled out. The two
     /// level-banded members become one variant covering every level a fixture can draw, which is
     /// the shape a non-PMC wave sends (`[1..1]`, widened here so PMC fixtures can reuse it).
@@ -1614,12 +1742,13 @@ pub(crate) mod tests {
         let object = envelope.as_object_mut().unwrap();
         let slice = object.remove("bot").unwrap();
 
-        let variant = json!({
+        let mut variant = json!({
             "levelMin": 1,
             "levelMax": 99,
             "template": object.remove("template").unwrap(),
             "lootPools": object.remove("lootPools").unwrap(),
         });
+        variant.as_object_mut().unwrap().extend(prelude_blocks());
         object.get_mut("shared").unwrap()["templateVariants"] = json!([variant]);
 
         (envelope, slice)
@@ -1683,21 +1812,75 @@ pub(crate) mod tests {
         );
     }
 
-    /// The envelope carries the drawn level and exp; non-PMC is the constant pair, and — because it
-    /// consumes no draw for it (`BotLevelGenerator.cs:23-26`) — the bot's whole stream is the one
-    /// the single-bot path produces for the same level.
+    /// The envelope carries the drawn level and exp — non-PMC is the constant pair, no draw
+    /// consumed (`BotLevelGenerator.cs:23-26`) — plus the prelude blocks the batch path draws
+    /// natively since ABI 38. It deliberately does *not* compare the batch inventory against the
+    /// single-bot one any more: the six extra draws sit between the level and the inventory, so the
+    /// two streams diverge by design. What the single-bot arm still has to prove is the other half
+    /// of that split — it runs the C# prelude, so it reports none of these fields at all.
     #[test]
-    fn a_non_pmc_bot_reports_level_one_and_no_exp() {
-        let mut single = base_request();
-        single["bot"]["details"]["botLevel"] = json!(1);
-        let expected = worn(&generate(single).unwrap());
-
+    fn a_non_pmc_batch_bot_reports_level_one_and_the_native_prelude_draws() {
         let (envelope, slice) = split_batch(base_request());
         let bots = batch(envelope, vec![slice]);
 
         let result = bots[0].result.as_ref().unwrap();
         assert_eq!((result.level, result.exp), (Some(1), Some(0)));
-        assert_eq!(worn(result), expected);
+
+        // The `normal` band, looked up under the bot's own difficulty; `easy` and `hard` are two
+        // and one orders of magnitude away, so a wrong-key lookup lands outside this range.
+        let experience = result
+            .settings_experience
+            .expect("the batch draws the exp reward");
+        assert!((100..=200).contains(&experience), "{experience}");
+
+        let customization = result.customization.as_ref().expect("appearance was drawn");
+        for (slot, picked) in [
+            ("head_", &customization.head),
+            ("feet_", &customization.feet),
+            ("body_", &customization.body),
+            ("hands_", &customization.hands),
+            ("voice_", &customization.voice),
+        ] {
+            assert!(picked.starts_with(slot), "{slot}: {picked}");
+        }
+
+        let health = result.health.as_ref().expect("health was drawn");
+        assert_eq!(health.body_parts.len(), 7);
+        assert!((80.0..=100.0).contains(&health.energy.current));
+
+        // `Mastering`'s null-valued entry is skipped; the other one comes through.
+        let skills = result.skills.as_ref().expect("skills were drawn");
+        assert_eq!(
+            skills
+                .common
+                .iter()
+                .map(|skill| &skill.id)
+                .collect::<Vec<_>>(),
+            ["BotReload", "BotSound"]
+        );
+        assert_eq!(
+            skills
+                .mastering
+                .iter()
+                .map(|skill| &skill.id)
+                .collect::<Vec<_>>(),
+            ["Assault"]
+        );
+
+        // `SetRandomisedGameVersionAndCategory` is the PMC branch only.
+        assert_eq!(result.game_version, None);
+        assert_eq!(result.member_category, None);
+        assert_eq!(result.selected_member_category, None);
+
+        // The single-bot path keeps the C# prelude, so every one of those fields is absent — the
+        // `skip_serializing_if` that keeps its response bytes unchanged.
+        let single = generate(base_request()).unwrap();
+        assert_eq!((single.level, single.exp), (None, None));
+        assert!(single.customization.is_none());
+        assert!(single.health.is_none());
+        assert!(single.skills.is_none());
+        assert!(single.settings_experience.is_none());
+        assert!(single.game_version.is_none());
     }
 
     /// A PMC slice with no `levelGeneration` on shared fails alone, like any per-bot error.
@@ -1786,7 +1969,9 @@ pub(crate) mod tests {
     }
 
     /// The unheard pocket weights are applied to the *cloned* variant template, PMC + unheard only
-    /// (`BotGenerator.cs:297-304`).
+    /// (`BotGenerator.cs:297-304`). Driven through `pmcConfig.gameVersionWeight`, because since
+    /// ABI 38 the batch path *draws* the version and writes it over the wire `details.gameVersion`
+    /// the single-bot sibling below still reads.
     #[test]
     fn an_unheard_pmc_batch_bot_gets_the_extra_pocket_weights() {
         const POCKET_LOOT_TPL: &str = "pocket_bandage";
@@ -1804,7 +1989,9 @@ pub(crate) mod tests {
 
             let (mut envelope, mut slice) = split_batch(request);
             slice["details"]["isPmc"] = json!(true);
-            slice["details"]["gameVersion"] = json!(game_version);
+            // A single-entry weight map takes `get_weighted_value`'s shortcut, so forcing the
+            // version this way costs neither arm a draw.
+            envelope["viewsOverride"]["pmcConfig"]["gameVersionWeight"] = json!({game_version: 1});
             envelope["shared"]["levelGeneration"] = json!({"levelMin": 1, "levelMax": 1});
             envelope["viewsOverride"]["expTable"] = json!([1000]);
             (envelope, slice)

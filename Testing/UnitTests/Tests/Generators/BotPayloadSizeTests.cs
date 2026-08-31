@@ -269,6 +269,10 @@ public class BotPayloadSizeTests
                         LevelMax = expTable.Length,
                         Template = BotPayloadProjection.BuildTemplateView(template),
                         LootPools = lootPools,
+                        Appearance = template.BotAppearance,
+                        Health = template.BotHealth,
+                        Skills = template.BotSkills,
+                        ExperienceReward = template.BotExperience.Reward,
                     },
                 ]
             ),

@@ -105,7 +105,7 @@ pub struct ConfigsRoot {
     pub extra: IndexMap<String, Value>,
 }
 
-/// `Models/Spt/Config/BotConfig.cs` — the nine members bot generation reads that no runtime writer
+/// `Models/Spt/Config/BotConfig.cs` — the ten members bot generation reads that no runtime writer
 /// touches, plus [`Self::equipment`], whose one written cell is overlaid per call.
 ///
 /// `equipment` is resident since ABI 34. Only the live `EquipmentMods` bands ride the varying
@@ -118,7 +118,7 @@ pub struct ConfigsRoot {
 /// [`crate::bot::resolve_equipment`] overlays it onto the bands below.
 ///
 /// Strictness per member follows the C# `required`: every member below is `required`
-/// (`BotConfig.cs:57,63,69,77,83,131,137,143,149`) except `secureContainerAmmoStackCount`, a plain
+/// (`BotConfig.cs:57,63,69,77,83,125,131,137,143,149`) except `secureContainerAmmoStackCount`, a plain
 /// auto-property C# fills with the type's default. Everything else — the four dispatch flags, the
 /// brain types, the caps, whatever Ceciler's `[JsonExtensionData]` adds on a Release build — rides
 /// [`Self::extra`].
@@ -127,6 +127,9 @@ pub struct BotConfigLift {
     /// `BotConfig.Bosses` — scanned case-insensitively by `BotHelper.IsBotBoss`, so source order
     /// is irrelevant but the `List<string>` shape is mirrored anyway.
     pub bosses: Vec<String>,
+    /// `BotConfig.BotRolesWithDogTags` — membership only, lowercase roles.
+    #[serde(rename = "botRolesWithDogTags")]
+    pub bot_roles_with_dog_tags: HashSet<String>,
     pub durability: BotDurability,
     /// Bot role → item tpl → max count. Keyed lookups plus one `["pmc"]`/`["default"]` fallback
     /// (`BotLootGenerator.cs:876-881`); the inner map is cloned and zeroed per bot, so its order
@@ -293,8 +296,8 @@ pub struct DbEndProducts {
     pub extra: IndexMap<String, Value>,
 }
 
-/// `Models/Spt/Tables/TemplateTable.cs` — only the members the ragfair view derivation and the
-/// repeatable-quest flip read are typed; everything else rides in `extra`.
+/// `Models/Spt/Tables/TemplateTable.cs` — only the members the ragfair view derivation, the
+/// repeatable-quest flip and the bot hands derive read are typed; everything else rides in `extra`.
 #[derive(Debug, Default, Deserialize, Serialize)]
 pub struct TemplatesRoot {
     /// `TemplateTable.Items` (`TemplateTable.cs:16-17`).
@@ -311,6 +314,19 @@ pub struct TemplatesRoot {
     /// flip reads.
     #[serde(rename = "repeatableQuests")]
     pub repeatable_quests: Option<RepeatableQuestsWire>,
+    /// `TemplateTable.Customization` — `_name` only (the hands derive's join key).
+    #[serde(default)]
+    pub customization: IndexMap<String, CustomizationItemLift>,
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
+    pub extra: IndexMap<String, Value>,
+}
+
+/// `Models/Eft/Common/Tables/CustomizationItem.cs` — `_name` only, the key
+/// [`crate::bot::views::derive`] joins `globals.config.Customization.SavageBody` on.
+#[derive(Debug, Default, Deserialize, Serialize)]
+pub struct CustomizationItemLift {
+    #[serde(default, rename = "_name")]
+    pub name: Option<String>,
     #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: IndexMap<String, Value>,
 }
@@ -415,13 +431,36 @@ pub struct GlobalsRoot {
     pub extra: IndexMap<String, Value>,
 }
 
-/// Globals `config` lift: `exp.level.exp_table` only (flip #6) — everything else
-/// rides `extra`. Wire names pin to GlobalTable.cs (`config`/`exp`/`level`/`exp_table`,
-/// entries `{"exp": n}` — GlobalTable.cs:12, :299, :1166, :1290, :1311).
+/// Globals `config` lift: `exp.level.exp_table` (flip #6) plus `Customization.SavageBody` (the
+/// bot hands derive) — everything else rides `extra`. Wire names pin to GlobalTable.cs
+/// (`config`/`exp`/`level`/`exp_table`, entries `{"exp": n}` — GlobalTable.cs:12, :299, :1166,
+/// :1290, :1311).
 #[derive(Debug, Default, Deserialize, Serialize)]
 pub struct GlobalsConfigLift {
     #[serde(default)]
     pub exp: GlobalsExpLift,
+    /// `GlobalConfig.Customization` (wire name `Customization`) — `SavageBody` only.
+    #[serde(default, rename = "Customization")]
+    pub customization: GlobalsCustomizationLift,
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
+    pub extra: IndexMap<String, Value>,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+pub struct GlobalsCustomizationLift {
+    /// `Customization.Body` (wire name `SavageBody`), keyed by the customization item's `_name`.
+    #[serde(default, rename = "SavageBody")]
+    pub body: IndexMap<String, WildBodyLift>,
+    #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
+    pub extra: IndexMap<String, Value>,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+pub struct WildBodyLift {
+    #[serde(default)]
+    pub hands: String,
+    #[serde(default, rename = "isNotRandom")]
+    pub is_not_random: bool,
     #[serde(flatten, skip_serializing_if = "crate::db::skip_extra_for_digest")]
     pub extra: IndexMap<String, Value>,
 }

@@ -68,7 +68,7 @@ public class BotWaveBatcherTests
     [Test]
     public void ABatchedWaveProducesCompleteBots()
     {
-        // Every bot starts as a clone of this, and the post-call draws are what overwrite it
+        // Every bot starts as a clone of this, and the native call's draws are what overwrite it
         var untouched = DI.GetInstance().GetService<BotTable>().Base.Customization!;
 
         var wave = _batcher.TryGenerateWave(_sessionId, BuildWaveDetails());
@@ -80,17 +80,25 @@ public class BotWaveBatcherTests
             Assert.That(bot!.Inventory?.Items, Is.Not.Empty, "bot came back without an inventory");
             Assert.That(bot.Id, Is.Not.EqualTo(default(MongoId)));
 
-            // Voice and appearance are drawn after the native call, from the band the drawn level
-            // landed in. assault.json's voice pool does not contain base.json's default, so a
-            // missing voice draw is caught per bot.
+            // Voice and appearance are drawn inside the native call since ABI 38 (spec 2026-08-29),
+            // from the band the drawn level landed in. assault.json's voice pool does not contain
+            // base.json's default, so a missing voice draw is caught per bot.
             Assert.That(bot.Customization!.Voice, Is.Not.Null.And.Not.EqualTo(default(MongoId)), "a bot came back without a voice");
-            Assert.That(bot.Customization.Voice, Is.Not.EqualTo(untouched.Voice), "the post-call voice draw never ran");
+            Assert.That(bot.Customization.Voice, Is.Not.EqualTo(untouched.Voice), "the native voice draw never ran");
             Assert.That(bot.Customization.Head, Is.Not.Null.And.Not.EqualTo(default(MongoId)), "a bot came back without a head");
+
+            // bots/base.json carries no BodyParts at all, so the clone cannot supply these - seven
+            // of them means the native health block landed on the envelope.
+            Assert.That(bot.Health?.BodyParts, Has.Count.EqualTo(7), "a bot came back without native health");
+            // No skills assertion here: base.json ships `Skills.Common: []` and assault/pmcusec both
+            // ship an empty `skills.Common`, so a bot with no native skills draw is indistinguishable
+            // from one with it on this wave. The non-vacuous skills pin is Rust-side, in
+            // flip6_bots_resident.rs beside RESIDENT_BATCH_GOLDEN.
         }
 
         // The appearance pools do contain base.json's defaults, so per bot a default is a legal
-        // draw and only the wave is decidable: with the appearance draw gone every bot keeps every
-        // default, which is what this rejects.
+        // draw and only the wave is decidable: with the native appearance draw gone every bot keeps
+        // every default, which is what this rejects.
         Assert.That(
             wave!.Any(bot =>
                 bot!.Customization!.Head != untouched.Head
@@ -99,7 +107,7 @@ public class BotWaveBatcherTests
                 || bot.Customization.Hands != untouched.Hands
             ),
             Is.True,
-            "the post-call appearance draw never ran - the whole wave still wears the bots/base.json default"
+            "the native appearance draw never ran - the whole wave still wears the bots/base.json default"
         );
 
         // GenerateInventoryId reroots every bot onto a fresh equipment id - all distinct
@@ -108,8 +116,10 @@ public class BotWaveBatcherTests
 
     /// <summary>
     /// The two behaviours an assault wave never reaches: the PMC side rewrite to <c>Savage</c> the
-    /// batcher copies from <c>BotController.TryGenerateSingleBot</c>, and <c>GenerateBotFinish</c>'s
-    /// dogtag branch, which only fires for the roles in <c>BotConfig.BotRolesWithDogTags</c>.
+    /// batcher copies from <c>BotController.TryGenerateSingleBot</c>, and the dogtag, which only
+    /// lands for the roles in <c>BotConfig.BotRolesWithDogTags</c>. The dogtag is drawn inside the
+    /// native call since ABI 38 (spec 2026-08-29) - <c>GenerateBotFinish</c>'s branch is skipped on
+    /// this arm - so what this pins is that the batch arm still produces it.
     ///
     /// Also the only place the level the native side drew is observable end to end: a PMC draws a
     /// real level, and the one member that constrains where the batcher assigns it is
@@ -131,6 +141,11 @@ public class BotWaveBatcherTests
             Assert.That(bot!.Info!.Side, Is.EqualTo(Sides.Savage));
             Assert.That(bot.Inventory!.Items!.Any(item => item.SlotId == Slots.Dogtag), Is.True, "a PMC came back without a dogtag");
 
+            Assert.That(bot.Info.GameVersion, Is.Not.Null.And.Not.Empty, "a batched PMC came back without a native game-version draw");
+            // No MemberCategory assertion here: bots/base.json ships `MemberCategory: 0` and the
+            // enum is nullable, so `Is.Not.Null` would pass on the untouched clone. The
+            // non-vacuous pins are in TheConsumedPreludeValuesMatchTheirTemplateBands below.
+
             Assert.That(bot.Info.Level, Is.GreaterThan(0), "a batched PMC came back without the level the native side drew");
             Assert.That(bot.Info.Experience, Is.Not.Null, "a batched PMC came back without its experience total");
             Assert.That(
@@ -139,6 +154,116 @@ public class BotWaveBatcherTests
                 "CacheBot ran before the envelope's level was assigned"
             );
         }
+    }
+
+    /// <summary>
+    /// Exact-value coverage of the C# side of the ABI 38 write-back. The Rust goldens pin what the
+    /// native call *draws*; nothing but a C# test can pin what
+    /// <c>BuildBotsFromEnvelopes</c> does with it - <c>ToBotBaseHealth</c>'s per-part
+    /// <c>Current</c>/<c>Maximum</c> transform, the <c>SettingsExperience</c> assignment, and the
+    /// <c>MemberCategory</c> casts - so a key swap or a dropped write-back would otherwise leave
+    /// every test in both languages green.
+    ///
+    /// The template a <c>pmcUSEC</c> wave resolves to is the shipped <c>usec.json</c>, whose single
+    /// <c>BodyParts</c> band has <c>min == max</c> on all seven parts - so every body-part value is
+    /// a constant and the health assertions can be exact rather than range checks. Its 19-entry
+    /// <c>skills.Common</c> is what reaches <c>Enum.Parse&lt;SkillTypes&gt;</c>; nothing else in
+    /// either language covers that parse.
+    /// </summary>
+    [Test]
+    public void TheConsumedPreludeValuesMatchTheirTemplateBands()
+    {
+        // 12 rather than 3 so the member-category check below is decidable: gameVersionWeight gives
+        // a non-zero category (edge_of_darkness -> UniqueId, unheard_edition -> Unheard) at 6/10 a
+        // bot, and 0.4^12 is a 1-in-59000 vacuous wave.
+        var wave = _batcher.TryGenerateWave(_sessionId, BuildWaveDetails(count: 12, isPmc: true));
+
+        Assert.That(wave, Is.Not.Null, "a PMC wave should take the batch path");
+        Assert.That(wave!, Has.Count.EqualTo(12));
+
+        // usec.json's single BodyParts band, verbatim. Distinct maxima across Head/Chest/Stomach
+        // and arms-vs-legs, so a key swap in ToBotBaseHealth's ToDictionary fails here.
+        var bands = new Dictionary<string, double>
+        {
+            ["Head"] = 35,
+            ["Chest"] = 85,
+            ["Stomach"] = 70,
+            ["LeftArm"] = 60,
+            ["RightArm"] = 60,
+            ["LeftLeg"] = 65,
+            ["RightLeg"] = 65,
+        };
+
+        foreach (var bot in wave!)
+        {
+            var health = bot!.Health!;
+            Assert.That(health.BodyParts, Has.Count.EqualTo(7));
+            foreach (var (part, max) in bands)
+            {
+                Assert.That(health.BodyParts![part].Health!.Current, Is.EqualTo(max), $"{part} current");
+                Assert.That(health.BodyParts[part].Health!.Maximum, Is.EqualTo(max), $"{part} maximum");
+            }
+
+            // The level bands, which take the raw max rather than GenerateHealth's rounded one
+            Assert.That(health.Hydration!.Current, Is.EqualTo(100));
+            Assert.That(health.Energy!.Current, Is.EqualTo(100));
+            Assert.That(health.Temperature!.Current, Is.InRange(36.6d, 40d));
+
+            // usec.json's `normal` reward band. bots/base.json ships -1, so this fails outright if
+            // the write-back is dropped, and the band excludes every other difficulty's.
+            Assert.That(bot.Info!.Settings!.Experience, Is.InRange(250, 1000), "the native exp reward never reached the bot");
+
+            // The only coverage of Enum.Parse<SkillTypes> in either language: usec.json ships 19
+            // Common entries, all 0..5100, and a key it cannot parse would throw into the per-bot
+            // catch and drop the bot from the wave rather than fail here - hence the count check.
+            Assert.That(bot.Skills!.Common, Has.Count.EqualTo(19), "the native skills draw never reached the bot");
+            Assert.That(bot.Skills.Common!.Select(skill => skill.Id), Is.Unique);
+            Assert.That(bot.Skills.Common!.All(skill => skill.Progress is >= 0 and <= 5100), Is.True);
+            Assert.That(bot.Skills.Common!.Any(skill => skill.Id == SkillTypes.AimDrills), Is.True, "a known usec skill key did not parse");
+
+            // The nikita quirk, ported verbatim: SetRandomisedGameVersionAndCategory's special case
+            // assigns GameVersion and MemberCategory and returns *without* touching
+            // SelectedMemberCategory, so that bot keeps base.json's Default. usec.json's name pool
+            // carries "Nikita", so a wave this size reaches the branch often enough that the
+            // equality below has to exempt it - and this is the only end-to-end pin of the quirk.
+            if (string.Equals(bot.Info.Nickname, "nikita", StringComparison.OrdinalIgnoreCase))
+            {
+                Assert.That(bot.Info.GameVersion, Is.EqualTo(GameEditions.UNHEARD));
+                Assert.That(bot.Info.MemberCategory, Is.EqualTo(MemberCategory.Developer));
+                Assert.That(
+                    bot.Info.SelectedMemberCategory,
+                    Is.EqualTo(MemberCategory.Default),
+                    "the nikita branch must leave SelectedMemberCategory untouched"
+                );
+
+                continue;
+            }
+
+            // Everywhere else the two move together; base.json ships 0 for both, so this is only
+            // non-vacuous on a bot whose category is non-zero - hence the wave-level check below.
+            Assert.That(
+                bot.Info.SelectedMemberCategory,
+                Is.EqualTo(bot.Info.MemberCategory),
+                $"SelectedMemberCategory did not track MemberCategory (nickname '{bot.Info.Nickname}', version '{bot.Info.GameVersion}')"
+            );
+
+            // The switch's two fixed arms, deterministic whenever they fire
+            switch (bot.Info.GameVersion)
+            {
+                case GameEditions.EDGE_OF_DARKNESS:
+                    Assert.That(bot.Info.MemberCategory, Is.EqualTo(MemberCategory.UniqueId));
+                    break;
+                case GameEditions.UNHEARD:
+                    Assert.That(bot.Info.MemberCategory, Is.EqualTo(MemberCategory.Unheard));
+                    break;
+            }
+        }
+
+        Assert.That(
+            wave!.Any(bot => bot!.Info!.MemberCategory is not (null or MemberCategory.Default)),
+            Is.True,
+            "no bot in the wave carried a drawn member category - the write-back never ran"
+        );
     }
 
     [Test]

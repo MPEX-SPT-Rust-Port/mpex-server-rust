@@ -576,6 +576,10 @@ public class BotResidentDbTests
                         LevelMax = levelMax,
                         Template = BotPayloadProjection.BuildTemplateView(template),
                         LootPools = lootPools,
+                        Appearance = template.BotAppearance,
+                        Health = template.BotHealth,
+                        Skills = template.BotSkills,
+                        ExperienceReward = template.BotExperience.Reward,
                     },
                 ]
             ),

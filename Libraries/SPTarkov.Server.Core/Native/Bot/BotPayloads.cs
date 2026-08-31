@@ -126,6 +126,21 @@ internal record BotViewsOverride
     [JsonPropertyName("bosses")]
     public required List<string> Bosses { get; set; }
 
+    /// <summary>
+    /// <c>BotConfig.BotRolesWithDogTags</c> - the roles whose bots the native prelude gives a
+    /// dogtag to.
+    /// </summary>
+    [JsonPropertyName("botRolesWithDogTags")]
+    public required HashSet<string> BotRolesWithDogTags { get; set; }
+
+    /// <summary>
+    /// <c>SetBotAppearance</c>'s fixed-hands rule as a map, the wire twin of the resident derive in
+    /// <c>rust/spt-native/src/bot/views.rs</c>. Built by
+    /// <see cref="BotPayloadProjection.BuildBodyToFixedHands"/>.
+    /// </summary>
+    [JsonPropertyName("bodyToFixedHands")]
+    public required Dictionary<MongoId, MongoId> BodyToFixedHands { get; set; }
+
     [JsonPropertyName("durability")]
     public required BotDurability Durability { get; set; }
 
@@ -286,6 +301,29 @@ internal record BotTemplateVariantView
 
     [JsonPropertyName("lootPools")]
     public required BotLootCache LootPools { get; set; }
+
+    /// <summary>
+    /// The per-band blocks the native prelude draws read: the band template's
+    /// appearance/health/skills and the difficulty-keyed exp reward. They ride the variant rather
+    /// than <see cref="BotTemplateView"/>, which the single-bot and player-scav requests share and
+    /// whose bytes stay unchanged. The model records are reused directly, so their own
+    /// <c>JsonPropertyName</c>s (and the PascalCase of the unattributed ones) are what the Rust
+    /// serde renames mirror.
+    /// </summary>
+    [JsonPropertyName("appearance")]
+    public required Appearance Appearance { get; set; }
+
+    /// <inheritdoc cref="Appearance"/>
+    [JsonPropertyName("health")]
+    public required BotTypeHealth Health { get; set; }
+
+    /// <inheritdoc cref="Appearance"/>
+    [JsonPropertyName("skills")]
+    public required BotDbSkills Skills { get; set; }
+
+    /// <inheritdoc cref="Appearance"/>
+    [JsonPropertyName("experienceReward")]
+    public required Dictionary<string, MinMax<int>> ExperienceReward { get; set; }
 }
 
 /// <summary>
@@ -308,6 +346,15 @@ internal record BotSlice
 
     [JsonPropertyName("details")]
     public required BotGenerationDetailsView Details { get; set; }
+
+    /// <summary>
+    /// True when the prelude drew the nickname "nikita" - the native game-version draw's special
+    /// case. The nickname itself never crosses: the draw happens C#-side before the request is
+    /// built, and legacy's own check is the same case-insensitive equality against the same value.
+    /// Batch-only; the single-bot request sends false.
+    /// </summary>
+    [JsonPropertyName("isNikita")]
+    public bool IsNikita { get; set; }
 }
 
 /// <summary>
@@ -444,6 +491,131 @@ internal record BotInventoryResult
     /// </summary>
     [JsonPropertyName("exp")]
     public int? Exp { get; set; }
+
+    /// <summary>
+    /// <c>SetBotAppearance</c>'s four draws plus the voice line. Set by the batch path only - the
+    /// single-bot and player-scav paths keep their C# prelude, so those responses omit it.
+    /// </summary>
+    [JsonPropertyName("customization")]
+    public BotCustomizationResultView? Customization { get; set; }
+
+    /// <summary>
+    /// <c>GenerateHealth</c>'s drawn values. Set by the batch path only, as
+    /// <see cref="Customization"/>.
+    /// </summary>
+    [JsonPropertyName("health")]
+    public BotHealthResultView? Health { get; set; }
+
+    /// <summary>
+    /// The randomised common and mastering progress values. Set by the batch path only, as
+    /// <see cref="Customization"/>.
+    /// </summary>
+    [JsonPropertyName("skills")]
+    public BotSkillsResultView? Skills { get; set; }
+
+    /// <summary>
+    /// <c>GetBotExperience</c> for the bot's difficulty -> <c>Info.Settings.Experience</c>. Set by
+    /// the batch path only, as <see cref="Customization"/>.
+    /// </summary>
+    [JsonPropertyName("settingsExperience")]
+    public int? SettingsExperience { get; set; }
+
+    /// <summary>
+    /// The game version the PMC draw picked -> <c>Info.GameVersion</c>. Set by the batch path only,
+    /// as <see cref="Customization"/>.
+    /// </summary>
+    [JsonPropertyName("gameVersion")]
+    public string? GameVersion { get; set; }
+
+    /// <summary>
+    /// The drawn <c>MemberCategory</c> as its numeric value - the enum is not shared across the
+    /// boundary. Set by the batch path only, as <see cref="Customization"/>.
+    /// </summary>
+    [JsonPropertyName("memberCategory")]
+    public int? MemberCategory { get; set; }
+
+    /// <summary>
+    /// <see cref="MemberCategory"/>'s twin, absent on the nikita branch, where legacy leaves
+    /// <c>SelectedMemberCategory</c> untouched. Set by the batch path only, as
+    /// <see cref="Customization"/>.
+    /// </summary>
+    [JsonPropertyName("selectedMemberCategory")]
+    public int? SelectedMemberCategory { get; set; }
+}
+
+/// <summary>
+/// The customization the native prelude drew (<c>SetBotAppearance</c> plus the voice line).
+/// </summary>
+internal record BotCustomizationResultView
+{
+    [JsonPropertyName("head")]
+    public required string Head { get; set; }
+
+    [JsonPropertyName("body")]
+    public required string Body { get; set; }
+
+    [JsonPropertyName("feet")]
+    public required string Feet { get; set; }
+
+    [JsonPropertyName("hands")]
+    public required string Hands { get; set; }
+
+    [JsonPropertyName("voice")]
+    public required string Voice { get; set; }
+}
+
+/// <summary>
+/// <c>CurrentMinMax</c> narrowed to the two members the health draw fills; <c>Minimum</c> is a
+/// constant the caller writes.
+/// </summary>
+internal record CurrentMaxView
+{
+    [JsonPropertyName("current")]
+    public required double Current { get; set; }
+
+    [JsonPropertyName("maximum")]
+    public required double Maximum { get; set; }
+}
+
+/// <summary>
+/// <c>GenerateHealth</c>'s output. <c>UpdateTime</c> and <c>Immortal</c> are constants the caller
+/// writes; only the drawn values cross.
+/// </summary>
+internal record BotHealthResultView
+{
+    [JsonPropertyName("hydration")]
+    public required CurrentMaxView Hydration { get; set; }
+
+    [JsonPropertyName("energy")]
+    public required CurrentMaxView Energy { get; set; }
+
+    [JsonPropertyName("temperature")]
+    public required CurrentMaxView Temperature { get; set; }
+
+    [JsonPropertyName("bodyParts")]
+    public required Dictionary<string, CurrentMaxView> BodyParts { get; set; }
+}
+
+/// <summary>
+/// One randomised skill. The id is the raw template key - the caller parses it into
+/// <c>SkillTypes</c> on hydration, throwing per bot exactly where the legacy prelude threw.
+/// </summary>
+internal record SkillResultView
+{
+    [JsonPropertyName("id")]
+    public required string Id { get; set; }
+
+    [JsonPropertyName("progress")]
+    public required double Progress { get; set; }
+}
+
+internal record BotSkillsResultView
+{
+    [JsonPropertyName("common")]
+    public required List<SkillResultView> Common { get; set; }
+
+    [JsonPropertyName("mastering")]
+    public required List<SkillResultView> Mastering { get; set; }
 }
 
 /// <summary>

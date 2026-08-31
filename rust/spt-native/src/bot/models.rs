@@ -79,6 +79,133 @@ pub struct ItemPoolsWire {
     pub extra: Extra,
 }
 
+/// `BotType.BotAppearance` weight maps (`Models/Eft/Common/Tables/BotType.cs` `Appearance`) —
+/// wire names are the C# `JsonPropertyName`s, all lowercase.
+///
+/// Every member is lenient about a *null* C# map, matching
+/// [`RandomisationDetails::level_range`]'s rationale. A null map does not cross the wire the same
+/// way for all five: `hands`/`head`/`voice` carry `ArrayToObjectFactoryConverter`, whose
+/// `HandleNull => true` bypasses `JsonUtil`'s `WhenWritingNull` and writes `[]`, while
+/// `body`/`feet` have no converter and are omitted outright. So both shapes have to be absorbed —
+/// `#[serde(default)]` covers only the absent key, and
+/// [`deserialize_weights_or_empty_array`] covers the `[]`.
+///
+/// Strict fields would turn either shape into a *deserialize* failure, which `run_generator_with`
+/// reports as `STATUS_BAD_ARGS` for the whole call — one malformed bot template killing a whole
+/// wave, where the legacy C# prelude killed one bot. Lenient, the empty map reaches
+/// [`crate::loot::random_util::get_weighted_value`], which takes the equal-weights branch, draws
+/// nothing (`get_int(0, -1)` has `max > min` false) and returns `Err`, erroring exactly that one
+/// bot at exactly the C# blast radius.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AppearanceWire {
+    #[serde(
+        rename = "body",
+        default,
+        deserialize_with = "deserialize_weights_or_empty_array"
+    )]
+    pub body: IndexMap<String, f64>,
+    #[serde(
+        rename = "feet",
+        default,
+        deserialize_with = "deserialize_weights_or_empty_array"
+    )]
+    pub feet: IndexMap<String, f64>,
+    #[serde(
+        rename = "hands",
+        default,
+        deserialize_with = "deserialize_weights_or_empty_array"
+    )]
+    pub hands: IndexMap<String, f64>,
+    #[serde(
+        rename = "head",
+        default,
+        deserialize_with = "deserialize_weights_or_empty_array"
+    )]
+    pub head: IndexMap<String, f64>,
+    #[serde(
+        rename = "voice",
+        default,
+        deserialize_with = "deserialize_weights_or_empty_array"
+    )]
+    pub voice: IndexMap<String, f64>,
+}
+
+/// A weight map, or the `[]` that `ArrayToObjectFactoryConverter` writes for a null one. A
+/// non-empty array is still an error: nothing produces one, and silently reading it as no weights
+/// would hide malformed data rather than error the bot.
+fn deserialize_weights_or_empty_array<'de, D>(
+    deserializer: D,
+) -> Result<IndexMap<String, f64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum WeightsOrArray {
+        Weights(IndexMap<String, f64>),
+        Array(Vec<f64>),
+    }
+
+    match WeightsOrArray::deserialize(deserializer)? {
+        WeightsOrArray::Weights(weights) => Ok(weights),
+        WeightsOrArray::Array(items) if items.is_empty() => Ok(IndexMap::new()),
+        WeightsOrArray::Array(_) => Err(serde::de::Error::custom(
+            "expected a weight map or `[]`, got a non-empty array",
+        )),
+    }
+}
+
+/// `BotTypeHealth` — unattributed C# properties serialize PascalCase (no global naming policy).
+#[derive(Debug, Clone, Deserialize)]
+pub struct BotTypeHealthWire {
+    /// `#[serde(default)]` for [`AppearanceWire`]'s reason. `BotTypeHealth` carries no converter,
+    /// so a null `BodyParts` is omitted rather than written as `[]` and the plain default is the
+    /// whole fix: the empty `Vec` hits `generate_health`'s live emptiness guard and errors one bot
+    /// instead of failing the wave's deserialize.
+    ///
+    /// `Common` on [`BotDbSkillsWire`] deliberately stays strict. An empty map there is a silent
+    /// `Ok` with no skills - C# `GetCommonSkillsWithRandomisedProgressValue` returns an empty list
+    /// for one too, so an emptiness guard would be the divergence, not the fix - and a wave-kill
+    /// beats shipping bots whose skills were quietly dropped.
+    #[serde(rename = "BodyParts", default)]
+    pub body_parts: Vec<BodyPartTemplateWire>,
+    #[serde(rename = "Energy")]
+    pub energy: MinMax<f64>,
+    #[serde(rename = "Hydration")]
+    pub hydration: MinMax<f64>,
+    #[serde(rename = "Temperature")]
+    pub temperature: MinMax<f64>,
+}
+
+/// One `BodyPart` band of the health template.
+#[derive(Debug, Clone, Deserialize)]
+pub struct BodyPartTemplateWire {
+    #[serde(rename = "Chest")]
+    pub chest: MinMax<f64>,
+    #[serde(rename = "Head")]
+    pub head: MinMax<f64>,
+    #[serde(rename = "LeftArm")]
+    pub left_arm: MinMax<f64>,
+    #[serde(rename = "LeftLeg")]
+    pub left_leg: MinMax<f64>,
+    #[serde(rename = "RightArm")]
+    pub right_arm: MinMax<f64>,
+    #[serde(rename = "RightLeg")]
+    pub right_leg: MinMax<f64>,
+    #[serde(rename = "Stomach")]
+    pub stomach: MinMax<f64>,
+}
+
+/// `BotDbSkills`. Values are `Option` because the C# dictionaries carry nulls, which
+/// `GetCommonSkillsWithRandomisedProgressValue` skips without drawing.
+#[derive(Debug, Clone, Deserialize)]
+pub struct BotDbSkillsWire {
+    #[serde(rename = "Common")]
+    pub common: IndexMap<String, Option<MinMax<f64>>>,
+    #[serde(rename = "Mastering", default)]
+    pub mastering: Option<IndexMap<String, Option<MinMax<f64>>>>,
+}
+
 /// `Models/Spt/Config/BotConfig.cs:465-472` — `BotConfig.LootItemResourceRandomization[botRole]`.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct RandomisedResourceDetails {
@@ -508,9 +635,9 @@ pub struct WalletLootSettingsWire {
 /// [`DynamicConfigWire`] precedent), and the bot suite's override fixtures publish it partially
 /// throughout, so the struct-level `#[serde(default)]` stays. The consequence is
 /// [`ItemConfigLift`](crate::db::models::ItemConfigLift)'s: the shipped projection always carries
-/// all eight members, but a hand-built or mod-rewritten stem that omits one silently reads
+/// all eleven members, but a hand-built or mod-rewritten stem that omits one silently reads
 /// defaults instead of failing the publish. A strict twin struct for the stem would have to
-/// mirror this one field for field and would drift; `phase4_configs_root.rs` pins the eight wire
+/// mirror this one field for field and would drift; `phase4_configs_root.rs` pins the eleven wire
 /// names against the projected dump instead.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -526,6 +653,15 @@ pub struct PmcConfigWire {
     /// `PmcConfig.WeaponHasEnhancementChancePercent`, hoisted into
     /// [`crate::bot::BotContext::weapon_has_enhancement_chance_percent`].
     pub weapon_has_enhancement_chance_percent: f64,
+    /// `PmcConfig.GameVersionWeight`.
+    pub game_version_weight: IndexMap<String, f64>,
+    /// `PmcConfig.AccountTypeWeight` — C#-side a `Dictionary<MemberCategory, double>`;
+    /// `EftEnumConverter.WriteAsPropertyName` encodes the enum keys as numeric strings on the
+    /// wire ("0", "1", "256", "512" shipped).
+    pub account_type_weight: IndexMap<String, f64>,
+    /// `PmcConfig.DogtagSettings` (wire name `dogtags`): side → gameVersion → tpl → weight.
+    #[serde(rename = "dogtags")]
+    pub dogtag_settings: IndexMap<String, IndexMap<String, IndexMap<String, f64>>>,
 }
 
 /// `Models/Spt/Config/PmcConfig.cs:152-162` (`ForceArmbandSettings`).
@@ -660,6 +796,10 @@ pub struct BotViewsWire {
 
     // -- The `spt-bot` config slice (`BotConfigLift`).
     pub bosses: Vec<String>,
+    pub bot_roles_with_dog_tags: std::collections::HashSet<String>,
+    /// bodyTpl → fixed hands tpl, the resident [`crate::bot::views::BotDbViews::body_to_fixed_hands`]
+    /// derive's twin on the wire (`BotPayloadProjection.BuildBodyToFixedHands`).
+    pub body_to_fixed_hands: IndexMap<String, String>,
     pub durability: crate::bot::durability_limits_helper::BotDurability,
     pub item_spawn_limits: IndexMap<String, IndexMap<String, f64>>,
     pub wallet_loot: WalletLootSettingsWire,
@@ -729,6 +869,23 @@ pub struct TemplateVariantWire {
     pub level_max: i32,
     pub template: BotTemplateWire,
     pub loot_pools: BotLootCacheWire,
+    /// The four `BotType` blocks the per-bot prelude draws from. They sit beside
+    /// [`Self::template`] rather than inside [`BotTemplateWire`], which the single-bot and
+    /// player-scav requests share and whose bytes stay unchanged.
+    ///
+    /// The blocks themselves are required, not `Option`: the C# batcher always sends all four, and
+    /// an absent block is malformed input, not data a default could stand in for. Their *members*
+    /// split — the ones whose empty value reaches a draw-free error path carry `#[serde(default)]`
+    /// so one malformed template errors one bot instead of failing the wave's deserialize (see
+    /// [`AppearanceWire`]); the rest stay strict. That leaves **twelve** leaves whose absence still
+    /// kills the wave: `BotTypeHealthWire`'s `Energy`/`Hydration`/`Temperature` (3), all seven
+    /// `BodyPartTemplateWire` bands (7), [`Self::experience_reward`] (1), and
+    /// `BotDbSkillsWire::common` (1) — the last strict on purpose. This is the divergence booked in
+    /// `RUST-ROADMAP.md`.
+    pub appearance: AppearanceWire,
+    pub health: BotTypeHealthWire,
+    pub skills: BotDbSkillsWire,
+    pub experience_reward: IndexMap<String, MinMax<i32>>,
 }
 
 /// The request members that do not vary between the bots of one wave and are not database views:
@@ -806,6 +963,11 @@ pub struct BotSliceWire {
     #[serde(default)]
     pub test_seed: Option<u64>,
     pub details: BotGenerationDetailsWire,
+    /// True when the C# prelude drew the nickname "nikita" (case-insensitive) — the game-version
+    /// draw's special case. The single-bot request sends `false` (the C# member is a non-nullable
+    /// bool and `JsonUtil` only omits nulls); default false for anything that omits it.
+    #[serde(default)]
+    pub is_nikita: bool,
 }
 
 /// One wave: the `{epoch, viewsOverride?, …}` envelope around the shared varying block once, then
@@ -884,6 +1046,54 @@ pub struct BotBaseInventoryWire {
     pub hideout_customization_stash_id: String,
 }
 
+/// The customization the batch drew (`SetBotAppearance` + the voice line) — batch-only, like
+/// [`BotInventoryResult::level`].
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BotCustomizationResult {
+    pub head: String,
+    pub body: String,
+    pub feet: String,
+    pub hands: String,
+    pub voice: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CurrentMaxWire {
+    pub current: f64,
+    pub maximum: f64,
+}
+
+/// `GenerateHealth`'s output. `updateTime: 0` / `immortal: false` are constants the C# side
+/// writes; only the drawn values cross.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BotHealthResult {
+    pub hydration: CurrentMaxWire,
+    pub energy: CurrentMaxWire,
+    pub temperature: CurrentMaxWire,
+    /// Insertion order is the C# initializer order: Head, Chest, Stomach, LeftArm, RightArm,
+    /// LeftLeg, RightLeg.
+    pub body_parts: IndexMap<String, CurrentMaxWire>,
+}
+
+/// One randomised skill. The id is the raw template key — C# parses it into `SkillTypes` on
+/// hydration, throwing per bot exactly where the legacy prelude threw.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillResult {
+    pub id: String,
+    pub progress: f64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BotSkillsResult {
+    pub common: Vec<SkillResult>,
+    pub mastering: Vec<SkillResult>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BotInventoryResult {
@@ -903,6 +1113,23 @@ pub struct BotInventoryResult {
     /// `Info.Experience`. `None` alongside it, for the same reason.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exp: Option<i32>,
+    /// The prelude draws the batch arm owns. `None` on the single-bot and player-scav paths, for
+    /// [`Self::level`]'s reason.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub customization: Option<BotCustomizationResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub health: Option<BotHealthResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skills: Option<BotSkillsResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub settings_experience: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub game_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub member_category: Option<i32>,
+    /// Absent on the nikita branch — C# leaves `SelectedMemberCategory` untouched there (quirk).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected_member_category: Option<i32>,
 }
 
 /// The native slice of one `KarmaLevel` entry from `PlayerScavConfig`. Ships per call —
@@ -960,6 +1187,8 @@ mod tests {
             "handbookPrices":{"aaaaaaaaaaaaaaaaaaaaaab4":12500.5},
             "expTable":[10],
             "bosses":["bossknight"],
+            "botRolesWithDogTags":["pmcbear","pmcusec"],
+            "bodyToFixedHands":{"aaaaaaaaaaaaaaaaaaaaaab7":"aaaaaaaaaaaaaaaaaaaaaab8"},
             "durability":{"default":{"armor":{"maxDelta":10,"minDelta":0,"minLimitPercent":15},
                     "weapon":{"lowestMax":60,"highestMax":100,"maxDelta":10,"minDelta":0,
                               "minLimitPercent":15}},
@@ -1201,6 +1430,53 @@ mod tests {
         assert_eq!(parsed.bot.test_seed, None);
     }
 
+    /// The four prelude blocks every `templateVariants` entry carries. Every weight map is
+    /// multi-entry on purpose: a single-entry map takes the `len() == 1` shortcut instead of the
+    /// weighted draw, and an empty one errors the bot.
+    fn prelude_blocks() -> serde_json::Map<String, serde_json::Value> {
+        let serde_json::Value::Object(blocks) = serde_json::json!({
+            "appearance": {
+                "body": {"body_a": 1, "body_b": 3},
+                "feet": {"feet_a": 1, "feet_b": 3},
+                "hands": {"hands_a": 1, "hands_b": 3},
+                "head": {"head_a": 1, "head_b": 3},
+                "voice": {"voice_a": 1, "voice_b": 3},
+            },
+            "health": {
+                "BodyParts": [
+                    {"Chest": {"min": 80, "max": 85}, "Head": {"min": 35, "max": 35},
+                     "LeftArm": {"min": 60, "max": 60}, "LeftLeg": {"min": 65, "max": 65},
+                     "RightArm": {"min": 60, "max": 60}, "RightLeg": {"min": 65, "max": 65},
+                     "Stomach": {"min": 70, "max": 75}},
+                    {"Chest": {"min": 70, "max": 75}, "Head": {"min": 30, "max": 30},
+                     "LeftArm": {"min": 50, "max": 50}, "LeftLeg": {"min": 55, "max": 55},
+                     "RightArm": {"min": 50, "max": 50}, "RightLeg": {"min": 55, "max": 55},
+                     "Stomach": {"min": 60, "max": 65}},
+                ],
+                "Energy": {"min": 80, "max": 100},
+                "Hydration": {"min": 80, "max": 100},
+                "Temperature": {"min": 36, "max": 40},
+            },
+            "skills": {
+                "Common": {"BotReload": {"min": 100, "max": 200},
+                    "BotSound": {"min": 100, "max": 200}},
+                // Two entries, one explicitly null: the mastering loop and its `Option<MinMax>`
+                // skip (which must not consume a draw) both run.
+                "Mastering": {"Assault": {"min": 300, "max": 400}, "Pistol": null},
+            },
+            // Keyed by *difficulty*, which is what `GetExperienceRewardForKillByDifficulty` looks
+            // the bot's `botDifficulty` up under. The three bands are ranges apart, so a lookup on
+            // the wrong key lands outside the band the fixture's `normal` bots must draw from.
+            "experienceReward": {"easy": {"min": 10, "max": 20},
+                "normal": {"min": 100, "max": 200},
+                "hard": {"min": 1000, "max": 2000}},
+        }) else {
+            unreachable!("the literal is an object")
+        };
+
+        blocks
+    }
+
     /// The single-bot fixture reshaped into a batch request: the slice rides in `bots`, and the
     /// template and loot pools move into one full-coverage variant on the shared block.
     fn batch_request_json(level_generation: Option<serde_json::Value>) -> serde_json::Value {
@@ -1208,12 +1484,13 @@ mod tests {
         let object = request.as_object_mut().unwrap();
 
         let slice = object.remove("bot").unwrap();
-        let variant = serde_json::json!({
+        let mut variant = serde_json::json!({
             "levelMin": 1,
             "levelMax": 99,
             "template": object.remove("template").unwrap(),
             "lootPools": object.remove("lootPools").unwrap(),
         });
+        variant.as_object_mut().unwrap().extend(prelude_blocks());
         let shared = object.get_mut("shared").unwrap().as_object_mut().unwrap();
         shared.insert("templateVariants".to_owned(), serde_json::json!([variant]));
         if let Some(level_generation) = level_generation {
@@ -1249,6 +1526,83 @@ mod tests {
         assert_eq!(slice.bot_id, "bbbbbbbbbbbbbbbbbbbbbbbb");
         assert_eq!(slice.test_seed, None);
         assert_eq!(slice.details.bot_level, 12);
+    }
+
+    /// The strictness boundary of the four prelude blocks, pinned rather than left to prose. Both
+    /// null shapes a C# `Appearance` can produce - `[]` for the three `HandleNull` converter
+    /// members, an omitted key for the two without one - and an omitted `BodyParts` survive
+    /// deserialization as empty, so the bot errors alone downstream. Everything else is still
+    /// strict, and a strict miss is `STATUS_BAD_ARGS` for the whole wave.
+    #[test]
+    fn null_appearance_and_body_parts_survive_deserialize_but_the_rest_stay_strict() {
+        let parse = |mutate: &dyn Fn(&mut serde_json::Value)| {
+            let mut json = batch_request_json(None);
+            mutate(&mut json["shared"]["templateVariants"][0]);
+            serde_json::from_value::<GenerateBotInventoryBatchRequest>(json)
+        };
+        let variant_of = |parsed: GenerateBotInventoryBatchRequest| {
+            parsed.shared.template_variants.into_iter().next().unwrap()
+        };
+
+        // `ArrayToObjectFactoryConverter` writes a null map as `[]`.
+        for member in ["head", "hands", "voice"] {
+            let parsed = parse(&|variant| variant["appearance"][member] = serde_json::json!([]))
+                .unwrap_or_else(|error| panic!("`{member}: []` must parse: {error}"));
+            let appearance = variant_of(parsed).appearance;
+            let map = match member {
+                "head" => &appearance.head,
+                "hands" => &appearance.hands,
+                _ => &appearance.voice,
+            };
+            assert!(map.is_empty(), "`{member}: []` must read as no weights");
+        }
+
+        // `body`/`feet` have no converter, so `WhenWritingNull` omits them instead.
+        let parsed = parse(&|variant| {
+            let appearance = variant["appearance"].as_object_mut().unwrap();
+            appearance.remove("body");
+            appearance.remove("feet");
+        })
+        .expect("an omitted body/feet must parse");
+        let appearance = variant_of(parsed).appearance;
+        assert!(appearance.body.is_empty() && appearance.feet.is_empty());
+
+        // `BotTypeHealth` has no converter either; the empty `Vec` errors in `generate_health`.
+        let parsed = parse(&|variant| {
+            variant["health"]
+                .as_object_mut()
+                .unwrap()
+                .remove("BodyParts");
+        })
+        .expect("an omitted BodyParts must parse");
+        assert!(variant_of(parsed).health.body_parts.is_empty());
+
+        // A non-empty array is malformed, not a null map, and is rejected.
+        assert!(
+            parse(&|variant| variant["appearance"]["head"] = serde_json::json!([1.0])).is_err()
+        );
+
+        // The booked divergence: these leaves still fail the wave's deserialize.
+        let strict: [&dyn Fn(&mut serde_json::Value); 4] = [
+            &|variant| {
+                variant["health"].as_object_mut().unwrap().remove("Energy");
+            },
+            &|variant| {
+                variant["health"]["BodyParts"][0]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("Head");
+            },
+            &|variant| {
+                variant["skills"].as_object_mut().unwrap().remove("Common");
+            },
+            &|variant| {
+                variant.as_object_mut().unwrap().remove("experienceReward");
+            },
+        ];
+        for remove in strict {
+            assert!(parse(remove).is_err(), "this leaf is booked as strict");
+        }
     }
 
     #[test]
@@ -1363,6 +1717,13 @@ mod tests {
             randomisation_clamps: IndexMap::from([("Headwear".to_owned(), 62.5)]),
             level: None,
             exp: None,
+            customization: None,
+            health: None,
+            skills: None,
+            settings_experience: None,
+            game_version: None,
+            member_category: None,
+            selected_member_category: None,
         })
         .unwrap();
 
@@ -1407,6 +1768,13 @@ mod tests {
             randomisation_clamps: IndexMap::new(),
             level: Some(23),
             exp: Some(45_600),
+            customization: None,
+            health: None,
+            skills: None,
+            settings_experience: None,
+            game_version: None,
+            member_category: None,
+            selected_member_category: None,
         })
         .unwrap();
         assert_eq!(out["level"], 23);
