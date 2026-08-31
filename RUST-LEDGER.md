@@ -1175,3 +1175,17 @@ comment); this list records where, plus the deferred items recorded nowhere else
   `_required`). One
   unreproduced single-test failure in one of six full-suite runs (name lost to an output pipe;
   three logged re-runs green, fixture teardown audit clean).
+- **PR #25 — BotGenerator's prelude draws** (2026-08-31, `5c8e903`, ABI 38). Retires roadmap item 20;
+  the item-20 entry above is the detail. Final review found one code defect (the sim-pscav
+  game-version draw never reaching the wire) and it was fixed on the branch, along with the
+  appearance/`BodyParts` leniency, the dead `Details.GameVersion` write, and the exact-value
+  consumption test. Carryovers, none blocking: the batch path still has no real-data exact-output
+  test to replace `BatchGeneratesTheSameBotsAsThePerBotPath`, and the two deferred arms will make
+  the same retirement argument, so "the golden covers it" is a weaker claim each time;
+  `phase4_configs_root.rs` stays `#[ignore]`d while three load-bearing `spt-pmc` members depend on
+  its pins; the prelude-block fixture is duplicated three times in Rust and four in C# (all seven
+  in sync as of the merge); `BotWaveBatcher`'s `weightedRandomHelper` parameter is unread
+  (`CS9113`), removable at the next deliberate public-surface break; and the wire budget has ~2.7%
+  headroom (4,185,450 of 4,300,000 bytes measured at review), which the two deferred arms will
+  spend. `dotnet build -c Release` apicompat is the one PR claim never independently reproduced —
+  it needs the sibling `mpex-api-compat` repo.
