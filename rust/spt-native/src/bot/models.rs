@@ -81,24 +81,93 @@ pub struct ItemPoolsWire {
 
 /// `BotType.BotAppearance` weight maps (`Models/Eft/Common/Tables/BotType.cs` `Appearance`) —
 /// wire names are the C# `JsonPropertyName`s, all lowercase.
+///
+/// Every member is lenient about a *null* C# map, matching
+/// [`RandomisationDetails::level_range`]'s rationale. A null map does not cross the wire the same
+/// way for all five: `hands`/`head`/`voice` carry `ArrayToObjectFactoryConverter`, whose
+/// `HandleNull => true` bypasses `JsonUtil`'s `WhenWritingNull` and writes `[]`, while
+/// `body`/`feet` have no converter and are omitted outright. So both shapes have to be absorbed —
+/// `#[serde(default)]` covers only the absent key, and
+/// [`deserialize_weights_or_empty_array`] covers the `[]`.
+///
+/// Strict fields would turn either shape into a *deserialize* failure, which `run_generator_with`
+/// reports as `STATUS_BAD_ARGS` for the whole call — one malformed bot template killing a whole
+/// wave, where the legacy C# prelude killed one bot. Lenient, the empty map reaches
+/// [`crate::loot::random_util::get_weighted_value`], which takes the equal-weights branch, draws
+/// nothing (`get_int(0, -1)` has `max > min` false) and returns `Err`, erroring exactly that one
+/// bot at exactly the C# blast radius.
 #[derive(Debug, Clone, Deserialize)]
 pub struct AppearanceWire {
-    #[serde(rename = "body")]
+    #[serde(
+        rename = "body",
+        default,
+        deserialize_with = "deserialize_weights_or_empty_array"
+    )]
     pub body: IndexMap<String, f64>,
-    #[serde(rename = "feet")]
+    #[serde(
+        rename = "feet",
+        default,
+        deserialize_with = "deserialize_weights_or_empty_array"
+    )]
     pub feet: IndexMap<String, f64>,
-    #[serde(rename = "hands")]
+    #[serde(
+        rename = "hands",
+        default,
+        deserialize_with = "deserialize_weights_or_empty_array"
+    )]
     pub hands: IndexMap<String, f64>,
-    #[serde(rename = "head")]
+    #[serde(
+        rename = "head",
+        default,
+        deserialize_with = "deserialize_weights_or_empty_array"
+    )]
     pub head: IndexMap<String, f64>,
-    #[serde(rename = "voice")]
+    #[serde(
+        rename = "voice",
+        default,
+        deserialize_with = "deserialize_weights_or_empty_array"
+    )]
     pub voice: IndexMap<String, f64>,
+}
+
+/// A weight map, or the `[]` that `ArrayToObjectFactoryConverter` writes for a null one. A
+/// non-empty array is still an error: nothing produces one, and silently reading it as no weights
+/// would hide malformed data rather than error the bot.
+fn deserialize_weights_or_empty_array<'de, D>(
+    deserializer: D,
+) -> Result<IndexMap<String, f64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum WeightsOrArray {
+        Weights(IndexMap<String, f64>),
+        Array(Vec<f64>),
+    }
+
+    match WeightsOrArray::deserialize(deserializer)? {
+        WeightsOrArray::Weights(weights) => Ok(weights),
+        WeightsOrArray::Array(items) if items.is_empty() => Ok(IndexMap::new()),
+        WeightsOrArray::Array(_) => Err(serde::de::Error::custom(
+            "expected a weight map or `[]`, got a non-empty array",
+        )),
+    }
 }
 
 /// `BotTypeHealth` — unattributed C# properties serialize PascalCase (no global naming policy).
 #[derive(Debug, Clone, Deserialize)]
 pub struct BotTypeHealthWire {
-    #[serde(rename = "BodyParts")]
+    /// `#[serde(default)]` for [`AppearanceWire`]'s reason. `BotTypeHealth` carries no converter,
+    /// so a null `BodyParts` is omitted rather than written as `[]` and the plain default is the
+    /// whole fix: the empty `Vec` hits `generate_health`'s live emptiness guard and errors one bot
+    /// instead of failing the wave's deserialize.
+    ///
+    /// `Common` on [`BotDbSkillsWire`] deliberately stays strict. An empty map there is a silent
+    /// `Ok` with no skills - C# `GetCommonSkillsWithRandomisedProgressValue` returns an empty list
+    /// for one too, so an emptiness guard would be the divergence, not the fix - and a wave-kill
+    /// beats shipping bots whose skills were quietly dropped.
+    #[serde(rename = "BodyParts", default)]
     pub body_parts: Vec<BodyPartTemplateWire>,
     #[serde(rename = "Energy")]
     pub energy: MinMax<f64>,
@@ -802,9 +871,17 @@ pub struct TemplateVariantWire {
     pub loot_pools: BotLootCacheWire,
     /// The four `BotType` blocks the per-bot prelude draws from. They sit beside
     /// [`Self::template`] rather than inside [`BotTemplateWire`], which the single-bot and
-    /// player-scav requests share and whose bytes stay unchanged. Required, not `Option`: the C#
-    /// batcher always sends them, and a silent default would skip draws and shift the RNG stream
-    /// invisibly.
+    /// player-scav requests share and whose bytes stay unchanged.
+    ///
+    /// The blocks themselves are required, not `Option`: the C# batcher always sends all four, and
+    /// an absent block is malformed input, not data a default could stand in for. Their *members*
+    /// split — the ones whose empty value reaches a draw-free error path carry `#[serde(default)]`
+    /// so one malformed template errors one bot instead of failing the wave's deserialize (see
+    /// [`AppearanceWire`]); the rest stay strict. That leaves **twelve** leaves whose absence still
+    /// kills the wave: `BotTypeHealthWire`'s `Energy`/`Hydration`/`Temperature` (3), all seven
+    /// `BodyPartTemplateWire` bands (7), [`Self::experience_reward`] (1), and
+    /// `BotDbSkillsWire::common` (1) — the last strict on purpose. This is the divergence booked in
+    /// `RUST-ROADMAP.md`.
     pub appearance: AppearanceWire,
     pub health: BotTypeHealthWire,
     pub skills: BotDbSkillsWire,
@@ -1449,6 +1526,83 @@ mod tests {
         assert_eq!(slice.bot_id, "bbbbbbbbbbbbbbbbbbbbbbbb");
         assert_eq!(slice.test_seed, None);
         assert_eq!(slice.details.bot_level, 12);
+    }
+
+    /// The strictness boundary of the four prelude blocks, pinned rather than left to prose. Both
+    /// null shapes a C# `Appearance` can produce - `[]` for the three `HandleNull` converter
+    /// members, an omitted key for the two without one - and an omitted `BodyParts` survive
+    /// deserialization as empty, so the bot errors alone downstream. Everything else is still
+    /// strict, and a strict miss is `STATUS_BAD_ARGS` for the whole wave.
+    #[test]
+    fn null_appearance_and_body_parts_survive_deserialize_but_the_rest_stay_strict() {
+        let parse = |mutate: &dyn Fn(&mut serde_json::Value)| {
+            let mut json = batch_request_json(None);
+            mutate(&mut json["shared"]["templateVariants"][0]);
+            serde_json::from_value::<GenerateBotInventoryBatchRequest>(json)
+        };
+        let variant_of = |parsed: GenerateBotInventoryBatchRequest| {
+            parsed.shared.template_variants.into_iter().next().unwrap()
+        };
+
+        // `ArrayToObjectFactoryConverter` writes a null map as `[]`.
+        for member in ["head", "hands", "voice"] {
+            let parsed = parse(&|variant| variant["appearance"][member] = serde_json::json!([]))
+                .unwrap_or_else(|error| panic!("`{member}: []` must parse: {error}"));
+            let appearance = variant_of(parsed).appearance;
+            let map = match member {
+                "head" => &appearance.head,
+                "hands" => &appearance.hands,
+                _ => &appearance.voice,
+            };
+            assert!(map.is_empty(), "`{member}: []` must read as no weights");
+        }
+
+        // `body`/`feet` have no converter, so `WhenWritingNull` omits them instead.
+        let parsed = parse(&|variant| {
+            let appearance = variant["appearance"].as_object_mut().unwrap();
+            appearance.remove("body");
+            appearance.remove("feet");
+        })
+        .expect("an omitted body/feet must parse");
+        let appearance = variant_of(parsed).appearance;
+        assert!(appearance.body.is_empty() && appearance.feet.is_empty());
+
+        // `BotTypeHealth` has no converter either; the empty `Vec` errors in `generate_health`.
+        let parsed = parse(&|variant| {
+            variant["health"]
+                .as_object_mut()
+                .unwrap()
+                .remove("BodyParts");
+        })
+        .expect("an omitted BodyParts must parse");
+        assert!(variant_of(parsed).health.body_parts.is_empty());
+
+        // A non-empty array is malformed, not a null map, and is rejected.
+        assert!(
+            parse(&|variant| variant["appearance"]["head"] = serde_json::json!([1.0])).is_err()
+        );
+
+        // The booked divergence: these leaves still fail the wave's deserialize.
+        let strict: [&dyn Fn(&mut serde_json::Value); 4] = [
+            &|variant| {
+                variant["health"].as_object_mut().unwrap().remove("Energy");
+            },
+            &|variant| {
+                variant["health"]["BodyParts"][0]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("Head");
+            },
+            &|variant| {
+                variant["skills"].as_object_mut().unwrap().remove("Common");
+            },
+            &|variant| {
+                variant.as_object_mut().unwrap().remove("experienceReward");
+            },
+        ];
+        for remove in strict {
+            assert!(parse(remove).is_err(), "this leaf is booked as strict");
+        }
     }
 
     #[test]

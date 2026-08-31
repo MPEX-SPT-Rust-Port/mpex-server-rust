@@ -944,10 +944,11 @@ deliberate; reverting one silently diverges from C#. The bare `:N` line numbers 
 the 4.1.2 body the port was written against, not the current file.
 
 **`BotGenerator`'s prelude draws — roadmap item 20 (ABI 38, landed 2026-08-30).** The last of
-`Generators/Bot/BotGenerator.cs`'s per-bot draw work moves inside the batch call: health
-(`GenerateHealth`/`GetLowestHpBodyPart`), skills (`GenerateSkills` and its two randomisers),
-`GetExperienceRewardForKillByDifficulty`, the voice draw, `SetBotAppearance`, the PMC branch of
-`SetRandomisedGameVersionAndCategory`, and `GenerateBotFinish`'s `AddDogtagToBot`. **No new export
+`Generators/Bot/BotGenerator.cs`'s per-bot draw work moves inside the batch call, in
+`GenerateBotPrelude`'s statement order: `GetExperienceRewardForKillByDifficulty`, the voice draw,
+health (`GenerateHealth`/`GetLowestHpBodyPart`), skills (`GenerateSkills` and its two randomisers),
+the PMC branch of `SetRandomisedGameVersionAndCategory`, `SetBotAppearance` — then, after the
+inventory, `GenerateBotFinish`'s `AddDogtagToBot`. **No new export
 and no new root** — the item-20 rule was that it moves inside `spt_generate_bot_inventory_batch` or
 it does not move, so the export count stays 43 and the wire grows only sibling fields:
 `appearance`/`health`/`skills`/`experience.reward` on the template *variant* (per band, because
@@ -995,8 +996,34 @@ lifts `botRolesWithDogTags`, and a `bodyTpl → handsTpl` derive view (`body_to_
   `an_unheard_pmc_batch_bot_gets_the_extra_pocket_weights` is re-driven through `gameVersionWeight`
   because the native draw overwrites the `details.gameVersion` it used to be driven by. The
   single-bot `an_unheard_pmc_gets_the_tue_pockets` keeps its `details`-driven form — that arm still
-  reads the wire value. Exact-output coverage did not shrink; it moved from cross-arm equality to
-  per-arm seeded pins, the PR #24 pattern.
+  reads the wire value. *For the retired cross-arm inventory invariant* exact-output coverage did
+  not shrink; it moved to per-arm seeded pins, the PR #24 pattern.
+- **That is not a claim about the new C# consumption code, which a Rust golden cannot reach.**
+  `BotWaveBatcher.BuildBotsFromEnvelopes` is new C# in this slice — `ToBotBaseHealth`'s per-part
+  transform, `Enum.Parse<SkillTypes>`, the `MemberCategory` casts, the `Settings.Experience`
+  assignment — and a golden that pins what the *native side drew* says nothing about what the
+  caller then does with it. `BotWaveBatcherTests.TheConsumedPreludeValuesMatchTheirTemplateBands`
+  closes it by driving a PMC wave over the template a `pmcUSEC` wave actually resolves to, the
+  shipped `usec.json`: its single `min == max` `BodyParts` band makes all seven parts constants, so
+  they are asserted exactly (distinct maxima across Head/Chest/Stomach and arms-vs-legs, so a key
+  swap in `ToBotBaseHealth`'s `ToDictionary` fails); `Settings.Experience` lands in the `normal`
+  band, against `base.json`'s `-1`; `SelectedMemberCategory == MemberCategory` carries a wave-level
+  non-zero check so the equality is not vacuous against `base.json`'s `0`/`0`; and `usec.json`'s
+  19-entry `skills.Common` is the **only** thing in either language that reaches
+  `Enum.Parse<SkillTypes>`. Verified non-vacuous by deleting the `SelectedMemberCategory` write-back
+  and watching it go red — the check that found this gap in review.
+- **Writing that test surfaced the nikita quirk as a live wave outcome, and it is now pinned.**
+  `SetRandomisedGameVersionAndCategory`'s special case assigns `GameVersion` and `MemberCategory`
+  and returns *without* touching `SelectedMemberCategory`, so a nikita bot keeps `base.json`'s
+  `Default` while its category is `Developer` — the one bot for which the two do not track. The
+  Rust port reproduces it (`set_randomised_game_version_and_category` returns
+  `selected_member_category: None` on that branch only; every other path returns
+  `Some(member_category)`, and `bot_inventory_generator.rs` has the crate's only assignment of the
+  field, so `None` alongside a non-`Developer` category is unreachable). `usec.json`'s 619-entry
+  name pool carries `Nikita`, so a 12-bot PMC wave reaches the branch roughly one run in eight —
+  which is how the first draft of the test found it. It is now an explicit arm asserting all three
+  members, and the only end-to-end pin of the quirk in either language; the Rust unit tests pin the
+  draw, not the consumption.
 - **Naming is the documented carve-out and stays C# on every arm.** `BotNameService`'s
   `UsedNameCache` is a cross-wave, cross-arm singleton `HashSet<string>` that
   `LocationLifecycleService` clears per raid. Shipping it both ways per wave is unbounded wire
@@ -1053,12 +1080,35 @@ lifts `botRolesWithDogTags`, and a `bodyTpl → handsTpl` derive view (`body_to_
   pin). The live in-suite guards on the same surface are
   `SptNativeBotWireTests.TemplateVariantBlocksSerialiseWithTheNamesTheNativeSideExpects` and
   `BotResidentDbTests.AResidentSendAndAnOverrideSendProduceIdenticalBotsFieldForField`.
-- **Pre-existing flake, not caused by this slice.**
-  `BotHookLivenessTests.AssertPatchForcesLegacyPath` runs a bounded
-  `for (i < MaxBots && !_patchFired)` loop over randomly generated bots and asserts `_patchFired`;
-  it failed once in three `~Bot` filtered runs during review and passed on every run since. It
-  drives the **legacy single-bot** path, which this branch cannot reach at all. Recorded so a
-  future full-suite run seeing it red does not misread it as an item-20 regression.
+- **Pre-existing flake, not caused by this slice.** `BotHookLivenessTests`' private helper
+  `AssertPatchForcesLegacyPath` — not itself a `[Test]` — runs a bounded
+  `for (i < MaxBots && !_patchFired)` loop over randomly generated bots and asserts `_patchFired`.
+  Five `[Test]` methods call it: the `BotEquipmentModGenerator`, `BotWeaponGenerator`,
+  `BotLootGenerator`, `BotInventoryGenerator` and `BotEquipmentModPoolService` variants of
+  `HarmonyPatchOn…ForcesTheLegacyPath`. (A sixth,
+  `HarmonyPatchOnAPoolPropertyGetterForcesTheLegacyPath`, calls `Generate()` once with no retry loop
+  and is not flake-capable.) One of the five failed once in three `~Bot` filtered runs during review
+  and passed on every run since. They drive the **legacy single-bot** path, which this branch cannot
+  reach at all. Recorded so a future full-suite run seeing one red does not misread it as an item-20
+  regression.
+- **Review fix: the sim-pscav game-version draw now reaches the wire.**
+  `GenerateBotPrelude`'s `ShouldSimulatePlayerScav` block is ungated by `nativeLevelAndFilter`, so
+  it draws on the batch arm too — but it wrote only `bot.Info.GameVersion`, while this slice's
+  native dogtag reads `details.game_version`, which `BuildBotSlice` ships as `""` for a non-PMC
+  (the `if (!nativeLevelAndFilter)` block that assigns `botGenerationDetails.GameVersion` is
+  PMC-only). The Rust-side overwrite from the draw is gated on `details.is_pmc`, so it never fired
+  for these bots: `side_weights.get("")` missed and fell back to `dogtagSettings`' `default` band —
+  a wrong rarity, not a crash. Dead on shipped config in both directions (`botRolesWithDogTags` is
+  `pmcbear`/`pmcusec`; `ShouldSimulatePlayerScav` fires on `assault` alone) and one config edit from
+  live. Fixed by assigning `SetRandomisedGameVersionAndCategory`'s return value into
+  `botGenerationDetails.GameVersion`, which is a no-op on the legacy arm — that arm's
+  `AddDogtagToBot` reads `bot.Info` directly, and the only other reader of the details field,
+  `GetPocketPoolByGameEdition`, is `isPmc`-gated on both sides.
+- **Review fix: `entry.Details.GameVersion = native.GameVersion` deleted as dead.** `entry.Details`
+  is a per-bot clone; every read after the write-back is of a different member
+  (`ClearBotContainerCacheAfterGeneration`, `ReplayRandomisationClamps`' `RoleLowercase`/`BotLevel`,
+  `GenerateBotFinish`'s `EventRole`), and `GenerateBotFinish`'s only `RoleLowercase` read sits in
+  the `!nativeDogtag` branch the batch arm never takes.
 - **Three follow-ups deferred** (also queued in todo/TODO.md's *Removed from this file*): extend
   the prelude draws to `spt_generate_bot_inventory` (the per-bot arm); extend them to
   `spt_generate_player_scav` (arm C — reworks `PlayerScavParityTests`' identical-prelude

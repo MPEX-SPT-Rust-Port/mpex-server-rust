@@ -327,7 +327,13 @@ public class BotGenerator(
         if (!botGenerationDetails.IsPlayerScav && ShouldSimulatePlayerScav(botGenerationDetails.RoleLowercase))
         {
             botNameService.AddRandomPmcNameToBotMainProfileNicknameProperty(bot);
-            SetRandomisedGameVersionAndCategory(bot.Info);
+            // Ungated by nativeLevelAndFilter, so this draw happens on the batch arm too - and
+            // there the native dogtag reads details.GameVersion, not bot.Info.GameVersion. Without
+            // the propagation the wire ships "" and the dogtag falls back to the `default` rarity
+            // band. Dead on shipped botRolesWithDogTags (pmcbear/pmcusec only, never assault), live
+            // the moment a mod adds a scav role. Legacy arm reads bot.Info directly, so this is a
+            // no-op there: nothing else reads details.GameVersion outside an IsPmc gate.
+            botGenerationDetails.GameVersion = SetRandomisedGameVersionAndCategory(bot.Info);
         }
 
         // Batch: both strips run once per level-band variant instead (ApplyBatchTemplateMutations)

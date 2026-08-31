@@ -110,9 +110,22 @@ entry cited.
   consumption). Exact-output coverage at randomised levels is gone on both arms; the replacement is
   a smoke case (`BotParityTests.TheNativePathGeneratesAtRandomisedLevels`) plus the Rust-side
   golden below. → ledger: mod-pool ownership.
-- **A null `Appearance.Head`/`Hands`/`Voice` map fails the whole batch request** where legacy NRE'd
-  one bot. Those members carry `ArrayToObjectFactoryConverter`, so a null map serialises as `[]`,
-  which the Rust request deserialise rejects — one bad template kills the wave instead of one bot.
+- **A null or absent member of the four per-band prelude blocks fails the whole batch request**
+  where legacy NRE'd one bot. The blocks (`appearance`, `health`, `skills`, `experienceReward` on
+  each `templateVariants` entry) deserialise strictly, and `ffi.rs::run_generator_with` returns
+  `STATUS_BAD_ARGS` for the whole call before any per-bot envelope exists, so one bad template kills
+  the wave instead of one bot. A null C# map reaches the wire two ways, not one: `Appearance`'s
+  `Head`/`Hands`/`Voice` carry `ArrayToObjectFactoryConverter`, whose `HandleNull => true` bypasses
+  `JsonUtil`'s `WhenWritingNull` and writes `[]`; every other member has no converter and is omitted
+  outright.
+  The five `Appearance` maps and `BotTypeHealth.BodyParts` absorb **both** shapes (`#[serde(default)]`
+  for the omission, `deserialize_weights_or_empty_array` for the `[]`) and error that one bot at the
+  legacy blast radius. **Twelve leaves remain wave-fatal**: `BotTypeHealth`'s
+  `Energy`/`Hydration`/`Temperature`, all seven `BodyPart` bands, `experienceReward`, and
+  `BotDbSkills.Common` — the last strict *on purpose*, because an empty `Common` is a silent `Ok`
+  with no skills (C# `GetCommonSkillsWithRandomisedProgressValue` returns an empty list too, so a
+  guard would be the divergence) and a wave-kill beats shipping bots whose skills were quietly
+  dropped. Pinned by `models.rs::null_appearance_and_body_parts_survive_deserialize_but_the_rest_stay_strict`.
   Mod-data-only: all 57 shipped bot type files were scanned and none has such a member. Escape
   hatches: `ForcePerBotGeneration` or `ForceLegacyBotGeneration`. → ledger: item-20 port.
 - **A drawn body tpl absent from `templates.customization` throws on the legacy path and draws

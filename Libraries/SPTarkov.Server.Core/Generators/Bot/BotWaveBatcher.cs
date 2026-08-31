@@ -319,8 +319,6 @@ public class BotWaveBatcher(
                     {
                         entry.Bot.Info.SelectedMemberCategory = (MemberCategory)native.SelectedMemberCategory.Value;
                     }
-
-                    entry.Details.GameVersion = native.GameVersion;
                 }
 
                 entry.Bot.Inventory = native.Inventory;
